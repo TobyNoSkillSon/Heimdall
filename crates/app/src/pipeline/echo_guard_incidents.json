@@ -1,0 +1,837 @@
+{
+"note": "Recorded 22 Oct 2026 incidents (build 996f5e3, MacBook speakers, Shure MV7i): Parakeet's words on the mic, and Heimdall's playback per sentence from its own process tap's transcript and the ack playback records. echo = ground truth (Heimdall's voice), judged by comparing with the tap.",
+"mic": [
+{
+"local": "23:25:46.376",
+"text": "Yo, Heimdal, we can actually check whether the eco actually works, you know? I unplugged my earphones.",
+"echo": false,
+"words": [
+{
+"text": "Yo,",
+"start_ns": 1426167611507666,
+"end_ns": 1426167895507666
+},
+{
+"text": "Heimdal,",
+"start_ns": 1426167895507666,
+"end_ns": 1426168179507666
+},
+{
+"text": "we",
+"start_ns": 1426168179507666,
+"end_ns": 1426168259507666
+},
+{
+"text": "can",
+"start_ns": 1426168259507666,
+"end_ns": 1426168419507666
+},
+{
+"text": "actually",
+"start_ns": 1426168419507666,
+"end_ns": 1426168819507666
+},
+{
+"text": "check",
+"start_ns": 1426168819507666,
+"end_ns": 1426169139507666
+},
+{
+"text": "whether",
+"start_ns": 1426169379507666,
+"end_ns": 1426169779507666
+},
+{
+"text": "the",
+"start_ns": 1426169779507666,
+"end_ns": 1426170019507666
+},
+{
+"text": "eco",
+"start_ns": 1426170019507666,
+"end_ns": 1426170339507666
+},
+{
+"text": "actually",
+"start_ns": 1426170579507666,
+"end_ns": 1426170819507666
+},
+{
+"text": "works,",
+"start_ns": 1426170819507666,
+"end_ns": 1426171139507666
+},
+{
+"text": "you",
+"start_ns": 1426171139507666,
+"end_ns": 1426171299507666
+},
+{
+"text": "know?",
+"start_ns": 1426171299507666,
+"end_ns": 1426171619507666
+},
+{
+"text": "I",
+"start_ns": 1426171619507666,
+"end_ns": 1426171859507666
+},
+{
+"text": "unplugged",
+"start_ns": 1426171859507666,
+"end_ns": 1426172339507666
+},
+{
+"text": "my",
+"start_ns": 1426172419507666,
+"end_ns": 1426172579507666
+},
+{
+"text": "earphones.",
+"start_ns": 1426172579507666,
+"end_ns": 1426174659507666
+}
+]
+},
+{
+"local": "23:26:05.422",
+"text": "echo guard can be tested. Ask me something short and stop talking. You should hear a quick act, then my answer. Neither should come back to me as you talking or set off away. One thing will",
+"echo": true,
+"words": [
+{
+"text": "echo",
+"start_ns": 1426183635507666,
+"end_ns": 1426183795507666
+},
+{
+"text": "guard",
+"start_ns": 1426183875507666,
+"end_ns": 1426184115507666
+},
+{
+"text": "can",
+"start_ns": 1426184115507666,
+"end_ns": 1426184195507666
+},
+{
+"text": "be",
+"start_ns": 1426184195507666,
+"end_ns": 1426184275507666
+},
+{
+"text": "tested.",
+"start_ns": 1426184635507666,
+"end_ns": 1426184695507666
+},
+{
+"text": "Ask",
+"start_ns": 1426184695507666,
+"end_ns": 1426184755507666
+},
+{
+"text": "me",
+"start_ns": 1426184755507666,
+"end_ns": 1426184915507666
+},
+{
+"text": "something",
+"start_ns": 1426184915507666,
+"end_ns": 1426185075507666
+},
+{
+"text": "short",
+"start_ns": 1426185075507666,
+"end_ns": 1426185315507666
+},
+{
+"text": "and",
+"start_ns": 1426185395507666,
+"end_ns": 1426185475507666
+},
+{
+"text": "stop",
+"start_ns": 1426185475507666,
+"end_ns": 1426185715507666
+},
+{
+"text": "talking.",
+"start_ns": 1426185715507666,
+"end_ns": 1426186035507666
+},
+{
+"text": "You",
+"start_ns": 1426186035507666,
+"end_ns": 1426186115507666
+},
+{
+"text": "should",
+"start_ns": 1426186115507666,
+"end_ns": 1426186275507666
+},
+{
+"text": "hear",
+"start_ns": 1426186275507666,
+"end_ns": 1426186435507666
+},
+{
+"text": "a",
+"start_ns": 1426186435507666,
+"end_ns": 1426186515507666
+},
+{
+"text": "quick",
+"start_ns": 1426186515507666,
+"end_ns": 1426186755507666
+},
+{
+"text": "act,",
+"start_ns": 1426186755507666,
+"end_ns": 1426187155507666
+},
+{
+"text": "then",
+"start_ns": 1426187155507666,
+"end_ns": 1426187315507666
+},
+{
+"text": "my",
+"start_ns": 1426187395507666,
+"end_ns": 1426187475507666
+},
+{
+"text": "answer.",
+"start_ns": 1426187555507666,
+"end_ns": 1426187955507666
+},
+{
+"text": "Neither",
+"start_ns": 1426187955507666,
+"end_ns": 1426188435507666
+},
+{
+"text": "should",
+"start_ns": 1426188435507666,
+"end_ns": 1426188595507666
+},
+{
+"text": "come",
+"start_ns": 1426188595507666,
+"end_ns": 1426188755507666
+},
+{
+"text": "back",
+"start_ns": 1426188755507666,
+"end_ns": 1426188835507666
+},
+{
+"text": "to",
+"start_ns": 1426188835507666,
+"end_ns": 1426188915507666
+},
+{
+"text": "me",
+"start_ns": 1426188915507666,
+"end_ns": 1426189075507666
+},
+{
+"text": "as",
+"start_ns": 1426189075507666,
+"end_ns": 1426189235507666
+},
+{
+"text": "you",
+"start_ns": 1426189235507666,
+"end_ns": 1426189395507666
+},
+{
+"text": "talking",
+"start_ns": 1426189395507666,
+"end_ns": 1426189635507666
+},
+{
+"text": "or",
+"start_ns": 1426189715507666,
+"end_ns": 1426189955507666
+},
+{
+"text": "set",
+"start_ns": 1426189955507666,
+"end_ns": 1426190115507666
+},
+{
+"text": "off",
+"start_ns": 1426190115507666,
+"end_ns": 1426190355507666
+},
+{
+"text": "away.",
+"start_ns": 1426190355507666,
+"end_ns": 1426190675507666
+},
+{
+"text": "One",
+"start_ns": 1426190675507666,
+"end_ns": 1426190835507666
+},
+{
+"text": "thing",
+"start_ns": 1426190835507666,
+"end_ns": 1426190995507666
+},
+{
+"text": "will",
+"start_ns": 1426191155507666,
+"end_ns": 1426191315507666
+}
+]
+},
+{
+"local": "23:39:58.704",
+"text": "Yeah, why is it so easy to corrupt?",
+"echo": false,
+"words": [
+{
+"text": "Yeah,",
+"start_ns": 1427024403393250,
+"end_ns": 1427024643393250
+},
+{
+"text": "why",
+"start_ns": 1427024643393250,
+"end_ns": 1427024963393250
+},
+{
+"text": "is",
+"start_ns": 1427024963393250,
+"end_ns": 1427025043393250
+},
+{
+"text": "it",
+"start_ns": 1427025043393250,
+"end_ns": 1427025203393250
+},
+{
+"text": "so",
+"start_ns": 1427025203393250,
+"end_ns": 1427025363393250
+},
+{
+"text": "easy",
+"start_ns": 1427025363393250,
+"end_ns": 1427025603393250
+},
+{
+"text": "to",
+"start_ns": 1427025603393250,
+"end_ns": 1427025763393250
+},
+{
+"text": "corrupt?",
+"start_ns": 1427025923393250,
+"end_ns": 1427026483393250
+}
+]
+},
+{
+"local": "23:40:01.340",
+"text": "Let me check.",
+"echo": true,
+"words": [
+{
+"text": "Let",
+"start_ns": 1427027643393250,
+"end_ns": 1427027803393250
+},
+{
+"text": "me",
+"start_ns": 1427027899393250,
+"end_ns": 1427028123393250
+},
+{
+"text": "check.",
+"start_ns": 1427028123393250,
+"end_ns": 1427029083393250
+}
+]
+},
+{
+"local": "23:40:13.732",
+"text": "What do you mean by corruption I'm missing what you're referring to?",
+"echo": true,
+"words": [
+{
+"text": "What",
+"start_ns": 1427038307393250,
+"end_ns": 1427038627393250
+},
+{
+"text": "do",
+"start_ns": 1427038627393250,
+"end_ns": 1427038707393250
+},
+{
+"text": "you",
+"start_ns": 1427038707393250,
+"end_ns": 1427038787393250
+},
+{
+"text": "mean",
+"start_ns": 1427038787393250,
+"end_ns": 1427038947393250
+},
+{
+"text": "by",
+"start_ns": 1427038947393250,
+"end_ns": 1427039107393250
+},
+{
+"text": "corruption",
+"start_ns": 1427039291393250,
+"end_ns": 1427039587393250
+},
+{
+"text": "I'm",
+"start_ns": 1427039675393250,
+"end_ns": 1427039907393250
+},
+{
+"text": "missing",
+"start_ns": 1427039827393250,
+"end_ns": 1427040067393250
+},
+{
+"text": "what",
+"start_ns": 1427040067393250,
+"end_ns": 1427040147393250
+},
+{
+"text": "you're",
+"start_ns": 1427040147393250,
+"end_ns": 1427040387393250
+},
+{
+"text": "referring",
+"start_ns": 1427040307393250,
+"end_ns": 1427040707393250
+},
+{
+"text": "to?",
+"start_ns": 1427040707393250,
+"end_ns": 1427041107393250
+}
+]
+},
+{
+"local": "23:40:19.086",
+"text": "Also that let me check right after was my own hack echoing back from the speaker.",
+"echo": true,
+"words": [
+{
+"text": "Also",
+"start_ns": 1427042715393250,
+"end_ns": 1427042811393250
+},
+{
+"text": "that",
+"start_ns": 1427042811393250,
+"end_ns": 1427042907393250
+},
+{
+"text": "let",
+"start_ns": 1427042907393250,
+"end_ns": 1427043067393250
+},
+{
+"text": "me",
+"start_ns": 1427043067393250,
+"end_ns": 1427043227393250
+},
+{
+"text": "check",
+"start_ns": 1427043227393250,
+"end_ns": 1427043467393250
+},
+{
+"text": "right",
+"start_ns": 1427043467393250,
+"end_ns": 1427043627393250
+},
+{
+"text": "after",
+"start_ns": 1427043627393250,
+"end_ns": 1427043867393250
+},
+{
+"text": "was",
+"start_ns": 1427044187393250,
+"end_ns": 1427044227393250
+},
+{
+"text": "my",
+"start_ns": 1427044227393250,
+"end_ns": 1427044267393250
+},
+{
+"text": "own",
+"start_ns": 1427044267393250,
+"end_ns": 1427044427393250
+},
+{
+"text": "hack",
+"start_ns": 1427044587393250,
+"end_ns": 1427044907393250
+},
+{
+"text": "echoing",
+"start_ns": 1427045019393250,
+"end_ns": 1427045307393250
+},
+{
+"text": "back",
+"start_ns": 1427045307393250,
+"end_ns": 1427045387393250
+},
+{
+"text": "from",
+"start_ns": 1427045387393250,
+"end_ns": 1427045547393250
+},
+{
+"text": "the",
+"start_ns": 1427045547393250,
+"end_ns": 1427045627393250
+},
+{
+"text": "speaker.",
+"start_ns": 1427045627393250,
+"end_ns": 1427046667393250
+}
+]
+},
+{
+"local": "23:40:21.785",
+"text": "Wait, no, you can hear me?",
+"echo": false,
+"words": [
+{
+"text": "Wait,",
+"start_ns": 1427047867393250,
+"end_ns": 1427048251393250
+},
+{
+"text": "no,",
+"start_ns": 1427048251393250,
+"end_ns": 1427048315393250
+},
+{
+"text": "you",
+"start_ns": 1427048315393250,
+"end_ns": 1427048475393250
+},
+{
+"text": "can",
+"start_ns": 1427048475393250,
+"end_ns": 1427048555393250
+},
+{
+"text": "hear",
+"start_ns": 1427048715393250,
+"end_ns": 1427049115393250
+},
+{
+"text": "me?",
+"start_ns": 1427049115393250,
+"end_ns": 1427049755393250
+}
+]
+},
+{
+"local": "23:40:23.785",
+"text": "La dice.",
+"echo": true,
+"words": [
+{
+"text": "La",
+"start_ns": 1427050587393250,
+"end_ns": 1427050667393250
+},
+{
+"text": "dice.",
+"start_ns": 1427050667393250,
+"end_ns": 1427052187393250
+}
+]
+},
+{
+"local": "23:40:45.877",
+"text": "Yes, I hear you. On speakers, my own voice keeps coming back as you, and starts a loop. Plug your earphones back in until tonight's fix lands.",
+"echo": true,
+"words": [
+{
+"text": "Yes,",
+"start_ns": 1427066707393250,
+"end_ns": 1427067187393250
+},
+{
+"text": "I",
+"start_ns": 1427067387393250,
+"end_ns": 1427067527393250
+},
+{
+"text": "hear",
+"start_ns": 1427067527393250,
+"end_ns": 1427067667393250
+},
+{
+"text": "you.",
+"start_ns": 1427067667393250,
+"end_ns": 1427068067393250
+},
+{
+"text": "On",
+"start_ns": 1427068067393250,
+"end_ns": 1427068307393250
+},
+{
+"text": "speakers,",
+"start_ns": 1427068571393250,
+"end_ns": 1427068787393250
+},
+{
+"text": "my",
+"start_ns": 1427068787393250,
+"end_ns": 1427068947393250
+},
+{
+"text": "own",
+"start_ns": 1427068947393250,
+"end_ns": 1427069107393250
+},
+{
+"text": "voice",
+"start_ns": 1427069107393250,
+"end_ns": 1427069267393250
+},
+{
+"text": "keeps",
+"start_ns": 1427069267393250,
+"end_ns": 1427069427393250
+},
+{
+"text": "coming",
+"start_ns": 1427069427393250,
+"end_ns": 1427069587393250
+},
+{
+"text": "back",
+"start_ns": 1427069587393250,
+"end_ns": 1427069747393250
+},
+{
+"text": "as",
+"start_ns": 1427069747393250,
+"end_ns": 1427069827393250
+},
+{
+"text": "you,",
+"start_ns": 1427069907393250,
+"end_ns": 1427070147393250
+},
+{
+"text": "and",
+"start_ns": 1427070147393250,
+"end_ns": 1427070307393250
+},
+{
+"text": "starts",
+"start_ns": 1427070395393250,
+"end_ns": 1427070547393250
+},
+{
+"text": "a",
+"start_ns": 1427070547393250,
+"end_ns": 1427070627393250
+},
+{
+"text": "loop.",
+"start_ns": 1427070627393250,
+"end_ns": 1427070867393250
+},
+{
+"text": "Plug",
+"start_ns": 1427070867393250,
+"end_ns": 1427071027393250
+},
+{
+"text": "your",
+"start_ns": 1427071027393250,
+"end_ns": 1427071107393250
+},
+{
+"text": "earphones",
+"start_ns": 1427071107393250,
+"end_ns": 1427071507393250
+},
+{
+"text": "back",
+"start_ns": 1427071507393250,
+"end_ns": 1427071587393250
+},
+{
+"text": "in",
+"start_ns": 1427071587393250,
+"end_ns": 1427071667393250
+},
+{
+"text": "until",
+"start_ns": 1427071667393250,
+"end_ns": 1427071907393250
+},
+{
+"text": "tonight's",
+"start_ns": 1427071907393250,
+"end_ns": 1427072227393250
+},
+{
+"text": "fix",
+"start_ns": 1427072227393250,
+"end_ns": 1427072467393250
+},
+{
+"text": "lands.",
+"start_ns": 1427072627393250,
+"end_ns": 1427073267393250
+}
+]
+}
+],
+"played": [
+{
+"start_ns": 1426182673931250,
+"end_ns": 1426184553931250,
+"text": "You're on speakers now, so the echo guard can be tested.",
+"from": "tap",
+"heard_on_tap": "You're on speakers now so the echo guard can be tested."
+},
+{
+"start_ns": 1426184553931250,
+"end_ns": 1426185993931250,
+"text": "Ask me something short and stop talking.",
+"from": "tap",
+"heard_on_tap": "Ask me something short and stop talking."
+},
+{
+"start_ns": 1426185993931250,
+"end_ns": 1426187993931250,
+"text": "You should hear a quick ack, then my answer.",
+"from": "tap",
+"heard_on_tap": "You should hear a quick act, then my answer."
+},
+{
+"start_ns": 1426187993931250,
+"end_ns": 1426190633931250,
+"text": "Neither should come back to me as you talking or set off a wake.",
+"from": "tap",
+"heard_on_tap": "Neither should come back to me as you talking, or set off away."
+},
+{
+"start_ns": 1426190633931250,
+"end_ns": 1426192713931250,
+"text": "One thing won't work through speakers: interrupting me, since there's no echo cancellation yet.",
+"from": "tap",
+"heard_on_tap": "One thing won't."
+},
+{
+"start_ns": 1427027564059125,
+"end_ns": 1427029684059125,
+"text": "Let me check.",
+"from": "tap",
+"heard_on_tap": "Let me check."
+},
+{
+"start_ns": 1427030252059125,
+"end_ns": 1427032124059125,
+"text": "Got it.",
+"from": "tap",
+"heard_on_tap": "Got it."
+},
+{
+"start_ns": 1427038132059125,
+"end_ns": 1427041172059125,
+"text": "What do you mean by \"corrupt\"? I'm missing what you're referring to.",
+"from": "tap",
+"heard_on_tap": "What do you mean by corruption- I'm missing what you're referring to."
+},
+{
+"start_ns": 1427042604059125,
+"end_ns": 1427047164059125,
+"text": "Also, that \"Let me check\" right after was my own ack echoing back from the speakers as you.",
+"from": "tap",
+"heard_on_tap": "Also that let me check right after, was my own ack echoing back from the speakers."
+},
+{
+"start_ns": 1427047820059125,
+"end_ns": 1427049612059125,
+"text": "Okay.",
+"from": "tap",
+"heard_on_tap": "Okay."
+},
+{
+"start_ns": 1427050540059125,
+"end_ns": 1427052236059125,
+"text": "Let me check.",
+"from": "tap",
+"heard_on_tap": "Let me check."
+},
+{
+"start_ns": 1427052492059125,
+"end_ns": 1427054396059125,
+"text": "Will do.",
+"from": "tap",
+"heard_on_tap": "We'll do."
+},
+{
+"start_ns": 1427067180059125,
+"end_ns": 1427068020059125,
+"text": "Yes, I hear you.",
+"from": "tap",
+"heard_on_tap": "Yes, I hear you."
+},
+{
+"start_ns": 1427068020059125,
+"end_ns": 1427070820059125,
+"text": "On speakers my own voice keeps coming back as you and starts a loop.",
+"from": "tap",
+"heard_on_tap": "On speakers, my own voice keeps coming back as you and starts a loop."
+},
+{
+"start_ns": 1427070820059125,
+"end_ns": 1427073140059125,
+"text": "Plug your earphones back in until tonight's fix lands.",
+"from": "tap",
+"heard_on_tap": "Plug your earphones back in until tonight's fix lands."
+}
+],
+"acks": [
+{
+"start_ns": 1427027464355792,
+"end_ns": 1427028413427291
+},
+{
+"start_ns": 1427030140020584,
+"end_ns": 1427030752700750
+},
+{
+"start_ns": 1427047720828375,
+"end_ns": 1427048237047583
+},
+{
+"start_ns": 1427050420987166,
+"end_ns": 1427051109907708
+},
+{
+"start_ns": 1427052422586291,
+"end_ns": 1427053076357958
+}
+]
+}

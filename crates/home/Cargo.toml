@@ -1,0 +1,19 @@
+[package]
+name = "heimdall-home"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Where Heimdall keeps its files (docs/home.md): the home folder the user picks and `<home>/.heimdall`. Std plus
+# serde_json and libc, so every binary in the app, the workers and the CLIs can resolve the same folders.
+[lib]
+name = "heimdall_home"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

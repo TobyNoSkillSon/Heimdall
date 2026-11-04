@@ -1,0 +1,167 @@
+Heimdall Alpha
+Copyright 2026 TobyNoSkillSon
+This product includes software developed by TobyNoSkillSon (https://github.com/TobyNoSkillSon).
+
+Third-party components
+
+Heimdall Alpha includes, bundles or runs the third-party components below. Each keeps its own licence. Full licence texts are in the licenses/ folder; the file named in each entry is the full text. THIRD_PARTY_NOTICES.md lists every component with version, licence and obligation.
+
+Attribution
+
+Parakeet speech recognition weights, CC-BY-4.0. Parakeet Ultra by Moondream (moondream/parakeet-ultra, https://huggingface.co/moondream/parakeet-ultra), a post-train of nvidia/parakeet-tdt-0.6b-v3 by NVIDIA. The Core ML conversion used here is by FluidInference (FluidInference/parakeet-ultra-coreml, revision 95eaa59a39d4394f047a4dc5cce480388a60d1b6); its files are used as published. Licence: licenses/CC-BY-4.0.txt.
+
+Nemotron 3 Diarization weights, OpenMDW-1.1. Copyright NVIDIA Corporation (nvidia/Nemotron-3-Diarization, https://huggingface.co/nvidia/Nemotron-3-Diarization). Licence: licenses/OpenMDW-1.1.txt.
+
+Decider V6 (heimdall-d1-v6, https://huggingface.co/Toby-NoSkillSon/heimdall-d1-v6), a fine-tune of LiquidAI/d1-2B, LFM Open License v1.0. Base model Copyright Liquid AI, Inc. Downloaded at build time; not in this repository. Licence: licenses/LFM-Open-License-1.0.txt. Commercial use is licensed only where the licensee has annual revenue under USD 10,000,000.
+
+EmbeddingGemma 2 memory-search embedding model, Apache-2.0. Google (google/embeddinggemma-2). Licence: licenses/EmbeddingGemma-Apache-2.0.txt. The model card asks deployments to adhere to Google's Gemma Prohibited Use Policy: https://ai.google.dev/gemma/prohibited_use_policy
+
+Qwen3.8 27B (unsloth/Qwen3.8-27B-GGUF, quantised from Qwen/Qwen3.8-27B), Apache-2.0, Copyright 2026 Alibaba Cloud. Downloaded by the Splash engine when used; not bundled. Licence: licenses/Qwen3.8-Apache-2.0.txt.
+
+Phonon 31m English model and voice presets, Apache-2.0, Gradium (gradium/phonon-31m-en and gradium/phonon-voices). Licence: licenses/Apache-2.0.txt.
+
+MossFormer2 speech separation (ONNX export ipsilondev/MossFormer2-SS-16K-ONNX), Apache-2.0; the upstream code is MIT, copyright alibabasglab. Licences: licenses/Apache-2.0.txt and licenses/MossFormer2-MIT.txt.
+
+Splash native inference engine 1.4.1 (the splash engine binary and splash.metallib only; Heimdall replaces Splash's Python server with its own Rust code), Apache-2.0 (incoai/splash). Its notices, including llama.cpp/ggml, are in licenses/Splash-THIRD_PARTY_NOTICES.txt; the app also carries them in Contents/Resources/licenses/splash-*. Licence: licenses/Apache-2.0.txt.
+
+Node.js 26.8.1, Copyright Node.js contributors, with the notices of the components Node bundles. Licence: licenses/Node.js-LICENSE.txt.
+
+Pi agent packages 1.4.0 (@earendil-works/pi-coding-agent, pi-agent-core, pi-ai, pi-codemode, pi-mcp, pi-telemetry, pi-tui), MIT, Copyright (c) 2025 Mario Zechner. Licence: licenses/Pi-MIT.txt. The 121 npm packages they depend on are listed in THIRD_PARTY_NOTICES.md.
+
+NeMo-Speech.cpp, Apache-2.0, Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. Its diarization code is compiled into the speaker worker. Licence: licenses/NeMo-Speech-NVIDIA-Apache-2.0.txt. Its NOTICE file is reproduced below.
+
+FluidAudio streaming-cache algorithm, Apache-2.0, FluidInference. The algorithm is adapted in the speaker code; no FluidAudio code is shipped. Licence: licenses/FluidAudio-Apache-2.0.txt.
+
+ONNX Runtime, MIT, Copyright (c) Microsoft Corporation, statically linked through the ort crate (MIT OR Apache-2.0). Licences: licenses/ONNX-Runtime-MIT.txt and licenses/Apache-2.0.txt.
+
+llama.cpp and ggml, MIT, Copyright (c) 2023-2026 The ggml authors. Compiled into libheimdall_decide.dylib and the speaker worker. Licence: licenses/llama.cpp-ggml-MIT.txt.
+
+MLX (mlx-swift 0.32.3, mlx, mlx-swift-lm), MIT, Copyright ml-explore and Apple Inc. Used by the native embedding worker. Licences: licenses/MLX-Swift-MIT.txt, licenses/MLX-MIT.txt and licenses/MLX-Swift-LM-MIT.txt.
+
+Swift packages used by the embedding worker: swift-transformers and swift-jinja (Apache-2.0, Hugging Face), swift-crypto and swift-asn1 (Apache-2.0, The SwiftCrypto Project and The SwiftASN1 Project), swift-collections, swift-numerics and swift-syntax (Apache-2.0 with the Runtime Library Exception, Apple and Swift.org), yyjson (MIT, YaoYuan). Licences: licenses/Apache-2.0.txt, licenses/Swift-Apache-2.0-runtime-exception.txt, licenses/swift-asn1-LICENSE.txt and licenses/yyjson-MIT.txt.
+
+Silero VAD, MIT, Copyright (c) 2020-present Silero Team. Licence: licenses/Silero-VAD-MIT.txt.
+
+Smart Turn v3.2, BSD 2-Clause, Copyright (c) 2024-2025, Daily (pipecat-ai). Licence: licenses/SmartTurn-BSD-2-Clause.txt.
+
+ReDimNet2-B6 speaker embedding weights, MIT, Copyright (c) 2026 Palabra.ai. Licence: licenses/ReDimNet-MIT.txt.
+
+Vella Metal kernels, MIT, Copyright (c) 2026 Vella contributors: crates/listen/src/metal/vella_formats27.metal and the
+adapted Metal tiles in crates/decide/src/whisper.metal, crates/speak/src/pointwise.metal and
+crates/speakers/src/kernels.metal (each crate keeps the notice as VELLA-LICENSE). The decider crate (crates/decide) is
+licensed MIT for that reason; the rest of Heimdall is Apache-2.0, which keeps these MIT notices as they are.
+Licence: licenses/Vella-MIT.txt.
+
+flexaudio, MIT, Copyright (c) 2026 tubome / Studio Sadola. Licence: licenses/flexaudio-MIT.txt.
+
+ptts, MIT OR Apache-2.0, Gradium. Licences: licenses/ptts-MIT.txt and licenses/Apache-2.0.txt.
+
+cfg_aliases, MIT. Its notice is in licenses/cfg_aliases-NOTICES.txt.
+
+Rust crates from crates.io (658 locked registry crates) and npm packages are credited by licence type in THIRD_PARTY_NOTICES.md.
+
+Notices of Apache-2.0 components
+
+The following NOTICE files come from Apache-2.0 components that ship, and are reproduced unchanged. No other shipped Apache-2.0 component has a NOTICE file. Checked: all 121 npm tarballs, the other Swift packages, the Rust crates in the local cargo cache, and the Qwen and EmbeddingGemma model repositories.
+
+NeMo-Speech.cpp NOTICE (crates/speakers/vendor/nemo-speech/NOTICE):
+
+NeMo-Speech.cpp
+Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This product includes software developed by third parties. See
+THIRD_PARTY_NOTICES.md for applicable notices, attributions, and license
+terms.
+
+
+swift-crypto NOTICE.txt (apple/swift-crypto at da9d28d69ebe3894b18376c8f2395c2f37b8448f):
+
+                            The SwiftCrypto Project
+                            =======================
+
+Please visit the SwiftCrypto web site for more information:
+
+  * https://github.com/apple/swift-crypto
+
+Copyright 2019 The SwiftCrypto Project
+
+The SwiftCrypto Project licenses this file to you under the Apache License,
+version 2.0 (the "License"); you may not use this file except in compliance
+with the License. You may obtain a copy of the License at:
+
+  https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+License for the specific language governing permissions and limitations
+under the License.
+
+Also, please refer to each LICENSE.<component>.txt file, which is located in
+the 'license' directory of the distribution file, for the license terms of the
+components that this product depends on.
+
+-------------------------------------------------------------------------------
+
+This product contains test vectors from Google's wycheproof project.
+
+  * LICENSE (Apache License 2.0):
+    * https://github.com/C2SP/wycheproof/blob/31387e2cd596587c859c611027b6a44d2e2b65ff/LICENSE
+  * HOMEPAGE:
+    * https://github.com/google/wycheproof
+
+---
+
+This product contains a derivation of various files from SwiftNIO.
+
+  * LICENSE (Apache License 2.0):
+    * https://www.apache.org/licenses/LICENSE-2.0
+  * HOMEPAGE:
+    * https://github.com/apple/swift-nio
+
+
+swift-asn1 NOTICE.txt (apple/swift-asn1 at 3b6410f7dee09eb33cdd26260c5fd47fda19b0e2):
+
+
+                            The SwiftASN1 Project
+                            =====================
+
+Please visit the SwiftASN1 web site for more information:
+
+  * https://github.com/apple/swift-asn1
+
+Copyright 2022 The SwiftASN1 Project
+
+The SwiftASN1 Project licenses this file to you under the Apache License,
+version 2.0 (the "License"); you may not use this file except in compliance
+with the License. You may obtain a copy of the License at:
+
+  https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+License for the specific language governing permissions and limitations
+under the License.
+
+Also, please refer to each LICENSE.txt file, which is located in
+the 'license' directory of the distribution file, for the license terms of the
+components that this product depends on.
+
+---
+
+This product contains derivations of various scripts from SwiftNIO.
+
+  * LICENSE (Apache License 2.0):
+    * https://www.apache.org/licenses/LICENSE-2.0
+  * HOMEPAGE:
+    * https://github.com/apple/swift-nio
+    
+---
+
+This product contains derivations of various scripts from Swift OpenAPI Generator.
+
+  * LICENSE (Apache License 2.0):
+    * https://www.apache.org/licenses/LICENSE-2.0
+  * HOMEPAGE:
+    * https://github.com/apple/swift-openapi-generator

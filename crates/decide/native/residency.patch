@@ -1,0 +1,67 @@
+--- ggml-metal-device.m
++++ ggml-metal-device.m
+@@ -925,6 +925,7 @@
+     atomic_int  d_loop;
+ 
+     dispatch_group_t d_group;
++    dispatch_semaphore_t d_wake;
+ };
+ 
+ #if defined(GGML_METAL_HAS_RESIDENCY_SETS)
+@@ -970,7 +971,9 @@
+         res->keep_alive_s = 3*60;
+     }
+ 
+-    res->time_per_loop_ms = 5;
++    // requestResidency persists until endResidency. A one-second heartbeat
++    // retains the upstream keep-alive policy without 200 idle wakeups/second.
++    res->time_per_loop_ms = 1000;
+     res->loops_per_s = 1000/res->time_per_loop_ms;
+ 
+     GGML_LOG_INFO("%s: creating a residency set collection (keep_alive = %d s)\n", __func__, res->keep_alive_s);
+@@ -979,6 +982,7 @@
+     atomic_store_explicit(&res->d_loop, res->loops_per_s*res->keep_alive_s, memory_order_relaxed);
+ 
+     res->d_group = dispatch_group_create();
++    res->d_wake = dispatch_semaphore_create(0);
+ 
+     // start a background thread that periodically requests residency for all the currently active sets in the collection
+     // the requests stop after a certain amount of time (keep_alive_s) of inactivity
+@@ -999,7 +1003,12 @@
+                       [res->lock unlock];
+                   }
+ 
+-                  usleep(res->time_per_loop_ms * 1000);
++                  // No polling after the keep-alive budget expires. Graph
++                  // activity and destruction signal this semaphore directly.
++                  dispatch_time_t deadline = atomic_load_explicit(&res->d_loop, memory_order_relaxed) > 0
++                      ? dispatch_time(DISPATCH_TIME_NOW, (int64_t) res->time_per_loop_ms * NSEC_PER_MSEC)
++                      : DISPATCH_TIME_FOREVER;
++                  dispatch_semaphore_wait(res->d_wake, deadline);
+               }
+         }
+ #endif
+@@ -1026,9 +1035,11 @@
+     GGML_ASSERT([rsets->data count] == 0);
+ 
+     atomic_store_explicit(&rsets->d_stop, true, memory_order_relaxed);
++    dispatch_semaphore_signal(rsets->d_wake);
+ 
+     dispatch_group_wait(rsets->d_group, DISPATCH_TIME_FOREVER);
+     dispatch_release(rsets->d_group);
++    dispatch_release(rsets->d_wake);
+ 
+     [rsets->data release];
+     [rsets->lock release];
+@@ -1428,7 +1439,10 @@
+         return;
+     }
+ 
+-    atomic_store_explicit(&dev->rsets->d_loop, dev->rsets->loops_per_s*dev->rsets->keep_alive_s, memory_order_relaxed);
++    if (atomic_exchange_explicit(&dev->rsets->d_loop,
++            dev->rsets->loops_per_s*dev->rsets->keep_alive_s, memory_order_relaxed) == 0) {
++        dispatch_semaphore_signal(dev->rsets->d_wake);
++    }
+ }
+ 
+ struct ggml_metal_event {

@@ -1,0 +1,4127 @@
+{
+ "qwen": [
+  {
+   "name": "thinking_then_answer",
+   "text": "Let me think about 2+2.\nIt is 4.\n</think>\n\nThe answer is **4** 🚀.",
+   "thinking": true,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Current weather for a city — °C, wind & <rain>.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City, e.g. \"Poznań\""
+        },
+        "days": {
+         "type": "integer"
+        },
+        "units": {
+         "type": "string",
+         "enum": [
+          "metric",
+          "imperial"
+         ]
+        },
+        "precise": {
+         "type": "boolean"
+        },
+        "threshold": {
+         "type": "number"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "options": {
+         "type": "object",
+         "properties": {
+          "lang": {
+           "type": "string"
+          }
+         }
+        },
+        "note": {
+         "type": [
+          "string",
+          "null"
+         ]
+        },
+        "maybe": {
+         "type": [
+          "integer",
+          "null"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ],
+   "tool_types": {
+    "get_weather": {
+     "parameters": {
+      "city": [
+       "string"
+      ],
+      "days": [
+       "integer"
+      ],
+      "units": [
+       "string"
+      ],
+      "precise": [
+       "boolean"
+      ],
+      "threshold": [
+       "number"
+      ],
+      "tags": [
+       "array"
+      ],
+      "options": [
+       "object"
+      ],
+      "note": [
+       "null",
+       "string"
+      ],
+      "maybe": [
+       "integer",
+       "null"
+      ]
+     },
+     "other": null
+    },
+    "mystery": {
+     "parameters": {},
+     "other": null
+    }
+   },
+   "may_call_tools": true,
+   "events": [
+    [
+     "reasoning_content",
+     "Let"
+    ],
+    [
+     "reasoning_content",
+     " me"
+    ],
+    [
+     "reasoning_content",
+     " think"
+    ],
+    [
+     "reasoning_content",
+     " about"
+    ],
+    [
+     "reasoning_content",
+     " "
+    ],
+    [
+     "reasoning_content",
+     "2"
+    ],
+    [
+     "reasoning_content",
+     "+"
+    ],
+    [
+     "reasoning_content",
+     "2"
+    ],
+    [
+     "reasoning_content",
+     "."
+    ],
+    [
+     "reasoning_content",
+     "\n"
+    ],
+    [
+     "reasoning_content",
+     "It"
+    ],
+    [
+     "reasoning_content",
+     " is"
+    ],
+    [
+     "reasoning_content",
+     " "
+    ],
+    [
+     "reasoning_content",
+     "4"
+    ],
+    [
+     "reasoning_content",
+     "."
+    ],
+    [
+     "reasoning_content",
+     "\n"
+    ],
+    [
+     "content",
+     "The"
+    ],
+    [
+     "content",
+     " answer"
+    ],
+    [
+     "content",
+     " is"
+    ],
+    [
+     "content",
+     " **"
+    ],
+    [
+     "content",
+     "4"
+    ],
+    [
+     "content",
+     "**"
+    ],
+    [
+     "content",
+     " 🚀"
+    ],
+    [
+     "content",
+     "."
+    ]
+   ],
+   "reasoning": "Let me think about 2+2.\nIt is 4.\n",
+   "content": "The answer is **4** 🚀.",
+   "tool_calls": [],
+   "reasoning_open": false,
+   "cut_in_call": false,
+   "cut_call": null,
+   "stop_sequence": null,
+   "reasoning_tokens": 16,
+   "token_ids": [
+    9764,
+    728,
+    1683,
+    883,
+    220,
+    17,
+    10,
+    17,
+    13,
+    198,
+    2064,
+    369,
+    220,
+    19,
+    13,
+    198,
+    248069,
+    271,
+    760,
+    4087,
+    369,
+    2972,
+    19,
+    332,
+    10838,
+    248,
+    222,
+    13
+   ],
+   "frames": 2
+  },
+  {
+   "name": "thinking_tool_call_typed",
+   "text": "The user asks for weather in Poznań. I should call the tool.\n</think>\n\nChecking the weather now.\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nPoznań, \"Old Town\" 🚀\n</parameter>\n<parameter=days>\n3\n</parameter>\n<parameter=threshold>\n2.50\n</parameter>\n<parameter=precise>\nTrue\n</parameter>\n<parameter=units>\nmetric\n</parameter>\n<parameter=tags>\n[\"wind\", \"rain\"]\n</parameter>\n<parameter=options>\n{\"lang\": \"pl\"}\n</parameter>\n<parameter=note>\nnull\n</parameter>\n<parameter=maybe>\nNone\n</parameter>\n<parameter=extra>\n{\"free\": 1}\n</parameter>\n<parameter=days>\n9\n</parameter>\n</function>\n</tool_call>",
+   "thinking": true,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Current weather for a city — °C, wind & <rain>.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City, e.g. \"Poznań\""
+        },
+        "days": {
+         "type": "integer"
+        },
+        "units": {
+         "type": "string",
+         "enum": [
+          "metric",
+          "imperial"
+         ]
+        },
+        "precise": {
+         "type": "boolean"
+        },
+        "threshold": {
+         "type": "number"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "options": {
+         "type": "object",
+         "properties": {
+          "lang": {
+           "type": "string"
+          }
+         }
+        },
+        "note": {
+         "type": [
+          "string",
+          "null"
+         ]
+        },
+        "maybe": {
+         "type": [
+          "integer",
+          "null"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "function": {
+      "name": "search",
+      "description": "Search the web.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "limit": {
+         "type": "integer"
+        }
+       }
+      }
+     }
+    }
+   ],
+   "tool_types": {
+    "get_weather": {
+     "parameters": {
+      "city": [
+       "string"
+      ],
+      "days": [
+       "integer"
+      ],
+      "units": [
+       "string"
+      ],
+      "precise": [
+       "boolean"
+      ],
+      "threshold": [
+       "number"
+      ],
+      "tags": [
+       "array"
+      ],
+      "options": [
+       "object"
+      ],
+      "note": [
+       "null",
+       "string"
+      ],
+      "maybe": [
+       "integer",
+       "null"
+      ]
+     },
+     "other": null
+    },
+    "search": {
+     "parameters": {
+      "query": [
+       "string"
+      ],
+      "limit": [
+       "integer"
+      ]
+     },
+     "other": null
+    },
+    "mystery": {
+     "parameters": {},
+     "other": null
+    }
+   },
+   "may_call_tools": true,
+   "events": [
+    [
+     "reasoning_content",
+     "The"
+    ],
+    [
+     "reasoning_content",
+     " user"
+    ],
+    [
+     "reasoning_content",
+     " asks"
+    ],
+    [
+     "reasoning_content",
+     " for"
+    ],
+    [
+     "reasoning_content",
+     " weather"
+    ],
+    [
+     "reasoning_content",
+     " in"
+    ],
+    [
+     "reasoning_content",
+     " Poz"
+    ],
+    [
+     "reasoning_content",
+     "na"
+    ],
+    [
+     "reasoning_content",
+     "ń"
+    ],
+    [
+     "reasoning_content",
+     "."
+    ],
+    [
+     "reasoning_content",
+     " I"
+    ],
+    [
+     "reasoning_content",
+     " should"
+    ],
+    [
+     "reasoning_content",
+     " call"
+    ],
+    [
+     "reasoning_content",
+     " the"
+    ],
+    [
+     "reasoning_content",
+     " tool"
+    ],
+    [
+     "reasoning_content",
+     "."
+    ],
+    [
+     "reasoning_content",
+     "\n"
+    ],
+    [
+     "content",
+     "Checking"
+    ],
+    [
+     "content",
+     " the"
+    ],
+    [
+     "content",
+     " weather"
+    ],
+    [
+     "content",
+     " now"
+    ],
+    [
+     "content",
+     "."
+    ],
+    [
+     "content",
+     "\n\n"
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "id": "call_req42_0",
+      "type": "function",
+      "function": {
+       "name": "get_weather"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "{"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "\"city\":\""
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "P"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "oz"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "na"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "ń"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": ","
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": " \\\""
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "Old"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": " Town"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "\\\""
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": " 🚀"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "\""
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": ",\"days\":3"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": ",\"threshold\":2.5"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": ",\"precise\":true"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": ",\"units\":\""
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "metric"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "\""
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": ",\"tags\":[\"wind\",\"rain\"]"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": ",\"options\":{\"lang\":\"pl\"}"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": ",\"note\":null"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": ",\"maybe\":null"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": ",\"extra\":\""
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "{\\\""
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "free"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "\\\":"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": " "
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "1"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "}"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "\""
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "}"
+      }
+     }
+    ]
+   ],
+   "reasoning": "The user asks for weather in Poznań. I should call the tool.\n",
+   "content": "Checking the weather now.\n\n",
+   "tool_calls": [
+    {
+     "id": "call_req42_0",
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "arguments": "{\"city\":\"Poznań, \\\"Old Town\\\" 🚀\",\"days\":3,\"threshold\":2.5,\"precise\":true,\"units\":\"metric\",\"tags\":[\"wind\",\"rain\"],\"options\":{\"lang\":\"pl\"},\"note\":null,\"maybe\":null,\"extra\":\"{\\\"free\\\": 1}\"}"
+     }
+    }
+   ],
+   "reasoning_open": false,
+   "cut_in_call": false,
+   "cut_call": null,
+   "stop_sequence": null,
+   "reasoning_tokens": 17,
+   "token_ids": [
+    760,
+    1156,
+    16561,
+    364,
+    8831,
+    303,
+    76280,
+    3267,
+    18570,
+    13,
+    353,
+    1220,
+    1562,
+    279,
+    5224,
+    13,
+    198,
+    248069,
+    271,
+    38797,
+    279,
+    8831,
+    1381,
+    13,
+    271,
+    248058,
+    198,
+    27,
+    1628,
+    27362,
+    67017,
+    29,
+    198,
+    27,
+    15704,
+    28,
+    8656,
+    29,
+    198,
+    47,
+    9230,
+    3267,
+    18570,
+    11,
+    328,
+    17740,
+    13570,
+    1,
+    10838,
+    248,
+    222,
+    198,
+    510,
+    15704,
+    29,
+    198,
+    27,
+    15704,
+    28,
+    13382,
+    29,
+    198,
+    18,
+    198,
+    510,
+    15704,
+    29,
+    198,
+    27,
+    15704,
+    28,
+    27960,
+    29,
+    198,
+    17,
+    13,
+    20,
+    15,
+    198,
+    510,
+    15704,
+    29,
+    198,
+    27,
+    15704,
+    28,
+    10330,
+    1029,
+    29,
+    198,
+    2434,
+    198,
+    510,
+    15704,
+    29,
+    198,
+    27,
+    15704,
+    28,
+    24826,
+    29,
+    198,
+    15435,
+    198,
+    510,
+    15704,
+    29,
+    198,
+    27,
+    15704,
+    28,
+    13679,
+    29,
+    198,
+    1143,
+    18574,
+    487,
+    328,
+    28142,
+    1293,
+    198,
+    510,
+    15704,
+    29,
+    198,
+    27,
+    15704,
+    91750,
+    29,
+    198,
+    4754,
+    5040,
+    763,
+    328,
+    490,
+    8934,
+    198,
+    510,
+    15704,
+    29,
+    198,
+    27,
+    15704,
+    28,
+    9679,
+    29,
+    198,
+    2827,
+    198,
+    510,
+    15704,
+    29,
+    198,
+    27,
+    15704,
+    28,
+    35542,
+    29,
+    198,
+    3928,
+    198,
+    510,
+    15704,
+    29,
+    198,
+    27,
+    15704,
+    28,
+    15006,
+    29,
+    198,
+    4754,
+    10279,
+    763,
+    220,
+    16,
+    92,
+    198,
+    510,
+    15704,
+    29,
+    198,
+    27,
+    15704,
+    28,
+    13382,
+    29,
+    198,
+    24,
+    198,
+    510,
+    15704,
+    29,
+    198,
+    510,
+    1628,
+    29,
+    198,
+    248059
+   ],
+   "frames": 2
+  },
+  {
+   "name": "parallel_calls",
+   "text": "Two calls.\n</think>\n\n<tool_call>\n<function=search>\n<parameter=query>\nfirst\n</parameter>\n<parameter=limit>\n5\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=get_weather>\n<parameter=city>\nKraków\n</parameter>\n</function>\n</tool_call>",
+   "thinking": true,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Current weather for a city — °C, wind & <rain>.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City, e.g. \"Poznań\""
+        },
+        "days": {
+         "type": "integer"
+        },
+        "units": {
+         "type": "string",
+         "enum": [
+          "metric",
+          "imperial"
+         ]
+        },
+        "precise": {
+         "type": "boolean"
+        },
+        "threshold": {
+         "type": "number"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "options": {
+         "type": "object",
+         "properties": {
+          "lang": {
+           "type": "string"
+          }
+         }
+        },
+        "note": {
+         "type": [
+          "string",
+          "null"
+         ]
+        },
+        "maybe": {
+         "type": [
+          "integer",
+          "null"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "function": {
+      "name": "search",
+      "description": "Search the web.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "limit": {
+         "type": "integer"
+        }
+       }
+      }
+     }
+    }
+   ],
+   "tool_types": {
+    "get_weather": {
+     "parameters": {
+      "city": [
+       "string"
+      ],
+      "days": [
+       "integer"
+      ],
+      "units": [
+       "string"
+      ],
+      "precise": [
+       "boolean"
+      ],
+      "threshold": [
+       "number"
+      ],
+      "tags": [
+       "array"
+      ],
+      "options": [
+       "object"
+      ],
+      "note": [
+       "null",
+       "string"
+      ],
+      "maybe": [
+       "integer",
+       "null"
+      ]
+     },
+     "other": null
+    },
+    "search": {
+     "parameters": {
+      "query": [
+       "string"
+      ],
+      "limit": [
+       "integer"
+      ]
+     },
+     "other": null
+    },
+    "mystery": {
+     "parameters": {},
+     "other": null
+    }
+   },
+   "may_call_tools": true,
+   "events": [
+    [
+     "reasoning_content",
+     "Two"
+    ],
+    [
+     "reasoning_content",
+     " calls"
+    ],
+    [
+     "reasoning_content",
+     "."
+    ],
+    [
+     "reasoning_content",
+     "\n"
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "id": "call_req42_0",
+      "type": "function",
+      "function": {
+       "name": "search"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "{"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "\"query\":\""
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "first"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "\""
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": ",\"limit\":5"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "}"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 1,
+      "id": "call_req42_1",
+      "type": "function",
+      "function": {
+       "name": "get_weather"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 1,
+      "function": {
+       "arguments": "{"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 1,
+      "function": {
+       "arguments": "\"city\":\""
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 1,
+      "function": {
+       "arguments": "Kr"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 1,
+      "function": {
+       "arguments": "aków"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 1,
+      "function": {
+       "arguments": "\""
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 1,
+      "function": {
+       "arguments": "}"
+      }
+     }
+    ]
+   ],
+   "reasoning": "Two calls.\n",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call_req42_0",
+     "type": "function",
+     "function": {
+      "name": "search",
+      "arguments": "{\"query\":\"first\",\"limit\":5}"
+     }
+    },
+    {
+     "id": "call_req42_1",
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "arguments": "{\"city\":\"Kraków\"}"
+     }
+    }
+   ],
+   "reasoning_open": false,
+   "cut_in_call": false,
+   "cut_call": null,
+   "stop_sequence": null,
+   "reasoning_tokens": 4,
+   "token_ids": [
+    11280,
+    6526,
+    13,
+    198,
+    248069,
+    271,
+    248058,
+    198,
+    27,
+    1628,
+    93260,
+    29,
+    198,
+    27,
+    15704,
+    76478,
+    29,
+    198,
+    3765,
+    198,
+    510,
+    15704,
+    29,
+    198,
+    27,
+    15704,
+    28,
+    9226,
+    29,
+    198,
+    20,
+    198,
+    510,
+    15704,
+    29,
+    198,
+    510,
+    1628,
+    29,
+    198,
+    248059,
+    198,
+    248058,
+    198,
+    27,
+    1628,
+    27362,
+    67017,
+    29,
+    198,
+    27,
+    15704,
+    28,
+    8656,
+    29,
+    198,
+    78367,
+    215166,
+    198,
+    510,
+    15704,
+    29,
+    198,
+    510,
+    1628,
+    29,
+    198,
+    248059
+   ],
+   "frames": 2
+  },
+  {
+   "name": "call_inside_reasoning",
+   "text": "I'll just call it.\n<tool_call>\n<function=search>\n<parameter=query>\nx < y and </parameter> stays\n</parameter>\n</function>\n</tool_call>",
+   "thinking": true,
+   "tools": [
+    {
+     "function": {
+      "name": "search",
+      "description": "Search the web.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "limit": {
+         "type": "integer"
+        }
+       }
+      }
+     }
+    }
+   ],
+   "tool_types": {
+    "search": {
+     "parameters": {
+      "query": [
+       "string"
+      ],
+      "limit": [
+       "integer"
+      ]
+     },
+     "other": null
+    },
+    "mystery": {
+     "parameters": {},
+     "other": null
+    }
+   },
+   "may_call_tools": true,
+   "events": [
+    [
+     "reasoning_content",
+     "I"
+    ],
+    [
+     "reasoning_content",
+     "'ll"
+    ],
+    [
+     "reasoning_content",
+     " just"
+    ],
+    [
+     "reasoning_content",
+     " call"
+    ],
+    [
+     "reasoning_content",
+     " it"
+    ],
+    [
+     "reasoning_content",
+     "."
+    ],
+    [
+     "reasoning_content",
+     "\n"
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "id": "call_req42_0",
+      "type": "function",
+      "function": {
+       "name": "search"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "{"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "\"query\":\""
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "x"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": " <"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": " y"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": " and"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": " </"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "parameter"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": ">"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": " stays"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "\""
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "}"
+      }
+     }
+    ]
+   ],
+   "reasoning": "I'll just call it.\n",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call_req42_0",
+     "type": "function",
+     "function": {
+      "name": "search",
+      "arguments": "{\"query\":\"x < y and </parameter> stays\"}"
+     }
+    }
+   ],
+   "reasoning_open": false,
+   "cut_in_call": false,
+   "cut_call": null,
+   "stop_sequence": null,
+   "reasoning_tokens": 7,
+   "token_ids": [
+    40,
+    3172,
+    1066,
+    1562,
+    424,
+    13,
+    198,
+    248058,
+    198,
+    27,
+    1628,
+    93260,
+    29,
+    198,
+    27,
+    15704,
+    76478,
+    29,
+    198,
+    87,
+    361,
+    374,
+    321,
+    672,
+    15704,
+    29,
+    25710,
+    198,
+    510,
+    15704,
+    29,
+    198,
+    510,
+    1628,
+    29,
+    198,
+    248059
+   ],
+   "frames": 2
+  },
+  {
+   "name": "plain_content_thinking_off",
+   "text": "Sure! Here's a list:\n- one\n- two ✓\n</think> stray close\nEnd.",
+   "thinking": false,
+   "tools": null,
+   "tool_types": null,
+   "may_call_tools": false,
+   "events": [
+    [
+     "content",
+     "Sure"
+    ],
+    [
+     "content",
+     "!"
+    ],
+    [
+     "content",
+     " Here"
+    ],
+    [
+     "content",
+     "'s"
+    ],
+    [
+     "content",
+     " a"
+    ],
+    [
+     "content",
+     " list"
+    ],
+    [
+     "content",
+     ":"
+    ],
+    [
+     "content",
+     "\n"
+    ],
+    [
+     "content",
+     "-"
+    ],
+    [
+     "content",
+     " one"
+    ],
+    [
+     "content",
+     "\n"
+    ],
+    [
+     "content",
+     "-"
+    ],
+    [
+     "content",
+     " two"
+    ],
+    [
+     "content",
+     " ✓"
+    ],
+    [
+     "content",
+     "\n"
+    ],
+    [
+     "content",
+     " stray"
+    ],
+    [
+     "content",
+     " close"
+    ],
+    [
+     "content",
+     "\n"
+    ],
+    [
+     "content",
+     "End"
+    ],
+    [
+     "content",
+     "."
+    ]
+   ],
+   "reasoning": "",
+   "content": "Sure! Here's a list:\n- one\n- two ✓\n stray close\nEnd.",
+   "tool_calls": [],
+   "reasoning_open": false,
+   "cut_in_call": false,
+   "cut_call": null,
+   "stop_sequence": null,
+   "reasoning_tokens": 0,
+   "token_ids": [
+    38493,
+    0,
+    5514,
+    579,
+    264,
+    1103,
+    25,
+    198,
+    12,
+    799,
+    198,
+    12,
+    1330,
+    50615,
+    198,
+    248069,
+    59317,
+    3160,
+    198,
+    3601,
+    13
+   ],
+   "frames": 2
+  },
+  {
+   "name": "plain_content_no_tools_tag_is_text",
+   "text": "Text with <tool_call> inside, not a call.",
+   "thinking": false,
+   "tools": null,
+   "tool_types": null,
+   "may_call_tools": false,
+   "events": [
+    [
+     "content",
+     "Text"
+    ],
+    [
+     "content",
+     " with"
+    ],
+    [
+     "content",
+     " "
+    ],
+    [
+     "content",
+     "<tool_call>"
+    ],
+    [
+     "content",
+     " inside"
+    ],
+    [
+     "content",
+     ","
+    ],
+    [
+     "content",
+     " not"
+    ],
+    [
+     "content",
+     " a"
+    ],
+    [
+     "content",
+     " call"
+    ],
+    [
+     "content",
+     "."
+    ]
+   ],
+   "reasoning": "",
+   "content": "Text with <tool_call> inside, not a call.",
+   "tool_calls": [],
+   "reasoning_open": false,
+   "cut_in_call": false,
+   "cut_call": null,
+   "stop_sequence": null,
+   "reasoning_tokens": 0,
+   "token_ids": [
+    1138,
+    440,
+    220,
+    248058,
+    4613,
+    11,
+    524,
+    264,
+    1562,
+    13
+   ],
+   "frames": 2
+  },
+  {
+   "name": "stop_sequence_in_content",
+   "text": "Thinking.\n</think>\n\nAnswer part one. STOP here and more.",
+   "thinking": true,
+   "stop": [
+    "STOP"
+   ],
+   "tools": null,
+   "tool_types": null,
+   "may_call_tools": false,
+   "events": [
+    [
+     "reasoning_content",
+     "Thinking"
+    ],
+    [
+     "reasoning_content",
+     "."
+    ],
+    [
+     "reasoning_content",
+     "\n"
+    ],
+    [
+     "content",
+     "Answer"
+    ],
+    [
+     "content",
+     " part"
+    ],
+    [
+     "content",
+     " one"
+    ],
+    [
+     "content",
+     "."
+    ],
+    [
+     "content",
+     " "
+    ]
+   ],
+   "reasoning": "Thinking.\n",
+   "content": "Answer part one. ",
+   "tool_calls": [],
+   "reasoning_open": false,
+   "cut_in_call": false,
+   "cut_call": null,
+   "stop_sequence": "STOP",
+   "reasoning_tokens": 3,
+   "token_ids": [
+    90700,
+    13,
+    198,
+    248069,
+    271,
+    15666,
+    919,
+    799,
+    13,
+    44020,
+    1532,
+    321,
+    777,
+    13
+   ],
+   "frames": 2
+  },
+  {
+   "name": "length_cut_inside_call",
+   "text": "Plan.\n</think>\n\nCalling.\n<tool_call>\n<function=get_weather>\n<parameter=city>\nWar",
+   "thinking": true,
+   "reason": "length",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Current weather for a city — °C, wind & <rain>.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City, e.g. \"Poznań\""
+        },
+        "days": {
+         "type": "integer"
+        },
+        "units": {
+         "type": "string",
+         "enum": [
+          "metric",
+          "imperial"
+         ]
+        },
+        "precise": {
+         "type": "boolean"
+        },
+        "threshold": {
+         "type": "number"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "options": {
+         "type": "object",
+         "properties": {
+          "lang": {
+           "type": "string"
+          }
+         }
+        },
+        "note": {
+         "type": [
+          "string",
+          "null"
+         ]
+        },
+        "maybe": {
+         "type": [
+          "integer",
+          "null"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ],
+   "tool_types": {
+    "get_weather": {
+     "parameters": {
+      "city": [
+       "string"
+      ],
+      "days": [
+       "integer"
+      ],
+      "units": [
+       "string"
+      ],
+      "precise": [
+       "boolean"
+      ],
+      "threshold": [
+       "number"
+      ],
+      "tags": [
+       "array"
+      ],
+      "options": [
+       "object"
+      ],
+      "note": [
+       "null",
+       "string"
+      ],
+      "maybe": [
+       "integer",
+       "null"
+      ]
+     },
+     "other": null
+    },
+    "mystery": {
+     "parameters": {},
+     "other": null
+    }
+   },
+   "may_call_tools": true,
+   "events": [
+    [
+     "reasoning_content",
+     "Plan"
+    ],
+    [
+     "reasoning_content",
+     "."
+    ],
+    [
+     "reasoning_content",
+     "\n"
+    ],
+    [
+     "content",
+     "Calling"
+    ],
+    [
+     "content",
+     "."
+    ],
+    [
+     "content",
+     "\n"
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "id": "call_req42_0",
+      "type": "function",
+      "function": {
+       "name": "get_weather"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "{"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "\"city\":\""
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "War"
+      }
+     }
+    ]
+   ],
+   "reasoning": "Plan.\n",
+   "content": "Calling.\n",
+   "tool_calls": [
+    {
+     "id": "call_req42_0",
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "arguments": "{\"city\":\"War"
+     }
+    }
+   ],
+   "reasoning_open": false,
+   "cut_in_call": true,
+   "cut_call": "call_req42_0",
+   "stop_sequence": null,
+   "reasoning_tokens": 3,
+   "token_ids": [
+    19860,
+    13,
+    198,
+    248069,
+    271,
+    47218,
+    13,
+    198,
+    248058,
+    198,
+    27,
+    1628,
+    27362,
+    67017,
+    29,
+    198,
+    27,
+    15704,
+    28,
+    8656,
+    29,
+    198,
+    27745
+   ],
+   "frames": 2
+  },
+  {
+   "name": "length_cut_inside_typed_value",
+   "text": "Plan.\n</think>\n\n<tool_call>\n<function=get_weather>\n<parameter=days>\n1",
+   "thinking": true,
+   "reason": "length",
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Current weather for a city — °C, wind & <rain>.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City, e.g. \"Poznań\""
+        },
+        "days": {
+         "type": "integer"
+        },
+        "units": {
+         "type": "string",
+         "enum": [
+          "metric",
+          "imperial"
+         ]
+        },
+        "precise": {
+         "type": "boolean"
+        },
+        "threshold": {
+         "type": "number"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "options": {
+         "type": "object",
+         "properties": {
+          "lang": {
+           "type": "string"
+          }
+         }
+        },
+        "note": {
+         "type": [
+          "string",
+          "null"
+         ]
+        },
+        "maybe": {
+         "type": [
+          "integer",
+          "null"
+         ]
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ],
+   "tool_types": {
+    "get_weather": {
+     "parameters": {
+      "city": [
+       "string"
+      ],
+      "days": [
+       "integer"
+      ],
+      "units": [
+       "string"
+      ],
+      "precise": [
+       "boolean"
+      ],
+      "threshold": [
+       "number"
+      ],
+      "tags": [
+       "array"
+      ],
+      "options": [
+       "object"
+      ],
+      "note": [
+       "null",
+       "string"
+      ],
+      "maybe": [
+       "integer",
+       "null"
+      ]
+     },
+     "other": null
+    },
+    "mystery": {
+     "parameters": {},
+     "other": null
+    }
+   },
+   "may_call_tools": true,
+   "events": [
+    [
+     "reasoning_content",
+     "Plan"
+    ],
+    [
+     "reasoning_content",
+     "."
+    ],
+    [
+     "reasoning_content",
+     "\n"
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "id": "call_req42_0",
+      "type": "function",
+      "function": {
+       "name": "get_weather"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "{"
+      }
+     }
+    ]
+   ],
+   "reasoning": "Plan.\n",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call_req42_0",
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "arguments": "{"
+     }
+    }
+   ],
+   "reasoning_open": false,
+   "cut_in_call": true,
+   "cut_call": "call_req42_0",
+   "stop_sequence": null,
+   "reasoning_tokens": 3,
+   "token_ids": [
+    19860,
+    13,
+    198,
+    248069,
+    271,
+    248058,
+    198,
+    27,
+    1628,
+    27362,
+    67017,
+    29,
+    198,
+    27,
+    15704,
+    28,
+    13382,
+    29,
+    198,
+    16
+   ],
+   "frames": 2
+  },
+  {
+   "name": "length_cut_in_reasoning",
+   "text": "Still thinking about the problem at",
+   "thinking": true,
+   "reason": "length",
+   "tools": null,
+   "tool_types": null,
+   "may_call_tools": false,
+   "events": [
+    [
+     "reasoning_content",
+     "Still"
+    ],
+    [
+     "reasoning_content",
+     " thinking"
+    ],
+    [
+     "reasoning_content",
+     " about"
+    ],
+    [
+     "reasoning_content",
+     " the"
+    ],
+    [
+     "reasoning_content",
+     " problem"
+    ],
+    [
+     "reasoning_content",
+     " at"
+    ]
+   ],
+   "reasoning": "Still thinking about the problem at",
+   "content": "",
+   "tool_calls": [],
+   "reasoning_open": true,
+   "cut_in_call": false,
+   "cut_call": null,
+   "stop_sequence": null,
+   "reasoning_tokens": 6,
+   "token_ids": [
+    22597,
+    7047,
+    883,
+    279,
+    3377,
+    506
+   ],
+   "frames": 2
+  },
+  {
+   "name": "unclosed_call_at_eos",
+   "text": "Ok.\n</think>\n\n<tool_call>\n<function=search>\n<parameter=query>\nabc",
+   "thinking": true,
+   "tools": [
+    {
+     "function": {
+      "name": "search",
+      "description": "Search the web.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "limit": {
+         "type": "integer"
+        }
+       }
+      }
+     }
+    }
+   ],
+   "tool_types": {
+    "search": {
+     "parameters": {
+      "query": [
+       "string"
+      ],
+      "limit": [
+       "integer"
+      ]
+     },
+     "other": null
+    },
+    "mystery": {
+     "parameters": {},
+     "other": null
+    }
+   },
+   "may_call_tools": true,
+   "events": [
+    [
+     "reasoning_content",
+     "Ok"
+    ],
+    [
+     "reasoning_content",
+     "."
+    ],
+    [
+     "reasoning_content",
+     "\n"
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "id": "call_req42_0",
+      "type": "function",
+      "function": {
+       "name": "search"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "{"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "\"query\":\""
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "abc"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "\""
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "}"
+      }
+     }
+    ]
+   ],
+   "reasoning": "Ok.\n",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call_req42_0",
+     "type": "function",
+     "function": {
+      "name": "search",
+      "arguments": "{\"query\":\"abc\"}"
+     }
+    }
+   ],
+   "reasoning_open": false,
+   "cut_in_call": false,
+   "cut_call": null,
+   "stop_sequence": null,
+   "reasoning_tokens": 3,
+   "token_ids": [
+    11245,
+    13,
+    198,
+    248069,
+    271,
+    248058,
+    198,
+    27,
+    1628,
+    93260,
+    29,
+    198,
+    27,
+    15704,
+    76478,
+    29,
+    198,
+    13290
+   ],
+   "frames": 2
+  },
+  {
+   "name": "structured_json",
+   "text": "Thinking.\n</think>\n\n  {\"a\": \"<tool_call> in a string\", \"b\": [1, 2]}",
+   "thinking": true,
+   "structured": true,
+   "tools": null,
+   "tool_types": null,
+   "may_call_tools": false,
+   "events": [
+    [
+     "reasoning_content",
+     "Thinking"
+    ],
+    [
+     "reasoning_content",
+     "."
+    ],
+    [
+     "reasoning_content",
+     "\n"
+    ],
+    [
+     "content",
+     "  {\""
+    ],
+    [
+     "content",
+     "a"
+    ],
+    [
+     "content",
+     "\":"
+    ],
+    [
+     "content",
+     " \""
+    ],
+    [
+     "content",
+     "<tool_call>"
+    ],
+    [
+     "content",
+     " in"
+    ],
+    [
+     "content",
+     " a"
+    ],
+    [
+     "content",
+     " string"
+    ],
+    [
+     "content",
+     "\","
+    ],
+    [
+     "content",
+     " \""
+    ],
+    [
+     "content",
+     "b"
+    ],
+    [
+     "content",
+     "\":"
+    ],
+    [
+     "content",
+     " ["
+    ],
+    [
+     "content",
+     "1"
+    ],
+    [
+     "content",
+     ","
+    ],
+    [
+     "content",
+     " "
+    ],
+    [
+     "content",
+     "2"
+    ],
+    [
+     "content",
+     "]}"
+    ]
+   ],
+   "reasoning": "Thinking.\n",
+   "content": "  {\"a\": \"<tool_call> in a string\", \"b\": [1, 2]}",
+   "tool_calls": [],
+   "reasoning_open": false,
+   "cut_in_call": false,
+   "cut_call": null,
+   "stop_sequence": null,
+   "reasoning_tokens": 3,
+   "token_ids": [
+    90700,
+    13,
+    198,
+    248069,
+    271,
+    220,
+    5046,
+    64,
+    763,
+    328,
+    248058,
+    303,
+    264,
+    886,
+    487,
+    328,
+    65,
+    763,
+    498,
+    16,
+    11,
+    220,
+    17,
+    13587
+   ],
+   "frames": 2
+  },
+  {
+   "name": "unknown_tool_and_whitespace",
+   "text": "\n\n<tool_call>\n<function=mystery>\n<parameter=n>\n42\n</parameter>\n</function>\n</tool_call>\n\nAfter.\n\n",
+   "thinking": false,
+   "tools": [
+    {
+     "function": {
+      "name": "search",
+      "description": "Search the web.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "limit": {
+         "type": "integer"
+        }
+       }
+      }
+     }
+    }
+   ],
+   "tool_types": {
+    "search": {
+     "parameters": {
+      "query": [
+       "string"
+      ],
+      "limit": [
+       "integer"
+      ]
+     },
+     "other": null
+    },
+    "mystery": {
+     "parameters": {},
+     "other": null
+    }
+   },
+   "may_call_tools": true,
+   "events": [
+    [
+     "tool",
+     {
+      "index": 0,
+      "id": "call_req42_0",
+      "type": "function",
+      "function": {
+       "name": "mystery"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "{"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "\"n\":\""
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "4"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "2"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "\""
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "}"
+      }
+     }
+    ],
+    [
+     "content",
+     "\n\nAfter"
+    ],
+    [
+     "content",
+     "."
+    ],
+    [
+     "content",
+     "\n\n"
+    ]
+   ],
+   "reasoning": "",
+   "content": "\n\nAfter.\n\n",
+   "tool_calls": [
+    {
+     "id": "call_req42_0",
+     "type": "function",
+     "function": {
+      "name": "mystery",
+      "arguments": "{\"n\":\"42\"}"
+     }
+    }
+   ],
+   "reasoning_open": false,
+   "cut_in_call": false,
+   "cut_call": null,
+   "stop_sequence": null,
+   "reasoning_tokens": 0,
+   "token_ids": [
+    271,
+    248058,
+    198,
+    27,
+    1628,
+    26343,
+    91968,
+    29,
+    198,
+    27,
+    15704,
+    21076,
+    29,
+    198,
+    19,
+    17,
+    198,
+    510,
+    15704,
+    29,
+    198,
+    510,
+    1628,
+    29,
+    198,
+    248059,
+    271,
+    5836,
+    13,
+    271
+   ],
+   "frames": 2
+  },
+  {
+   "name": "emoji_split_bytes",
+   "text": "👩‍👩‍👧 family 🇵🇱 flag 日本語 ok",
+   "thinking": false,
+   "frames": 1,
+   "tools": null,
+   "tool_types": null,
+   "may_call_tools": false,
+   "events": [
+    [
+     "content",
+     "👩"
+    ],
+    [
+     "content",
+     "‍"
+    ],
+    [
+     "content",
+     "👩"
+    ],
+    [
+     "content",
+     "‍"
+    ],
+    [
+     "content",
+     "👧"
+    ],
+    [
+     "content",
+     " family"
+    ],
+    [
+     "content",
+     " 🇵"
+    ],
+    [
+     "content",
+     "🇱"
+    ],
+    [
+     "content",
+     " flag"
+    ],
+    [
+     "content",
+     " "
+    ],
+    [
+     "content",
+     "日本語"
+    ],
+    [
+     "content",
+     " ok"
+    ]
+   ],
+   "reasoning": "",
+   "content": "👩‍👩‍👧 family 🇵🇱 flag 日本語 ok",
+   "tool_calls": [],
+   "reasoning_open": false,
+   "cut_in_call": false,
+   "cut_call": null,
+   "stop_sequence": null,
+   "reasoning_tokens": 0,
+   "token_ids": [
+    9008,
+    239,
+    102,
+    373,
+    235,
+    9008,
+    239,
+    102,
+    373,
+    235,
+    9008,
+    239,
+    100,
+    2902,
+    10838,
+    229,
+    113,
+    9008,
+    229,
+    109,
+    5016,
+    220,
+    247359,
+    5226
+   ]
+  }
+ ],
+ "flint": [
+  {
+   "name": "flint_reasoning_and_call",
+   "chunks_of": 3,
+   "text": "<think>Need data.</think>Calling.<tool_call>search<arg_key>query</arg_key><arg_value>rain</arg_value><arg_key>limit</arg_key><arg_value>7</arg_value></tool_call>",
+   "thinking": false,
+   "tools": [
+    {
+     "function": {
+      "name": "search",
+      "description": "Search the web.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "limit": {
+         "type": "integer"
+        }
+       }
+      }
+     }
+    }
+   ],
+   "tool_types": {
+    "search": {
+     "parameters": {
+      "query": [
+       "string"
+      ],
+      "limit": [
+       "integer"
+      ]
+     },
+     "other": null
+    },
+    "mystery": {
+     "parameters": {},
+     "other": null
+    }
+   },
+   "may_call_tools": true,
+   "events": [
+    [
+     "reasoning_content",
+     "Ne"
+    ],
+    [
+     "reasoning_content",
+     "ed "
+    ],
+    [
+     "reasoning_content",
+     "dat"
+    ],
+    [
+     "reasoning_content",
+     "a."
+    ],
+    [
+     "content",
+     "Ca"
+    ],
+    [
+     "content",
+     "lli"
+    ],
+    [
+     "content",
+     "ng."
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "id": "call_req42_0",
+      "type": "function",
+      "function": {
+       "name": "search"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "{"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "\"query\":\""
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "ra"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "in"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "\""
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": ",\"limit\":7"
+      }
+     }
+    ],
+    [
+     "tool",
+     {
+      "index": 0,
+      "function": {
+       "arguments": "}"
+      }
+     }
+    ]
+   ],
+   "reasoning": "Need data.",
+   "content": "Calling.",
+   "tool_calls": [
+    {
+     "id": "call_req42_0",
+     "type": "function",
+     "function": {
+      "name": "search",
+      "arguments": "{\"query\":\"rain\",\"limit\":7}"
+     }
+    }
+   ],
+   "reasoning_open": false,
+   "cut_in_call": false,
+   "cut_call": null,
+   "stop_sequence": null,
+   "reasoning_tokens": null,
+   "chunks": [
+    "<th",
+    "ink",
+    ">Ne",
+    "ed ",
+    "dat",
+    "a.<",
+    "/th",
+    "ink",
+    ">Ca",
+    "lli",
+    "ng.",
+    "<to",
+    "ol_",
+    "cal",
+    "l>s",
+    "ear",
+    "ch<",
+    "arg",
+    "_ke",
+    "y>q",
+    "uer",
+    "y</",
+    "arg",
+    "_ke",
+    "y><",
+    "arg",
+    "_va",
+    "lue",
+    ">ra",
+    "in<",
+    "/ar",
+    "g_v",
+    "alu",
+    "e><",
+    "arg",
+    "_ke",
+    "y>l",
+    "imi",
+    "t</",
+    "arg",
+    "_ke",
+    "y><",
+    "arg",
+    "_va",
+    "lue",
+    ">7<",
+    "/ar",
+    "g_v",
+    "alu",
+    "e><",
+    "/to",
+    "ol_",
+    "cal",
+    "l>"
+   ]
+  },
+  {
+   "name": "flint_no_reasoning",
+   "chunks_of": 1,
+   "text": "Hello <think> not opening",
+   "thinking": false,
+   "tools": null,
+   "tool_types": null,
+   "may_call_tools": false,
+   "events": [
+    [
+     "content",
+     "H"
+    ],
+    [
+     "content",
+     "e"
+    ],
+    [
+     "content",
+     "l"
+    ],
+    [
+     "content",
+     "l"
+    ],
+    [
+     "content",
+     "o"
+    ],
+    [
+     "content",
+     " "
+    ],
+    [
+     "content",
+     "<t"
+    ],
+    [
+     "content",
+     "h"
+    ],
+    [
+     "content",
+     "i"
+    ],
+    [
+     "content",
+     "n"
+    ],
+    [
+     "content",
+     "k"
+    ],
+    [
+     "content",
+     ">"
+    ],
+    [
+     "content",
+     " "
+    ],
+    [
+     "content",
+     "n"
+    ],
+    [
+     "content",
+     "o"
+    ],
+    [
+     "content",
+     "t"
+    ],
+    [
+     "content",
+     " "
+    ],
+    [
+     "content",
+     "o"
+    ],
+    [
+     "content",
+     "p"
+    ],
+    [
+     "content",
+     "e"
+    ],
+    [
+     "content",
+     "n"
+    ],
+    [
+     "content",
+     "i"
+    ],
+    [
+     "content",
+     "n"
+    ],
+    [
+     "content",
+     "g"
+    ]
+   ],
+   "reasoning": "",
+   "content": "Hello <think> not opening",
+   "tool_calls": [],
+   "reasoning_open": false,
+   "cut_in_call": false,
+   "cut_call": null,
+   "stop_sequence": null,
+   "reasoning_tokens": null,
+   "chunks": [
+    "H",
+    "e",
+    "l",
+    "l",
+    "o",
+    " ",
+    "<",
+    "t",
+    "h",
+    "i",
+    "n",
+    "k",
+    ">",
+    " ",
+    "n",
+    "o",
+    "t",
+    " ",
+    "o",
+    "p",
+    "e",
+    "n",
+    "i",
+    "n",
+    "g"
+   ]
+  },
+  {
+   "name": "flint_call_in_reasoning_is_reasoning",
+   "chunks_of": 5,
+   "text": "<think>maybe <tool_call>search</think>Answer.",
+   "thinking": false,
+   "tools": [
+    {
+     "function": {
+      "name": "search",
+      "description": "Search the web.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "limit": {
+         "type": "integer"
+        }
+       }
+      }
+     }
+    }
+   ],
+   "tool_types": {
+    "search": {
+     "parameters": {
+      "query": [
+       "string"
+      ],
+      "limit": [
+       "integer"
+      ]
+     },
+     "other": null
+    },
+    "mystery": {
+     "parameters": {},
+     "other": null
+    }
+   },
+   "may_call_tools": true,
+   "events": [
+    [
+     "reasoning_content",
+     "may"
+    ],
+    [
+     "reasoning_content",
+     "be <t"
+    ],
+    [
+     "reasoning_content",
+     "ool_c"
+    ],
+    [
+     "reasoning_content",
+     "all>s"
+    ],
+    [
+     "reasoning_content",
+     "earch"
+    ],
+    [
+     "content",
+     "An"
+    ],
+    [
+     "content",
+     "swer."
+    ]
+   ],
+   "reasoning": "maybe <tool_call>search",
+   "content": "Answer.",
+   "tool_calls": [],
+   "reasoning_open": false,
+   "cut_in_call": false,
+   "cut_call": null,
+   "stop_sequence": null,
+   "reasoning_tokens": null,
+   "chunks": [
+    "<thin",
+    "k>may",
+    "be <t",
+    "ool_c",
+    "all>s",
+    "earch",
+    "</thi",
+    "nk>An",
+    "swer."
+   ]
+  }
+ ],
+ "convert": [
+  {
+   "text": "42",
+   "types": [
+    "integer"
+   ],
+   "is_text": false,
+   "value": 42
+  },
+  {
+   "text": "42",
+   "types": [
+    "number"
+   ],
+   "is_text": false,
+   "value": 42
+  },
+  {
+   "text": "42",
+   "types": [
+    "string"
+   ],
+   "is_text": true,
+   "value": "42"
+  },
+  {
+   "text": "42",
+   "types": [
+    "integer",
+    "string"
+   ],
+   "is_text": false,
+   "value": 42
+  },
+  {
+   "text": "42",
+   "types": [
+    "number",
+    "string"
+   ],
+   "is_text": false,
+   "value": 42
+  },
+  {
+   "text": "4.0",
+   "types": [
+    "integer",
+    "string"
+   ],
+   "is_text": true,
+   "value": "4.0"
+  },
+  {
+   "text": "4.0",
+   "types": [
+    "number"
+   ],
+   "is_text": false,
+   "value": 4.0
+  },
+  {
+   "text": "true",
+   "types": [
+    "boolean"
+   ],
+   "is_text": false,
+   "value": true
+  },
+  {
+   "text": "True",
+   "types": [
+    "boolean"
+   ],
+   "is_text": false,
+   "value": true
+  },
+  {
+   "text": "True",
+   "types": [
+    "boolean",
+    "string"
+   ],
+   "is_text": true,
+   "value": "True"
+  },
+  {
+   "text": "None",
+   "types": [
+    "null",
+    "integer"
+   ],
+   "is_text": false,
+   "value": null
+  },
+  {
+   "text": "null",
+   "types": [
+    "string",
+    "null"
+   ],
+   "is_text": false,
+   "value": null
+  },
+  {
+   "text": "\"quoted\"",
+   "types": [
+    "string"
+   ],
+   "is_text": true,
+   "value": "\"quoted\""
+  },
+  {
+   "text": "\"quoted\"",
+   "types": [
+    "array"
+   ],
+   "is_text": false,
+   "value": "quoted"
+  },
+  {
+   "text": "[1, 2]",
+   "types": [
+    "array"
+   ],
+   "is_text": false,
+   "value": [
+    1,
+    2
+   ]
+  },
+  {
+   "text": "[1, 2]",
+   "types": [
+    "string"
+   ],
+   "is_text": true,
+   "value": "[1, 2]"
+  },
+  {
+   "text": "{\"a\": NaN}",
+   "types": [
+    "object"
+   ],
+   "is_text": true,
+   "value": "{\"a\": NaN}"
+  },
+  {
+   "text": "1e400",
+   "types": [
+    "number"
+   ],
+   "is_text": true,
+   "value": "1e400"
+  },
+  {
+   "text": "\"\\ud83d\"",
+   "types": [
+    "string",
+    "integer"
+   ],
+   "is_text": true,
+   "value": "\"\\ud83d\""
+  },
+  {
+   "text": "\"\\ud83d\"",
+   "types": [
+    "array"
+   ],
+   "is_text": true,
+   "value": "\"\\ud83d\""
+  },
+  {
+   "text": "not json",
+   "types": [
+    "integer"
+   ],
+   "is_text": true,
+   "value": "not json"
+  },
+  {
+   "text": " 7 ",
+   "types": [
+    "integer"
+   ],
+   "is_text": false,
+   "value": 7
+  },
+  {
+   "text": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]",
+   "types": [
+    "array"
+   ],
+   "is_text": true,
+   "value": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]"
+  },
+  {
+   "text": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]",
+   "types": [
+    "array"
+   ],
+   "is_text": false,
+   "value": [
+    [
+     [
+      [
+       [
+        [
+         [
+          [
+           [
+            [
+             [
+              [
+               [
+                [
+                 [
+                  [
+                   [
+                    [
+                     [
+                      [
+                       [
+                        [
+                         [
+                          [
+                           [
+                            [
+                             [
+                              [
+                               [
+                                [
+                                 [
+                                  [
+                                   [
+                                    [
+                                     [
+                                      [
+                                       [
+                                        [
+                                         [
+                                          [
+                                           [
+                                            [
+                                             [
+                                              [
+                                               [
+                                                [
+                                                 [
+                                                  [
+                                                   [
+                                                    [
+                                                     [
+                                                      [
+                                                       [
+                                                        [
+                                                         [
+                                                          [
+                                                           [
+                                                            [
+                                                             [
+                                                              [
+                                                               [
+                                                                [
+                                                                 [
+                                                                  [
+                                                                   [
+                                                                    [
+                                                                     [
+                                                                      [
+                                                                       [
+                                                                        [
+                                                                         [
+                                                                          [
+                                                                           [
+                                                                            [
+                                                                             [
+                                                                              [
+                                                                               [
+                                                                                [
+                                                                                 [
+                                                                                  [
+                                                                                   [
+                                                                                    [
+                                                                                     [
+                                                                                      [
+                                                                                       [
+                                                                                        [
+                                                                                         [
+                                                                                          [
+                                                                                           [
+                                                                                            [
+                                                                                             [
+                                                                                              [
+                                                                                               [
+                                                                                                [
+                                                                                                 [
+                                                                                                  [
+                                                                                                   [
+                                                                                                    [
+                                                                                                     [
+                                                                                                      [
+                                                                                                       [
+                                                                                                        [
+                                                                                                         [
+                                                                                                          [
+                                                                                                           [
+                                                                                                            [
+                                                                                                             [
+                                                                                                              [
+                                                                                                               [
+                                                                                                                [
+                                                                                                                 [
+                                                                                                                  [
+                                                                                                                   [
+                                                                                                                    [
+                                                                                                                     [
+                                                                                                                      [
+                                                                                                                       [
+                                                                                                                        [
+                                                                                                                         [
+                                                                                                                          [
+                                                                                                                           [
+                                                                                                                            []
+                                                                                                                           ]
+                                                                                                                          ]
+                                                                                                                         ]
+                                                                                                                        ]
+                                                                                                                       ]
+                                                                                                                      ]
+                                                                                                                     ]
+                                                                                                                    ]
+                                                                                                                   ]
+                                                                                                                  ]
+                                                                                                                 ]
+                                                                                                                ]
+                                                                                                               ]
+                                                                                                              ]
+                                                                                                             ]
+                                                                                                            ]
+                                                                                                           ]
+                                                                                                          ]
+                                                                                                         ]
+                                                                                                        ]
+                                                                                                       ]
+                                                                                                      ]
+                                                                                                     ]
+                                                                                                    ]
+                                                                                                   ]
+                                                                                                  ]
+                                                                                                 ]
+                                                                                                ]
+                                                                                               ]
+                                                                                              ]
+                                                                                             ]
+                                                                                            ]
+                                                                                           ]
+                                                                                          ]
+                                                                                         ]
+                                                                                        ]
+                                                                                       ]
+                                                                                      ]
+                                                                                     ]
+                                                                                    ]
+                                                                                   ]
+                                                                                  ]
+                                                                                 ]
+                                                                                ]
+                                                                               ]
+                                                                              ]
+                                                                             ]
+                                                                            ]
+                                                                           ]
+                                                                          ]
+                                                                         ]
+                                                                        ]
+                                                                       ]
+                                                                      ]
+                                                                     ]
+                                                                    ]
+                                                                   ]
+                                                                  ]
+                                                                 ]
+                                                                ]
+                                                               ]
+                                                              ]
+                                                             ]
+                                                            ]
+                                                           ]
+                                                          ]
+                                                         ]
+                                                        ]
+                                                       ]
+                                                      ]
+                                                     ]
+                                                    ]
+                                                   ]
+                                                  ]
+                                                 ]
+                                                ]
+                                               ]
+                                              ]
+                                             ]
+                                            ]
+                                           ]
+                                          ]
+                                         ]
+                                        ]
+                                       ]
+                                      ]
+                                     ]
+                                    ]
+                                   ]
+                                  ]
+                                 ]
+                                ]
+                               ]
+                              ]
+                             ]
+                            ]
+                           ]
+                          ]
+                         ]
+                        ]
+                       ]
+                      ]
+                     ]
+                    ]
+                   ]
+                  ]
+                 ]
+                ]
+               ]
+              ]
+             ]
+            ]
+           ]
+          ]
+         ]
+        ]
+       ]
+      ]
+     ]
+    ]
+   ]
+  },
+  {
+   "text": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]",
+   "types": [
+    "array"
+   ],
+   "is_text": false,
+   "value": [
+    [
+     [
+      [
+       [
+        [
+         [
+          [
+           [
+            [
+             [
+              [
+               [
+                [
+                 [
+                  [
+                   [
+                    [
+                     [
+                      [
+                       [
+                        [
+                         [
+                          [
+                           [
+                            [
+                             [
+                              [
+                               [
+                                [
+                                 [
+                                  [
+                                   [
+                                    [
+                                     [
+                                      [
+                                       [
+                                        [
+                                         [
+                                          [
+                                           [
+                                            [
+                                             [
+                                              [
+                                               [
+                                                [
+                                                 [
+                                                  [
+                                                   [
+                                                    [
+                                                     [
+                                                      [
+                                                       [
+                                                        [
+                                                         [
+                                                          [
+                                                           [
+                                                            [
+                                                             [
+                                                              [
+                                                               [
+                                                                [
+                                                                 [
+                                                                  [
+                                                                   [
+                                                                    [
+                                                                     [
+                                                                      [
+                                                                       [
+                                                                        [
+                                                                         [
+                                                                          [
+                                                                           [
+                                                                            [
+                                                                             [
+                                                                              [
+                                                                               [
+                                                                                [
+                                                                                 [
+                                                                                  [
+                                                                                   [
+                                                                                    [
+                                                                                     [
+                                                                                      [
+                                                                                       [
+                                                                                        [
+                                                                                         [
+                                                                                          [
+                                                                                           [
+                                                                                            [
+                                                                                             [
+                                                                                              [
+                                                                                               [
+                                                                                                [
+                                                                                                 [
+                                                                                                  [
+                                                                                                   [
+                                                                                                    [
+                                                                                                     [
+                                                                                                      [
+                                                                                                       [
+                                                                                                        [
+                                                                                                         [
+                                                                                                          [
+                                                                                                           [
+                                                                                                            [
+                                                                                                             [
+                                                                                                              [
+                                                                                                               [
+                                                                                                                [
+                                                                                                                 [
+                                                                                                                  [
+                                                                                                                   [
+                                                                                                                    [
+                                                                                                                     [
+                                                                                                                      [
+                                                                                                                       [
+                                                                                                                        [
+                                                                                                                         [
+                                                                                                                          [
+                                                                                                                           []
+                                                                                                                          ]
+                                                                                                                         ]
+                                                                                                                        ]
+                                                                                                                       ]
+                                                                                                                      ]
+                                                                                                                     ]
+                                                                                                                    ]
+                                                                                                                   ]
+                                                                                                                  ]
+                                                                                                                 ]
+                                                                                                                ]
+                                                                                                               ]
+                                                                                                              ]
+                                                                                                             ]
+                                                                                                            ]
+                                                                                                           ]
+                                                                                                          ]
+                                                                                                         ]
+                                                                                                        ]
+                                                                                                       ]
+                                                                                                      ]
+                                                                                                     ]
+                                                                                                    ]
+                                                                                                   ]
+                                                                                                  ]
+                                                                                                 ]
+                                                                                                ]
+                                                                                               ]
+                                                                                              ]
+                                                                                             ]
+                                                                                            ]
+                                                                                           ]
+                                                                                          ]
+                                                                                         ]
+                                                                                        ]
+                                                                                       ]
+                                                                                      ]
+                                                                                     ]
+                                                                                    ]
+                                                                                   ]
+                                                                                  ]
+                                                                                 ]
+                                                                                ]
+                                                                               ]
+                                                                              ]
+                                                                             ]
+                                                                            ]
+                                                                           ]
+                                                                          ]
+                                                                         ]
+                                                                        ]
+                                                                       ]
+                                                                      ]
+                                                                     ]
+                                                                    ]
+                                                                   ]
+                                                                  ]
+                                                                 ]
+                                                                ]
+                                                               ]
+                                                              ]
+                                                             ]
+                                                            ]
+                                                           ]
+                                                          ]
+                                                         ]
+                                                        ]
+                                                       ]
+                                                      ]
+                                                     ]
+                                                    ]
+                                                   ]
+                                                  ]
+                                                 ]
+                                                ]
+                                               ]
+                                              ]
+                                             ]
+                                            ]
+                                           ]
+                                          ]
+                                         ]
+                                        ]
+                                       ]
+                                      ]
+                                     ]
+                                    ]
+                                   ]
+                                  ]
+                                 ]
+                                ]
+                               ]
+                              ]
+                             ]
+                            ]
+                           ]
+                          ]
+                         ]
+                        ]
+                       ]
+                      ]
+                     ]
+                    ]
+                   ]
+                  ]
+                 ]
+                ]
+               ]
+              ]
+             ]
+            ]
+           ]
+          ]
+         ]
+        ]
+       ]
+      ]
+     ]
+    ]
+   ]
+  },
+  {
+   "text": "-0.0",
+   "types": [
+    "number"
+   ],
+   "is_text": false,
+   "value": -0.0
+  },
+  {
+   "text": "1e16",
+   "types": [
+    "number"
+   ],
+   "is_text": false,
+   "value": 1e+16
+  },
+  {
+   "text": "{\"k\": \" é\"}",
+   "types": [
+    "object"
+   ],
+   "is_text": false,
+   "value": {
+    "k": " é"
+   }
+  }
+ ],
+ "hold": [
+  {
+   "text": "abc</th",
+   "markers": [
+    "</think>"
+   ],
+   "split": [
+    "abc",
+    "</th"
+   ]
+  },
+  {
+   "text": "abc<",
+   "markers": [
+    "</think>",
+    "<tool_call>"
+   ],
+   "split": [
+    "abc",
+    "<"
+   ]
+  },
+  {
+   "text": "abc",
+   "markers": [
+    "</think>"
+   ],
+   "split": [
+    "abc",
+    ""
+   ]
+  },
+  {
+   "text": "x</think>",
+   "markers": [
+    "</think>"
+   ],
+   "split": [
+    "x</think>",
+    ""
+   ]
+  },
+  {
+   "text": "żółć<tool",
+   "markers": [
+    "<tool_call>\n<function="
+   ],
+   "split": [
+    "żółć",
+    "<tool"
+   ]
+  },
+  {
+   "text": "gę",
+   "markers": [
+    "gęś"
+   ],
+   "split": [
+    "",
+    "gę"
+   ]
+  }
+ ]
+}

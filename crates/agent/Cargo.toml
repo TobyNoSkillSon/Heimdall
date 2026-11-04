@@ -1,0 +1,37 @@
+[package]
+name = "agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[features]
+# The harness simulator (`agent::sim`): FakePi, the scenario runner. Test builds always have it.
+sim = []
+# The public edition (app's `public` feature, docs/editions.md): the system prompt and compaction text without the user's
+# name, paths or projects (`prompt/public/`), and Pi working in the user's home folder instead of the user's Vault.
+public = ["heimdall-emergency/public"]
+[dependencies]
+heimdall-home = { path = "../home" }
+# An ask option's grant is checked as the deny-list hook keeps it (`heimdall_emergency::grants`).
+heimdall-emergency = { path = "../emergency-cli" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+base64 = "0.22"
+tokio = { version = "1", features = ["rt-multi-thread", "process", "io-util", "sync", "time", "macros", "net", "fs"] }
+async-trait = "0.1"
+rusqlite = { version = "0.39", features = ["bundled"] }
+axum = "0.8"
+http-body = "1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
+tempfile = "3"
+
+sha2 = "0.10"
+fs2 = "0.4"
+libc = "0.2"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+security-framework = "3"
+futures-util = "0.3"
+url = "2"

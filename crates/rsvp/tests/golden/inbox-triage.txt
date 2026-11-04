@@ -1,0 +1,5 @@
+You have four new emails, and only one needs you today. The invoice from Hetzner is due on October 21st for 48.30 euros; it's already in your accounting folder. The GitHub notice says a dependency in the night-pass crate has a security fix, and the update is a one-line change.
+
+The other two can wait. A recruiter from Allegro asked about a call next week, and the Ego team sent their monthly changelog.
+
+Nothing else came in overnight. I'll check again at noon.

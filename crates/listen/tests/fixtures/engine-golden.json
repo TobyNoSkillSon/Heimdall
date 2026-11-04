@@ -1,0 +1,39 @@
+[
+  {
+    "id": "en-1",
+    "utterances": [
+      "The aspect ratio of this format dividing by 12 to obtain the simplest whole number ratio, is therefore said to be 3 to 2."
+    ]
+  },
+  {
+    "id": "en-2",
+    "utterances": [
+      "Blogs can also help improve student writing. While students often begin their blog experience with sloppy grammar and spelling, the presence of an audience generally changes that."
+    ]
+  },
+  {
+    "id": "pl-1",
+    "utterances": [
+      "Jeżeli schodzisz na brzeg wyłącznie podczas wycieczek statkiem, nie musisz mieć oddzielnej wizy - sytuacja na 2009 rok."
+    ]
+  },
+  {
+    "id": "pl-2",
+    "utterances": [
+      "Główna władza kościelna znajduje się w Rzymie od ponad tysiące lat, a taka koncentracja władzy i pieniędzy każe zadać sobie pytanie, czy ta doktryna jest przestrzegana."
+    ]
+  },
+  {
+    "id": "mixed",
+    "utterances": [
+      "The aspect ratio of this format dividing by 12 to obtain the simplest whole number ratio, is therefore said to be 3 to 2.",
+      "Jeżeli schodzisz na brzeg wyłącznie podczas wycieczek statkiem, nie musisz mieć oddzielnej wizy - sytuacja na 2009 rok."
+    ]
+  },
+  {
+    "id": "continuous",
+    "utterances": [
+      "The aspect ratio of this format dividing by 12 to obtain the simplest whole number ratio, is therefore said to be 3 to 2. Blogs can also help improve student writing, while students often begin their blog experience with sloppy grammar and spelling, the presence of an audience generally changes that."
+    ]
+  }
+]

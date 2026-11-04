@@ -1,0 +1,37 @@
+[package]
+name = "islands"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Floating Islands in Rust: the FloatingIslands helper app (AppKit + Core Animation through objc2) and the islands CLI, the same file protocol as islands/ (Swift)."
+
+[lib]
+name = "islands"
+path = "src/lib.rs"
+
+[[bin]]
+name = "FloatingIslands"
+path = "src/bin/floating_islands.rs"
+
+[[bin]]
+name = "islands"
+path = "src/bin/islands.rs"
+
+[dependencies]
+serde_json = { version = "1", features = ["float_roundtrip"] }
+libc = "0.2"
+objc2 = { workspace = true }
+objc2-foundation = { workspace = true }
+objc2-core-foundation = { workspace = true }
+objc2-app-kit = { workspace = true }
+objc2-core-graphics = { workspace = true }
+objc2-quartz-core = "0.3"
+objc2-uniform-type-identifiers = "0.3"
+objc2-av-foundation = { workspace = true }
+objc2-avf-audio = "0.3"
+objc2-core-media = "0.3"
+objc2-image-io = "0.3"
+block2 = { workspace = true }
+dispatch2 = { workspace = true }
+
+[dev-dependencies]

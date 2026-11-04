@@ -1,0 +1,40 @@
+{
+  "date_utc": "2026-10-11T11:29:05.802311+00:00",
+  "hardware": "Apple M5 Max",
+  "machine_busy": true,
+  "command": "CARGO_TARGET_DIR=target/agent cargo test -p agent -p speak -- --include-ignored",
+  "model_asset_bytes": 398667957,
+  "model_revision": "3cadd1ee6394adea1bd021217a0e650ede09a323",
+  "measurements": [
+    {
+      "audio_seconds": 2.6700226757369614,
+      "first_audio_ms": 554.621292,
+      "lang": "en",
+      "load_ms": 418.75908400000003,
+      "rms": 0.03738431055090212,
+      "rtf": 0.207836187326324,
+      "samples": 117748,
+      "synthesis_ms": 554.927333,
+      "text": "Hello User. I am listening.",
+      "wav": "/Users/user/Heimdall/crates/speak/../../models/tts-golden/en.wav"
+    },
+    {
+      "audio_seconds": 2.7952607709750565,
+      "first_audio_ms": 496.316916,
+      "lang": "pl",
+      "load_ms": 418.75908400000003,
+      "rms": 0.03617893831706569,
+      "rtf": 0.17767011083790998,
+      "samples": 123271,
+      "synthesis_ms": 496.634291,
+      "text": "Cze\u015b\u0107 User. S\u0142ucham ciebie.",
+      "wav": "/Users/user/Heimdall/crates/speak/../../models/tts-golden/pl.wav"
+    }
+  ],
+  "wav_sha256": {
+    "en": "dc12e888dc0cc40e133f5223eb4260e244b4f777b973d24112327bca2728fe22",
+    "pl": "f9a882dcc84df9e7f188a1f2abbee75273a98a4b894df8f05fe653bf99680cb1"
+  },
+  "playback_tested": false,
+  "power_measured": false
+}

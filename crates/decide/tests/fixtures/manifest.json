@@ -1,0 +1,60 @@
+{
+  "clips": [
+    {
+      "id": "en-1",
+      "file": "en-1.wav",
+      "reference": "The aspect ratio of this format (dividing by twelve to obtain the simplest whole-number ratio) is therefore said to be 3:2.",
+      "language": "en",
+      "origin": {
+        "repo": "google/fleurs",
+        "revision": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+        "archive": "data/en_us/audio/test.tar.gz",
+        "member": "10344335557154974057.wav",
+        "sentenceId": "1846"
+      },
+      "sha256": "937e5687e4b1440e4c9e701da6a9c3d63a95bd84136adc8e1884d497ae898bfd"
+    },
+    {
+      "id": "en-2",
+      "file": "en-2.wav",
+      "reference": "Blogs can also help improve student writing. While students often begin their blog experience with sloppy grammar and spelling, the presence of an audience generally changes that.",
+      "language": "en",
+      "origin": {
+        "repo": "google/fleurs",
+        "revision": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+        "archive": "data/en_us/audio/test.tar.gz",
+        "member": "10938576782105608041.wav",
+        "sentenceId": "1990"
+      },
+      "sha256": "e9b1e8bfb94ababbc1862e0787d055c1535ad26e9f1e77b545dd435844e9809c"
+    },
+    {
+      "id": "pl-1",
+      "file": "pl-1.wav",
+      "reference": "Je\u017celi schodzisz na brzeg wy\u0142\u0105cznie podczas wycieczek statkiem, nie musisz mie\u0107 oddzielnej wizy (sytuacja na 2009 r.).",
+      "language": "pl",
+      "origin": {
+        "repo": "google/fleurs",
+        "revision": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+        "archive": "data/pl_pl/audio/test.tar.gz",
+        "member": "10166331184477401711.wav",
+        "sentenceId": "1981"
+      },
+      "sha256": "4023bb681c7e9af6e18b09586a1f43ab5478bb14017e8f95455be5c5f82aec36"
+    }
+  ],
+  "license": "CC-BY-4.0",
+  "attribution": "Google FLEURS, 2022; https://huggingface.co/datasets/google/fleurs",
+  "synthetic": [
+    {
+      "file": "sigma.wav",
+      "text": "Sigma, what time is it?",
+      "source": "macOS installed Samantha voice; mono float32 16 kHz"
+    },
+    {
+      "file": "human.wav",
+      "text": "Alex, are you coming to dinner?",
+      "source": "macOS installed Samantha voice; mono float32 16 kHz"
+    }
+  ]
+}

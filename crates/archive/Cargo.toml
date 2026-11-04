@@ -1,0 +1,38 @@
+[package]
+name = "heimdall-archive"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+heimdall-home = { path = "../home" }
+anyhow = "1"
+# SQLite 3.51.3 fixes the concurrent WAL-close deadlock in 3.51.1.
+rusqlite = { version = "0.39", features = ["bundled", "backup", "hooks"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+zstd = "0.13"
+rubato = "0.16"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+libc = "0.2"
+hound = "3.5"
+crossbeam-channel = "0.5"
+flacenc = { version = "0.5", default-features = false }
+claxon = "0.4"
+tempfile = "3"
+
+[build-dependencies]
+cmake = "0.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-foundation = "0.3"
+objc2-core-media = "0.3"
+objc2-core-video = "0.3"
+objc2-video-toolbox = "0.3"
+block2 = "0.6"
+# Clip muxing (clip_writer.rs): AVAssetWriter, AAC tracks, timed text.
+objc2 = { workspace = true }
+objc2-foundation = { workspace = true }
+objc2-av-foundation = { workspace = true, features = ["objc2-core-media", "objc2-core-video", "block2"] }
+objc2-core-audio-types = "0.3"

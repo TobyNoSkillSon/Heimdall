@@ -1,0 +1,10 @@
+# Low-priority, offline-friendly build settings for this crate only.
+[build]
+jobs = 2
+
+[env]
+# MLX's own sources (v0.32.2 and its deps), copied locally so mlx-sys's cmake fetches nothing (build/offline.cmake).
+CMAKE_TOOLCHAIN_FILE = { value = "build/offline.cmake", relative = true }
+CMAKE_BUILD_PARALLEL_LEVEL = "2"
+# mlx.metallib goes inside the engine's target dir, not ~/.mlx.
+MLX_RS_METAL_PATH = { value = "target/mlx-metal", relative = true }

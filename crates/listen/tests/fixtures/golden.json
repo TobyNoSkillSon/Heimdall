@@ -1,0 +1,32 @@
+[
+  {
+    "id": "en-1",
+    "text": "The aspect ratio of this format, dividing by 12 to obtain the simplest whole number ratio, is therefore said to be 3 to 2.",
+    "errors": 2,
+    "reference_words": 23
+  },
+  {
+    "id": "en-2",
+    "text": "Blogs can also help improve student writing. While students often begin their blog experience with sloppy grammar and spelling, the presence of an audience generally changes that.",
+    "errors": 0,
+    "reference_words": 27
+  },
+  {
+    "id": "pl-1",
+    "text": "Jeżeli schodzisz na brzeg wyłącznie podczas wycieczek statkiem, nie musisz mieć oddzielnej wizy - sytuacja na 2009 rok.",
+    "errors": 1,
+    "reference_words": 17
+  },
+  {
+    "id": "pl-2",
+    "text": "Główna władza kościelna znajduje się w Rzymie od ponad tysiące lat, a taka koncentracja władzy i pieniędzy każe zadać sobie pytanie, czy ta doktryna jest przestrzegana.",
+    "errors": 1,
+    "reference_words": 26
+  },
+  {
+    "id": "mixed",
+    "text": "The aspect ratio of this format, dividing by 12 to obtain the simplest whole number ratio, is therefore said to be 3 to 2. Jeżeli schodzisz na brzeg wyłącznie podczas wycieczek statkiem, nie musisz mieć oddzielnej wizy - sytuacja na 2009 rok.",
+    "errors": 3,
+    "reference_words": 40
+  }
+]

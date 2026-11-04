@@ -1,0 +1,3 @@
+The build failed because tests timed out. Three things matter. First, the limit is two minutes, and the tests need longer. Second, the slow part is loading the embedding model, which happens one target at a time. Third, loading all three targets together would fix it. A longer limit would also work, but it hides the problem.
+
+I'd fix the loading first. It's a small change in the test harness, and it should take about an hour.

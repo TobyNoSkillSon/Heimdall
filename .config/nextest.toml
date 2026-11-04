@@ -1,0 +1,61 @@
+# The longest completed test in retained full-check logs took 16.187 s.
+# Allow over seven times that before terminating a hung test (also under load).
+[profile.default]
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+# This internally parallel test asserts real wall-clock callback latency. Reserve
+# the runner while it executes so unrelated model tests cannot deschedule it.
+# Keep all 15,120 orderings, the 12 internal workers and the 50 ms bound.
+[[profile.default.overrides]]
+filter = 'test(=stop_interleaving_tests::all_5040_orders_of_settings_file_off_on_send_mcp_and_held_speech)'
+threads-required = "num-test-threads"
+
+# A latency assertion must measure the native decision, without simultaneous
+# workspace inference competing for its CPU/GPU. Preserve the 120 ms median
+# and every native distribution assertion in this test.
+[[profile.default.overrides]]
+filter = 'test(=barge_in_question_is_native_and_fast)'
+threads-required = "num-test-threads"
+
+# This fixture distinguishes the execution deadline from inherited-pipe drain.
+# Reserve the runner so CPU contention cannot consume its one-second execution
+# budget before the shell exit is observed. Keep the deadline and cleanup checks.
+[[profile.default.overrides]]
+filter = 'test(=runtime::tests::execution_and_inherited_pipe_drain_share_one_deadline)'
+threads-required = "num-test-threads"
+
+# Real ownership-lock and foreground-latency assertions must not contend with
+# concurrent native model tests or hundreds of archive writes on this Mac.
+[[profile.default.overrides]]
+filter = 'test(=pipeline::send_worker::tests::real_native_lock_does_not_block_explicit_command_send) | test(=pipeline::send_worker::tests::real_command_check_precedes_queued_sends_and_meets_main_latency_bound)'
+threads-required = "num-test-threads"
+
+# Full-window foreground/command-check timing must share the runner, not contend with
+# parallel native model tests. Preserve the context and timing assertions.
+[[profile.default.overrides]]
+filter = 'test(=pipeline::send_worker::bounded_foreground_tests::command_wait_behind_the_largest_fitted_foreground_question)'
+threads-required = "num-test-threads"
+
+# This queues a command inside a real blocking correction slice and checks its
+# 150 ms foreground bound. Keep unrelated native-model tests off its CPU window.
+[[profile.default.overrides]]
+filter = 'test(=worker::tests::command_arriving_inside_blocking_correction_precedes_remaining_slices)'
+threads-required = "num-test-threads"
+
+# The archive's writer scenarios assert wall-clock waits under a modelled slow disk, another process holding the lock,
+# a full disk image and an 11.7 GB index (lab/archive-hardening). Reserve the runner so parallel tests' fsyncs do not
+# stand in for the conditions they model. Keep every limit.
+[[profile.default.overrides]]
+filter = '(package(heimdall-archive) & (binary(hardening) | binary(held_lock_backlog) | binary(live_lock))) | (package(capture) & binary(hardening))'
+threads-required = "num-test-threads"
+
+# Two more wall-clock archive scenarios: an event's wait behind another process's lock (COMMIT_WAIT + 300 ms) and 32
+# threads opening packs together. Both pass alone in 0.2-1.1 s and failed only beside the full suite on a RAM disk
+# (1 Nov, lab/build-speed). Reserve the runner; keep every bound.
+[[profile.default.overrides]]
+filter = '(package(heimdall-archive) & binary(fd_bound)) | test(=records::durability_tests::notes_and_events_behind_a_held_lock_never_fail_and_commit_in_order)'
+threads-required = "num-test-threads"
+
+# scripts/check.sh keeps each run's JUnit report beside its log (per-test times for profiling the suite).
+[profile.default.junit]
+path = "junit.xml"

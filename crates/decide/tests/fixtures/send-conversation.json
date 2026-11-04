@@ -1,0 +1,14 @@
+[
+ {"at_s":1,"text":"I was thinking we could","choice":"wait","send":false},
+ {"at_s":5,"text":"Alex, are you coming?","choice":"not_for_heimdall","send":false},
+ {"at_s":9,"text":"move that file tomorrow.","choice":"send","trigger":"d1","send":true,"contains":"I was thinking we could"},
+ {"at_s":20,"speaker":"Heimdall","text":"Which file?"},
+ {"at_s":50,"text":"The notes file.","choice":"send","trigger":"d1","send":true},
+ {"at_s":51,"text":"I should mention","choice":"wait","send":false},
+ {"at_s":90,"text":"Heimdal, also back it up.","choice":"not_for_heimdall","trigger":"name","send":true,"contains":"I should mention"},
+ {"at_s":100,"text":"And the draft","choice":"wait","send":false},
+ {"at_s":110,"text":"send it","choice":"wait","trigger":"send_it","send":true,"contains":"And the draft"},
+ {"at_s":120,"text":"Keep this pending","choice":"wait","send":false},
+ {"at_s":125,"typed":true,"text":"Use the current folder."},
+ {"at_s":130,"text":"A new thought","choice":"wait","send":false}
+]

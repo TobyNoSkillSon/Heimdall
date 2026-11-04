@@ -1,0 +1,7155 @@
+[
+ {
+  "name": "auto_free",
+  "format": "qwen",
+  "thinking": true,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "notes",
+      "description": "The notes tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "text": {
+         "type": "str"
+        }
+       },
+       "patternProperties": {
+        "^x_": {
+         "type": "integer"
+        }
+       },
+       "oneOf": [
+        {
+         "properties": {
+          "kind": {
+           "const": "a"
+          }
+         }
+        },
+        {
+         "properties": {
+          "kind": {
+           "const": "b"
+          },
+          "n": {
+           "type": "number"
+          }
+         }
+        }
+       ]
+      }
+     }
+    },
+    {
+     "function": {
+      "name": "now"
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "aliases",
+      "description": "The aliases tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "n": {
+         "type": " Float"
+        },
+        "b": {
+         "type": [
+          "BOOL",
+          "null"
+         ]
+        },
+        "any": {
+         "type": "any"
+        }
+       }
+      }
+     }
+    }
+   ]
+  },
+  "expected": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "notes",
+      "description": "The notes tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "text": {
+         "type": "str"
+        }
+       },
+       "patternProperties": {
+        "^x_": {
+         "type": "integer"
+        }
+       },
+       "oneOf": [
+        {
+         "properties": {
+          "kind": {
+           "const": "a"
+          }
+         }
+        },
+        {
+         "properties": {
+          "kind": {
+           "const": "b"
+          },
+          "n": {
+           "type": "number"
+          }
+         }
+        }
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "now"
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "aliases",
+      "description": "The aliases tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "n": {
+         "type": " Float"
+        },
+        "b": {
+         "type": [
+          "BOOL",
+          "null"
+         ]
+        },
+        "any": {
+         "type": "any"
+        }
+       }
+      }
+     }
+    }
+   ],
+   "policy": {
+    "names": [
+     "get_weather",
+     "notes",
+     "now",
+     "aliases"
+    ],
+    "required": false,
+    "parallel": true,
+    "strict": [],
+    "constrained": false
+   },
+   "constrained": false,
+   "grammar": null,
+   "types": {
+    "get_weather": {
+     "parameters": {
+      "city": [
+       "string"
+      ],
+      "unit": [
+       "string"
+      ],
+      "days": [
+       "integer"
+      ]
+     },
+     "other": null
+    },
+    "notes": {
+     "parameters": {
+      "text": [
+       "string"
+      ],
+      "kind": [
+       "string"
+      ],
+      "n": null
+     },
+     "other": null
+    },
+    "now": {
+     "parameters": {},
+     "other": null
+    },
+    "aliases": {
+     "parameters": {
+      "n": [
+       "number"
+      ],
+      "b": [
+       "boolean",
+       "null"
+      ],
+      "any": null
+     },
+     "other": null
+    },
+    "not_offered": {
+     "parameters": {},
+     "other": null
+    }
+   }
+  }
+ },
+ {
+  "name": "auto_strict",
+  "format": "qwen",
+  "thinking": true,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": "The search tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string",
+         "description": "What to look for"
+        },
+        "limit": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 100
+        },
+        "filters": {
+         "type": "object",
+         "properties": {
+          "site": {
+           "type": "string",
+           "pattern": "^[a-z.]+$"
+          },
+          "after": {
+           "type": "string",
+           "format": "date"
+          }
+         },
+         "required": [
+          "site"
+         ]
+        },
+        "safe": {
+         "type": "boolean"
+        },
+        "mode": {
+         "enum": [
+          "fast",
+          "deep",
+          3,
+          null,
+          1.5
+         ]
+        }
+       },
+       "required": [
+        "query",
+        "mode"
+       ]
+      },
+      "strict": true
+     }
+    }
+   ]
+  },
+  "expected": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": "The search tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string",
+         "description": "What to look for"
+        },
+        "limit": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 100
+        },
+        "filters": {
+         "type": "object",
+         "properties": {
+          "site": {
+           "type": "string",
+           "pattern": "^[a-z.]+$"
+          },
+          "after": {
+           "type": "string",
+           "format": "date"
+          }
+         },
+         "required": [
+          "site"
+         ]
+        },
+        "safe": {
+         "type": "boolean"
+        },
+        "mode": {
+         "enum": [
+          "fast",
+          "deep",
+          3,
+          null,
+          1.5
+         ]
+        }
+       },
+       "required": [
+        "query",
+        "mode"
+       ]
+      },
+      "strict": true
+     }
+    }
+   ],
+   "policy": {
+    "names": [
+     "get_weather",
+     "search"
+    ],
+    "required": false,
+    "parallel": true,
+    "strict": [
+     "search"
+    ],
+    "constrained": true
+   },
+   "constrained": true,
+   "grammar": "{\"grammars\":[{\"name\":\"tool_output\",\"lark_grammar\":\"%llguidance {}\\nstart: think (TEXT (call_0 | call_1))* TEXT\\nthink: TEXT <[248069]>\\ncall_0: <tool_call> \\\"\\\\n<function=get_weather>\\\\n\\\" @free_arguments \\\"</function>\\\\n\\\" </tool_call>\\ncall_1: <tool_call> \\\"\\\\n<function=search>\\\\n\\\" @arguments_1 \\\"</function>\\\\n\\\" </tool_call>\\nWS: /[ \\\\t\\\\n\\\\r]{0,64}/\\nTEXT: /(?s:.*)/ & ~/(?s:.*)(<tool_call>|<\\\\/think>)(?s:.*)/\\n\"},{\"name\":\"free_arguments\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter*\\nparameter: \\\"<parameter=\\\" NAME \\\">\\\\n\\\" value\\nvalue[suffix=\\\"\\\\n</parameter>\\\\n\\\"]: /(?s:.*)/\\nNAME: /[^<> \\\\t\\\\n\\\\r]([^<>\\\\n\\\\r]{0,254}[^<> \\\\t\\\\n\\\\r])?/\\n\"},{\"name\":\"arguments_1\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter_0 parameter_1? parameter_2? parameter_3? parameter_4\\nparameter_0: \\\"<parameter=\\\" \\\"query\\\" \\\">\\\\n\\\" parameter_0_value\\nparameter_0_value[suffix=\\\"\\\\n</parameter>\\\\n\\\"]: /(?s:.*)/\\nparameter_1: \\\"<parameter=\\\" \\\"limit\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"integer\\\",\\\"minimum\\\":1,\\\"maximum\\\":100,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_2: \\\"<parameter=\\\" \\\"filters\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"site\\\":{\\\"type\\\":\\\"string\\\",\\\"pattern\\\":\\\"^[a-z.]+$\\\"},\\\"after\\\":{\\\"type\\\":\\\"string\\\",\\\"format\\\":\\\"date\\\"}},\\\"required\\\":[\\\"site\\\"],\\\"additionalProperties\\\":false,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_3: \\\"<parameter=\\\" \\\"safe\\\" \\\">\\\\n\\\" (\\\"true\\\" | \\\"false\\\") \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_4: \\\"<parameter=\\\" \\\"mode\\\" \\\">\\\\n\\\" (\\\"fast\\\" | \\\"deep\\\" | \\\"3\\\" | \\\"null\\\" | \\\"1.5\\\") \\\"\\\\n</parameter>\\\\n\\\"\\n\"}]}",
+   "types": {
+    "get_weather": {
+     "parameters": {
+      "city": [
+       "string"
+      ],
+      "unit": [
+       "string"
+      ],
+      "days": [
+       "integer"
+      ]
+     },
+     "other": null
+    },
+    "search": {
+     "parameters": {
+      "query": [
+       "string"
+      ],
+      "limit": [
+       "integer"
+      ],
+      "filters": [
+       "object"
+      ],
+      "safe": [
+       "boolean"
+      ],
+      "mode": [
+       "integer",
+       "null",
+       "number",
+       "string"
+      ]
+     },
+     "other": []
+    },
+    "not_offered": {
+     "parameters": {},
+     "other": null
+    }
+   }
+  }
+ },
+ {
+  "name": "auto_strict_off",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": "The search tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string",
+         "description": "What to look for"
+        },
+        "limit": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 100
+        },
+        "filters": {
+         "type": "object",
+         "properties": {
+          "site": {
+           "type": "string",
+           "pattern": "^[a-z.]+$"
+          },
+          "after": {
+           "type": "string",
+           "format": "date"
+          }
+         },
+         "required": [
+          "site"
+         ]
+        },
+        "safe": {
+         "type": "boolean"
+        },
+        "mode": {
+         "enum": [
+          "fast",
+          "deep",
+          3,
+          null,
+          1.5
+         ]
+        }
+       },
+       "required": [
+        "query",
+        "mode"
+       ]
+      },
+      "strict": true
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "create_event",
+      "description": "The create_event tool.",
+      "parameters": {
+       "type": "object",
+       "$defs": {
+        "person": {
+         "type": "object",
+         "properties": {
+          "name": {
+           "type": "string"
+          },
+          "email": {
+           "type": "string",
+           "pattern": "(?<=x)y"
+          }
+         },
+         "required": [
+          "name"
+         ]
+        }
+       },
+       "properties": {
+        "title": {
+         "type": "string"
+        },
+        "attendees": {
+         "type": "array",
+         "items": {
+          "$ref": "#/$defs/person"
+         },
+         "maxItems": 200
+        },
+        "when": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "priority": {
+         "anyOf": [
+          {
+           "type": "integer",
+           "multipleOf": 5
+          },
+          {
+           "const": "high"
+          }
+         ]
+        },
+        "tags": {
+         "type": [
+          "array",
+          "null"
+         ],
+         "items": {
+          "type": "string"
+         },
+         "minItems": 2
+        },
+        "empty": {
+         "enum": [
+          "",
+          "x"
+         ]
+        },
+        "weight": {
+         "type": "number",
+         "maximum": 1e+16,
+         "minimum": 1.5e-07
+        }
+       },
+       "required": [
+        "title",
+        "priority"
+       ]
+      },
+      "strict": true
+     }
+    }
+   ]
+  },
+  "expected": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": "The search tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string",
+         "description": "What to look for"
+        },
+        "limit": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 100
+        },
+        "filters": {
+         "type": "object",
+         "properties": {
+          "site": {
+           "type": "string",
+           "pattern": "^[a-z.]+$"
+          },
+          "after": {
+           "type": "string",
+           "format": "date"
+          }
+         },
+         "required": [
+          "site"
+         ]
+        },
+        "safe": {
+         "type": "boolean"
+        },
+        "mode": {
+         "enum": [
+          "fast",
+          "deep",
+          3,
+          null,
+          1.5
+         ]
+        }
+       },
+       "required": [
+        "query",
+        "mode"
+       ]
+      },
+      "strict": true
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "create_event",
+      "description": "The create_event tool.",
+      "parameters": {
+       "type": "object",
+       "$defs": {
+        "person": {
+         "type": "object",
+         "properties": {
+          "name": {
+           "type": "string"
+          },
+          "email": {
+           "type": "string",
+           "pattern": "(?<=x)y"
+          }
+         },
+         "required": [
+          "name"
+         ]
+        }
+       },
+       "properties": {
+        "title": {
+         "type": "string"
+        },
+        "attendees": {
+         "type": "array",
+         "items": {
+          "$ref": "#/$defs/person"
+         },
+         "maxItems": 200
+        },
+        "when": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "priority": {
+         "anyOf": [
+          {
+           "type": "integer",
+           "multipleOf": 5
+          },
+          {
+           "const": "high"
+          }
+         ]
+        },
+        "tags": {
+         "type": [
+          "array",
+          "null"
+         ],
+         "items": {
+          "type": "string"
+         },
+         "minItems": 2
+        },
+        "empty": {
+         "enum": [
+          "",
+          "x"
+         ]
+        },
+        "weight": {
+         "type": "number",
+         "maximum": 1e+16,
+         "minimum": 1.5e-07
+        }
+       },
+       "required": [
+        "title",
+        "priority"
+       ]
+      },
+      "strict": true
+     }
+    }
+   ],
+   "policy": {
+    "names": [
+     "get_weather",
+     "search",
+     "create_event"
+    ],
+    "required": false,
+    "parallel": true,
+    "strict": [
+     "create_event",
+     "search"
+    ],
+    "constrained": true
+   },
+   "constrained": true,
+   "grammar": "{\"grammars\":[{\"name\":\"tool_output\",\"lark_grammar\":\"%llguidance {}\\nstart: (TEXT (call_0 | call_1 | call_2))* TEXT\\ncall_0: <tool_call> \\\"\\\\n<function=get_weather>\\\\n\\\" @free_arguments \\\"</function>\\\\n\\\" </tool_call>\\ncall_1: <tool_call> \\\"\\\\n<function=search>\\\\n\\\" @arguments_1 \\\"</function>\\\\n\\\" </tool_call>\\ncall_2: <tool_call> \\\"\\\\n<function=create_event>\\\\n\\\" @arguments_2 \\\"</function>\\\\n\\\" </tool_call>\\nWS: /[ \\\\t\\\\n\\\\r]{0,64}/\\nTEXT: /(?s:.*)/ & ~/(?s:.*)(<tool_call>|<\\\\/think>)(?s:.*)/\\n\"},{\"name\":\"free_arguments\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter*\\nparameter: \\\"<parameter=\\\" NAME \\\">\\\\n\\\" value\\nvalue[suffix=\\\"\\\\n</parameter>\\\\n\\\"]: /(?s:.*)/\\nNAME: /[^<> \\\\t\\\\n\\\\r]([^<>\\\\n\\\\r]{0,254}[^<> \\\\t\\\\n\\\\r])?/\\n\"},{\"name\":\"arguments_1\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter_0 parameter_1? parameter_2? parameter_3? parameter_4\\nparameter_0: \\\"<parameter=\\\" \\\"query\\\" \\\">\\\\n\\\" parameter_0_value\\nparameter_0_value[suffix=\\\"\\\\n</parameter>\\\\n\\\"]: /(?s:.*)/\\nparameter_1: \\\"<parameter=\\\" \\\"limit\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"integer\\\",\\\"minimum\\\":1,\\\"maximum\\\":100,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_2: \\\"<parameter=\\\" \\\"filters\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"site\\\":{\\\"type\\\":\\\"string\\\",\\\"pattern\\\":\\\"^[a-z.]+$\\\"},\\\"after\\\":{\\\"type\\\":\\\"string\\\",\\\"format\\\":\\\"date\\\"}},\\\"required\\\":[\\\"site\\\"],\\\"additionalProperties\\\":false,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_3: \\\"<parameter=\\\" \\\"safe\\\" \\\">\\\\n\\\" (\\\"true\\\" | \\\"false\\\") \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_4: \\\"<parameter=\\\" \\\"mode\\\" \\\">\\\\n\\\" (\\\"fast\\\" | \\\"deep\\\" | \\\"3\\\" | \\\"null\\\" | \\\"1.5\\\") \\\"\\\\n</parameter>\\\\n\\\"\\n\"},{\"name\":\"arguments_2\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter_0 parameter_1? parameter_2? parameter_3 parameter_4? parameter_5? parameter_6?\\nparameter_0: \\\"<parameter=\\\" \\\"title\\\" \\\">\\\\n\\\" parameter_0_value\\nparameter_0_value[suffix=\\\"\\\\n</parameter>\\\\n\\\"]: /(?s:.*)/\\nparameter_1: \\\"<parameter=\\\" \\\"attendees\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"array\\\",\\\"items\\\":{\\\"$ref\\\":\\\"#/$defs/__splash_root/$defs/person\\\"},\\\"$defs\\\":{\\\"__splash_root\\\":{\\\"type\\\":\\\"object\\\",\\\"$defs\\\":{\\\"person\\\":{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"name\\\":{\\\"type\\\":\\\"string\\\"},\\\"email\\\":{\\\"type\\\":\\\"string\\\"}},\\\"required\\\":[\\\"name\\\"],\\\"additionalProperties\\\":false}},\\\"properties\\\":{\\\"title\\\":{\\\"type\\\":\\\"string\\\"},\\\"attendees\\\":{\\\"type\\\":\\\"array\\\",\\\"items\\\":{\\\"$ref\\\":\\\"#/$defs/__splash_root/$defs/person\\\"}},\\\"when\\\":{\\\"anyOf\\\":[{\\\"type\\\":\\\"string\\\"},{\\\"type\\\":\\\"null\\\"}]},\\\"priority\\\":{\\\"anyOf\\\":[{\\\"type\\\":\\\"integer\\\",\\\"multipleOf\\\":5},{\\\"const\\\":\\\"high\\\"}]},\\\"tags\\\":{\\\"type\\\":[\\\"array\\\",\\\"null\\\"],\\\"items\\\":{\\\"type\\\":\\\"string\\\"},\\\"minItems\\\":2},\\\"empty\\\":{\\\"enum\\\":[\\\"\\\",\\\"x\\\"]},\\\"weight\\\":{\\\"type\\\":\\\"number\\\",\\\"maximum\\\":1e+16,\\\"minimum\\\":1.5e-07}},\\\"required\\\":[\\\"title\\\",\\\"priority\\\"],\\\"additionalProperties\\\":false}},\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_2: \\\"<parameter=\\\" \\\"when\\\" \\\">\\\\n\\\" parameter_2_value\\nparameter_2_value[suffix=\\\"\\\\n</parameter>\\\\n\\\"]: /(?s:.*)/\\nparameter_3: \\\"<parameter=\\\" \\\"priority\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"integer\\\",\\\"multipleOf\\\":5,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}} | \\\"high\\\") \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_4: \\\"<parameter=\\\" \\\"tags\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":[\\\"array\\\",\\\"null\\\"],\\\"items\\\":{\\\"type\\\":\\\"string\\\"},\\\"minItems\\\":2,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_5_empty_0:\\nparameter_5: \\\"<parameter=\\\" \\\"empty\\\" \\\">\\\\n\\\" (parameter_5_empty_0 | \\\"x\\\") \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_6: \\\"<parameter=\\\" \\\"weight\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"number\\\",\\\"maximum\\\":1e+16,\\\"minimum\\\":1.5e-07,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\n\"}]}",
+   "types": {
+    "get_weather": {
+     "parameters": {
+      "city": [
+       "string"
+      ],
+      "unit": [
+       "string"
+      ],
+      "days": [
+       "integer"
+      ]
+     },
+     "other": null
+    },
+    "search": {
+     "parameters": {
+      "query": [
+       "string"
+      ],
+      "limit": [
+       "integer"
+      ],
+      "filters": [
+       "object"
+      ],
+      "safe": [
+       "boolean"
+      ],
+      "mode": [
+       "integer",
+       "null",
+       "number",
+       "string"
+      ]
+     },
+     "other": []
+    },
+    "create_event": {
+     "parameters": {
+      "title": [
+       "string"
+      ],
+      "attendees": [
+       "array"
+      ],
+      "when": [
+       "null",
+       "string"
+      ],
+      "priority": [
+       "integer",
+       "string"
+      ],
+      "tags": [
+       "array",
+       "null"
+      ],
+      "empty": [
+       "string"
+      ],
+      "weight": [
+       "number"
+      ]
+     },
+     "other": []
+    },
+    "not_offered": {
+     "parameters": {},
+     "other": null
+    }
+   }
+  }
+ },
+ {
+  "name": "required_mixed",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": "The search tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string",
+         "description": "What to look for"
+        },
+        "limit": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 100
+        },
+        "filters": {
+         "type": "object",
+         "properties": {
+          "site": {
+           "type": "string",
+           "pattern": "^[a-z.]+$"
+          },
+          "after": {
+           "type": "string",
+           "format": "date"
+          }
+         },
+         "required": [
+          "site"
+         ]
+        },
+        "safe": {
+         "type": "boolean"
+        },
+        "mode": {
+         "enum": [
+          "fast",
+          "deep",
+          3,
+          null,
+          1.5
+         ]
+        }
+       },
+       "required": [
+        "query",
+        "mode"
+       ]
+      },
+      "strict": true
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "create_event",
+      "description": "The create_event tool.",
+      "parameters": {
+       "type": "object",
+       "$defs": {
+        "person": {
+         "type": "object",
+         "properties": {
+          "name": {
+           "type": "string"
+          },
+          "email": {
+           "type": "string",
+           "pattern": "(?<=x)y"
+          }
+         },
+         "required": [
+          "name"
+         ]
+        }
+       },
+       "properties": {
+        "title": {
+         "type": "string"
+        },
+        "attendees": {
+         "type": "array",
+         "items": {
+          "$ref": "#/$defs/person"
+         },
+         "maxItems": 200
+        },
+        "when": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "priority": {
+         "anyOf": [
+          {
+           "type": "integer",
+           "multipleOf": 5
+          },
+          {
+           "const": "high"
+          }
+         ]
+        },
+        "tags": {
+         "type": [
+          "array",
+          "null"
+         ],
+         "items": {
+          "type": "string"
+         },
+         "minItems": 2
+        },
+        "empty": {
+         "enum": [
+          "",
+          "x"
+         ]
+        },
+        "weight": {
+         "type": "number",
+         "maximum": 1e+16,
+         "minimum": 1.5e-07
+        }
+       },
+       "required": [
+        "title",
+        "priority"
+       ]
+      },
+      "strict": true
+     }
+    }
+   ],
+   "tool_choice": "required"
+  },
+  "expected": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": "The search tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string",
+         "description": "What to look for"
+        },
+        "limit": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 100
+        },
+        "filters": {
+         "type": "object",
+         "properties": {
+          "site": {
+           "type": "string",
+           "pattern": "^[a-z.]+$"
+          },
+          "after": {
+           "type": "string",
+           "format": "date"
+          }
+         },
+         "required": [
+          "site"
+         ]
+        },
+        "safe": {
+         "type": "boolean"
+        },
+        "mode": {
+         "enum": [
+          "fast",
+          "deep",
+          3,
+          null,
+          1.5
+         ]
+        }
+       },
+       "required": [
+        "query",
+        "mode"
+       ]
+      },
+      "strict": true
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "create_event",
+      "description": "The create_event tool.",
+      "parameters": {
+       "type": "object",
+       "$defs": {
+        "person": {
+         "type": "object",
+         "properties": {
+          "name": {
+           "type": "string"
+          },
+          "email": {
+           "type": "string",
+           "pattern": "(?<=x)y"
+          }
+         },
+         "required": [
+          "name"
+         ]
+        }
+       },
+       "properties": {
+        "title": {
+         "type": "string"
+        },
+        "attendees": {
+         "type": "array",
+         "items": {
+          "$ref": "#/$defs/person"
+         },
+         "maxItems": 200
+        },
+        "when": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "priority": {
+         "anyOf": [
+          {
+           "type": "integer",
+           "multipleOf": 5
+          },
+          {
+           "const": "high"
+          }
+         ]
+        },
+        "tags": {
+         "type": [
+          "array",
+          "null"
+         ],
+         "items": {
+          "type": "string"
+         },
+         "minItems": 2
+        },
+        "empty": {
+         "enum": [
+          "",
+          "x"
+         ]
+        },
+        "weight": {
+         "type": "number",
+         "maximum": 1e+16,
+         "minimum": 1.5e-07
+        }
+       },
+       "required": [
+        "title",
+        "priority"
+       ]
+      },
+      "strict": true
+     }
+    }
+   ],
+   "policy": {
+    "names": [
+     "get_weather",
+     "search",
+     "create_event"
+    ],
+    "required": true,
+    "parallel": true,
+    "strict": [
+     "create_event",
+     "search"
+    ],
+    "constrained": true
+   },
+   "constrained": true,
+   "grammar": "{\"grammars\":[{\"name\":\"tool_output\",\"lark_grammar\":\"%llguidance {}\\nstart: WS (call_0 | call_1 | call_2) (TEXT (call_0 | call_1 | call_2))* TEXT\\ncall_0: <tool_call> \\\"\\\\n<function=get_weather>\\\\n\\\" @free_arguments \\\"</function>\\\\n\\\" </tool_call>\\ncall_1: <tool_call> \\\"\\\\n<function=search>\\\\n\\\" @arguments_1 \\\"</function>\\\\n\\\" </tool_call>\\ncall_2: <tool_call> \\\"\\\\n<function=create_event>\\\\n\\\" @arguments_2 \\\"</function>\\\\n\\\" </tool_call>\\nWS: /[ \\\\t\\\\n\\\\r]{0,64}/\\nTEXT: /(?s:.*)/ & ~/(?s:.*)(<tool_call>|<\\\\/think>)(?s:.*)/\\n\"},{\"name\":\"free_arguments\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter*\\nparameter: \\\"<parameter=\\\" NAME \\\">\\\\n\\\" value\\nvalue[suffix=\\\"\\\\n</parameter>\\\\n\\\"]: /(?s:.*)/\\nNAME: /[^<> \\\\t\\\\n\\\\r]([^<>\\\\n\\\\r]{0,254}[^<> \\\\t\\\\n\\\\r])?/\\n\"},{\"name\":\"arguments_1\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter_0 parameter_1? parameter_2? parameter_3? parameter_4\\nparameter_0: \\\"<parameter=\\\" \\\"query\\\" \\\">\\\\n\\\" parameter_0_value\\nparameter_0_value[suffix=\\\"\\\\n</parameter>\\\\n\\\"]: /(?s:.*)/\\nparameter_1: \\\"<parameter=\\\" \\\"limit\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"integer\\\",\\\"minimum\\\":1,\\\"maximum\\\":100,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_2: \\\"<parameter=\\\" \\\"filters\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"site\\\":{\\\"type\\\":\\\"string\\\",\\\"pattern\\\":\\\"^[a-z.]+$\\\"},\\\"after\\\":{\\\"type\\\":\\\"string\\\",\\\"format\\\":\\\"date\\\"}},\\\"required\\\":[\\\"site\\\"],\\\"additionalProperties\\\":false,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_3: \\\"<parameter=\\\" \\\"safe\\\" \\\">\\\\n\\\" (\\\"true\\\" | \\\"false\\\") \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_4: \\\"<parameter=\\\" \\\"mode\\\" \\\">\\\\n\\\" (\\\"fast\\\" | \\\"deep\\\" | \\\"3\\\" | \\\"null\\\" | \\\"1.5\\\") \\\"\\\\n</parameter>\\\\n\\\"\\n\"},{\"name\":\"arguments_2\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter_0 parameter_1? parameter_2? parameter_3 parameter_4? parameter_5? parameter_6?\\nparameter_0: \\\"<parameter=\\\" \\\"title\\\" \\\">\\\\n\\\" parameter_0_value\\nparameter_0_value[suffix=\\\"\\\\n</parameter>\\\\n\\\"]: /(?s:.*)/\\nparameter_1: \\\"<parameter=\\\" \\\"attendees\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"array\\\",\\\"items\\\":{\\\"$ref\\\":\\\"#/$defs/__splash_root/$defs/person\\\"},\\\"$defs\\\":{\\\"__splash_root\\\":{\\\"type\\\":\\\"object\\\",\\\"$defs\\\":{\\\"person\\\":{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"name\\\":{\\\"type\\\":\\\"string\\\"},\\\"email\\\":{\\\"type\\\":\\\"string\\\"}},\\\"required\\\":[\\\"name\\\"],\\\"additionalProperties\\\":false}},\\\"properties\\\":{\\\"title\\\":{\\\"type\\\":\\\"string\\\"},\\\"attendees\\\":{\\\"type\\\":\\\"array\\\",\\\"items\\\":{\\\"$ref\\\":\\\"#/$defs/__splash_root/$defs/person\\\"}},\\\"when\\\":{\\\"anyOf\\\":[{\\\"type\\\":\\\"string\\\"},{\\\"type\\\":\\\"null\\\"}]},\\\"priority\\\":{\\\"anyOf\\\":[{\\\"type\\\":\\\"integer\\\",\\\"multipleOf\\\":5},{\\\"const\\\":\\\"high\\\"}]},\\\"tags\\\":{\\\"type\\\":[\\\"array\\\",\\\"null\\\"],\\\"items\\\":{\\\"type\\\":\\\"string\\\"},\\\"minItems\\\":2},\\\"empty\\\":{\\\"enum\\\":[\\\"\\\",\\\"x\\\"]},\\\"weight\\\":{\\\"type\\\":\\\"number\\\",\\\"maximum\\\":1e+16,\\\"minimum\\\":1.5e-07}},\\\"required\\\":[\\\"title\\\",\\\"priority\\\"],\\\"additionalProperties\\\":false}},\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_2: \\\"<parameter=\\\" \\\"when\\\" \\\">\\\\n\\\" parameter_2_value\\nparameter_2_value[suffix=\\\"\\\\n</parameter>\\\\n\\\"]: /(?s:.*)/\\nparameter_3: \\\"<parameter=\\\" \\\"priority\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"integer\\\",\\\"multipleOf\\\":5,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}} | \\\"high\\\") \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_4: \\\"<parameter=\\\" \\\"tags\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":[\\\"array\\\",\\\"null\\\"],\\\"items\\\":{\\\"type\\\":\\\"string\\\"},\\\"minItems\\\":2,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_5_empty_0:\\nparameter_5: \\\"<parameter=\\\" \\\"empty\\\" \\\">\\\\n\\\" (parameter_5_empty_0 | \\\"x\\\") \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_6: \\\"<parameter=\\\" \\\"weight\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"number\\\",\\\"maximum\\\":1e+16,\\\"minimum\\\":1.5e-07,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\n\"}]}",
+   "types": {
+    "get_weather": {
+     "parameters": {
+      "city": [
+       "string"
+      ],
+      "unit": [
+       "string"
+      ],
+      "days": [
+       "integer"
+      ]
+     },
+     "other": null
+    },
+    "search": {
+     "parameters": {
+      "query": [
+       "string"
+      ],
+      "limit": [
+       "integer"
+      ],
+      "filters": [
+       "object"
+      ],
+      "safe": [
+       "boolean"
+      ],
+      "mode": [
+       "integer",
+       "null",
+       "number",
+       "string"
+      ]
+     },
+     "other": []
+    },
+    "create_event": {
+     "parameters": {
+      "title": [
+       "string"
+      ],
+      "attendees": [
+       "array"
+      ],
+      "when": [
+       "null",
+       "string"
+      ],
+      "priority": [
+       "integer",
+       "string"
+      ],
+      "tags": [
+       "array",
+       "null"
+      ],
+      "empty": [
+       "string"
+      ],
+      "weight": [
+       "number"
+      ]
+     },
+     "other": []
+    },
+    "not_offered": {
+     "parameters": {},
+     "other": null
+    }
+   }
+  }
+ },
+ {
+  "name": "required_single",
+  "format": "qwen",
+  "thinking": true,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": "The search tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string",
+         "description": "What to look for"
+        },
+        "limit": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 100
+        },
+        "filters": {
+         "type": "object",
+         "properties": {
+          "site": {
+           "type": "string",
+           "pattern": "^[a-z.]+$"
+          },
+          "after": {
+           "type": "string",
+           "format": "date"
+          }
+         },
+         "required": [
+          "site"
+         ]
+        },
+        "safe": {
+         "type": "boolean"
+        },
+        "mode": {
+         "enum": [
+          "fast",
+          "deep",
+          3,
+          null,
+          1.5
+         ]
+        }
+       },
+       "required": [
+        "query",
+        "mode"
+       ]
+      },
+      "strict": true
+     }
+    }
+   ],
+   "tool_choice": "required",
+   "parallel_tool_calls": false
+  },
+  "expected": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": "The search tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string",
+         "description": "What to look for"
+        },
+        "limit": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 100
+        },
+        "filters": {
+         "type": "object",
+         "properties": {
+          "site": {
+           "type": "string",
+           "pattern": "^[a-z.]+$"
+          },
+          "after": {
+           "type": "string",
+           "format": "date"
+          }
+         },
+         "required": [
+          "site"
+         ]
+        },
+        "safe": {
+         "type": "boolean"
+        },
+        "mode": {
+         "enum": [
+          "fast",
+          "deep",
+          3,
+          null,
+          1.5
+         ]
+        }
+       },
+       "required": [
+        "query",
+        "mode"
+       ]
+      },
+      "strict": true
+     }
+    }
+   ],
+   "policy": {
+    "names": [
+     "get_weather",
+     "search"
+    ],
+    "required": true,
+    "parallel": false,
+    "strict": [
+     "search"
+    ],
+    "constrained": true
+   },
+   "constrained": true,
+   "grammar": "{\"grammars\":[{\"name\":\"tool_output\",\"lark_grammar\":\"%llguidance {}\\nstart: think WS (call_0 | call_1) WS\\nthink: TEXT <[248069]>\\ncall_0: <tool_call> \\\"\\\\n<function=get_weather>\\\\n\\\" @free_arguments \\\"</function>\\\\n\\\" </tool_call>\\ncall_1: <tool_call> \\\"\\\\n<function=search>\\\\n\\\" @arguments_1 \\\"</function>\\\\n\\\" </tool_call>\\nWS: /[ \\\\t\\\\n\\\\r]{0,64}/\\nTEXT: /(?s:.*)/ & ~/(?s:.*)(<tool_call>|<\\\\/think>)(?s:.*)/\\n\"},{\"name\":\"free_arguments\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter*\\nparameter: \\\"<parameter=\\\" NAME \\\">\\\\n\\\" value\\nvalue[suffix=\\\"\\\\n</parameter>\\\\n\\\"]: /(?s:.*)/\\nNAME: /[^<> \\\\t\\\\n\\\\r]([^<>\\\\n\\\\r]{0,254}[^<> \\\\t\\\\n\\\\r])?/\\n\"},{\"name\":\"arguments_1\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter_0 parameter_1? parameter_2? parameter_3? parameter_4\\nparameter_0: \\\"<parameter=\\\" \\\"query\\\" \\\">\\\\n\\\" parameter_0_value\\nparameter_0_value[suffix=\\\"\\\\n</parameter>\\\\n\\\"]: /(?s:.*)/\\nparameter_1: \\\"<parameter=\\\" \\\"limit\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"integer\\\",\\\"minimum\\\":1,\\\"maximum\\\":100,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_2: \\\"<parameter=\\\" \\\"filters\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"site\\\":{\\\"type\\\":\\\"string\\\",\\\"pattern\\\":\\\"^[a-z.]+$\\\"},\\\"after\\\":{\\\"type\\\":\\\"string\\\",\\\"format\\\":\\\"date\\\"}},\\\"required\\\":[\\\"site\\\"],\\\"additionalProperties\\\":false,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_3: \\\"<parameter=\\\" \\\"safe\\\" \\\">\\\\n\\\" (\\\"true\\\" | \\\"false\\\") \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_4: \\\"<parameter=\\\" \\\"mode\\\" \\\">\\\\n\\\" (\\\"fast\\\" | \\\"deep\\\" | \\\"3\\\" | \\\"null\\\" | \\\"1.5\\\") \\\"\\\\n</parameter>\\\\n\\\"\\n\"}]}",
+   "types": {
+    "get_weather": {
+     "parameters": {
+      "city": [
+       "string"
+      ],
+      "unit": [
+       "string"
+      ],
+      "days": [
+       "integer"
+      ]
+     },
+     "other": null
+    },
+    "search": {
+     "parameters": {
+      "query": [
+       "string"
+      ],
+      "limit": [
+       "integer"
+      ],
+      "filters": [
+       "object"
+      ],
+      "safe": [
+       "boolean"
+      ],
+      "mode": [
+       "integer",
+       "null",
+       "number",
+       "string"
+      ]
+     },
+     "other": []
+    },
+    "not_offered": {
+     "parameters": {},
+     "other": null
+    }
+   }
+  }
+ },
+ {
+  "name": "named_event",
+  "format": "qwen",
+  "thinking": true,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": "The search tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string",
+         "description": "What to look for"
+        },
+        "limit": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 100
+        },
+        "filters": {
+         "type": "object",
+         "properties": {
+          "site": {
+           "type": "string",
+           "pattern": "^[a-z.]+$"
+          },
+          "after": {
+           "type": "string",
+           "format": "date"
+          }
+         },
+         "required": [
+          "site"
+         ]
+        },
+        "safe": {
+         "type": "boolean"
+        },
+        "mode": {
+         "enum": [
+          "fast",
+          "deep",
+          3,
+          null,
+          1.5
+         ]
+        }
+       },
+       "required": [
+        "query",
+        "mode"
+       ]
+      },
+      "strict": true
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "create_event",
+      "description": "The create_event tool.",
+      "parameters": {
+       "type": "object",
+       "$defs": {
+        "person": {
+         "type": "object",
+         "properties": {
+          "name": {
+           "type": "string"
+          },
+          "email": {
+           "type": "string",
+           "pattern": "(?<=x)y"
+          }
+         },
+         "required": [
+          "name"
+         ]
+        }
+       },
+       "properties": {
+        "title": {
+         "type": "string"
+        },
+        "attendees": {
+         "type": "array",
+         "items": {
+          "$ref": "#/$defs/person"
+         },
+         "maxItems": 200
+        },
+        "when": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "priority": {
+         "anyOf": [
+          {
+           "type": "integer",
+           "multipleOf": 5
+          },
+          {
+           "const": "high"
+          }
+         ]
+        },
+        "tags": {
+         "type": [
+          "array",
+          "null"
+         ],
+         "items": {
+          "type": "string"
+         },
+         "minItems": 2
+        },
+        "empty": {
+         "enum": [
+          "",
+          "x"
+         ]
+        },
+        "weight": {
+         "type": "number",
+         "maximum": 1e+16,
+         "minimum": 1.5e-07
+        }
+       },
+       "required": [
+        "title",
+        "priority"
+       ]
+      },
+      "strict": true
+     }
+    }
+   ],
+   "tool_choice": {
+    "type": "function",
+    "function": {
+     "name": "create_event"
+    }
+   }
+  },
+  "expected": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": "The search tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string",
+         "description": "What to look for"
+        },
+        "limit": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 100
+        },
+        "filters": {
+         "type": "object",
+         "properties": {
+          "site": {
+           "type": "string",
+           "pattern": "^[a-z.]+$"
+          },
+          "after": {
+           "type": "string",
+           "format": "date"
+          }
+         },
+         "required": [
+          "site"
+         ]
+        },
+        "safe": {
+         "type": "boolean"
+        },
+        "mode": {
+         "enum": [
+          "fast",
+          "deep",
+          3,
+          null,
+          1.5
+         ]
+        }
+       },
+       "required": [
+        "query",
+        "mode"
+       ]
+      },
+      "strict": true
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "create_event",
+      "description": "The create_event tool.",
+      "parameters": {
+       "type": "object",
+       "$defs": {
+        "person": {
+         "type": "object",
+         "properties": {
+          "name": {
+           "type": "string"
+          },
+          "email": {
+           "type": "string",
+           "pattern": "(?<=x)y"
+          }
+         },
+         "required": [
+          "name"
+         ]
+        }
+       },
+       "properties": {
+        "title": {
+         "type": "string"
+        },
+        "attendees": {
+         "type": "array",
+         "items": {
+          "$ref": "#/$defs/person"
+         },
+         "maxItems": 200
+        },
+        "when": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "priority": {
+         "anyOf": [
+          {
+           "type": "integer",
+           "multipleOf": 5
+          },
+          {
+           "const": "high"
+          }
+         ]
+        },
+        "tags": {
+         "type": [
+          "array",
+          "null"
+         ],
+         "items": {
+          "type": "string"
+         },
+         "minItems": 2
+        },
+        "empty": {
+         "enum": [
+          "",
+          "x"
+         ]
+        },
+        "weight": {
+         "type": "number",
+         "maximum": 1e+16,
+         "minimum": 1.5e-07
+        }
+       },
+       "required": [
+        "title",
+        "priority"
+       ]
+      },
+      "strict": true
+     }
+    }
+   ],
+   "policy": {
+    "names": [
+     "create_event"
+    ],
+    "required": true,
+    "parallel": false,
+    "strict": [
+     "create_event"
+    ],
+    "constrained": true
+   },
+   "constrained": true,
+   "grammar": "{\"grammars\":[{\"name\":\"tool_output\",\"lark_grammar\":\"%llguidance {}\\nstart: think WS (call_0) WS\\nthink: TEXT <[248069]>\\ncall_0: <tool_call> \\\"\\\\n<function=create_event>\\\\n\\\" @arguments_0 \\\"</function>\\\\n\\\" </tool_call>\\nWS: /[ \\\\t\\\\n\\\\r]{0,64}/\\nTEXT: /(?s:.*)/ & ~/(?s:.*)(<tool_call>|<\\\\/think>)(?s:.*)/\\n\"},{\"name\":\"arguments_0\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter_0 parameter_1? parameter_2? parameter_3 parameter_4? parameter_5? parameter_6?\\nparameter_0: \\\"<parameter=\\\" \\\"title\\\" \\\">\\\\n\\\" parameter_0_value\\nparameter_0_value[suffix=\\\"\\\\n</parameter>\\\\n\\\"]: /(?s:.*)/\\nparameter_1: \\\"<parameter=\\\" \\\"attendees\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"array\\\",\\\"items\\\":{\\\"$ref\\\":\\\"#/$defs/__splash_root/$defs/person\\\"},\\\"$defs\\\":{\\\"__splash_root\\\":{\\\"type\\\":\\\"object\\\",\\\"$defs\\\":{\\\"person\\\":{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"name\\\":{\\\"type\\\":\\\"string\\\"},\\\"email\\\":{\\\"type\\\":\\\"string\\\"}},\\\"required\\\":[\\\"name\\\"],\\\"additionalProperties\\\":false}},\\\"properties\\\":{\\\"title\\\":{\\\"type\\\":\\\"string\\\"},\\\"attendees\\\":{\\\"type\\\":\\\"array\\\",\\\"items\\\":{\\\"$ref\\\":\\\"#/$defs/__splash_root/$defs/person\\\"}},\\\"when\\\":{\\\"anyOf\\\":[{\\\"type\\\":\\\"string\\\"},{\\\"type\\\":\\\"null\\\"}]},\\\"priority\\\":{\\\"anyOf\\\":[{\\\"type\\\":\\\"integer\\\",\\\"multipleOf\\\":5},{\\\"const\\\":\\\"high\\\"}]},\\\"tags\\\":{\\\"type\\\":[\\\"array\\\",\\\"null\\\"],\\\"items\\\":{\\\"type\\\":\\\"string\\\"},\\\"minItems\\\":2},\\\"empty\\\":{\\\"enum\\\":[\\\"\\\",\\\"x\\\"]},\\\"weight\\\":{\\\"type\\\":\\\"number\\\",\\\"maximum\\\":1e+16,\\\"minimum\\\":1.5e-07}},\\\"required\\\":[\\\"title\\\",\\\"priority\\\"],\\\"additionalProperties\\\":false}},\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_2: \\\"<parameter=\\\" \\\"when\\\" \\\">\\\\n\\\" parameter_2_value\\nparameter_2_value[suffix=\\\"\\\\n</parameter>\\\\n\\\"]: /(?s:.*)/\\nparameter_3: \\\"<parameter=\\\" \\\"priority\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"integer\\\",\\\"multipleOf\\\":5,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}} | \\\"high\\\") \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_4: \\\"<parameter=\\\" \\\"tags\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":[\\\"array\\\",\\\"null\\\"],\\\"items\\\":{\\\"type\\\":\\\"string\\\"},\\\"minItems\\\":2,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_5_empty_0:\\nparameter_5: \\\"<parameter=\\\" \\\"empty\\\" \\\">\\\\n\\\" (parameter_5_empty_0 | \\\"x\\\") \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_6: \\\"<parameter=\\\" \\\"weight\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"number\\\",\\\"maximum\\\":1e+16,\\\"minimum\\\":1.5e-07,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\n\"}]}",
+   "types": {
+    "get_weather": {
+     "parameters": {},
+     "other": null
+    },
+    "search": {
+     "parameters": {},
+     "other": null
+    },
+    "create_event": {
+     "parameters": {
+      "title": [
+       "string"
+      ],
+      "attendees": [
+       "array"
+      ],
+      "when": [
+       "null",
+       "string"
+      ],
+      "priority": [
+       "integer",
+       "string"
+      ],
+      "tags": [
+       "array",
+       "null"
+      ],
+      "empty": [
+       "string"
+      ],
+      "weight": [
+       "number"
+      ]
+     },
+     "other": []
+    },
+    "not_offered": {
+     "parameters": {},
+     "other": null
+    }
+   }
+  }
+ },
+ {
+  "name": "named_untyped",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "function": {
+      "name": "now"
+     }
+    }
+   ],
+   "tool_choice": {
+    "function": {
+     "name": "now"
+    }
+   }
+  },
+  "expected": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "now"
+     }
+    }
+   ],
+   "policy": {
+    "names": [
+     "now"
+    ],
+    "required": true,
+    "parallel": false,
+    "strict": [],
+    "constrained": true
+   },
+   "constrained": true,
+   "grammar": "{\"grammars\":[{\"name\":\"tool_output\",\"lark_grammar\":\"%llguidance {}\\nstart: WS (call_0) WS\\ncall_0: <tool_call> \\\"\\\\n<function=now>\\\\n\\\" @free_arguments \\\"</function>\\\\n\\\" </tool_call>\\nWS: /[ \\\\t\\\\n\\\\r]{0,64}/\\nTEXT: /(?s:.*)/ & ~/(?s:.*)(<tool_call>|<\\\\/think>)(?s:.*)/\\n\"},{\"name\":\"free_arguments\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter*\\nparameter: \\\"<parameter=\\\" NAME \\\">\\\\n\\\" value\\nvalue[suffix=\\\"\\\\n</parameter>\\\\n\\\"]: /(?s:.*)/\\nNAME: /[^<> \\\\t\\\\n\\\\r]([^<>\\\\n\\\\r]{0,254}[^<> \\\\t\\\\n\\\\r])?/\\n\"}]}",
+   "types": {
+    "get_weather": {
+     "parameters": {},
+     "other": null
+    },
+    "now": {
+     "parameters": {},
+     "other": null
+    },
+    "not_offered": {
+     "parameters": {},
+     "other": null
+    }
+   }
+  }
+ },
+ {
+  "name": "none",
+  "format": "qwen",
+  "thinking": true,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": "The search tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string",
+         "description": "What to look for"
+        },
+        "limit": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 100
+        },
+        "filters": {
+         "type": "object",
+         "properties": {
+          "site": {
+           "type": "string",
+           "pattern": "^[a-z.]+$"
+          },
+          "after": {
+           "type": "string",
+           "format": "date"
+          }
+         },
+         "required": [
+          "site"
+         ]
+        },
+        "safe": {
+         "type": "boolean"
+        },
+        "mode": {
+         "enum": [
+          "fast",
+          "deep",
+          3,
+          null,
+          1.5
+         ]
+        }
+       },
+       "required": [
+        "query",
+        "mode"
+       ]
+      },
+      "strict": true
+     }
+    }
+   ],
+   "tool_choice": "none"
+  },
+  "expected": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": "The search tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string",
+         "description": "What to look for"
+        },
+        "limit": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 100
+        },
+        "filters": {
+         "type": "object",
+         "properties": {
+          "site": {
+           "type": "string",
+           "pattern": "^[a-z.]+$"
+          },
+          "after": {
+           "type": "string",
+           "format": "date"
+          }
+         },
+         "required": [
+          "site"
+         ]
+        },
+        "safe": {
+         "type": "boolean"
+        },
+        "mode": {
+         "enum": [
+          "fast",
+          "deep",
+          3,
+          null,
+          1.5
+         ]
+        }
+       },
+       "required": [
+        "query",
+        "mode"
+       ]
+      },
+      "strict": true
+     }
+    }
+   ],
+   "policy": {
+    "names": [],
+    "required": false,
+    "parallel": true,
+    "strict": [],
+    "constrained": true
+   },
+   "constrained": true,
+   "grammar": "{\"grammars\":[{\"name\":\"tool_output\",\"lark_grammar\":\"%llguidance {}\\nstart: think TEXT\\nthink: TEXT <[248069]>\\nWS: /[ \\\\t\\\\n\\\\r]{0,64}/\\nTEXT: /(?s:.*)/ & ~/(?s:.*)(<tool_call>|<\\\\/think>)(?s:.*)/\\n\"}]}",
+   "types": {
+    "get_weather": {
+     "parameters": {},
+     "other": null
+    },
+    "search": {
+     "parameters": {},
+     "other": null
+    },
+    "not_offered": {
+     "parameters": {},
+     "other": null
+    }
+   }
+  }
+ },
+ {
+  "name": "auto_single",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ],
+   "parallel_tool_calls": false
+  },
+  "expected": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ],
+   "policy": {
+    "names": [
+     "get_weather"
+    ],
+    "required": false,
+    "parallel": false,
+    "strict": [],
+    "constrained": true
+   },
+   "constrained": true,
+   "grammar": "{\"grammars\":[{\"name\":\"tool_output\",\"lark_grammar\":\"%llguidance {}\\nstart: TEXT ((call_0) WS)?\\ncall_0: <tool_call> \\\"\\\\n<function=get_weather>\\\\n\\\" @free_arguments \\\"</function>\\\\n\\\" </tool_call>\\nWS: /[ \\\\t\\\\n\\\\r]{0,64}/\\nTEXT: /(?s:.*)/ & ~/(?s:.*)(<tool_call>|<\\\\/think>)(?s:.*)/\\n\"},{\"name\":\"free_arguments\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter*\\nparameter: \\\"<parameter=\\\" NAME \\\">\\\\n\\\" value\\nvalue[suffix=\\\"\\\\n</parameter>\\\\n\\\"]: /(?s:.*)/\\nNAME: /[^<> \\\\t\\\\n\\\\r]([^<>\\\\n\\\\r]{0,254}[^<> \\\\t\\\\n\\\\r])?/\\n\"}]}",
+   "types": {
+    "get_weather": {
+     "parameters": {
+      "city": [
+       "string"
+      ],
+      "unit": [
+       "string"
+      ],
+      "days": [
+       "integer"
+      ]
+     },
+     "other": null
+    },
+    "not_offered": {
+     "parameters": {},
+     "other": null
+    }
+   }
+  }
+ },
+ {
+  "name": "strict_zoo",
+  "format": "qwen",
+  "thinking": true,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "merge",
+      "description": "The merge tool.",
+      "parameters": {
+       "allOf": [
+        {
+         "type": "object",
+         "properties": {
+          "a": {
+           "type": "number"
+          }
+         }
+        },
+        {
+         "properties": {
+          "b": {
+           "type": "boolean"
+          }
+         },
+         "required": [
+          "b"
+         ]
+        }
+       ]
+      },
+      "strict": true
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "lookup_é",
+      "description": "The lookup_é tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "naïve": {
+         "type": "string",
+         "enum": [
+          "ü",
+          "x\"y",
+          "😀"
+         ]
+        },
+        "ratio": {
+         "type": "number",
+         "exclusiveMaximum": 1e-05
+        },
+        "choice": {
+         "enum": [
+          1.0,
+          2,
+          true,
+          null,
+          {
+           "a": [
+            1,
+            "b"
+           ]
+          }
+         ]
+        }
+       },
+       "required": [
+        "naïve"
+       ]
+      },
+      "strict": true
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "tree",
+      "description": "The tree tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "label": {
+         "type": "string"
+        },
+        "child": {
+         "$ref": "#"
+        }
+       },
+       "required": [
+        "label"
+       ]
+      },
+      "strict": true
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "cond",
+      "description": "The cond tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "k": {
+         "type": "string"
+        }
+       },
+       "if": {
+        "properties": {
+         "k": {
+          "const": "a"
+         }
+        }
+       },
+       "then": {
+        "properties": {
+         "v": {
+          "type": "integer"
+         }
+        }
+       },
+       "else": {
+        "properties": {
+         "v": {
+          "type": "boolean"
+         }
+        }
+       }
+      },
+      "strict": true
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "anything",
+      "description": "The anything tool.",
+      "parameters": true,
+      "strict": true
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "shapes",
+      "description": "The shapes tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "shape": {
+         "oneOf": [
+          {
+           "type": "object",
+           "properties": {
+            "r": {
+             "type": "number"
+            }
+           },
+           "required": [
+            "r"
+           ]
+          },
+          {
+           "type": "object",
+           "properties": {
+            "w": {
+             "type": "number"
+            },
+            "h": {
+             "type": "number"
+            }
+           }
+          }
+         ]
+        },
+        "point": {
+         "type": "array",
+         "prefixItems": [
+          {
+           "type": "number"
+          },
+          {
+           "type": "number"
+          }
+         ]
+        },
+        "meta": {
+         "type": "object",
+         "propertyNames": {
+          "maxLength": 3
+         },
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "dependentSchemas": {
+        "shape": {
+         "properties": {
+          "unit": {
+           "enum": [
+            "cm",
+            "in"
+           ]
+          }
+         }
+        }
+       },
+       "additionalProperties": {
+        "type": "integer"
+       }
+      },
+      "strict": true
+     }
+    }
+   ],
+   "tool_choice": "required"
+  },
+  "expected": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "merge",
+      "description": "The merge tool.",
+      "parameters": {
+       "allOf": [
+        {
+         "type": "object",
+         "properties": {
+          "a": {
+           "type": "number"
+          }
+         }
+        },
+        {
+         "properties": {
+          "b": {
+           "type": "boolean"
+          }
+         },
+         "required": [
+          "b"
+         ]
+        }
+       ]
+      },
+      "strict": true
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "lookup_é",
+      "description": "The lookup_é tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "naïve": {
+         "type": "string",
+         "enum": [
+          "ü",
+          "x\"y",
+          "😀"
+         ]
+        },
+        "ratio": {
+         "type": "number",
+         "exclusiveMaximum": 1e-05
+        },
+        "choice": {
+         "enum": [
+          1.0,
+          2,
+          true,
+          null,
+          {
+           "a": [
+            1,
+            "b"
+           ]
+          }
+         ]
+        }
+       },
+       "required": [
+        "naïve"
+       ]
+      },
+      "strict": true
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "tree",
+      "description": "The tree tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "label": {
+         "type": "string"
+        },
+        "child": {
+         "$ref": "#"
+        }
+       },
+       "required": [
+        "label"
+       ]
+      },
+      "strict": true
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "cond",
+      "description": "The cond tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "k": {
+         "type": "string"
+        }
+       },
+       "if": {
+        "properties": {
+         "k": {
+          "const": "a"
+         }
+        }
+       },
+       "then": {
+        "properties": {
+         "v": {
+          "type": "integer"
+         }
+        }
+       },
+       "else": {
+        "properties": {
+         "v": {
+          "type": "boolean"
+         }
+        }
+       }
+      },
+      "strict": true
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "anything",
+      "description": "The anything tool.",
+      "parameters": true,
+      "strict": true
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "shapes",
+      "description": "The shapes tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "shape": {
+         "oneOf": [
+          {
+           "type": "object",
+           "properties": {
+            "r": {
+             "type": "number"
+            }
+           },
+           "required": [
+            "r"
+           ]
+          },
+          {
+           "type": "object",
+           "properties": {
+            "w": {
+             "type": "number"
+            },
+            "h": {
+             "type": "number"
+            }
+           }
+          }
+         ]
+        },
+        "point": {
+         "type": "array",
+         "prefixItems": [
+          {
+           "type": "number"
+          },
+          {
+           "type": "number"
+          }
+         ]
+        },
+        "meta": {
+         "type": "object",
+         "propertyNames": {
+          "maxLength": 3
+         },
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "dependentSchemas": {
+        "shape": {
+         "properties": {
+          "unit": {
+           "enum": [
+            "cm",
+            "in"
+           ]
+          }
+         }
+        }
+       },
+       "additionalProperties": {
+        "type": "integer"
+       }
+      },
+      "strict": true
+     }
+    }
+   ],
+   "policy": {
+    "names": [
+     "merge",
+     "lookup_é",
+     "tree",
+     "cond",
+     "anything",
+     "shapes"
+    ],
+    "required": true,
+    "parallel": true,
+    "strict": [
+     "anything",
+     "cond",
+     "lookup_é",
+     "merge",
+     "shapes",
+     "tree"
+    ],
+    "constrained": true
+   },
+   "constrained": true,
+   "grammar": "{\"grammars\":[{\"name\":\"tool_output\",\"lark_grammar\":\"%llguidance {}\\nstart: think WS (call_0 | call_1 | call_2 | call_3 | call_4 | call_5) (TEXT (call_0 | call_1 | call_2 | call_3 | call_4 | call_5))* TEXT\\nthink: TEXT <[248069]>\\ncall_0: <tool_call> \\\"\\\\n<function=merge>\\\\n\\\" @arguments_0 \\\"</function>\\\\n\\\" </tool_call>\\ncall_1: <tool_call> \\\"\\\\n<function=lookup_\\\\u00e9>\\\\n\\\" @arguments_1 \\\"</function>\\\\n\\\" </tool_call>\\ncall_2: <tool_call> \\\"\\\\n<function=tree>\\\\n\\\" @arguments_2 \\\"</function>\\\\n\\\" </tool_call>\\ncall_3: <tool_call> \\\"\\\\n<function=cond>\\\\n\\\" @arguments_3 \\\"</function>\\\\n\\\" </tool_call>\\ncall_4: <tool_call> \\\"\\\\n<function=anything>\\\\n\\\" @arguments_4 \\\"</function>\\\\n\\\" </tool_call>\\ncall_5: <tool_call> \\\"\\\\n<function=shapes>\\\\n\\\" @arguments_5 \\\"</function>\\\\n\\\" </tool_call>\\nWS: /[ \\\\t\\\\n\\\\r]{0,64}/\\nTEXT: /(?s:.*)/ & ~/(?s:.*)(<tool_call>|<\\\\/think>)(?s:.*)/\\n\"},{\"name\":\"arguments_0\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter_0? parameter_1 extra*\\nparameter_0: \\\"<parameter=\\\" \\\"a\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"number\\\",\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_1: \\\"<parameter=\\\" \\\"b\\\" \\\">\\\\n\\\" (\\\"true\\\" | \\\"false\\\") \\\"\\\\n</parameter>\\\\n\\\"\\nEXTRA_NAME: /[^<> \\\\t\\\\n\\\\r]([^<>\\\\n\\\\r]{0,254}[^<> \\\\t\\\\n\\\\r])?/ & ~(\\\"a\\\" | \\\"b\\\")\\nextra: \\\"<parameter=\\\" EXTRA_NAME \\\">\\\\n\\\" extra_value\\nextra_value[suffix=\\\"\\\\n</parameter>\\\\n\\\"]: /(?s:.*)/\\n\"},{\"name\":\"arguments_1\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter_0 parameter_1? parameter_2?\\nparameter_0: \\\"<parameter=\\\" \\\"na\\\\u00efve\\\" \\\">\\\\n\\\" (\\\"\\\\u00fc\\\" | \\\"x\\\\\\\"y\\\" | \\\"\\\\ud83d\\\\ude00\\\") \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_1: \\\"<parameter=\\\" \\\"ratio\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"number\\\",\\\"exclusiveMaximum\\\":1e-05,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_2: \\\"<parameter=\\\" \\\"choice\\\" \\\">\\\\n\\\" (\\\"1.0\\\" | \\\"2\\\" | \\\"true\\\" | \\\"null\\\" | \\\"{\\\\\\\"a\\\\\\\":[1,\\\\\\\"b\\\\\\\"]}\\\") \\\"\\\\n</parameter>\\\\n\\\"\\n\"},{\"name\":\"arguments_2\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter_0 parameter_1?\\nparameter_0: \\\"<parameter=\\\" \\\"label\\\" \\\">\\\\n\\\" parameter_0_value\\nparameter_0_value[suffix=\\\"\\\\n</parameter>\\\\n\\\"]: /(?s:.*)/\\nparameter_1: \\\"<parameter=\\\" \\\"child\\\" \\\">\\\\n\\\" (%json {\\\"$ref\\\":\\\"#/$defs/__splash_root\\\",\\\"$defs\\\":{\\\"__splash_root\\\":{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"label\\\":{\\\"type\\\":\\\"string\\\"},\\\"child\\\":{\\\"$ref\\\":\\\"#/$defs/__splash_root\\\"}},\\\"required\\\":[\\\"label\\\"],\\\"additionalProperties\\\":false}},\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\n\"},{\"name\":\"arguments_3\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter_0? parameter_1? extra*\\nparameter_0: \\\"<parameter=\\\" \\\"k\\\" \\\">\\\\n\\\" parameter_0_value\\nparameter_0_value[suffix=\\\"\\\\n</parameter>\\\\n\\\"]: /(?s:.*)/\\nparameter_1: \\\"<parameter=\\\" \\\"v\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"integer\\\",\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}} | \\\"true\\\" | \\\"false\\\") \\\"\\\\n</parameter>\\\\n\\\"\\nEXTRA_NAME: /[^<> \\\\t\\\\n\\\\r]([^<>\\\\n\\\\r]{0,254}[^<> \\\\t\\\\n\\\\r])?/ & ~(\\\"k\\\" | \\\"v\\\")\\nextra: \\\"<parameter=\\\" EXTRA_NAME \\\">\\\\n\\\" extra_value\\nextra_value[suffix=\\\"\\\\n</parameter>\\\\n\\\"]: /(?s:.*)/\\n\"},{\"name\":\"arguments_4\",\"lark_grammar\":\"%llguidance {}\\nstart: extra*\\nEXTRA_NAME: /[^<> \\\\t\\\\n\\\\r]([^<>\\\\n\\\\r]{0,254}[^<> \\\\t\\\\n\\\\r])?/\\nextra: \\\"<parameter=\\\" EXTRA_NAME \\\">\\\\n\\\" extra_value\\nextra_value[suffix=\\\"\\\\n</parameter>\\\\n\\\"]: /(?s:.*)/\\n\"},{\"name\":\"arguments_5\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter_0? parameter_1? parameter_2? parameter_3? extra*\\nparameter_0: \\\"<parameter=\\\" \\\"shape\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"r\\\":{\\\"type\\\":\\\"number\\\"}},\\\"required\\\":[\\\"r\\\"],\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}} | %json {\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"w\\\":{\\\"type\\\":\\\"number\\\"},\\\"h\\\":{\\\"type\\\":\\\"number\\\"}},\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_1: \\\"<parameter=\\\" \\\"point\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"array\\\",\\\"prefixItems\\\":[{\\\"type\\\":\\\"number\\\"},{\\\"type\\\":\\\"number\\\"}],\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_2: \\\"<parameter=\\\" \\\"meta\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"object\\\",\\\"additionalProperties\\\":{\\\"type\\\":\\\"string\\\"},\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_3: \\\"<parameter=\\\" \\\"unit\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"integer\\\",\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\nEXTRA_NAME: /[^<> \\\\t\\\\n\\\\r]([^<>\\\\n\\\\r]{0,254}[^<> \\\\t\\\\n\\\\r])?/ & ~(\\\"shape\\\" | \\\"point\\\" | \\\"meta\\\" | \\\"unit\\\")\\nextra: \\\"<parameter=\\\" EXTRA_NAME \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"integer\\\",\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\n\"}]}",
+   "types": {
+    "merge": {
+     "parameters": {
+      "a": [
+       "number"
+      ],
+      "b": [
+       "boolean"
+      ]
+     },
+     "other": null
+    },
+    "lookup_é": {
+     "parameters": {
+      "naïve": [
+       "string"
+      ],
+      "ratio": [
+       "number"
+      ],
+      "choice": [
+       "boolean",
+       "integer",
+       "null",
+       "number",
+       "object"
+      ]
+     },
+     "other": []
+    },
+    "tree": {
+     "parameters": {
+      "label": [
+       "string"
+      ],
+      "child": [
+       "object"
+      ]
+     },
+     "other": []
+    },
+    "cond": {
+     "parameters": {
+      "k": [
+       "string"
+      ],
+      "v": [
+       "boolean",
+       "integer"
+      ]
+     },
+     "other": null
+    },
+    "anything": {
+     "parameters": {},
+     "other": null
+    },
+    "shapes": {
+     "parameters": {
+      "shape": [
+       "object"
+      ],
+      "point": [
+       "array"
+      ],
+      "meta": [
+       "object"
+      ],
+      "unit": [
+       "integer"
+      ]
+     },
+     "other": [
+      "integer"
+     ]
+    },
+    "not_offered": {
+     "parameters": {},
+     "other": null
+    }
+   }
+  }
+ },
+ {
+  "name": "json_think",
+  "format": "qwen",
+  "thinking": true,
+  "request": {
+   "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+     "name": "answer",
+     "schema": {
+      "type": "object",
+      "properties": {
+       "answer": {
+        "type": "string"
+       },
+       "score": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 10
+       },
+       "tags": {
+        "type": "array",
+        "items": {
+         "type": "string",
+         "pattern": "^\\w+$"
+        },
+        "maxItems": 100
+       },
+       "note": {
+        "type": "string",
+        "pattern": "^(?!no)",
+        "propertyNames": {
+         "pattern": "a"
+        }
+       }
+      },
+      "required": [
+       "answer",
+       "score"
+      ],
+      "additionalProperties": false
+     }
+    }
+   }
+  },
+  "expected": {
+   "tools": null,
+   "policy": null,
+   "constrained": true,
+   "grammar": "%llguidance {}\nstart: think WS %json {\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"},\"score\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":10},\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"string\",\"pattern\":\"^\\\\w+$\"}},\"note\":{\"type\":\"string\"}},\"required\":[\"answer\",\"score\"],\"additionalProperties\":false,\"x-guidance\":{\"lenient\":true,\"whitespace_pattern\":\"[ \\\\t\\\\n\\\\r]{0,64}\"}}\nthink: TEXT <[248069]>\nTEXT: /(?s:.*)/ & ~/(?s:.*)<\\/think>(?s:.*)/\nWS: /[ \\t\\n\\r]{0,64}/\n",
+   "types": null
+  }
+ },
+ {
+  "name": "json_plain",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+     "schema": {
+      "type": "array",
+      "items": {
+       "enum": [
+        "a",
+        "bé",
+        2.5e-09
+       ]
+      },
+      "multipleOf": 100
+     }
+    }
+   }
+  },
+  "expected": {
+   "tools": null,
+   "policy": null,
+   "constrained": true,
+   "grammar": "%llguidance {}\nstart: WS %json {\"type\":\"array\",\"items\":{\"enum\":[\"a\",\"b\\u00e9\",2.5e-09]},\"x-guidance\":{\"lenient\":true,\"whitespace_pattern\":\"[ \\\\t\\\\n\\\\r]{0,64}\"}}\nWS: /[ \\t\\n\\r]{0,64}/\n",
+   "types": null
+  }
+ },
+ {
+  "name": "json_object",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "response_format": {
+    "type": "json_object"
+   }
+  },
+  "expected": {
+   "tools": null,
+   "policy": null,
+   "constrained": true,
+   "grammar": "%llguidance {}\nstart: WS %json {\"type\":\"object\",\"x-guidance\":{\"lenient\":true,\"whitespace_pattern\":\"[ \\\\t\\\\n\\\\r]{0,64}\"}}\nWS: /[ \\t\\n\\r]{0,64}/\n",
+   "types": null
+  }
+ },
+ {
+  "name": "json_true",
+  "format": "qwen",
+  "thinking": true,
+  "request": {
+   "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+     "schema": true
+    }
+   }
+  },
+  "expected": {
+   "tools": null,
+   "policy": null,
+   "constrained": true,
+   "grammar": "%llguidance {}\nstart: think WS %json {\"x-guidance\":{\"lenient\":true,\"whitespace_pattern\":\"[ \\\\t\\\\n\\\\r]{0,64}\"}}\nthink: TEXT <[248069]>\nTEXT: /(?s:.*)/ & ~/(?s:.*)<\\/think>(?s:.*)/\nWS: /[ \\t\\n\\r]{0,64}/\n",
+   "types": null
+  }
+ },
+ {
+  "name": "text_format",
+  "format": "qwen",
+  "thinking": true,
+  "request": {
+   "response_format": {
+    "type": "text"
+   }
+  },
+  "expected": {
+   "tools": null,
+   "policy": null,
+   "constrained": false,
+   "grammar": null,
+   "types": null
+  }
+ },
+ {
+  "name": "tools_and_answer",
+  "format": "qwen",
+  "thinking": true,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": "The search tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string",
+         "description": "What to look for"
+        },
+        "limit": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 100
+        },
+        "filters": {
+         "type": "object",
+         "properties": {
+          "site": {
+           "type": "string",
+           "pattern": "^[a-z.]+$"
+          },
+          "after": {
+           "type": "string",
+           "format": "date"
+          }
+         },
+         "required": [
+          "site"
+         ]
+        },
+        "safe": {
+         "type": "boolean"
+        },
+        "mode": {
+         "enum": [
+          "fast",
+          "deep",
+          3,
+          null,
+          1.5
+         ]
+        }
+       },
+       "required": [
+        "query",
+        "mode"
+       ]
+      },
+      "strict": true
+     }
+    }
+   ],
+   "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+     "name": "answer",
+     "schema": {
+      "type": "object",
+      "properties": {
+       "answer": {
+        "type": "string"
+       },
+       "score": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 10
+       },
+       "tags": {
+        "type": "array",
+        "items": {
+         "type": "string",
+         "pattern": "^\\w+$"
+        },
+        "maxItems": 100
+       },
+       "note": {
+        "type": "string",
+        "pattern": "^(?!no)",
+        "propertyNames": {
+         "pattern": "a"
+        }
+       }
+      },
+      "required": [
+       "answer",
+       "score"
+      ],
+      "additionalProperties": false
+     }
+    }
+   }
+  },
+  "expected": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": "The search tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string",
+         "description": "What to look for"
+        },
+        "limit": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 100
+        },
+        "filters": {
+         "type": "object",
+         "properties": {
+          "site": {
+           "type": "string",
+           "pattern": "^[a-z.]+$"
+          },
+          "after": {
+           "type": "string",
+           "format": "date"
+          }
+         },
+         "required": [
+          "site"
+         ]
+        },
+        "safe": {
+         "type": "boolean"
+        },
+        "mode": {
+         "enum": [
+          "fast",
+          "deep",
+          3,
+          null,
+          1.5
+         ]
+        }
+       },
+       "required": [
+        "query",
+        "mode"
+       ]
+      },
+      "strict": true
+     }
+    }
+   ],
+   "policy": {
+    "names": [
+     "get_weather",
+     "search"
+    ],
+    "required": false,
+    "parallel": true,
+    "strict": [
+     "search"
+    ],
+    "constrained": true
+   },
+   "constrained": true,
+   "grammar": "{\"grammars\":[{\"name\":\"tool_output\",\"lark_grammar\":\"%llguidance {}\\nstart: think ((WS (call_0 | call_1) (TEXT (call_0 | call_1))* TEXT) | answer)\\nanswer: WS %json {\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"answer\\\":{\\\"type\\\":\\\"string\\\"},\\\"score\\\":{\\\"type\\\":\\\"integer\\\",\\\"minimum\\\":0,\\\"maximum\\\":10},\\\"tags\\\":{\\\"type\\\":\\\"array\\\",\\\"items\\\":{\\\"type\\\":\\\"string\\\",\\\"pattern\\\":\\\"^\\\\\\\\w+$\\\"}},\\\"note\\\":{\\\"type\\\":\\\"string\\\"}},\\\"required\\\":[\\\"answer\\\",\\\"score\\\"],\\\"additionalProperties\\\":false,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}} WS\\nthink: TEXT <[248069]>\\ncall_0: <tool_call> \\\"\\\\n<function=get_weather>\\\\n\\\" @free_arguments \\\"</function>\\\\n\\\" </tool_call>\\ncall_1: <tool_call> \\\"\\\\n<function=search>\\\\n\\\" @arguments_1 \\\"</function>\\\\n\\\" </tool_call>\\nWS: /[ \\\\t\\\\n\\\\r]{0,64}/\\nTEXT: /(?s:.*)/ & ~/(?s:.*)(<tool_call>|<\\\\/think>)(?s:.*)/\\n\"},{\"name\":\"free_arguments\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter*\\nparameter: \\\"<parameter=\\\" NAME \\\">\\\\n\\\" value\\nvalue[suffix=\\\"\\\\n</parameter>\\\\n\\\"]: /(?s:.*)/\\nNAME: /[^<> \\\\t\\\\n\\\\r]([^<>\\\\n\\\\r]{0,254}[^<> \\\\t\\\\n\\\\r])?/\\n\"},{\"name\":\"arguments_1\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter_0 parameter_1? parameter_2? parameter_3? parameter_4\\nparameter_0: \\\"<parameter=\\\" \\\"query\\\" \\\">\\\\n\\\" parameter_0_value\\nparameter_0_value[suffix=\\\"\\\\n</parameter>\\\\n\\\"]: /(?s:.*)/\\nparameter_1: \\\"<parameter=\\\" \\\"limit\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"integer\\\",\\\"minimum\\\":1,\\\"maximum\\\":100,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_2: \\\"<parameter=\\\" \\\"filters\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"site\\\":{\\\"type\\\":\\\"string\\\",\\\"pattern\\\":\\\"^[a-z.]+$\\\"},\\\"after\\\":{\\\"type\\\":\\\"string\\\",\\\"format\\\":\\\"date\\\"}},\\\"required\\\":[\\\"site\\\"],\\\"additionalProperties\\\":false,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_3: \\\"<parameter=\\\" \\\"safe\\\" \\\">\\\\n\\\" (\\\"true\\\" | \\\"false\\\") \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_4: \\\"<parameter=\\\" \\\"mode\\\" \\\">\\\\n\\\" (\\\"fast\\\" | \\\"deep\\\" | \\\"3\\\" | \\\"null\\\" | \\\"1.5\\\") \\\"\\\\n</parameter>\\\\n\\\"\\n\"}]}",
+   "types": {
+    "get_weather": {
+     "parameters": {
+      "city": [
+       "string"
+      ],
+      "unit": [
+       "string"
+      ],
+      "days": [
+       "integer"
+      ]
+     },
+     "other": null
+    },
+    "search": {
+     "parameters": {
+      "query": [
+       "string"
+      ],
+      "limit": [
+       "integer"
+      ],
+      "filters": [
+       "object"
+      ],
+      "safe": [
+       "boolean"
+      ],
+      "mode": [
+       "integer",
+       "null",
+       "number",
+       "string"
+      ]
+     },
+     "other": []
+    },
+    "not_offered": {
+     "parameters": {},
+     "other": null
+    }
+   }
+  }
+ },
+ {
+  "name": "free_tools_and_answer",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ],
+   "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+     "name": "answer",
+     "schema": {
+      "type": "object",
+      "properties": {
+       "answer": {
+        "type": "string"
+       },
+       "score": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 10
+       },
+       "tags": {
+        "type": "array",
+        "items": {
+         "type": "string",
+         "pattern": "^\\w+$"
+        },
+        "maxItems": 100
+       },
+       "note": {
+        "type": "string",
+        "pattern": "^(?!no)",
+        "propertyNames": {
+         "pattern": "a"
+        }
+       }
+      },
+      "required": [
+       "answer",
+       "score"
+      ],
+      "additionalProperties": false
+     }
+    }
+   }
+  },
+  "expected": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ],
+   "policy": {
+    "names": [
+     "get_weather"
+    ],
+    "required": false,
+    "parallel": true,
+    "strict": [],
+    "constrained": false
+   },
+   "constrained": true,
+   "grammar": "{\"grammars\":[{\"name\":\"tool_output\",\"lark_grammar\":\"%llguidance {}\\nstart: ((WS (call_0) (TEXT (call_0))* TEXT) | answer)\\nanswer: WS %json {\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"answer\\\":{\\\"type\\\":\\\"string\\\"},\\\"score\\\":{\\\"type\\\":\\\"integer\\\",\\\"minimum\\\":0,\\\"maximum\\\":10},\\\"tags\\\":{\\\"type\\\":\\\"array\\\",\\\"items\\\":{\\\"type\\\":\\\"string\\\",\\\"pattern\\\":\\\"^\\\\\\\\w+$\\\"}},\\\"note\\\":{\\\"type\\\":\\\"string\\\"}},\\\"required\\\":[\\\"answer\\\",\\\"score\\\"],\\\"additionalProperties\\\":false,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}} WS\\ncall_0: <tool_call> \\\"\\\\n<function=get_weather>\\\\n\\\" @free_arguments \\\"</function>\\\\n\\\" </tool_call>\\nWS: /[ \\\\t\\\\n\\\\r]{0,64}/\\nTEXT: /(?s:.*)/ & ~/(?s:.*)(<tool_call>|<\\\\/think>)(?s:.*)/\\n\"},{\"name\":\"free_arguments\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter*\\nparameter: \\\"<parameter=\\\" NAME \\\">\\\\n\\\" value\\nvalue[suffix=\\\"\\\\n</parameter>\\\\n\\\"]: /(?s:.*)/\\nNAME: /[^<> \\\\t\\\\n\\\\r]([^<>\\\\n\\\\r]{0,254}[^<> \\\\t\\\\n\\\\r])?/\\n\"}]}",
+   "types": {
+    "get_weather": {
+     "parameters": {
+      "city": [
+       "string"
+      ],
+      "unit": [
+       "string"
+      ],
+      "days": [
+       "integer"
+      ]
+     },
+     "other": null
+    },
+    "not_offered": {
+     "parameters": {},
+     "other": null
+    }
+   }
+  }
+ },
+ {
+  "name": "required_and_answer",
+  "format": "qwen",
+  "thinking": true,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": "The search tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string",
+         "description": "What to look for"
+        },
+        "limit": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 100
+        },
+        "filters": {
+         "type": "object",
+         "properties": {
+          "site": {
+           "type": "string",
+           "pattern": "^[a-z.]+$"
+          },
+          "after": {
+           "type": "string",
+           "format": "date"
+          }
+         },
+         "required": [
+          "site"
+         ]
+        },
+        "safe": {
+         "type": "boolean"
+        },
+        "mode": {
+         "enum": [
+          "fast",
+          "deep",
+          3,
+          null,
+          1.5
+         ]
+        }
+       },
+       "required": [
+        "query",
+        "mode"
+       ]
+      },
+      "strict": true
+     }
+    }
+   ],
+   "tool_choice": "required",
+   "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+     "name": "answer",
+     "schema": {
+      "type": "object",
+      "properties": {
+       "answer": {
+        "type": "string"
+       },
+       "score": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 10
+       },
+       "tags": {
+        "type": "array",
+        "items": {
+         "type": "string",
+         "pattern": "^\\w+$"
+        },
+        "maxItems": 100
+       },
+       "note": {
+        "type": "string",
+        "pattern": "^(?!no)",
+        "propertyNames": {
+         "pattern": "a"
+        }
+       }
+      },
+      "required": [
+       "answer",
+       "score"
+      ],
+      "additionalProperties": false
+     }
+    }
+   }
+  },
+  "expected": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": "The search tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string",
+         "description": "What to look for"
+        },
+        "limit": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 100
+        },
+        "filters": {
+         "type": "object",
+         "properties": {
+          "site": {
+           "type": "string",
+           "pattern": "^[a-z.]+$"
+          },
+          "after": {
+           "type": "string",
+           "format": "date"
+          }
+         },
+         "required": [
+          "site"
+         ]
+        },
+        "safe": {
+         "type": "boolean"
+        },
+        "mode": {
+         "enum": [
+          "fast",
+          "deep",
+          3,
+          null,
+          1.5
+         ]
+        }
+       },
+       "required": [
+        "query",
+        "mode"
+       ]
+      },
+      "strict": true
+     }
+    }
+   ],
+   "policy": {
+    "names": [
+     "get_weather",
+     "search"
+    ],
+    "required": true,
+    "parallel": true,
+    "strict": [
+     "search"
+    ],
+    "constrained": true
+   },
+   "constrained": true,
+   "grammar": "{\"grammars\":[{\"name\":\"tool_output\",\"lark_grammar\":\"%llguidance {}\\nstart: think WS (call_0 | call_1) (TEXT (call_0 | call_1))* TEXT\\nthink: TEXT <[248069]>\\ncall_0: <tool_call> \\\"\\\\n<function=get_weather>\\\\n\\\" @free_arguments \\\"</function>\\\\n\\\" </tool_call>\\ncall_1: <tool_call> \\\"\\\\n<function=search>\\\\n\\\" @arguments_1 \\\"</function>\\\\n\\\" </tool_call>\\nWS: /[ \\\\t\\\\n\\\\r]{0,64}/\\nTEXT: /(?s:.*)/ & ~/(?s:.*)(<tool_call>|<\\\\/think>)(?s:.*)/\\n\"},{\"name\":\"free_arguments\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter*\\nparameter: \\\"<parameter=\\\" NAME \\\">\\\\n\\\" value\\nvalue[suffix=\\\"\\\\n</parameter>\\\\n\\\"]: /(?s:.*)/\\nNAME: /[^<> \\\\t\\\\n\\\\r]([^<>\\\\n\\\\r]{0,254}[^<> \\\\t\\\\n\\\\r])?/\\n\"},{\"name\":\"arguments_1\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter_0 parameter_1? parameter_2? parameter_3? parameter_4\\nparameter_0: \\\"<parameter=\\\" \\\"query\\\" \\\">\\\\n\\\" parameter_0_value\\nparameter_0_value[suffix=\\\"\\\\n</parameter>\\\\n\\\"]: /(?s:.*)/\\nparameter_1: \\\"<parameter=\\\" \\\"limit\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"integer\\\",\\\"minimum\\\":1,\\\"maximum\\\":100,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_2: \\\"<parameter=\\\" \\\"filters\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"site\\\":{\\\"type\\\":\\\"string\\\",\\\"pattern\\\":\\\"^[a-z.]+$\\\"},\\\"after\\\":{\\\"type\\\":\\\"string\\\",\\\"format\\\":\\\"date\\\"}},\\\"required\\\":[\\\"site\\\"],\\\"additionalProperties\\\":false,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_3: \\\"<parameter=\\\" \\\"safe\\\" \\\">\\\\n\\\" (\\\"true\\\" | \\\"false\\\") \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_4: \\\"<parameter=\\\" \\\"mode\\\" \\\">\\\\n\\\" (\\\"fast\\\" | \\\"deep\\\" | \\\"3\\\" | \\\"null\\\" | \\\"1.5\\\") \\\"\\\\n</parameter>\\\\n\\\"\\n\"}]}",
+   "types": {
+    "get_weather": {
+     "parameters": {
+      "city": [
+       "string"
+      ],
+      "unit": [
+       "string"
+      ],
+      "days": [
+       "integer"
+      ]
+     },
+     "other": null
+    },
+    "search": {
+     "parameters": {
+      "query": [
+       "string"
+      ],
+      "limit": [
+       "integer"
+      ],
+      "filters": [
+       "object"
+      ],
+      "safe": [
+       "boolean"
+      ],
+      "mode": [
+       "integer",
+       "null",
+       "number",
+       "string"
+      ]
+     },
+     "other": []
+    },
+    "not_offered": {
+     "parameters": {},
+     "other": null
+    }
+   }
+  }
+ },
+ {
+  "name": "none_and_answer",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ],
+   "tool_choice": "none",
+   "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+     "name": "answer",
+     "schema": {
+      "type": "object",
+      "properties": {
+       "answer": {
+        "type": "string"
+       },
+       "score": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 10
+       },
+       "tags": {
+        "type": "array",
+        "items": {
+         "type": "string",
+         "pattern": "^\\w+$"
+        },
+        "maxItems": 100
+       },
+       "note": {
+        "type": "string",
+        "pattern": "^(?!no)",
+        "propertyNames": {
+         "pattern": "a"
+        }
+       }
+      },
+      "required": [
+       "answer",
+       "score"
+      ],
+      "additionalProperties": false
+     }
+    }
+   }
+  },
+  "expected": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ],
+   "policy": {
+    "names": [],
+    "required": false,
+    "parallel": true,
+    "strict": [],
+    "constrained": true
+   },
+   "constrained": true,
+   "grammar": "{\"grammars\":[{\"name\":\"tool_output\",\"lark_grammar\":\"%llguidance {}\\nstart: answer\\nanswer: WS %json {\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"answer\\\":{\\\"type\\\":\\\"string\\\"},\\\"score\\\":{\\\"type\\\":\\\"integer\\\",\\\"minimum\\\":0,\\\"maximum\\\":10},\\\"tags\\\":{\\\"type\\\":\\\"array\\\",\\\"items\\\":{\\\"type\\\":\\\"string\\\",\\\"pattern\\\":\\\"^\\\\\\\\w+$\\\"}},\\\"note\\\":{\\\"type\\\":\\\"string\\\"}},\\\"required\\\":[\\\"answer\\\",\\\"score\\\"],\\\"additionalProperties\\\":false,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}} WS\\nWS: /[ \\\\t\\\\n\\\\r]{0,64}/\\nTEXT: /(?s:.*)/ & ~/(?s:.*)(<tool_call>|<\\\\/think>)(?s:.*)/\\n\"}]}",
+   "types": {
+    "get_weather": {
+     "parameters": {},
+     "other": null
+    },
+    "not_offered": {
+     "parameters": {},
+     "other": null
+    }
+   }
+  }
+ },
+ {
+  "name": "flint_auto_strict",
+  "format": "flint",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": "The search tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string",
+         "description": "What to look for"
+        },
+        "limit": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 100
+        },
+        "filters": {
+         "type": "object",
+         "properties": {
+          "site": {
+           "type": "string",
+           "pattern": "^[a-z.]+$"
+          },
+          "after": {
+           "type": "string",
+           "format": "date"
+          }
+         },
+         "required": [
+          "site"
+         ]
+        },
+        "safe": {
+         "type": "boolean"
+        },
+        "mode": {
+         "enum": [
+          "fast",
+          "deep",
+          3,
+          null,
+          1.5
+         ]
+        }
+       },
+       "required": [
+        "query",
+        "mode"
+       ]
+      },
+      "strict": true
+     }
+    }
+   ]
+  },
+  "expected": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": "The search tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string",
+         "description": "What to look for"
+        },
+        "limit": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 100
+        },
+        "filters": {
+         "type": "object",
+         "properties": {
+          "site": {
+           "type": "string",
+           "pattern": "^[a-z.]+$"
+          },
+          "after": {
+           "type": "string",
+           "format": "date"
+          }
+         },
+         "required": [
+          "site"
+         ]
+        },
+        "safe": {
+         "type": "boolean"
+        },
+        "mode": {
+         "enum": [
+          "fast",
+          "deep",
+          3,
+          null,
+          1.5
+         ]
+        }
+       },
+       "required": [
+        "query",
+        "mode"
+       ]
+      },
+      "strict": true
+     }
+    }
+   ],
+   "policy": {
+    "names": [
+     "get_weather",
+     "search"
+    ],
+    "required": false,
+    "parallel": true,
+    "strict": [
+     "search"
+    ],
+    "constrained": true
+   },
+   "constrained": true,
+   "grammar": "{\"grammars\":[{\"name\":\"tool_output\",\"lark_grammar\":\"%llguidance {}\\nstart: think? (TEXT (call_0 | call_1))* TEXT\\nthink: <[150006]> TEXT <[150007]>\\ncall_0: <tool_call> \\\"get_weather\\\" @free_arguments </tool_call>\\ncall_1: <tool_call> \\\"search\\\" @arguments_1 </tool_call>\\nWS: /[ \\\\t\\\\n\\\\r]{0,64}/\\nTEXT: /(?s:.*)/ & ~/(?s:.*)(<tool_call>|<\\\\/think>)(?s:.*)/\\n\"},{\"name\":\"free_arguments\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter*\\nparameter: <arg_key> NAME </arg_key> <arg_value> value\\nvalue: RAW_VALUE </arg_value>\\nNAME: /[^<> \\\\t\\\\n\\\\r]([^<>\\\\n\\\\r]{0,254}[^<> \\\\t\\\\n\\\\r])?/\\nRAW_VALUE: /(?s:.*)/ & ~/(?s:.*)<\\\\/arg_value>(?s:.*)/\\n\"},{\"name\":\"arguments_1\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter_0 parameter_1? parameter_2? parameter_3? parameter_4\\nparameter_0: <arg_key> \\\"query\\\" </arg_key> <arg_value> parameter_0_value\\nparameter_0_value: RAW_VALUE </arg_value>\\nparameter_1: <arg_key> \\\"limit\\\" </arg_key> <arg_value> (%json {\\\"type\\\":\\\"integer\\\",\\\"minimum\\\":1,\\\"maximum\\\":100,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) </arg_value>\\nparameter_2: <arg_key> \\\"filters\\\" </arg_key> <arg_value> (%json {\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"site\\\":{\\\"type\\\":\\\"string\\\",\\\"pattern\\\":\\\"^[a-z.]+$\\\"},\\\"after\\\":{\\\"type\\\":\\\"string\\\",\\\"format\\\":\\\"date\\\"}},\\\"required\\\":[\\\"site\\\"],\\\"additionalProperties\\\":false,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) </arg_value>\\nparameter_3: <arg_key> \\\"safe\\\" </arg_key> <arg_value> (\\\"true\\\" | \\\"false\\\") </arg_value>\\nparameter_4: <arg_key> \\\"mode\\\" </arg_key> <arg_value> (\\\"fast\\\" | \\\"deep\\\" | \\\"3\\\" | \\\"null\\\" | \\\"1.5\\\") </arg_value>\\nRAW_VALUE: /(?s:.*)/ & ~/(?s:.*)<\\\\/arg_value>(?s:.*)/\\n\"}]}",
+   "types": {
+    "get_weather": {
+     "parameters": {
+      "city": [
+       "string"
+      ],
+      "unit": [
+       "string"
+      ],
+      "days": [
+       "integer"
+      ]
+     },
+     "other": null
+    },
+    "search": {
+     "parameters": {
+      "query": [
+       "string"
+      ],
+      "limit": [
+       "integer"
+      ],
+      "filters": [
+       "object"
+      ],
+      "safe": [
+       "boolean"
+      ],
+      "mode": [
+       "integer",
+       "null",
+       "number",
+       "string"
+      ]
+     },
+     "other": []
+    },
+    "not_offered": {
+     "parameters": {},
+     "other": null
+    }
+   }
+  }
+ },
+ {
+  "name": "flint_required",
+  "format": "flint",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": "The search tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string",
+         "description": "What to look for"
+        },
+        "limit": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 100
+        },
+        "filters": {
+         "type": "object",
+         "properties": {
+          "site": {
+           "type": "string",
+           "pattern": "^[a-z.]+$"
+          },
+          "after": {
+           "type": "string",
+           "format": "date"
+          }
+         },
+         "required": [
+          "site"
+         ]
+        },
+        "safe": {
+         "type": "boolean"
+        },
+        "mode": {
+         "enum": [
+          "fast",
+          "deep",
+          3,
+          null,
+          1.5
+         ]
+        }
+       },
+       "required": [
+        "query",
+        "mode"
+       ]
+      },
+      "strict": true
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "create_event",
+      "description": "The create_event tool.",
+      "parameters": {
+       "type": "object",
+       "$defs": {
+        "person": {
+         "type": "object",
+         "properties": {
+          "name": {
+           "type": "string"
+          },
+          "email": {
+           "type": "string",
+           "pattern": "(?<=x)y"
+          }
+         },
+         "required": [
+          "name"
+         ]
+        }
+       },
+       "properties": {
+        "title": {
+         "type": "string"
+        },
+        "attendees": {
+         "type": "array",
+         "items": {
+          "$ref": "#/$defs/person"
+         },
+         "maxItems": 200
+        },
+        "when": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "priority": {
+         "anyOf": [
+          {
+           "type": "integer",
+           "multipleOf": 5
+          },
+          {
+           "const": "high"
+          }
+         ]
+        },
+        "tags": {
+         "type": [
+          "array",
+          "null"
+         ],
+         "items": {
+          "type": "string"
+         },
+         "minItems": 2
+        },
+        "empty": {
+         "enum": [
+          "",
+          "x"
+         ]
+        },
+        "weight": {
+         "type": "number",
+         "maximum": 1e+16,
+         "minimum": 1.5e-07
+        }
+       },
+       "required": [
+        "title",
+        "priority"
+       ]
+      },
+      "strict": true
+     }
+    }
+   ],
+   "tool_choice": "required"
+  },
+  "expected": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": "The search tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string",
+         "description": "What to look for"
+        },
+        "limit": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 100
+        },
+        "filters": {
+         "type": "object",
+         "properties": {
+          "site": {
+           "type": "string",
+           "pattern": "^[a-z.]+$"
+          },
+          "after": {
+           "type": "string",
+           "format": "date"
+          }
+         },
+         "required": [
+          "site"
+         ]
+        },
+        "safe": {
+         "type": "boolean"
+        },
+        "mode": {
+         "enum": [
+          "fast",
+          "deep",
+          3,
+          null,
+          1.5
+         ]
+        }
+       },
+       "required": [
+        "query",
+        "mode"
+       ]
+      },
+      "strict": true
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "create_event",
+      "description": "The create_event tool.",
+      "parameters": {
+       "type": "object",
+       "$defs": {
+        "person": {
+         "type": "object",
+         "properties": {
+          "name": {
+           "type": "string"
+          },
+          "email": {
+           "type": "string",
+           "pattern": "(?<=x)y"
+          }
+         },
+         "required": [
+          "name"
+         ]
+        }
+       },
+       "properties": {
+        "title": {
+         "type": "string"
+        },
+        "attendees": {
+         "type": "array",
+         "items": {
+          "$ref": "#/$defs/person"
+         },
+         "maxItems": 200
+        },
+        "when": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "priority": {
+         "anyOf": [
+          {
+           "type": "integer",
+           "multipleOf": 5
+          },
+          {
+           "const": "high"
+          }
+         ]
+        },
+        "tags": {
+         "type": [
+          "array",
+          "null"
+         ],
+         "items": {
+          "type": "string"
+         },
+         "minItems": 2
+        },
+        "empty": {
+         "enum": [
+          "",
+          "x"
+         ]
+        },
+        "weight": {
+         "type": "number",
+         "maximum": 1e+16,
+         "minimum": 1.5e-07
+        }
+       },
+       "required": [
+        "title",
+        "priority"
+       ]
+      },
+      "strict": true
+     }
+    }
+   ],
+   "policy": {
+    "names": [
+     "get_weather",
+     "search",
+     "create_event"
+    ],
+    "required": true,
+    "parallel": true,
+    "strict": [
+     "create_event",
+     "search"
+    ],
+    "constrained": true
+   },
+   "constrained": true,
+   "grammar": "{\"grammars\":[{\"name\":\"tool_output\",\"lark_grammar\":\"%llguidance {}\\nstart: think? WS (call_0 | call_1 | call_2) (TEXT (call_0 | call_1 | call_2))* TEXT\\nthink: <[150006]> TEXT <[150007]>\\ncall_0: <tool_call> \\\"get_weather\\\" @free_arguments </tool_call>\\ncall_1: <tool_call> \\\"search\\\" @arguments_1 </tool_call>\\ncall_2: <tool_call> \\\"create_event\\\" @arguments_2 </tool_call>\\nWS: /[ \\\\t\\\\n\\\\r]{0,64}/\\nTEXT: /(?s:.*)/ & ~/(?s:.*)(<tool_call>|<\\\\/think>)(?s:.*)/\\n\"},{\"name\":\"free_arguments\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter*\\nparameter: <arg_key> NAME </arg_key> <arg_value> value\\nvalue: RAW_VALUE </arg_value>\\nNAME: /[^<> \\\\t\\\\n\\\\r]([^<>\\\\n\\\\r]{0,254}[^<> \\\\t\\\\n\\\\r])?/\\nRAW_VALUE: /(?s:.*)/ & ~/(?s:.*)<\\\\/arg_value>(?s:.*)/\\n\"},{\"name\":\"arguments_1\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter_0 parameter_1? parameter_2? parameter_3? parameter_4\\nparameter_0: <arg_key> \\\"query\\\" </arg_key> <arg_value> parameter_0_value\\nparameter_0_value: RAW_VALUE </arg_value>\\nparameter_1: <arg_key> \\\"limit\\\" </arg_key> <arg_value> (%json {\\\"type\\\":\\\"integer\\\",\\\"minimum\\\":1,\\\"maximum\\\":100,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) </arg_value>\\nparameter_2: <arg_key> \\\"filters\\\" </arg_key> <arg_value> (%json {\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"site\\\":{\\\"type\\\":\\\"string\\\",\\\"pattern\\\":\\\"^[a-z.]+$\\\"},\\\"after\\\":{\\\"type\\\":\\\"string\\\",\\\"format\\\":\\\"date\\\"}},\\\"required\\\":[\\\"site\\\"],\\\"additionalProperties\\\":false,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) </arg_value>\\nparameter_3: <arg_key> \\\"safe\\\" </arg_key> <arg_value> (\\\"true\\\" | \\\"false\\\") </arg_value>\\nparameter_4: <arg_key> \\\"mode\\\" </arg_key> <arg_value> (\\\"fast\\\" | \\\"deep\\\" | \\\"3\\\" | \\\"null\\\" | \\\"1.5\\\") </arg_value>\\nRAW_VALUE: /(?s:.*)/ & ~/(?s:.*)<\\\\/arg_value>(?s:.*)/\\n\"},{\"name\":\"arguments_2\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter_0 parameter_1? parameter_2? parameter_3 parameter_4? parameter_5? parameter_6?\\nparameter_0: <arg_key> \\\"title\\\" </arg_key> <arg_value> parameter_0_value\\nparameter_0_value: RAW_VALUE </arg_value>\\nparameter_1: <arg_key> \\\"attendees\\\" </arg_key> <arg_value> (%json {\\\"type\\\":\\\"array\\\",\\\"items\\\":{\\\"$ref\\\":\\\"#/$defs/__splash_root/$defs/person\\\"},\\\"$defs\\\":{\\\"__splash_root\\\":{\\\"type\\\":\\\"object\\\",\\\"$defs\\\":{\\\"person\\\":{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"name\\\":{\\\"type\\\":\\\"string\\\"},\\\"email\\\":{\\\"type\\\":\\\"string\\\"}},\\\"required\\\":[\\\"name\\\"],\\\"additionalProperties\\\":false}},\\\"properties\\\":{\\\"title\\\":{\\\"type\\\":\\\"string\\\"},\\\"attendees\\\":{\\\"type\\\":\\\"array\\\",\\\"items\\\":{\\\"$ref\\\":\\\"#/$defs/__splash_root/$defs/person\\\"}},\\\"when\\\":{\\\"anyOf\\\":[{\\\"type\\\":\\\"string\\\"},{\\\"type\\\":\\\"null\\\"}]},\\\"priority\\\":{\\\"anyOf\\\":[{\\\"type\\\":\\\"integer\\\",\\\"multipleOf\\\":5},{\\\"const\\\":\\\"high\\\"}]},\\\"tags\\\":{\\\"type\\\":[\\\"array\\\",\\\"null\\\"],\\\"items\\\":{\\\"type\\\":\\\"string\\\"},\\\"minItems\\\":2},\\\"empty\\\":{\\\"enum\\\":[\\\"\\\",\\\"x\\\"]},\\\"weight\\\":{\\\"type\\\":\\\"number\\\",\\\"maximum\\\":1e+16,\\\"minimum\\\":1.5e-07}},\\\"required\\\":[\\\"title\\\",\\\"priority\\\"],\\\"additionalProperties\\\":false}},\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) </arg_value>\\nparameter_2: <arg_key> \\\"when\\\" </arg_key> <arg_value> parameter_2_value\\nparameter_2_value: RAW_VALUE </arg_value>\\nparameter_3: <arg_key> \\\"priority\\\" </arg_key> <arg_value> (%json {\\\"type\\\":\\\"integer\\\",\\\"multipleOf\\\":5,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}} | \\\"high\\\") </arg_value>\\nparameter_4: <arg_key> \\\"tags\\\" </arg_key> <arg_value> (%json {\\\"type\\\":[\\\"array\\\",\\\"null\\\"],\\\"items\\\":{\\\"type\\\":\\\"string\\\"},\\\"minItems\\\":2,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) </arg_value>\\nparameter_5_empty_0:\\nparameter_5: <arg_key> \\\"empty\\\" </arg_key> <arg_value> (parameter_5_empty_0 | \\\"x\\\") </arg_value>\\nparameter_6: <arg_key> \\\"weight\\\" </arg_key> <arg_value> (%json {\\\"type\\\":\\\"number\\\",\\\"maximum\\\":1e+16,\\\"minimum\\\":1.5e-07,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) </arg_value>\\nRAW_VALUE: /(?s:.*)/ & ~/(?s:.*)<\\\\/arg_value>(?s:.*)/\\n\"}]}",
+   "types": {
+    "get_weather": {
+     "parameters": {
+      "city": [
+       "string"
+      ],
+      "unit": [
+       "string"
+      ],
+      "days": [
+       "integer"
+      ]
+     },
+     "other": null
+    },
+    "search": {
+     "parameters": {
+      "query": [
+       "string"
+      ],
+      "limit": [
+       "integer"
+      ],
+      "filters": [
+       "object"
+      ],
+      "safe": [
+       "boolean"
+      ],
+      "mode": [
+       "integer",
+       "null",
+       "number",
+       "string"
+      ]
+     },
+     "other": []
+    },
+    "create_event": {
+     "parameters": {
+      "title": [
+       "string"
+      ],
+      "attendees": [
+       "array"
+      ],
+      "when": [
+       "null",
+       "string"
+      ],
+      "priority": [
+       "integer",
+       "string"
+      ],
+      "tags": [
+       "array",
+       "null"
+      ],
+      "empty": [
+       "string"
+      ],
+      "weight": [
+       "number"
+      ]
+     },
+     "other": []
+    },
+    "not_offered": {
+     "parameters": {},
+     "other": null
+    }
+   }
+  }
+ },
+ {
+  "name": "flint_named",
+  "format": "flint",
+  "thinking": true,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "create_event",
+      "description": "The create_event tool.",
+      "parameters": {
+       "type": "object",
+       "$defs": {
+        "person": {
+         "type": "object",
+         "properties": {
+          "name": {
+           "type": "string"
+          },
+          "email": {
+           "type": "string",
+           "pattern": "(?<=x)y"
+          }
+         },
+         "required": [
+          "name"
+         ]
+        }
+       },
+       "properties": {
+        "title": {
+         "type": "string"
+        },
+        "attendees": {
+         "type": "array",
+         "items": {
+          "$ref": "#/$defs/person"
+         },
+         "maxItems": 200
+        },
+        "when": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "priority": {
+         "anyOf": [
+          {
+           "type": "integer",
+           "multipleOf": 5
+          },
+          {
+           "const": "high"
+          }
+         ]
+        },
+        "tags": {
+         "type": [
+          "array",
+          "null"
+         ],
+         "items": {
+          "type": "string"
+         },
+         "minItems": 2
+        },
+        "empty": {
+         "enum": [
+          "",
+          "x"
+         ]
+        },
+        "weight": {
+         "type": "number",
+         "maximum": 1e+16,
+         "minimum": 1.5e-07
+        }
+       },
+       "required": [
+        "title",
+        "priority"
+       ]
+      },
+      "strict": true
+     }
+    }
+   ],
+   "tool_choice": {
+    "type": "function",
+    "function": {
+     "name": "create_event"
+    }
+   }
+  },
+  "expected": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "create_event",
+      "description": "The create_event tool.",
+      "parameters": {
+       "type": "object",
+       "$defs": {
+        "person": {
+         "type": "object",
+         "properties": {
+          "name": {
+           "type": "string"
+          },
+          "email": {
+           "type": "string",
+           "pattern": "(?<=x)y"
+          }
+         },
+         "required": [
+          "name"
+         ]
+        }
+       },
+       "properties": {
+        "title": {
+         "type": "string"
+        },
+        "attendees": {
+         "type": "array",
+         "items": {
+          "$ref": "#/$defs/person"
+         },
+         "maxItems": 200
+        },
+        "when": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "priority": {
+         "anyOf": [
+          {
+           "type": "integer",
+           "multipleOf": 5
+          },
+          {
+           "const": "high"
+          }
+         ]
+        },
+        "tags": {
+         "type": [
+          "array",
+          "null"
+         ],
+         "items": {
+          "type": "string"
+         },
+         "minItems": 2
+        },
+        "empty": {
+         "enum": [
+          "",
+          "x"
+         ]
+        },
+        "weight": {
+         "type": "number",
+         "maximum": 1e+16,
+         "minimum": 1.5e-07
+        }
+       },
+       "required": [
+        "title",
+        "priority"
+       ]
+      },
+      "strict": true
+     }
+    }
+   ],
+   "policy": {
+    "names": [
+     "create_event"
+    ],
+    "required": true,
+    "parallel": false,
+    "strict": [
+     "create_event"
+    ],
+    "constrained": true
+   },
+   "constrained": true,
+   "grammar": "{\"grammars\":[{\"name\":\"tool_output\",\"lark_grammar\":\"%llguidance {}\\nstart: think WS (call_0) WS\\nthink: TEXT <[150007]>\\ncall_0: <tool_call> \\\"create_event\\\" @arguments_0 </tool_call>\\nWS: /[ \\\\t\\\\n\\\\r]{0,64}/\\nTEXT: /(?s:.*)/ & ~/(?s:.*)(<tool_call>|<\\\\/think>)(?s:.*)/\\n\"},{\"name\":\"arguments_0\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter_0 parameter_1? parameter_2? parameter_3 parameter_4? parameter_5? parameter_6?\\nparameter_0: <arg_key> \\\"title\\\" </arg_key> <arg_value> parameter_0_value\\nparameter_0_value: RAW_VALUE </arg_value>\\nparameter_1: <arg_key> \\\"attendees\\\" </arg_key> <arg_value> (%json {\\\"type\\\":\\\"array\\\",\\\"items\\\":{\\\"$ref\\\":\\\"#/$defs/__splash_root/$defs/person\\\"},\\\"$defs\\\":{\\\"__splash_root\\\":{\\\"type\\\":\\\"object\\\",\\\"$defs\\\":{\\\"person\\\":{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"name\\\":{\\\"type\\\":\\\"string\\\"},\\\"email\\\":{\\\"type\\\":\\\"string\\\"}},\\\"required\\\":[\\\"name\\\"],\\\"additionalProperties\\\":false}},\\\"properties\\\":{\\\"title\\\":{\\\"type\\\":\\\"string\\\"},\\\"attendees\\\":{\\\"type\\\":\\\"array\\\",\\\"items\\\":{\\\"$ref\\\":\\\"#/$defs/__splash_root/$defs/person\\\"}},\\\"when\\\":{\\\"anyOf\\\":[{\\\"type\\\":\\\"string\\\"},{\\\"type\\\":\\\"null\\\"}]},\\\"priority\\\":{\\\"anyOf\\\":[{\\\"type\\\":\\\"integer\\\",\\\"multipleOf\\\":5},{\\\"const\\\":\\\"high\\\"}]},\\\"tags\\\":{\\\"type\\\":[\\\"array\\\",\\\"null\\\"],\\\"items\\\":{\\\"type\\\":\\\"string\\\"},\\\"minItems\\\":2},\\\"empty\\\":{\\\"enum\\\":[\\\"\\\",\\\"x\\\"]},\\\"weight\\\":{\\\"type\\\":\\\"number\\\",\\\"maximum\\\":1e+16,\\\"minimum\\\":1.5e-07}},\\\"required\\\":[\\\"title\\\",\\\"priority\\\"],\\\"additionalProperties\\\":false}},\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) </arg_value>\\nparameter_2: <arg_key> \\\"when\\\" </arg_key> <arg_value> parameter_2_value\\nparameter_2_value: RAW_VALUE </arg_value>\\nparameter_3: <arg_key> \\\"priority\\\" </arg_key> <arg_value> (%json {\\\"type\\\":\\\"integer\\\",\\\"multipleOf\\\":5,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}} | \\\"high\\\") </arg_value>\\nparameter_4: <arg_key> \\\"tags\\\" </arg_key> <arg_value> (%json {\\\"type\\\":[\\\"array\\\",\\\"null\\\"],\\\"items\\\":{\\\"type\\\":\\\"string\\\"},\\\"minItems\\\":2,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) </arg_value>\\nparameter_5_empty_0:\\nparameter_5: <arg_key> \\\"empty\\\" </arg_key> <arg_value> (parameter_5_empty_0 | \\\"x\\\") </arg_value>\\nparameter_6: <arg_key> \\\"weight\\\" </arg_key> <arg_value> (%json {\\\"type\\\":\\\"number\\\",\\\"maximum\\\":1e+16,\\\"minimum\\\":1.5e-07,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) </arg_value>\\nRAW_VALUE: /(?s:.*)/ & ~/(?s:.*)<\\\\/arg_value>(?s:.*)/\\n\"}]}",
+   "types": {
+    "get_weather": {
+     "parameters": {},
+     "other": null
+    },
+    "create_event": {
+     "parameters": {
+      "title": [
+       "string"
+      ],
+      "attendees": [
+       "array"
+      ],
+      "when": [
+       "null",
+       "string"
+      ],
+      "priority": [
+       "integer",
+       "string"
+      ],
+      "tags": [
+       "array",
+       "null"
+      ],
+      "empty": [
+       "string"
+      ],
+      "weight": [
+       "number"
+      ]
+     },
+     "other": []
+    },
+    "not_offered": {
+     "parameters": {},
+     "other": null
+    }
+   }
+  }
+ },
+ {
+  "name": "flint_none",
+  "format": "flint",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ],
+   "tool_choice": "none"
+  },
+  "expected": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ],
+   "policy": {
+    "names": [],
+    "required": false,
+    "parallel": true,
+    "strict": [],
+    "constrained": true
+   },
+   "constrained": true,
+   "grammar": "{\"grammars\":[{\"name\":\"tool_output\",\"lark_grammar\":\"%llguidance {}\\nstart: think? TEXT\\nthink: <[150006]> TEXT <[150007]>\\nWS: /[ \\\\t\\\\n\\\\r]{0,64}/\\nTEXT: /(?s:.*)/ & ~/(?s:.*)(<tool_call>|<\\\\/think>)(?s:.*)/\\n\"}]}",
+   "types": {
+    "get_weather": {
+     "parameters": {},
+     "other": null
+    },
+    "not_offered": {
+     "parameters": {},
+     "other": null
+    }
+   }
+  }
+ },
+ {
+  "name": "flint_single",
+  "format": "flint",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "notes",
+      "description": "The notes tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "text": {
+         "type": "str"
+        }
+       },
+       "patternProperties": {
+        "^x_": {
+         "type": "integer"
+        }
+       },
+       "oneOf": [
+        {
+         "properties": {
+          "kind": {
+           "const": "a"
+          }
+         }
+        },
+        {
+         "properties": {
+          "kind": {
+           "const": "b"
+          },
+          "n": {
+           "type": "number"
+          }
+         }
+        }
+       ]
+      }
+     }
+    }
+   ],
+   "parallel_tool_calls": false
+  },
+  "expected": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "notes",
+      "description": "The notes tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "text": {
+         "type": "str"
+        }
+       },
+       "patternProperties": {
+        "^x_": {
+         "type": "integer"
+        }
+       },
+       "oneOf": [
+        {
+         "properties": {
+          "kind": {
+           "const": "a"
+          }
+         }
+        },
+        {
+         "properties": {
+          "kind": {
+           "const": "b"
+          },
+          "n": {
+           "type": "number"
+          }
+         }
+        }
+       ]
+      }
+     }
+    }
+   ],
+   "policy": {
+    "names": [
+     "get_weather",
+     "notes"
+    ],
+    "required": false,
+    "parallel": false,
+    "strict": [],
+    "constrained": true
+   },
+   "constrained": true,
+   "grammar": "{\"grammars\":[{\"name\":\"tool_output\",\"lark_grammar\":\"%llguidance {}\\nstart: think? TEXT ((call_0 | call_1) WS)?\\nthink: <[150006]> TEXT <[150007]>\\ncall_0: <tool_call> \\\"get_weather\\\" @free_arguments </tool_call>\\ncall_1: <tool_call> \\\"notes\\\" @free_arguments </tool_call>\\nWS: /[ \\\\t\\\\n\\\\r]{0,64}/\\nTEXT: /(?s:.*)/ & ~/(?s:.*)(<tool_call>|<\\\\/think>)(?s:.*)/\\n\"},{\"name\":\"free_arguments\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter*\\nparameter: <arg_key> NAME </arg_key> <arg_value> value\\nvalue: RAW_VALUE </arg_value>\\nNAME: /[^<> \\\\t\\\\n\\\\r]([^<>\\\\n\\\\r]{0,254}[^<> \\\\t\\\\n\\\\r])?/\\nRAW_VALUE: /(?s:.*)/ & ~/(?s:.*)<\\\\/arg_value>(?s:.*)/\\n\"}]}",
+   "types": {
+    "get_weather": {
+     "parameters": {
+      "city": [
+       "string"
+      ],
+      "unit": [
+       "string"
+      ],
+      "days": [
+       "integer"
+      ]
+     },
+     "other": null
+    },
+    "notes": {
+     "parameters": {
+      "text": [
+       "string"
+      ],
+      "kind": [
+       "string"
+      ],
+      "n": null
+     },
+     "other": null
+    },
+    "not_offered": {
+     "parameters": {},
+     "other": null
+    }
+   }
+  }
+ },
+ {
+  "name": "flint_zoo",
+  "format": "flint",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "merge",
+      "description": "The merge tool.",
+      "parameters": {
+       "allOf": [
+        {
+         "type": "object",
+         "properties": {
+          "a": {
+           "type": "number"
+          }
+         }
+        },
+        {
+         "properties": {
+          "b": {
+           "type": "boolean"
+          }
+         },
+         "required": [
+          "b"
+         ]
+        }
+       ]
+      },
+      "strict": true
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "lookup_é",
+      "description": "The lookup_é tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "naïve": {
+         "type": "string",
+         "enum": [
+          "ü",
+          "x\"y",
+          "😀"
+         ]
+        },
+        "ratio": {
+         "type": "number",
+         "exclusiveMaximum": 1e-05
+        },
+        "choice": {
+         "enum": [
+          1.0,
+          2,
+          true,
+          null,
+          {
+           "a": [
+            1,
+            "b"
+           ]
+          }
+         ]
+        }
+       },
+       "required": [
+        "naïve"
+       ]
+      },
+      "strict": true
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "tree",
+      "description": "The tree tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "label": {
+         "type": "string"
+        },
+        "child": {
+         "$ref": "#"
+        }
+       },
+       "required": [
+        "label"
+       ]
+      },
+      "strict": true
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "cond",
+      "description": "The cond tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "k": {
+         "type": "string"
+        }
+       },
+       "if": {
+        "properties": {
+         "k": {
+          "const": "a"
+         }
+        }
+       },
+       "then": {
+        "properties": {
+         "v": {
+          "type": "integer"
+         }
+        }
+       },
+       "else": {
+        "properties": {
+         "v": {
+          "type": "boolean"
+         }
+        }
+       }
+      },
+      "strict": true
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "anything",
+      "description": "The anything tool.",
+      "parameters": true,
+      "strict": true
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "shapes",
+      "description": "The shapes tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "shape": {
+         "oneOf": [
+          {
+           "type": "object",
+           "properties": {
+            "r": {
+             "type": "number"
+            }
+           },
+           "required": [
+            "r"
+           ]
+          },
+          {
+           "type": "object",
+           "properties": {
+            "w": {
+             "type": "number"
+            },
+            "h": {
+             "type": "number"
+            }
+           }
+          }
+         ]
+        },
+        "point": {
+         "type": "array",
+         "prefixItems": [
+          {
+           "type": "number"
+          },
+          {
+           "type": "number"
+          }
+         ]
+        },
+        "meta": {
+         "type": "object",
+         "propertyNames": {
+          "maxLength": 3
+         },
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "dependentSchemas": {
+        "shape": {
+         "properties": {
+          "unit": {
+           "enum": [
+            "cm",
+            "in"
+           ]
+          }
+         }
+        }
+       },
+       "additionalProperties": {
+        "type": "integer"
+       }
+      },
+      "strict": true
+     }
+    }
+   ],
+   "tool_choice": "required"
+  },
+  "expected": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "merge",
+      "description": "The merge tool.",
+      "parameters": {
+       "allOf": [
+        {
+         "type": "object",
+         "properties": {
+          "a": {
+           "type": "number"
+          }
+         }
+        },
+        {
+         "properties": {
+          "b": {
+           "type": "boolean"
+          }
+         },
+         "required": [
+          "b"
+         ]
+        }
+       ]
+      },
+      "strict": true
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "lookup_é",
+      "description": "The lookup_é tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "naïve": {
+         "type": "string",
+         "enum": [
+          "ü",
+          "x\"y",
+          "😀"
+         ]
+        },
+        "ratio": {
+         "type": "number",
+         "exclusiveMaximum": 1e-05
+        },
+        "choice": {
+         "enum": [
+          1.0,
+          2,
+          true,
+          null,
+          {
+           "a": [
+            1,
+            "b"
+           ]
+          }
+         ]
+        }
+       },
+       "required": [
+        "naïve"
+       ]
+      },
+      "strict": true
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "tree",
+      "description": "The tree tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "label": {
+         "type": "string"
+        },
+        "child": {
+         "$ref": "#"
+        }
+       },
+       "required": [
+        "label"
+       ]
+      },
+      "strict": true
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "cond",
+      "description": "The cond tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "k": {
+         "type": "string"
+        }
+       },
+       "if": {
+        "properties": {
+         "k": {
+          "const": "a"
+         }
+        }
+       },
+       "then": {
+        "properties": {
+         "v": {
+          "type": "integer"
+         }
+        }
+       },
+       "else": {
+        "properties": {
+         "v": {
+          "type": "boolean"
+         }
+        }
+       }
+      },
+      "strict": true
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "anything",
+      "description": "The anything tool.",
+      "parameters": true,
+      "strict": true
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "shapes",
+      "description": "The shapes tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "shape": {
+         "oneOf": [
+          {
+           "type": "object",
+           "properties": {
+            "r": {
+             "type": "number"
+            }
+           },
+           "required": [
+            "r"
+           ]
+          },
+          {
+           "type": "object",
+           "properties": {
+            "w": {
+             "type": "number"
+            },
+            "h": {
+             "type": "number"
+            }
+           }
+          }
+         ]
+        },
+        "point": {
+         "type": "array",
+         "prefixItems": [
+          {
+           "type": "number"
+          },
+          {
+           "type": "number"
+          }
+         ]
+        },
+        "meta": {
+         "type": "object",
+         "propertyNames": {
+          "maxLength": 3
+         },
+         "additionalProperties": {
+          "type": "string"
+         }
+        }
+       },
+       "dependentSchemas": {
+        "shape": {
+         "properties": {
+          "unit": {
+           "enum": [
+            "cm",
+            "in"
+           ]
+          }
+         }
+        }
+       },
+       "additionalProperties": {
+        "type": "integer"
+       }
+      },
+      "strict": true
+     }
+    }
+   ],
+   "policy": {
+    "names": [
+     "merge",
+     "lookup_é",
+     "tree",
+     "cond",
+     "anything",
+     "shapes"
+    ],
+    "required": true,
+    "parallel": true,
+    "strict": [
+     "anything",
+     "cond",
+     "lookup_é",
+     "merge",
+     "shapes",
+     "tree"
+    ],
+    "constrained": true
+   },
+   "constrained": true,
+   "grammar": "{\"grammars\":[{\"name\":\"tool_output\",\"lark_grammar\":\"%llguidance {}\\nstart: think? WS (call_0 | call_1 | call_2 | call_3 | call_4 | call_5) (TEXT (call_0 | call_1 | call_2 | call_3 | call_4 | call_5))* TEXT\\nthink: <[150006]> TEXT <[150007]>\\ncall_0: <tool_call> \\\"merge\\\" @arguments_0 </tool_call>\\ncall_1: <tool_call> \\\"lookup_\\\\u00e9\\\" @arguments_1 </tool_call>\\ncall_2: <tool_call> \\\"tree\\\" @arguments_2 </tool_call>\\ncall_3: <tool_call> \\\"cond\\\" @arguments_3 </tool_call>\\ncall_4: <tool_call> \\\"anything\\\" @arguments_4 </tool_call>\\ncall_5: <tool_call> \\\"shapes\\\" @arguments_5 </tool_call>\\nWS: /[ \\\\t\\\\n\\\\r]{0,64}/\\nTEXT: /(?s:.*)/ & ~/(?s:.*)(<tool_call>|<\\\\/think>)(?s:.*)/\\n\"},{\"name\":\"arguments_0\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter_0? parameter_1 extra*\\nparameter_0: <arg_key> \\\"a\\\" </arg_key> <arg_value> (%json {\\\"type\\\":\\\"number\\\",\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) </arg_value>\\nparameter_1: <arg_key> \\\"b\\\" </arg_key> <arg_value> (\\\"true\\\" | \\\"false\\\") </arg_value>\\nEXTRA_NAME: /[^<> \\\\t\\\\n\\\\r]([^<>\\\\n\\\\r]{0,254}[^<> \\\\t\\\\n\\\\r])?/ & ~(\\\"a\\\" | \\\"b\\\")\\nextra: <arg_key> EXTRA_NAME </arg_key> <arg_value> extra_value\\nextra_value: RAW_VALUE </arg_value>\\nRAW_VALUE: /(?s:.*)/ & ~/(?s:.*)<\\\\/arg_value>(?s:.*)/\\n\"},{\"name\":\"arguments_1\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter_0 parameter_1? parameter_2?\\nparameter_0: <arg_key> \\\"na\\\\u00efve\\\" </arg_key> <arg_value> (\\\"\\\\u00fc\\\" | \\\"x\\\\\\\"y\\\" | \\\"\\\\ud83d\\\\ude00\\\") </arg_value>\\nparameter_1: <arg_key> \\\"ratio\\\" </arg_key> <arg_value> (%json {\\\"type\\\":\\\"number\\\",\\\"exclusiveMaximum\\\":1e-05,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) </arg_value>\\nparameter_2: <arg_key> \\\"choice\\\" </arg_key> <arg_value> (\\\"1.0\\\" | \\\"2\\\" | \\\"true\\\" | \\\"null\\\" | \\\"{\\\\\\\"a\\\\\\\":[1,\\\\\\\"b\\\\\\\"]}\\\") </arg_value>\\nRAW_VALUE: /(?s:.*)/ & ~/(?s:.*)<\\\\/arg_value>(?s:.*)/\\n\"},{\"name\":\"arguments_2\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter_0 parameter_1?\\nparameter_0: <arg_key> \\\"label\\\" </arg_key> <arg_value> parameter_0_value\\nparameter_0_value: RAW_VALUE </arg_value>\\nparameter_1: <arg_key> \\\"child\\\" </arg_key> <arg_value> (%json {\\\"$ref\\\":\\\"#/$defs/__splash_root\\\",\\\"$defs\\\":{\\\"__splash_root\\\":{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"label\\\":{\\\"type\\\":\\\"string\\\"},\\\"child\\\":{\\\"$ref\\\":\\\"#/$defs/__splash_root\\\"}},\\\"required\\\":[\\\"label\\\"],\\\"additionalProperties\\\":false}},\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) </arg_value>\\nRAW_VALUE: /(?s:.*)/ & ~/(?s:.*)<\\\\/arg_value>(?s:.*)/\\n\"},{\"name\":\"arguments_3\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter_0? parameter_1? extra*\\nparameter_0: <arg_key> \\\"k\\\" </arg_key> <arg_value> parameter_0_value\\nparameter_0_value: RAW_VALUE </arg_value>\\nparameter_1: <arg_key> \\\"v\\\" </arg_key> <arg_value> (%json {\\\"type\\\":\\\"integer\\\",\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}} | \\\"true\\\" | \\\"false\\\") </arg_value>\\nEXTRA_NAME: /[^<> \\\\t\\\\n\\\\r]([^<>\\\\n\\\\r]{0,254}[^<> \\\\t\\\\n\\\\r])?/ & ~(\\\"k\\\" | \\\"v\\\")\\nextra: <arg_key> EXTRA_NAME </arg_key> <arg_value> extra_value\\nextra_value: RAW_VALUE </arg_value>\\nRAW_VALUE: /(?s:.*)/ & ~/(?s:.*)<\\\\/arg_value>(?s:.*)/\\n\"},{\"name\":\"arguments_4\",\"lark_grammar\":\"%llguidance {}\\nstart: extra*\\nEXTRA_NAME: /[^<> \\\\t\\\\n\\\\r]([^<>\\\\n\\\\r]{0,254}[^<> \\\\t\\\\n\\\\r])?/\\nextra: <arg_key> EXTRA_NAME </arg_key> <arg_value> extra_value\\nextra_value: RAW_VALUE </arg_value>\\nRAW_VALUE: /(?s:.*)/ & ~/(?s:.*)<\\\\/arg_value>(?s:.*)/\\n\"},{\"name\":\"arguments_5\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter_0? parameter_1? parameter_2? parameter_3? extra*\\nparameter_0: <arg_key> \\\"shape\\\" </arg_key> <arg_value> (%json {\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"r\\\":{\\\"type\\\":\\\"number\\\"}},\\\"required\\\":[\\\"r\\\"],\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}} | %json {\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"w\\\":{\\\"type\\\":\\\"number\\\"},\\\"h\\\":{\\\"type\\\":\\\"number\\\"}},\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) </arg_value>\\nparameter_1: <arg_key> \\\"point\\\" </arg_key> <arg_value> (%json {\\\"type\\\":\\\"array\\\",\\\"prefixItems\\\":[{\\\"type\\\":\\\"number\\\"},{\\\"type\\\":\\\"number\\\"}],\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) </arg_value>\\nparameter_2: <arg_key> \\\"meta\\\" </arg_key> <arg_value> (%json {\\\"type\\\":\\\"object\\\",\\\"additionalProperties\\\":{\\\"type\\\":\\\"string\\\"},\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) </arg_value>\\nparameter_3: <arg_key> \\\"unit\\\" </arg_key> <arg_value> (%json {\\\"type\\\":\\\"integer\\\",\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) </arg_value>\\nEXTRA_NAME: /[^<> \\\\t\\\\n\\\\r]([^<>\\\\n\\\\r]{0,254}[^<> \\\\t\\\\n\\\\r])?/ & ~(\\\"shape\\\" | \\\"point\\\" | \\\"meta\\\" | \\\"unit\\\")\\nextra: <arg_key> EXTRA_NAME </arg_key> <arg_value> (%json {\\\"type\\\":\\\"integer\\\",\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) </arg_value>\\nRAW_VALUE: /(?s:.*)/ & ~/(?s:.*)<\\\\/arg_value>(?s:.*)/\\n\"}]}",
+   "types": {
+    "merge": {
+     "parameters": {
+      "a": [
+       "number"
+      ],
+      "b": [
+       "boolean"
+      ]
+     },
+     "other": null
+    },
+    "lookup_é": {
+     "parameters": {
+      "naïve": [
+       "string"
+      ],
+      "ratio": [
+       "number"
+      ],
+      "choice": [
+       "boolean",
+       "integer",
+       "null",
+       "number",
+       "object"
+      ]
+     },
+     "other": []
+    },
+    "tree": {
+     "parameters": {
+      "label": [
+       "string"
+      ],
+      "child": [
+       "object"
+      ]
+     },
+     "other": []
+    },
+    "cond": {
+     "parameters": {
+      "k": [
+       "string"
+      ],
+      "v": [
+       "boolean",
+       "integer"
+      ]
+     },
+     "other": null
+    },
+    "anything": {
+     "parameters": {},
+     "other": null
+    },
+    "shapes": {
+     "parameters": {
+      "shape": [
+       "object"
+      ],
+      "point": [
+       "array"
+      ],
+      "meta": [
+       "object"
+      ],
+      "unit": [
+       "integer"
+      ]
+     },
+     "other": [
+      "integer"
+     ]
+    },
+    "not_offered": {
+     "parameters": {},
+     "other": null
+    }
+   }
+  }
+ },
+ {
+  "name": "flint_json",
+  "format": "flint",
+  "thinking": false,
+  "request": {
+   "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+     "name": "answer",
+     "schema": {
+      "type": "object",
+      "properties": {
+       "answer": {
+        "type": "string"
+       },
+       "score": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 10
+       },
+       "tags": {
+        "type": "array",
+        "items": {
+         "type": "string",
+         "pattern": "^\\w+$"
+        },
+        "maxItems": 100
+       },
+       "note": {
+        "type": "string",
+        "pattern": "^(?!no)",
+        "propertyNames": {
+         "pattern": "a"
+        }
+       }
+      },
+      "required": [
+       "answer",
+       "score"
+      ],
+      "additionalProperties": false
+     }
+    }
+   }
+  },
+  "expected": {
+   "tools": null,
+   "policy": null,
+   "constrained": true,
+   "grammar": "%llguidance {}\nstart: think? WS %json {\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"},\"score\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":10},\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"string\",\"pattern\":\"^\\\\w+$\"}},\"note\":{\"type\":\"string\"}},\"required\":[\"answer\",\"score\"],\"additionalProperties\":false,\"x-guidance\":{\"lenient\":true,\"whitespace_pattern\":\"[ \\\\t\\\\n\\\\r]{0,64}\"}}\nthink: <[150006]> TEXT <[150007]>\nTEXT: /(?s:.*)/ & ~/(?s:.*)<\\/think>(?s:.*)/\nWS: /[ \\t\\n\\r]{0,64}/\n",
+   "types": null
+  }
+ },
+ {
+  "name": "flint_tools_and_answer",
+  "format": "flint",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": "The search tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string",
+         "description": "What to look for"
+        },
+        "limit": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 100
+        },
+        "filters": {
+         "type": "object",
+         "properties": {
+          "site": {
+           "type": "string",
+           "pattern": "^[a-z.]+$"
+          },
+          "after": {
+           "type": "string",
+           "format": "date"
+          }
+         },
+         "required": [
+          "site"
+         ]
+        },
+        "safe": {
+         "type": "boolean"
+        },
+        "mode": {
+         "enum": [
+          "fast",
+          "deep",
+          3,
+          null,
+          1.5
+         ]
+        }
+       },
+       "required": [
+        "query",
+        "mode"
+       ]
+      },
+      "strict": true
+     }
+    }
+   ],
+   "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+     "schema": {
+      "type": "array",
+      "items": {
+       "enum": [
+        "a",
+        "bé",
+        2.5e-09
+       ]
+      },
+      "multipleOf": 100
+     }
+    }
+   }
+  },
+  "expected": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": "The search tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string",
+         "description": "What to look for"
+        },
+        "limit": {
+         "type": "integer",
+         "minimum": 1,
+         "maximum": 100
+        },
+        "filters": {
+         "type": "object",
+         "properties": {
+          "site": {
+           "type": "string",
+           "pattern": "^[a-z.]+$"
+          },
+          "after": {
+           "type": "string",
+           "format": "date"
+          }
+         },
+         "required": [
+          "site"
+         ]
+        },
+        "safe": {
+         "type": "boolean"
+        },
+        "mode": {
+         "enum": [
+          "fast",
+          "deep",
+          3,
+          null,
+          1.5
+         ]
+        }
+       },
+       "required": [
+        "query",
+        "mode"
+       ]
+      },
+      "strict": true
+     }
+    }
+   ],
+   "policy": {
+    "names": [
+     "get_weather",
+     "search"
+    ],
+    "required": false,
+    "parallel": true,
+    "strict": [
+     "search"
+    ],
+    "constrained": true
+   },
+   "constrained": true,
+   "grammar": "{\"grammars\":[{\"name\":\"tool_output\",\"lark_grammar\":\"%llguidance {}\\nstart: think? ((WS (call_0 | call_1) (TEXT (call_0 | call_1))* TEXT) | answer)\\nanswer: WS %json {\\\"type\\\":\\\"array\\\",\\\"items\\\":{\\\"enum\\\":[\\\"a\\\",\\\"b\\\\u00e9\\\",2.5e-09]},\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}} WS\\nthink: <[150006]> TEXT <[150007]>\\ncall_0: <tool_call> \\\"get_weather\\\" @free_arguments </tool_call>\\ncall_1: <tool_call> \\\"search\\\" @arguments_1 </tool_call>\\nWS: /[ \\\\t\\\\n\\\\r]{0,64}/\\nTEXT: /(?s:.*)/ & ~/(?s:.*)(<tool_call>|<\\\\/think>)(?s:.*)/\\n\"},{\"name\":\"free_arguments\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter*\\nparameter: <arg_key> NAME </arg_key> <arg_value> value\\nvalue: RAW_VALUE </arg_value>\\nNAME: /[^<> \\\\t\\\\n\\\\r]([^<>\\\\n\\\\r]{0,254}[^<> \\\\t\\\\n\\\\r])?/\\nRAW_VALUE: /(?s:.*)/ & ~/(?s:.*)<\\\\/arg_value>(?s:.*)/\\n\"},{\"name\":\"arguments_1\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter_0 parameter_1? parameter_2? parameter_3? parameter_4\\nparameter_0: <arg_key> \\\"query\\\" </arg_key> <arg_value> parameter_0_value\\nparameter_0_value: RAW_VALUE </arg_value>\\nparameter_1: <arg_key> \\\"limit\\\" </arg_key> <arg_value> (%json {\\\"type\\\":\\\"integer\\\",\\\"minimum\\\":1,\\\"maximum\\\":100,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) </arg_value>\\nparameter_2: <arg_key> \\\"filters\\\" </arg_key> <arg_value> (%json {\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"site\\\":{\\\"type\\\":\\\"string\\\",\\\"pattern\\\":\\\"^[a-z.]+$\\\"},\\\"after\\\":{\\\"type\\\":\\\"string\\\",\\\"format\\\":\\\"date\\\"}},\\\"required\\\":[\\\"site\\\"],\\\"additionalProperties\\\":false,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) </arg_value>\\nparameter_3: <arg_key> \\\"safe\\\" </arg_key> <arg_value> (\\\"true\\\" | \\\"false\\\") </arg_value>\\nparameter_4: <arg_key> \\\"mode\\\" </arg_key> <arg_value> (\\\"fast\\\" | \\\"deep\\\" | \\\"3\\\" | \\\"null\\\" | \\\"1.5\\\") </arg_value>\\nRAW_VALUE: /(?s:.*)/ & ~/(?s:.*)<\\\\/arg_value>(?s:.*)/\\n\"}]}",
+   "types": {
+    "get_weather": {
+     "parameters": {
+      "city": [
+       "string"
+      ],
+      "unit": [
+       "string"
+      ],
+      "days": [
+       "integer"
+      ]
+     },
+     "other": null
+    },
+    "search": {
+     "parameters": {
+      "query": [
+       "string"
+      ],
+      "limit": [
+       "integer"
+      ],
+      "filters": [
+       "object"
+      ],
+      "safe": [
+       "boolean"
+      ],
+      "mode": [
+       "integer",
+       "null",
+       "number",
+       "string"
+      ]
+     },
+     "other": []
+    },
+    "not_offered": {
+     "parameters": {},
+     "other": null
+    }
+   }
+  }
+ },
+ {
+  "name": "err_tools_not_array",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tools": {
+    "a": 1
+   }
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "tools must be an array"
+   }
+  }
+ },
+ {
+  "name": "err_not_function",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "code_interpreter"
+    }
+   ]
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "only function tools are supported"
+   }
+  }
+ },
+ {
+  "name": "err_no_function",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function"
+    }
+   ]
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "a function tool needs a function object"
+   }
+  }
+ },
+ {
+  "name": "err_bad_name",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "a<b",
+      "description": "The a<b tool."
+     }
+    }
+   ]
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "tool name must be 1 to 256 characters in NFC, without <, >, line breaks, lone surrogates or surrounding whitespace"
+   }
+  }
+ },
+ {
+  "name": "err_space_name",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": " padded",
+      "description": "The  padded tool."
+     }
+    }
+   ]
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "tool name must be 1 to 256 characters in NFC, without <, >, line breaks, lone surrogates or surrounding whitespace"
+   }
+  }
+ },
+ {
+  "name": "err_nfd_name",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "café",
+      "description": "The café tool."
+     }
+    }
+   ]
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "tool name must be 1 to 256 characters in NFC, without <, >, line breaks, lone surrogates or surrounding whitespace"
+   }
+  }
+ },
+ {
+  "name": "err_duplicate",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "duplicate tool name: get_weather"
+   }
+  }
+ },
+ {
+  "name": "err_parameters",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "x",
+      "description": "The x tool.",
+      "parameters": 5
+     }
+    }
+   ]
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "invalid tool schema for x"
+   }
+  }
+ },
+ {
+  "name": "err_strict_type",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "x",
+      "description": "The x tool.",
+      "parameters": {},
+      "strict": "yes"
+     }
+    }
+   ]
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "strict must be a boolean for tool x"
+   }
+  }
+ },
+ {
+  "name": "err_choice_without_tools",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tool_choice": "required"
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "tool_choice requires tools"
+   }
+  }
+ },
+ {
+  "name": "err_choice_empty_tools",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tools": [],
+   "tool_choice": "required"
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "tool_choice requires at least one tool"
+   }
+  }
+ },
+ {
+  "name": "err_named_unknown",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ],
+   "tool_choice": {
+    "type": "function",
+    "function": {
+     "name": "nope"
+    }
+   }
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "invalid named tool_choice"
+   }
+  }
+ },
+ {
+  "name": "err_choice_word",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ],
+   "tool_choice": "sometimes"
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "invalid tool_choice"
+   }
+  }
+ },
+ {
+  "name": "err_parallel",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "The get_weather tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ],
+   "parallel_tool_calls": "no"
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "parallel_tool_calls must be a boolean"
+   }
+  }
+ },
+ {
+  "name": "err_remote_ref",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "x",
+      "description": "The x tool.",
+      "parameters": {
+       "properties": {
+        "a": {
+         "$ref": "https://example.com/s.json"
+        }
+       }
+      },
+      "strict": true
+     }
+    }
+   ]
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "remote tool schema reference is not allowed: https://example.com/s.json"
+   }
+  }
+ },
+ {
+  "name": "err_ref_type",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "x",
+      "description": "The x tool.",
+      "parameters": {
+       "properties": {
+        "a": {
+         "$ref": 5
+        }
+       }
+      },
+      "strict": true
+     }
+    }
+   ]
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "$ref must be a string"
+   }
+  }
+ },
+ {
+  "name": "err_unresolved_ref",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "x",
+      "description": "The x tool.",
+      "parameters": {
+       "properties": {
+        "a": {
+         "$ref": "#/$defs/missing"
+        }
+       }
+      },
+      "strict": true
+     }
+    }
+   ]
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "unresolved tool parameter reference: #/$defs/missing"
+   }
+  }
+ },
+ {
+  "name": "err_deep",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "x",
+      "description": "The x tool.",
+      "parameters": {
+       "a": {
+        "a": {
+         "a": {
+          "a": {
+           "a": {
+            "a": {
+             "a": {
+              "a": {
+               "a": {
+                "a": {
+                 "a": {
+                  "a": {
+                   "a": {
+                    "a": {
+                     "a": {
+                      "a": {
+                       "a": {
+                        "a": {
+                         "a": {
+                          "a": {
+                           "a": {
+                            "a": {
+                             "a": {
+                              "a": {
+                               "a": {
+                                "a": {
+                                 "a": {
+                                  "a": {
+                                   "a": {
+                                    "a": {
+                                     "a": {
+                                      "a": {
+                                       "a": {
+                                        "a": {
+                                         "a": {
+                                          "a": {
+                                           "a": {
+                                            "a": {
+                                             "a": {
+                                              "a": {
+                                               "a": {
+                                                "a": {
+                                                 "a": {
+                                                  "a": {
+                                                   "a": {
+                                                    "a": {
+                                                     "a": {
+                                                      "a": {
+                                                       "a": {
+                                                        "a": {
+                                                         "a": {
+                                                          "a": {
+                                                           "a": {
+                                                            "a": {
+                                                             "a": {
+                                                              "a": {
+                                                               "a": {
+                                                                "a": {
+                                                                 "a": {
+                                                                  "a": {
+                                                                   "a": {
+                                                                    "a": {
+                                                                     "a": {
+                                                                      "a": {
+                                                                       "a": {
+                                                                        "a": {
+                                                                         "a": {
+                                                                          "a": {
+                                                                           "a": {
+                                                                            "a": 1
+                                                                           }
+                                                                          }
+                                                                         }
+                                                                        }
+                                                                       }
+                                                                      }
+                                                                     }
+                                                                    }
+                                                                   }
+                                                                  }
+                                                                 }
+                                                                }
+                                                               }
+                                                              }
+                                                             }
+                                                            }
+                                                           }
+                                                          }
+                                                         }
+                                                        }
+                                                       }
+                                                      }
+                                                     }
+                                                    }
+                                                   }
+                                                  }
+                                                 }
+                                                }
+                                               }
+                                              }
+                                             }
+                                            }
+                                           }
+                                          }
+                                         }
+                                        }
+                                       }
+                                      }
+                                     }
+                                    }
+                                   }
+                                  }
+                                 }
+                                }
+                               }
+                              }
+                             }
+                            }
+                           }
+                          }
+                         }
+                        }
+                       }
+                      }
+                     }
+                    }
+                   }
+                  }
+                 }
+                }
+               }
+              }
+             }
+            }
+           }
+          }
+         }
+        }
+       }
+      },
+      "strict": true
+     }
+    }
+   ]
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "invalid tool schema for x: nested more than 64 levels deep"
+   }
+  }
+ },
+ {
+  "name": "err_meta",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "x",
+      "description": "The x tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "a": {
+         "type": "strin"
+        }
+       }
+      },
+      "strict": true
+     }
+    }
+   ]
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "invalid tool schema for x: 'strin' is not valid under any of the given schemas"
+   }
+  },
+  "message_prefix": "invalid tool schema for x: "
+ },
+ {
+  "name": "err_required_impossible",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "x",
+      "description": "The x tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "a": false
+       },
+       "required": [
+        "a"
+       ]
+      },
+      "strict": true
+     }
+    }
+   ],
+   "tool_choice": "required"
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "required tool parameter cannot have a value: a"
+   }
+  }
+ },
+ {
+  "name": "err_enum_framing",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "x",
+      "description": "The x tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "a": {
+         "enum": [
+          "ok",
+          "a\n</parameter>\nb"
+         ]
+        }
+       }
+      },
+      "strict": true
+     }
+    }
+   ],
+   "tool_choice": "required"
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "tool parameter enum contains XML framing"
+   }
+  }
+ },
+ {
+  "name": "err_no_object",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "x",
+      "description": "The x tool.",
+      "parameters": {
+       "type": "string"
+      },
+      "strict": true
+     }
+    }
+   ],
+   "tool_choice": "required"
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "tool parameters must allow a top-level JSON object"
+   }
+  }
+ },
+ {
+  "name": "err_cyclic",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "x",
+      "description": "The x tool.",
+      "parameters": {
+       "$ref": "#/$defs/a",
+       "$defs": {
+        "a": {
+         "$ref": "#/$defs/a"
+        }
+       }
+      },
+      "strict": true
+     }
+    }
+   ],
+   "tool_choice": "required"
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "cyclic direct tool argument reference"
+   }
+  }
+ },
+ {
+  "name": "err_parameter_name",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "x",
+      "description": "The x tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "<b>": {
+         "type": "string"
+        }
+       }
+      },
+      "strict": true
+     }
+    }
+   ],
+   "tool_choice": "required"
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "invalid tool parameter name"
+   }
+  }
+ },
+ {
+  "name": "err_pattern_tool",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "x",
+      "description": "The x tool.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "a": {
+         "type": "string",
+         "pattern": "("
+        }
+       }
+      },
+      "strict": true
+     }
+    }
+   ]
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "invalid tool schema for x: '(' is not a 'regex'"
+   }
+  }
+ },
+ {
+  "name": "err_pattern_names",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+     "schema": {
+      "patternProperties": {
+       "[it's": {}
+      }
+     }
+    }
+   }
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "invalid response schema: \"[it's\" is not a 'regex'"
+   }
+  }
+ },
+ {
+  "name": "err_format_kind",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "response_format": {
+    "type": "xml"
+   }
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "unsupported response_format"
+   }
+  }
+ },
+ {
+  "name": "err_format_value",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "response_format": "json"
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "response_format must be an object"
+   }
+  }
+ },
+ {
+  "name": "err_format_schema",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+     "name": "x"
+    }
+   }
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "response_format.json_schema.schema is required"
+   }
+  }
+ },
+ {
+  "name": "err_format_remote",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+     "schema": {
+      "$ref": "http://x/y"
+     }
+    }
+   }
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "remote schema reference is not allowed: http://x/y"
+   }
+  }
+ },
+ {
+  "name": "err_format_schema_type",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+     "schema": {
+      "$schema": 4
+     }
+    }
+   }
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "$schema must be a string"
+   }
+  }
+ },
+ {
+  "name": "err_format_meta",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+     "schema": {
+      "minimum": "zero"
+     }
+    }
+   }
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "invalid response schema: 'zero' is not of type 'number'"
+   }
+  },
+  "message_prefix": "invalid response schema: "
+ },
+ {
+  "name": "err_format_mixed",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+     "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+       "a": {
+        "$schema": "http://json-schema.org/draft-07/schema#"
+       }
+      }
+     }
+    }
+   }
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "mixed schema dialects are not supported"
+   }
+  }
+ },
+ {
+  "name": "err_format_unevaluated",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+     "schema": {
+      "patternProperties": {
+       "a": {}
+      },
+      "unevaluatedProperties": false
+     }
+    }
+   }
+  },
+  "expected": {
+   "error": {
+    "status": 400,
+    "message": "unevaluatedProperties with patternProperties is not supported"
+   }
+  }
+ },
+ {
+  "name": "json_plain_answer",
+  "format": "qwen",
+  "thinking": false,
+  "request": {
+   "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+     "name": "answer",
+     "schema": {
+      "type": "object",
+      "properties": {
+       "answer": {
+        "type": "string"
+       },
+       "score": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 10
+       },
+       "tags": {
+        "type": "array",
+        "items": {
+         "type": "string",
+         "pattern": "^\\w+$"
+        },
+        "maxItems": 100
+       },
+       "note": {
+        "type": "string",
+        "pattern": "^(?!no)",
+        "propertyNames": {
+         "pattern": "a"
+        }
+       }
+      },
+      "required": [
+       "answer",
+       "score"
+      ],
+      "additionalProperties": false
+     }
+    }
+   }
+  },
+  "expected": {
+   "tools": null,
+   "policy": null,
+   "constrained": true,
+   "grammar": "%llguidance {}\nstart: WS %json {\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"},\"score\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":10},\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"string\",\"pattern\":\"^\\\\w+$\"}},\"note\":{\"type\":\"string\"}},\"required\":[\"answer\",\"score\"],\"additionalProperties\":false,\"x-guidance\":{\"lenient\":true,\"whitespace_pattern\":\"[ \\\\t\\\\n\\\\r]{0,64}\"}}\nWS: /[ \\t\\n\\r]{0,64}/\n",
+   "types": null
+  }
+ }
+]

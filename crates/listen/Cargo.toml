@@ -1,0 +1,35 @@
+[package]
+name = "listen"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[features]
+placement-probe = ["ort/coreml"]
+# The public edition (app's `public` feature, docs/editions.md): a vocabulary without the user's project and place names,
+# and no English-and-Polish-only penalty.
+public = []
+
+[[bin]]
+name = "heimdall-small-model-probe"
+path = "src/bin/heimdall-small-model-probe.rs"
+required-features = ["placement-probe"]
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ort = "=2.0.0-rc.13"
+rustfft = "6.4"
+hound = "3.5"
+libc = "0.2"
+half = "2"
+sha2 = "0.10"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-metal = { version = "0.3.2", features = ["dispatch2"] }
+dispatch2 = "0.3"
+objc2 = "0.6.4"
+objc2-foundation = "0.3.2"
+objc2-core-ml = "0.3.2"
+block2 = "0.6"

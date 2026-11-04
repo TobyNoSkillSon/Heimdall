@@ -1,0 +1,5 @@
+{
+  "nemo-speech": "e59dfb0b5c22655620f41391cc9a000d6f56b802",
+  "ggml": "bd4f514db14d87fded667787a7a963bfbaa98e89",
+  "opus": "xiph/opus@7b05f44f4baadf34d8d1073f4ff69f1806d5cdb4 (from audiopus_sys 0.2.2)"
+}

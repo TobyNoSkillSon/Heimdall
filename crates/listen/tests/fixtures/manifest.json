@@ -1,0 +1,78 @@
+{
+  "clips": [
+    {
+      "id": "en-1",
+      "file": "en-1.wav",
+      "reference": "The aspect ratio of this format (dividing by twelve to obtain the simplest whole-number ratio) is therefore said to be 3:2.",
+      "language": "en",
+      "origin": {
+        "repo": "google/fleurs",
+        "revision": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+        "archive": "data/en_us/audio/test.tar.gz",
+        "member": "10344335557154974057.wav",
+        "sentenceId": "1846"
+      },
+      "sha256": "937e5687e4b1440e4c9e701da6a9c3d63a95bd84136adc8e1884d497ae898bfd"
+    },
+    {
+      "id": "en-2",
+      "file": "en-2.wav",
+      "reference": "Blogs can also help improve student writing. While students often begin their blog experience with sloppy grammar and spelling, the presence of an audience generally changes that.",
+      "language": "en",
+      "origin": {
+        "repo": "google/fleurs",
+        "revision": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+        "archive": "data/en_us/audio/test.tar.gz",
+        "member": "10938576782105608041.wav",
+        "sentenceId": "1990"
+      },
+      "sha256": "e9b1e8bfb94ababbc1862e0787d055c1535ad26e9f1e77b545dd435844e9809c"
+    },
+    {
+      "id": "pl-1",
+      "file": "pl-1.wav",
+      "reference": "Jeżeli schodzisz na brzeg wyłącznie podczas wycieczek statkiem, nie musisz mieć oddzielnej wizy (sytuacja na 2009 r.).",
+      "language": "pl",
+      "origin": {
+        "repo": "google/fleurs",
+        "revision": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+        "archive": "data/pl_pl/audio/test.tar.gz",
+        "member": "10166331184477401711.wav",
+        "sentenceId": "1981"
+      },
+      "sha256": "4023bb681c7e9af6e18b09586a1f43ab5478bb14017e8f95455be5c5f82aec36"
+    },
+    {
+      "id": "pl-2",
+      "file": "pl-2.wav",
+      "reference": "Główna władza kościelna znajduje się w Rzymie od ponad tysiąca lat, a taka koncentracja władzy i pieniędzy każe zadać sobie pytanie, czy ta doktryna jest przestrzegana.",
+      "language": "pl",
+      "origin": {
+        "repo": "google/fleurs",
+        "revision": "70bb2e84b976b7e960aa89f1c648e09c59f894dd",
+        "archive": "data/pl_pl/audio/test.tar.gz",
+        "member": "107354460426921830.wav",
+        "sentenceId": "1878"
+      },
+      "sha256": "18446f50788d80eccf45cb09dbfa02cfafbe7a66c1300b012081696eecbeb97d"
+    },
+    {
+      "id": "mixed",
+      "file": "mixed.wav",
+      "reference": "The aspect ratio of this format (dividing by twelve to obtain the simplest whole-number ratio) is therefore said to be 3:2. Jeżeli schodzisz na brzeg wyłącznie podczas wycieczek statkiem, nie musisz mieć oddzielnej wizy (sytuacja na 2009 r.).",
+      "language": "mixed",
+      "sha256": "cc1b359e1bafa321409c715db15f943f5d5fd406e74f8d386a5fee3ee844f593",
+      "construction": "0.5s silence, en-1, 2s silence, pl-1, 2s silence"
+    },
+    {
+      "id": "continuous",
+      "file": "continuous.wav",
+      "reference": "The aspect ratio of this format (dividing by twelve to obtain the simplest whole-number ratio) is therefore said to be 3:2. Blogs can also help improve student writing. While students often begin their blog experience with sloppy grammar and spelling, the presence of an audience generally changes that.",
+      "language": "synthetic",
+      "sha256": "6598df6d06453c7f369cfcc04350da8d7b2f8bbcadecd0b3b004023ec0fdea59",
+      "construction": "en-1[0.5:10.5] then en-2 with fixed 100x gain (different recording level), 2s silence; no artificial inter-speech pause"
+    }
+  ],
+  "license": "CC-BY-4.0",
+  "attribution": "Google FLEURS, 2022; https://huggingface.co/datasets/google/fleurs"
+}

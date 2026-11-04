@@ -1,0 +1,23 @@
+Source: crates/listen/src/metal/Vella-LICENSE in this repository (Vella revision d7fa658db6f1370944694648510786a6c9e99821, per crates/listen/THIRD_PARTY.md). No upstream URL is recorded; this copy was not fetched from a network source.
+Retrieved: 2026-10-27
+SHA-256 of the licence text below: c99f39011cf131ff62bb8f3aea9dd20d200b1b881123879efd642a259c88e628
+Applies to: vella_formats27.metal, a vendored Metal kernel used by the Parakeet Metal encoder.
+
+MIT License
+
+Copyright (c) 2026 Vella contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+associated documentation files (the "Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the
+following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial
+portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT
+LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO
+EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+USE OR OTHER DEALINGS IN THE SOFTWARE.

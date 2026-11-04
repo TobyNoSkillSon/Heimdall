@@ -1,0 +1,12 @@
+{
+  "version": "1.4.1",
+  "url": "https://github.com/incoai/splash/releases/download/1.4.1/splash-1.4.1-arm64-macos26.tar.gz",
+  "tarball_sha256": "5746068dc652a4998267d55b1c6d59b545f1bc1e018131c6d8025022f7000d5c",
+  "files": {
+    "engine/splash": "532732b0fef256d08e683fc1b50d132e4946d25a8d4f878d0451bebba0385a9a",
+    "engine/splash.metallib": "1933cf46cbcae8349640bbcfc3875f46b5be4630e13b42804cb5cf7070bce46d",
+    "engine/host-step.metallib": "8e177c753e2051cd8a31c79bf031b3fae8daf04f5564ced9fc37db064bdfe51a",
+    "THIRD_PARTY_NOTICES": "2fedf1277bf732f8435c3e3be2798f52f25f7e2bd4155865cb366da55b88e50b",
+    "LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+  }
+}

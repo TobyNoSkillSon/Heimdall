@@ -1,0 +1,31 @@
+[package]
+name = "capture"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+heimdall-home = { path = "../home" }
+heimdall-archive = { path = "../archive" }
+anyhow = "1"
+crossbeam-channel = "0.5"
+crossbeam-queue = "0.3"
+rusqlite = { version = "0.39", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zstd = "0.13"
+rubato = "0.16"
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSArray", "NSDictionary", "NSString", "NSValue", "NSUUID", "NSNotification"] }
+objc2-core-audio = "0.3"
+objc2-core-audio-types = "0.3"
+objc2-core-foundation = "0.3"
+objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSRunningApplication"] }
+objc2-av-foundation = { version = "0.3", features = ["AVCaptureDevice", "AVMediaFormat"] }
+block2 = "0.6"
+
+[dev-dependencies]
+tempfile = "3"

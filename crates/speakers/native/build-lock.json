@@ -1,0 +1,25 @@
+{
+  "platform": "macOS arm64",
+  "compiler": "Apple clang version 21.0.0 (clang-2100.4.1.1)",
+  "rustc": "1.99.0 (b940084d7 2026-09-28)",
+  "cmake": "4.4.3",
+  "cxx_standard": 17,
+  "release_flags": "-O3 -DNDEBUG -fno-fast-math",
+  "GGML_NATIVE": false,
+  "GGML_CCACHE": false,
+  "GGML_METAL": true,
+  "GGML_METAL_EMBED_LIBRARY": true,
+  "GGML_BLAS": false,
+  "GGML_OPENMP": false,
+  "GGML_LLAMAFILE": true,
+  "source_pins": "../vendor/pins.json",
+  "note": "The checked-in vendors are the actual build inputs; no build-time fetch. Compiler signature enforced on macOS. Cargo.lock pins Rust dependencies. Metal runtime uses vendored compile options (documented separately).",
+  "custom_speaker_metallib": {
+    "language": "metal4.0",
+    "flags": [
+      "-fno-fast-math"
+    ],
+    "compiler": "xcrun metal from the pinned Apple/Xcode toolchain",
+    "dispatch": "Rust metal 0.32.0; opt-in FP16 storage/operands, FP32 accumulators and boundary tensors"
+  }
+}

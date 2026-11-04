@@ -1,0 +1,11 @@
+{
+  "source_revision": "62a6f74bab748b1755f4cd8dfc0871caf865c6c8",
+  "path": "runtime/libheimdall_decide.dylib",
+  "bytes": 17258520,
+  "sha256": "a53fd566b91d3ef6d9561f2839b01dc6885a7db9a3b2d50dda977ca88cf1b288",
+  "platform": "macOS arm64, AppleClang 21, Metal+Accelerate, Release",
+  "heimdall_patch": "native/state-budget.inc; native/CMakeLists.txt; native/conformer-conv.inc; native/pointwise.metal; native/bridge.cpp; native/device-owner.inc; native/device-recovery.inc; native/residency.patch; native/ownership.h; native/ownership.cpp; native/decision-input.inc; native/decision-speed.cmake; native/request-media.h; native/centered.cmake; native/centered-conv.inc; native/centered.metal; native/audio-fft.cmake; native/audio-fft.inc; native/direct-mm.cmake; native/direct-mm.inc; native/direct-mm.metal; native/direct-mm-predicate.inc; native/fusion.cmake; native/joint.cmake; native/joint-decision.inc; native/im2col.cmake; native/im2col.metal; native/transpose.cmake; native/transpose.metal; native/prepare.cmake",
+  "abi": "F16;precise-pointwise-v1;current-first-v1;gpu-recovery-v1;residency-event-v1;native-ownership-v1;selected-head-v1;request-media-v1;pcm-v1;centered-conv-v1;audio-fft512-v1;direct-mm-v1;joint-decision-v1;flat-im2col-v1;tiled-cpy-v1;sparse-mel-v1;text-send-v1;async-owner-v1;text-window-v1",
+  "bundle": false,
+  "note": "llama.cpp runtime for the d1-omni-600M GGUFs (v3/v4 and parity tests). Not shipped since Decider V5 (runtime-v5.lock.json)."
+}

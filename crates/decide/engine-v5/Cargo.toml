@@ -1,0 +1,43 @@
+[package]
+name = "d1v5-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Inference engine for the Decider V5 (LiquidAI d1-2B fine-tune): state and question in, option probabilities out."
+
+# Standalone: not part of the enclosing Heimdall workspace.
+[workspace]
+
+[lib]
+name = "d1v5_engine"
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "check"
+path = "src/bin/check.rs"
+
+[[bin]]
+name = "bench"
+path = "src/bin/bench.rs"
+
+[[bin]]
+name = "abbench"
+path = "src/bin/abbench.rs"
+
+[[bin]]
+name = "memcheck"
+path = "src/bin/memcheck.rs"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
+regex = "1"
+half = "2"
+mlx-rs = "0.32"
+libc = "0.2"
+mlx-sys = "0.6.0"
+unicode_categories = "0.1"
+
+[profile.release]
+codegen-units = 16

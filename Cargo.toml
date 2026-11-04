@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+# Standalone (own [workspace]): the Rust Drama engine builds MLX bindings and never joins workspace builds.
+exclude = ["crates/drama-engine"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0-alpha.1"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+objc2-core-foundation = "0.3"
+objc2-core-graphics = "0.3"
+objc2-av-foundation = "0.3"
+block2 = "0.6"
+dispatch2 = "0.3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# Tests only (cargo test / nextest); release builds are untouched. Debug assertions and
+# overflow checks stay on. Unoptimized model and DSP code made the model tests 5-10x slower.
+[profile.test]
+opt-level = 1
+# Line tables only: panics and backtraces keep file and line; no variable-level debug info, which no check reads.
+# Cold test build 1131 s -> 746 s at two jobs, test target 16 -> 12 GB (lab/build-speed, 1 Nov).
+debug = "line-tables-only"

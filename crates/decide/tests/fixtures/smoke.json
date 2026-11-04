@@ -1,0 +1,182 @@
+[
+  {
+    "id": "smoke-00",
+    "text": "Sigma, tell me what time it is.",
+    "send_now": true,
+    "addressee": true
+  },
+  {
+    "id": "smoke-01",
+    "text": "Heimdall, summarize this conversation.",
+    "send_now": true,
+    "addressee": true
+  },
+  {
+    "id": "smoke-02",
+    "text": "Please take a screenshot now.",
+    "send_now": true,
+    "addressee": true
+  },
+  {
+    "id": "smoke-03",
+    "text": "Open the first link we just discussed.",
+    "send_now": true,
+    "addressee": true
+  },
+  {
+    "id": "smoke-04",
+    "text": "Explain this error to me.",
+    "send_now": true,
+    "addressee": true
+  },
+  {
+    "id": "smoke-05",
+    "text": "Stop speaking, please.",
+    "send_now": true,
+    "addressee": true
+  },
+  {
+    "id": "smoke-06",
+    "text": "Cancel the current task.",
+    "send_now": true,
+    "addressee": true
+  },
+  {
+    "id": "smoke-07",
+    "text": "Look at this window.",
+    "send_now": true,
+    "addressee": true
+  },
+  {
+    "id": "smoke-08",
+    "text": "Sigma, what is the weather like?",
+    "send_now": true,
+    "addressee": true
+  },
+  {
+    "id": "smoke-09",
+    "text": "Please send the completed request now.",
+    "send_now": true,
+    "addressee": true
+  },
+  {
+    "id": "smoke-10",
+    "text": "Heimdall, show me the second item.",
+    "send_now": true,
+    "addressee": true
+  },
+  {
+    "id": "smoke-11",
+    "text": "Can you check the build output?",
+    "send_now": true,
+    "addressee": true
+  },
+  {
+    "id": "smoke-12",
+    "text": "Please read the text in this picture.",
+    "send_now": true,
+    "addressee": true
+  },
+  {
+    "id": "smoke-13",
+    "text": "That is everything; go ahead and do it.",
+    "send_now": true,
+    "addressee": true
+  },
+  {
+    "id": "smoke-14",
+    "text": "Sigma, find the document I mentioned.",
+    "send_now": true,
+    "addressee": true
+  },
+  {
+    "id": "smoke-15",
+    "text": "Alex, are you coming to dinner?",
+    "send_now": false,
+    "addressee": false
+  },
+  {
+    "id": "smoke-16",
+    "text": "Sam, please open that door.",
+    "send_now": false,
+    "addressee": false
+  },
+  {
+    "id": "smoke-17",
+    "text": "I was telling my friend about the app.",
+    "send_now": false,
+    "addressee": false
+  },
+  {
+    "id": "smoke-18",
+    "text": "The game starts in ten minutes.",
+    "send_now": false,
+    "addressee": false
+  },
+  {
+    "id": "smoke-19",
+    "text": "My colleague said: take a screenshot.",
+    "send_now": false,
+    "addressee": false
+  },
+  {
+    "id": "smoke-20",
+    "text": "Jordan, can you pass the salt?",
+    "send_now": false,
+    "addressee": false
+  },
+  {
+    "id": "smoke-21",
+    "text": "We should ask the computer later.",
+    "send_now": false,
+    "addressee": false
+  },
+  {
+    "id": "smoke-22",
+    "text": "She asked me to stop speaking.",
+    "send_now": false,
+    "addressee": false
+  },
+  {
+    "id": "smoke-23",
+    "text": "Chris, please cancel your appointment.",
+    "send_now": false,
+    "addressee": false
+  },
+  {
+    "id": "smoke-24",
+    "text": "Heimdall, I would like you to",
+    "send_now": false,
+    "addressee": true
+  },
+  {
+    "id": "smoke-25",
+    "text": "Sigma, open the",
+    "send_now": false,
+    "addressee": true
+  },
+  {
+    "id": "smoke-26",
+    "text": "Before you do anything, wait for me.",
+    "send_now": false,
+    "addressee": true
+  },
+  {
+    "id": "smoke-27",
+    "text": "I am still thinking; do not send this yet.",
+    "send_now": false,
+    "addressee": true
+  },
+  {
+    "id": "smoke-28",
+    "text": "Heimdall, wait, I have not finished.",
+    "send_now": false,
+    "addressee": true
+  },
+  {
+    "id": "smoke-29",
+    "text": "Sigma, if the first link is",
+    "send_now": false,
+    "addressee": true
+  }
+]

@@ -1,0 +1,281 @@
+{
+  "checkedAt": "2026-10-14T09:19:58.728398+00:00",
+  "origin": "http://127.0.0.1:3773",
+  "calls": [
+    {
+      "path": "/.well-known/t3/environment",
+      "status": 200,
+      "result": {
+        "environmentId": "b19c81dc-57a8-44d1-b9c1-7aaf0a03cd8d",
+        "serverVersion": "0.0.46-nightly.20261013.3042"
+      }
+    },
+    {
+      "path": "/.well-known/oauth-protected-resource/mcp",
+      "status": 200,
+      "result": {
+        "resource": "http://127.0.0.1:3773/mcp",
+        "authorization_servers": [
+          "http://127.0.0.1:3773"
+        ],
+        "scopes_supported": [
+          "orchestration:read",
+          "orchestration:operate"
+        ],
+        "bearer_methods_supported": [
+          "header"
+        ],
+        "resource_name": "T3 Code"
+      }
+    },
+    {
+      "path": "/.well-known/oauth-authorization-server",
+      "status": 200,
+      "result": {
+        "issuer": "http://127.0.0.1:3773",
+        "authorization_endpoint": "http://127.0.0.1:3773/oauth/mcp/authorize",
+        "token_endpoint": "http://127.0.0.1:3773/oauth/mcp/token",
+        "registration_endpoint": "http://127.0.0.1:3773/oauth/mcp/register",
+        "response_types_supported": [
+          "code"
+        ],
+        "grant_types_supported": [
+          "authorization_code"
+        ],
+        "code_challenge_methods_supported": [
+          "S256"
+        ],
+        "token_endpoint_auth_methods_supported": [
+          "none"
+        ],
+        "scopes_supported": [
+          "orchestration:read",
+          "orchestration:operate"
+        ],
+        "authorization_response_iss_parameter_supported": true
+      }
+    }
+  ],
+  "providerMessagesSent": 0,
+  "threadsCreated": 0,
+  "credentialStored": false,
+  "unauthenticatedMcp": {
+    "status": 401,
+    "challenge": "Bearer resource_metadata=\"http://127.0.0.1:3773/.well-known/oauth-protected-resource/mcp\""
+  },
+  "credential": {
+    "source": "CLI --subject mcp-client compatibility probe",
+    "sessionId": "a9754917-4144-47af-9078-bcc536f496ba",
+    "scopes": [
+      "orchestration:read"
+    ],
+    "expiresAt": "2026-10-14T09:24:59.069Z"
+  },
+  "initialize": {
+    "protocolVersion": "2025-06-18",
+    "capabilities": {
+      "logging": {},
+      "tools": {
+        "listChanged": true
+      },
+      "completions": {}
+    },
+    "serverInfo": {
+      "name": "T3 Code",
+      "version": "0.0.46-nightly.20261013.3042"
+    }
+  },
+  "initializedNotificationStatus": 202,
+  "toolNames": [
+    "preview_dialog",
+    "preview_status",
+    "preview_open",
+    "preview_navigate",
+    "preview_resize",
+    "preview_set_appearance",
+    "preview_click",
+    "preview_type",
+    "preview_hover",
+    "preview_select",
+    "preview_drag",
+    "preview_upload",
+    "preview_press",
+    "preview_scroll",
+    "preview_evaluate",
+    "preview_wait_for",
+    "preview_recording_start",
+    "preview_recording_stop",
+    "preview_snapshot",
+    "orchestrator_capabilities",
+    "delegate_task",
+    "task_status",
+    "task_cancel",
+    "t3_workflow_stop",
+    "schedule_task",
+    "list_scheduled_tasks",
+    "update_scheduled_task",
+    "delete_scheduled_task",
+    "request_secret",
+    "create_threads",
+    "t3_thread_list",
+    "t3_thread_read",
+    "t3_thread_update",
+    "t3_thread_send",
+    "t3_thread_wait",
+    "t3_thread_interrupt",
+    "run_scheduled_task_now",
+    "t3_thread_search",
+    "t3_thread_fork",
+    "t3_thread_merge_back",
+    "t3_thread_transfers",
+    "t3_thread_configuration",
+    "t3_thread_configure",
+    "t3_pending_request_list",
+    "t3_pending_request_read",
+    "t3_pending_request_respond",
+    "t3_thread_organize",
+    "t3_queue_list",
+    "t3_queue_read",
+    "t3_queue_edit",
+    "t3_queue_cancel",
+    "t3_queue_reorder",
+    "t3_queue_promote_to_steer",
+    "t3_attachment_prepare_upload",
+    "t3_attachment_discard",
+    "t3_thread_send_attachments",
+    "t3_thread_launch",
+    "t3_project_list",
+    "t3_project_read",
+    "t3_project_create",
+    "t3_project_update",
+    "t3_project_delete",
+    "t3_project_clone",
+    "t3_environment_read",
+    "t3_environment_preferences_update",
+    "t3_preview_list",
+    "t3_preview_close",
+    "t3_worktree_handoff",
+    "t3_worktree_status",
+    "t3_worktree_list",
+    "link_pull_request",
+    "unlink_pull_request",
+    "list_thread_pull_requests",
+    "watch_pull_request",
+    "unwatch_pull_request",
+    "write_pull_request_guides",
+    "read_pull_request_guide",
+    "device_list",
+    "device_open",
+    "device_close",
+    "device_screenshot",
+    "html_render",
+    "html_preview"
+  ],
+  "capabilities": {
+    "parentThreadId": null,
+    "runtimeMode": "approval-required",
+    "features": {
+      "appOwnedSubagents": true,
+      "asyncPolling": true,
+      "cancellation": true,
+      "batchThreadCreation": true,
+      "threadManagement": true,
+      "incrementalThreadRead": true,
+      "scheduledTasks": true,
+      "maxBatchThreads": 20
+    },
+    "providers": [
+      {
+        "providerInstanceId": "codex",
+        "driverKind": "codex",
+        "models": 7,
+        "runtimeModes": null
+      },
+      {
+        "providerInstanceId": "claudeAgent",
+        "driverKind": "claudeAgent",
+        "models": 13,
+        "runtimeModes": null
+      },
+      {
+        "providerInstanceId": "cursor",
+        "driverKind": "cursor",
+        "models": 0,
+        "runtimeModes": null
+      },
+      {
+        "providerInstanceId": "grok",
+        "driverKind": "grok",
+        "models": 1,
+        "runtimeModes": [
+          "approval-required",
+          "auto",
+          "full-access"
+        ]
+      },
+      {
+        "providerInstanceId": "opencode",
+        "driverKind": "opencode",
+        "models": 0,
+        "runtimeModes": null
+      },
+      {
+        "providerInstanceId": "antigravity",
+        "driverKind": "antigravity",
+        "models": 0,
+        "runtimeModes": null
+      },
+      {
+        "providerInstanceId": "muse",
+        "driverKind": "muse",
+        "models": 0,
+        "runtimeModes": [
+          "approval-required",
+          "full-access"
+        ]
+      },
+      {
+        "providerInstanceId": "pi",
+        "driverKind": "pi",
+        "models": 1,
+        "runtimeModes": [
+          "approval-required",
+          "auto-accept-edits",
+          "full-access"
+        ]
+      }
+    ]
+  },
+  "projects": {
+    "count": 2,
+    "nextCursor": null,
+    "containingProjectId": "430e3e58-eb61-4f2a-aaa0-7ad485f9bec3"
+  },
+  "threads": {
+    "total": 2104,
+    "count": 5,
+    "currentThreadId": null,
+    "nextCursor": 5
+  },
+  "read": {
+    "threadId": "thread:delegated-task:command%3Amcp%3Afe7a98aa-bca8-44ec-84d3-3de51b463c54%3Adelegate-task%3Aheimdall-opt-eg-a-1",
+    "status": "running",
+    "pendingRequestCount": 0,
+    "itemCount": 1,
+    "hasMore": true,
+    "nextPosition": 0
+  },
+  "wait": {
+    "threadId": "thread:delegated-task:command%3Amcp%3Afe7a98aa-bca8-44ec-84d3-3de51b463c54%3Adelegate-task%3Aheimdall-opt-eg-a-1",
+    "runId": "run:thread:thread%3Adelegated-task%3Acommand%253Amcp%253Afe7a98aa-bca8-44ec-84d3-3de51b463c54%253Adelegate-task%253Aheimdall-opt-eg-a-1:ordinal:1",
+    "status": "running",
+    "timedOut": true
+  },
+  "pendingQuestions": {
+    "requestIds": []
+  },
+  "mcpTokenHttpSnapshotStatus": 401,
+  "transportClosedStatus": 204,
+  "credentialRevoked": true,
+  "revokedMcpStatus": 401
+}

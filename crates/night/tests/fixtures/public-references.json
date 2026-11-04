@@ -1,0 +1,44 @@
+[
+  {
+    "speakers": [
+      "SHALL I NEVER MISS HOME TALK AND BLESSING AND THE COMMON KISS THAT COMES TO EACH IN TURN NOR",
+      "HILDA WATCHED HIM FROM HER CORNER TREMBLING AND SCARCELY BREATHING DARK SHADOWS GROWING ABOUT HER EYES IT"
+    ],
+    "reference_status": "official-labels-clipped-to-mixture",
+    "librispeech_ids": [
+      "908-31957-0004",
+      "4446-2275-0016"
+    ],
+    "source": "https://www.openslr.org/resources/12/test-clean.tar.gz",
+    "crop": "Libri2Mix min-mode leading words only; source originals are longer than the mixture for some speakers",
+    "fixture": "item0"
+  },
+  {
+    "speakers": [
+      "ILL AND TROUBLED DEAR TROUBLED IN MIND AND MISERABLY NERVOUS",
+      "BUT IN THE REST OF THE WORK THE POWER OF LANGUAGE SEEMS TO FAIL HIM"
+    ],
+    "reference_status": "official-labels-clipped-to-mixture",
+    "librispeech_ids": [
+      "5683-32879-0009",
+      "2961-960-0018"
+    ],
+    "source": "https://www.openslr.org/resources/12/test-clean.tar.gz",
+    "crop": "Libri2Mix min-mode leading words only; source originals are longer than the mixture for some speakers",
+    "fixture": "item1"
+  },
+  {
+    "speakers": [
+      "GOD BLESS YOU FRIEND I DO BELIEVE YOUR SCENT IS NOT GREATLY",
+      "I GET WET TO MY KNEES WHEN I GO DOWN TO PICK CHERRIES"
+    ],
+    "reference_status": "official-labels-clipped-to-mixture",
+    "librispeech_ids": [
+      "1320-122617-0036",
+      "237-134493-0012"
+    ],
+    "source": "https://www.openslr.org/resources/12/test-clean.tar.gz",
+    "crop": "Libri2Mix min-mode leading words only; source originals are longer than the mixture for some speakers",
+    "fixture": "item2"
+  }
+]

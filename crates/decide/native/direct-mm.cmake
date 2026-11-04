@@ -1,0 +1,21 @@
+# Tensor-unit F16/BF16 matmul reading weights directly (direct-mm.*). Owned
+# copies only; fail closed when the pinned anchors move.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/direct-mm.metal" direct_metal)
+string(APPEND mm_embed "\n${direct_metal}")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/heimdall-mul-mm.metal" "${mm_embed}")
+
+file(READ "${CMAKE_CURRENT_BINARY_DIR}/heimdall-metal-ops.cpp" metal_ops)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/direct-mm-predicate.inc" direct_predicate)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/direct-mm.inc" direct_host)
+set(direct_host "${direct_predicate}${direct_host}")
+set(direct_fn_anchor "int ggml_metal_op_mul_mat(ggml_metal_op_t ctx, int idx) {")
+set(direct_branch_anchor "    } else if (ggml_metal_op_mul_mat_use_mm(op, props_dev->has_simdgroup_mm)) {")
+foreach(anchor IN ITEMS "${direct_fn_anchor}" "${direct_branch_anchor}")
+    string(FIND "${metal_ops}" "${anchor}" found)
+    if(found EQUAL -1)
+        message(FATAL_ERROR "Pinned Metal mul_mat anchor changed: ${anchor}")
+    endif()
+endforeach()
+string(REPLACE "${direct_fn_anchor}" "${direct_host}\n${direct_fn_anchor}" metal_ops "${metal_ops}")
+string(REPLACE "${direct_branch_anchor}" "    } else if (const int n_direct = heimdall_mul_mm_direct(ctx, idx); n_direct > 0) {\n        return n_direct;\n${direct_branch_anchor}" metal_ops "${metal_ops}")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/heimdall-metal-ops.cpp" "${metal_ops}")

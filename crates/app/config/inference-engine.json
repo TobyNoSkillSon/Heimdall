@@ -1,0 +1,214 @@
+{
+  "executable": "heimdall-splash",
+  "port": 8100,
+  "max_memory": "48G",
+  "max_cache_disk": "100G",
+  "default_model": "qwen3.8-27b",
+  "ram_formula": "ram_bytes (derived, not measured): GGUF weights + vision projector (if any) + DFlash2 draft + int8 KV cache bytes per token x context (262,144) + 1 GB (1e9) runtime overhead. Source: Assistant/Plans/heimdall-engine-models/catalog.json, sizes from Hugging Face file metadata 2026-10-28.",
+  "models": [
+    {
+      "id": "qwen3.8-27b",
+      "label": "Qwen3.8 27B",
+      "quant": "UD-Q4_K_XL",
+      "source": "huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF:UD-Q4_K_XL",
+      "context": 262144,
+      "licence": "apache-2.0",
+      "quants": [
+        {
+          "quant": "UD-Q2_K_XL",
+          "source": "huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF:UD-Q2_K_XL",
+          "size_bytes": 10011909024,
+          "ram_bytes": 24382102508
+        },
+        {
+          "quant": "UD-Q3_K_XL",
+          "source": "huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF:UD-Q3_K_XL",
+          "size_bytes": 13326125984,
+          "ram_bytes": 27696319468
+        },
+        {
+          "quant": "UD-Q4_K_XL",
+          "source": "huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF:UD-Q4_K_XL",
+          "size_bytes": 17378626464,
+          "ram_bytes": 31748819948
+        },
+        {
+          "quant": "UD-Q5_K_XL",
+          "source": "huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF:UD-Q5_K_XL",
+          "size_bytes": 20673612704,
+          "ram_bytes": 35043806188
+        },
+        {
+          "quant": "UD-Q6_K_XL",
+          "source": "huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF:UD-Q6_K_XL",
+          "size_bytes": 24826588064,
+          "ram_bytes": 39196781548
+        },
+        {
+          "quant": "Q8_0",
+          "source": "huihui-ai/Huihui-Qwen3.8-27B-abliterated-GGUF:Q8_0",
+          "size_bytes": 29047084320,
+          "ram_bytes": 43417277804
+        }
+      ]
+    },
+    {
+      "id": "qwen3.6-35b-a3b",
+      "label": "Qwen3.6 35B A3B",
+      "quant": "Q4_K",
+      "source": "huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated-MTP-GGUF:Q4_K",
+      "context": 262144,
+      "licence": "apache-2.0",
+      "quants": [
+        {
+          "quant": "Q2_K",
+          "source": "huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated-MTP-GGUF:Q2_K",
+          "size_bytes": 13246129376,
+          "ram_bytes": 18882586845
+        },
+        {
+          "quant": "Q3_K",
+          "source": "huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated-MTP-GGUF:Q3_K",
+          "size_bytes": 17165606112,
+          "ram_bytes": 22802063581
+        },
+        {
+          "quant": "Q4_K",
+          "source": "huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated-MTP-GGUF:Q4_K",
+          "size_bytes": 21712409824,
+          "ram_bytes": 27348867293
+        },
+        {
+          "quant": "Q5_K",
+          "source": "huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated-MTP-GGUF:Q5_K",
+          "size_bytes": 25346479328,
+          "ram_bytes": 30982936797
+        },
+        {
+          "quant": "Q6_K",
+          "source": "huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated-MTP-GGUF:Q6_K",
+          "size_bytes": 29207678176,
+          "ram_bytes": 34844135645
+        },
+        {
+          "quant": "Q8_0",
+          "source": "huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated-MTP-GGUF:Q8_0",
+          "size_bytes": 37801096416,
+          "ram_bytes": 43437553885
+        }
+      ]
+    },
+    {
+      "id": "flint",
+      "label": "Flint 40B A2.5B",
+      "quant": "Q4_K_M",
+      "source": "dima6312/Flint-40B-A2.5B-abliterated-GGUF:Q4_K_M",
+      "context": 262144,
+      "licence": "apache-2.0",
+      "quants": [
+        {
+          "quant": "IQ2_M",
+          "source": "dima6312/Flint-40B-A2.5B-abliterated-GGUF:IQ2_M",
+          "size_bytes": 13106540448,
+          "ram_bytes": 18670068569
+        },
+        {
+          "quant": "Q3_K_M",
+          "source": "dima6312/Flint-40B-A2.5B-abliterated-GGUF:Q3_K_M",
+          "size_bytes": 19100276640,
+          "ram_bytes": 24663804761
+        },
+        {
+          "quant": "Q4_K_M",
+          "source": "dima6312/Flint-40B-A2.5B-abliterated-GGUF:Q4_K_M",
+          "size_bytes": 24166842272,
+          "ram_bytes": 29730370393
+        },
+        {
+          "quant": "Q5_K_M",
+          "source": "dima6312/Flint-40B-A2.5B-abliterated-GGUF:Q5_K_M",
+          "size_bytes": 28314255264,
+          "ram_bytes": 33877783385
+        },
+        {
+          "quant": "Q6_K",
+          "source": "dima6312/Flint-40B-A2.5B-abliterated-GGUF:Q6_K",
+          "size_bytes": 32720881568,
+          "ram_bytes": 38284409689
+        },
+        {
+          "quant": "Q8_0",
+          "source": "dima6312/Flint-40B-A2.5B-abliterated-GGUF:Q8_0",
+          "size_bytes": 42350359360,
+          "ram_bytes": 47913887481
+        }
+      ]
+    },
+    {
+      "id": "ternary-bonsai-2-27b",
+      "label": "Ternary Bonsai 2 27B",
+      "quant": "PQ2_0",
+      "source": "OS-Software/Ternary-Bonsai-2-27B-Uncensored-Heretic-v2-GGUF:PQ2_0",
+      "context": 262144,
+      "licence": "apache-2.0",
+      "quants": [
+        {
+          "quant": "PQ2_0",
+          "source": "OS-Software/Ternary-Bonsai-2-27B-Uncensored-Heretic-v2-GGUF:PQ2_0",
+          "size_bytes": 7206168928,
+          "ram_bytes": 21576362380
+        }
+      ]
+    },
+    {
+      "id": "ornith-1.5-122b",
+      "label": "Ornith 1.5 122B",
+      "quant": "IQ2_XXS-UNCENSORED",
+      "source": "dealignai/Ornith-1.5-122B-UNCENSORED-GGUF:IQ2_XXS-UNCENSORED",
+      "context": 262144,
+      "licence": "mit",
+      "quants": [
+        {
+          "quant": "IQ2_XXS-UNCENSORED",
+          "source": "dealignai/Ornith-1.5-122B-UNCENSORED-GGUF:IQ2_XXS-UNCENSORED",
+          "size_bytes": 44072673440,
+          "ram_bytes": 51063492573
+        },
+        {
+          "quant": "Q4_K_M-UNCENSORED",
+          "source": "dealignai/Ornith-1.5-122B-UNCENSORED-GGUF:Q4_K_M-UNCENSORED",
+          "size_bytes": 79371735200,
+          "ram_bytes": 86362554333
+        }
+      ]
+    },
+    {
+      "id": "qwen3.8-flash-next",
+      "label": "Qwen3.8 Flash Next",
+      "quant": "IQ2_XS",
+      "source": "SC117/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-GGUF:IQ2_XS",
+      "context": 262144,
+      "licence": "apache-2.0",
+      "quants": [
+        {
+          "quant": "IQ2_XS",
+          "source": "SC117/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-GGUF:IQ2_XS",
+          "size_bytes": 68465153504,
+          "ram_bytes": 76410972414
+        },
+        {
+          "quant": "IQ3_XXS",
+          "source": "SC117/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-GGUF:IQ3_XXS",
+          "size_bytes": 76142283328,
+          "ram_bytes": 84088102238
+        },
+        {
+          "quant": "IQ3_S",
+          "source": "SC117/Qwen3.8-Flash-Next-GSQ-RCO-abliterated-GGUF:IQ3_S",
+          "size_bytes": 83863586496,
+          "ram_bytes": 91809405406
+        }
+      ]
+    }
+  ]
+}

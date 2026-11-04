@@ -1,0 +1,126 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+// Arrival-Order Speaker Cache (AOSC) streaming state for Sortformer.
+//
+// Host-side port of NeMo's synchronous `SortformerModules.streaming_update`
+// and `_compress_spkcache` inference behavior.
+//
+// Per chunk the model re-predicts the whole [spkcache | fifo | chunk]
+// concatenation; only the embeddings are persisted (fifo preds are refreshed
+// from the current output each step, spkcache preds persist once seeded at
+// the first compression - NeMo's `spkcache_preds is None` sentinel).
+#pragma once
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include "sortformer_model.h"  // DiarScoringConfig
+
+namespace nemo_speech::asr {
+
+// Streaming geometry in coarse encoder frames (80 ms for both v2 and v3).
+// V3's public predictions are upsampled to 10 ms; its AOSC state remains on
+// this coarse grid. Prefer the named presets over setting individual fields.
+struct DiarGeometry {
+    // -1 means unspecified, independently for each field. Resolve before use
+    // so explicit values (including V2 defaults and zero contexts) survive.
+    int spkcache_len = -1;
+    int fifo_len = -1;
+    int chunk_len = -1;
+    int spkcache_update_period = -1;
+    int chunk_left_context = -1;
+    int chunk_right_context = -1;
+
+    // The "offline" preset still uses AOSC streaming with larger chunks and caches.
+    static DiarGeometry riva_streaming() { return {160, 80, 20, 80, 0, 0}; }
+    static DiarGeometry riva_offline() { return {312, 100, 100, 100, 0, 0}; }
+    // Low-latency V3 streaming default: 1.04 s center chunk, no left context,
+    // 80 ms right context, speaker cache 264, FIFO 80, refresh 40 (80 ms grid).
+    static DiarGeometry v3_streaming() { return {264, 80, 13, 40, 0, 1}; }
+    static DiarGeometry v3_offline() { return {264, 0, 264, 188, 1, 1}; }
+    DiarGeometry resolved(bool is_v3) const;
+    // Throws std::invalid_argument for unknown names.
+    static DiarGeometry preset(const std::string& name);
+
+    // Validates positive chunk/update sizes, non-negative contexts and FIFO,
+    // the minimum speaker-cache budget, and the positional-encoding limit.
+    void validate(int n_spk, int sil_frames_per_spk, int pos_emb_max_len) const;
+};
+
+// Keeps transient channel redraws from becoming new speaker identities. A
+// channel is established only after a short clean or fading handoff; until
+// then its probability is folded into the strongest established channel.
+class ChannelBirthGate {
+   public:
+    // Maximum retrospective relabeling window, on the V2 output frame grid.
+    static constexpr int revision_frames = 128;
+    explicit ChannelBirthGate(int n_spk);
+
+    void reset();
+    void append(const std::vector<float>& raw, std::vector<float>& timeline);
+    bool is_established(int speaker) const;
+    // Frontier before which no future birth can change a frame's top speaker:
+    // the first retained frame where an unborn channel is the raw winner.
+    int64_t settled_frames() const;
+
+   private:
+    bool observe(const float* probs);
+    void relabel(float* probs) const;
+    void push_raw(const float* probs);
+
+    int n_spk_;
+    int64_t frame_ = 0;
+    std::vector<uint8_t> established_;
+    std::vector<int> clean_frames_;
+    std::vector<int> fading_frames_;
+    std::vector<int64_t> last_win_;
+    std::vector<float> raw_ring_;
+};
+
+class AoscState {
+   public:
+    AoscState(
+        const DiarGeometry& geo, const DiarScoringConfig& scoring, int n_spk, int emb_dim,
+        const std::vector<float>& learned_silence = {});
+
+    // One streaming update after a model chunk.
+    //   chunk_embs: (t3, emb_dim) pre-encode embeddings of the whole window
+    //               (including lc/rc frames; trimmed internally).
+    //   preds:      ((spkcache_frames + fifo_frames + t3), n_spk) model output.
+    //   lc, rc:     this window's left/right context in encoder frames.
+    // Returns the emitted chunk predictions ((t3 - lc - rc), n_spk).
+    std::vector<float> update(const float* chunk_embs, int t3, const float* preds, int lc, int rc);
+
+    int spkcache_frames() const { return spk_frames_; }
+    int fifo_frames() const { return fifo_frames_; }
+    const std::vector<float>& spkcache() const { return spkcache_; }
+    const std::vector<float>& fifo() const { return fifo_; }
+
+    // True once the cache preds were seeded at the first compression (NeMo's
+    // `spkcache_preds is None` sentinel; emptiness carries the same bit).
+    bool spkcache_preds_valid() const { return !spkcache_preds_.empty(); }
+    const std::vector<float>& spkcache_preds() const { return spkcache_preds_; }
+    const std::vector<float>& mean_sil_emb() const { return mean_sil_emb_; }
+    int64_t n_sil_frames() const { return n_sil_frames_; }
+
+   private:
+    void accumulate_silence(const float* embs, const float* preds, int n);
+    void compress(const std::vector<float>& seed_preds);
+
+    DiarGeometry geo_;
+    DiarScoringConfig sc_;
+    int n_spk_;
+    int emb_dim_;
+
+    std::vector<float> spkcache_;        // spk_frames_ x emb_dim
+    std::vector<float> spkcache_preds_;  // spk_frames_ x n_spk (empty until seeded)
+    int spk_frames_ = 0;
+    std::vector<float> fifo_;  // fifo_frames_ x emb_dim
+    int fifo_frames_ = 0;
+    std::vector<float> mean_sil_emb_;  // emb_dim
+    int64_t n_sil_frames_ = 0;
+    bool use_learned_silence_ = false;
+};
+
+}  // namespace nemo_speech::asr

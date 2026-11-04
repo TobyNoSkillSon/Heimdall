@@ -1,0 +1,51 @@
+{
+  "date": "2026-10-11",
+  "cli_version": "2.1.295",
+  "initial_live_check_preflight": "auth gate rejected before bootstrap or inference because installed CLI reports Claude Max rather than max",
+  "initial_cloud_queries": 0,
+  "local_metadata_probe": {
+    "argv": [
+      "claude",
+      "-p",
+      "--input-format",
+      "stream-json",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--setting-sources",
+      "",
+      "--settings",
+      "{\"forceLoginMethod\":\"claudeai\",\"apiKeyHelper\":\"\"}",
+      "--strict-mcp-config",
+      "--mcp-config",
+      "{\"mcpServers\":{}}"
+    ],
+    "cwd": "/tmp",
+    "env_allowlist": [
+      "HOME",
+      "PATH",
+      "TMPDIR",
+      "USER",
+      "LOGNAME",
+      "SHELL",
+      "LANG",
+      "LC_ALL"
+    ],
+    "stdin": {
+      "type": "control_request",
+      "request_id": "auth-local",
+      "request": {
+        "subtype": "initialize"
+      }
+    },
+    "account": {
+      "subscriptionType": "Claude Max",
+      "tokenSource": null,
+      "apiKeySource": null,
+      "apiProvider": "firstParty"
+    },
+    "cloud_queries": 0,
+    "cleanup": "SIGKILL and wait completed"
+  },
+  "binary_verification": "pvr maps pro/max/team/enterprise to Claude Pro/Claude Max/Claude Team/Claude Enterprise; other values map to Claude API"
+}

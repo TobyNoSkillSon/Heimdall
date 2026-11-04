@@ -1,0 +1,9 @@
+.build/
+build/
+lab/data/
+lab/shots/*.mov
+.DS_Store
+lab/shots/
+__pycache__/
+lab/tools/drag_probe
+lab/tools/click_probe

@@ -1,0 +1,40 @@
+[package]
+name = "ui"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+description = "Heimdall's menu-bar item and windows: native AppKit through objc2, in Vella's visual language."
+
+[lib]
+name = "ui"
+
+[[bin]]
+name = "heimdall-ui-demo"
+path = "src/bin/demo.rs"
+
+[features]
+# The public edition (app's `public` feature, docs/editions.md): no Bug Notes menu row.
+public = []
+
+# The island's fast reader plays crates/rsvp plans (phrase units, per-unit timing, recognition letters).
+[dependencies]
+heimdall-home = { path = "../home" }
+rsvp = { path = "../rsvp" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true }
+objc2-foundation = { workspace = true }
+objc2-app-kit = { workspace = true }
+objc2-core-foundation = { workspace = true }
+objc2-core-graphics = { workspace = true }
+objc2-av-foundation = { workspace = true }
+block2 = { workspace = true }
+dispatch2 = { workspace = true }
+# Drawing mode and pointing: Core Animation layers, the marked screenshot's PNG, the system profile.
+objc2-quartz-core = { version = "0.3", features = ["CAFrameRateRange"] }
+# The animation gallery renders Core Animation layer trees offscreen (CARenderer into a Metal texture).
+objc2-metal = "0.3.2"
+png = "0.18"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -1,0 +1,21 @@
+{
+  "engine": "d1v5-engine 0.1.0 (crates/decide/engine-v5), mlx-rs 0.32.0, mlx-sys 0.6.0, MLX v0.32.2",
+  "build": "scripts/build_decider_v5.sh: cargo build --release --offline at nice 19 with two jobs; MLX sources from target/deps-src (build/fetch-deps.sh)",
+  "platform": "macOS arm64, Metal; default path prune+fuse+compile+metal kernels with automatic fallback to plain MLX (D1E_FALLBACK=1 forces plain)",
+  "abi": "d1v5-engine@0.1.0;mlx-rs-0.32;text-only;json-v1;affine-q8q4-v1",
+  "files": [
+    {
+      "path": "runtime-v5/libd1v5_engine.dylib",
+      "bytes": 21897824,
+      "sha256": "06d8df90308fce8d5101dc8dce3d0db76d042909fcf24edd8fa167baa12a41b4",
+      "bundle": true
+    },
+    {
+      "path": "runtime-v5/mlx.metallib",
+      "bytes": 183778048,
+      "sha256": "c810f78355cb6f657c125bdcb70f771decabe082f12fa36b3c566ef240066c2c",
+      "bundle": true
+    }
+  ],
+  "built_at_commit": "4899cc727d204fd6e6eea24a3c4ea17ce5cc1d13"
+}

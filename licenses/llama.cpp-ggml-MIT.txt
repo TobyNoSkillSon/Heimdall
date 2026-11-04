@@ -1,0 +1,28 @@
+Source: https://raw.githubusercontent.com/ggml-org/llama.cpp/62a6f74bab748b1755f4cd8dfc0871caf865c6c8/LICENSE
+Retrieved: 2026-10-27
+SHA-256 of the licence text below: 94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d
+Applies to: llama.cpp and ggml (MIT, copyright The ggml authors). Covers libheimdall_decide.dylib (crates/decide/scripts/runtime.lock.json),
+the ggml CPU and Metal backends statically linked into heimdall-speakers-worker (crates/speakers/vendor/ggml, identical to the upstream LICENSE),
+and the ggml-derived Metal code inside the Splash engine. Splash's own notices are in Splash-THIRD_PARTY_NOTICES.txt.
+
+MIT License
+
+Copyright (c) 2023-2026 The ggml authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

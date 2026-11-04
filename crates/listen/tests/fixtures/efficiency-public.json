@@ -1,0 +1,65 @@
+[
+  {
+    "id": "conversation-pl-1",
+    "reference": "dzień dobry panu mam do pana taką uprzejmą prośbę chodzi mi o to jak dojechać do na Górczewską dwieście dwadzieścia osiem to jest strasznie daleko",
+    "language": "pl",
+    "origin": "https://huggingface.co/datasets/czyzi0/luna-speech-dataset",
+    "row": 1,
+    "revision": "83f9e9b1a502e178a54556204680eff7b1257364",
+    "sha256": "3a1f2f5799457bfb09f19d0654eabb71ca0d9216fcc0a059a701d9f708c55cda"
+  },
+  {
+    "id": "conversation-pl-6",
+    "reference": "no ja też będę musiała dojść bo ja tu mieszkam przy Olbrachta ale tutaj nie mam bezpośrednio to już wiem",
+    "language": "pl",
+    "origin": "https://huggingface.co/datasets/czyzi0/luna-speech-dataset",
+    "row": 6,
+    "revision": "83f9e9b1a502e178a54556204680eff7b1257364",
+    "sha256": "8b23eb9a1af5d586bc602bb5af9349a7b7e0f97073189a7776751da3aa790b4e"
+  },
+  {
+    "id": "conversation-en-2",
+    "reference": "YEAH WE'RE GONNA MEET UP",
+    "language": "en",
+    "origin": "https://huggingface.co/datasets/edinburghcstr/ami",
+    "row": 2,
+    "revision": "46f28f2503e2ec48f8867a84eef356c70476beab",
+    "sha256": "4c81019b169da417cd79e6158b414e8f828ff66e558485aa5a44d51947e3aa57"
+  },
+  {
+    "id": "conversation-en-3",
+    "reference": "I MEAN WE'RE NOT EVEN THERE YET",
+    "language": "en",
+    "origin": "https://huggingface.co/datasets/edinburghcstr/ami",
+    "row": 3,
+    "revision": "46f28f2503e2ec48f8867a84eef356c70476beab",
+    "sha256": "3956d8efff93de4c861e78065ac8e673fb0f8acb819228971ab327c3757a9c4f"
+  },
+  {
+    "id": "conversation-en-4",
+    "reference": "YEAH",
+    "language": "en",
+    "origin": "https://huggingface.co/datasets/edinburghcstr/ami",
+    "row": 4,
+    "revision": "46f28f2503e2ec48f8867a84eef356c70476beab",
+    "sha256": "a23a422f0df1c1c3bc486d0b86013454aa1dc1f3a3f3aaa19c91d1e3be7ec467"
+  },
+  {
+    "id": "conversation-en-25",
+    "reference": "SO EVEN IF IT DOESN'T WORK YOU CAN JIGGERY POKERY AROUND AND MAKE IT WORK",
+    "language": "en",
+    "origin": "https://huggingface.co/datasets/edinburghcstr/ami",
+    "revision": "46f28f2503e2ec48f8867a84eef356c70476beab",
+    "row": 25,
+    "sha256": "114b21ca524234941748918b917548842e841360419ffc866998fce68be043a2"
+  },
+  {
+    "id": "conversation-en-28",
+    "reference": "YOU OPEN THE WINDOW YOU READ THROUGH IT YOU MIGHT CLICK ON YOU KNOW CLOSE IT AGAIN STRAIGHT AWAY",
+    "language": "en",
+    "origin": "https://huggingface.co/datasets/edinburghcstr/ami",
+    "revision": "46f28f2503e2ec48f8867a84eef356c70476beab",
+    "row": 28,
+    "sha256": "f79fce60030e36bbcf3497af2721279df164ad6f0aba6c83c507ce61c338eb3e"
+  }
+]

@@ -1,0 +1,46 @@
+[package]
+name = "flexaudio-os-macos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "macOS system and per-process audio capture backend (Core Audio process taps) for flexaudio."
+readme = "README.md"
+keywords = ["audio", "coreaudio", "loopback", "capture", "macos"]
+categories = ["multimedia::audio", "os::macos-apis"]
+documentation = "https://docs.rs/flexaudio-os-macos"
+
+# Native adapters and objc2 dependencies are macOS-only. The private capture-health
+# policy compiles on every platform for device-free tests.
+#
+# Versions match the existing pins in Cargo.lock (the objc2 family pulled by cpal) to avoid duplicate compilation.
+[dependencies]
+flexaudio-core = { path = "../flexaudio-core", version = "0.5.1" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "=0.2.186"
+objc2 = "=0.6.4"
+objc2-foundation = { version = "=0.3.2", features = [
+    "NSArray",
+    "NSValue",
+    "NSString",
+    "NSUUID",
+    "NSDictionary",
+] }
+# Default features include AudioHardware, objc2-core-audio-types, and others.
+objc2-core-audio = "=0.3.2"
+objc2-core-audio-types = "=0.3.2"
+objc2-core-foundation = { version = "=0.3.2", features = [
+    "CFDictionary",
+    "CFString",
+    "CFNumber",
+    "CFArray",
+    "CFBase",
+] }
+block2 = "=0.6.2"
+
+[package.metadata.docs.rs]
+default-target = "x86_64-unknown-linux-gnu"
+targets = ["x86_64-pc-windows-msvc", "aarch64-apple-darwin"]

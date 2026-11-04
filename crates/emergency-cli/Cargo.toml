@@ -1,0 +1,30 @@
+[package]
+name = "heimdall-emergency"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The relay agent's CLI (docs/claude-relay.md, docs/emergency.md), bundled in Heimdall.app/Contents/MacOS. Std plus
+# serde_json, base64 (images in answers become files) and sha2 (the approval hook's launch digests): a tiny binary that
+# talks to Heimdall's scoped MCP server over loopback HTTP, and Claude Code's permission hook for Heimdall's threads.
+[lib]
+name = "heimdall_emergency"
+path = "src/lib.rs"
+
+[[bin]]
+name = "heimdall-emergency"
+path = "src/main.rs"
+
+[features]
+# The public edition (docs/editions.md): the user's click grants nothing there (`grants::ENABLED`). The public bundle builds
+# this CLI with it too (scripts/bundle.sh), so `grants status` tells the truth for either app.
+public = []
+
+[dependencies]
+heimdall-home = { path = "../home" }
+serde_json = "1"
+base64 = "0.22"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"

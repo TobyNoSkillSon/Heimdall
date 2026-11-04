@@ -1,0 +1,12 @@
+{
+  "attributes": {"AXRole":"AXApplication","AXTitle":"Discord"},
+  "children": [{
+    "attributes":{"AXRole":"AXWindow","AXTitle":"Voice channel"},
+    "children":[
+      {"attributes":{"AXRole":"AXGroup","AXDOMIdentifier":"voice-user-1","AXTitle":"Dave","AXDescription":"Dave, Speaking"}},
+      {"attributes":{"AXRole":"AXGroup","AXDOMIdentifier":"voice-user-2","AXTitle":"Anna","AXSpeaking":"false"}},
+      {"attributes":{"AXRole":"AXGroup","AXDOMIdentifier":"voice-user-3","AXTitle":"Zoë","AXSelected":"true"}},
+      {"attributes":{"AXRole":"AXStaticText","AXValue":"Speaking about Dave is not a speaking indicator"}}
+    ]
+  }]
+}

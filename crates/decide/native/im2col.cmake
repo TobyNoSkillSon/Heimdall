@@ -1,0 +1,13 @@
+# Flat im2col (im2col.metal) for the pinned KH*KW <= 1024 route. Owned copies only.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/im2col.metal" im2col_metal)
+string(APPEND mm_embed "\n${im2col_metal}")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/heimdall-mul-mm.metal" "${mm_embed}")
+file(READ "${CMAKE_CURRENT_BINARY_DIR}/heimdall-metal-ops.cpp" metal_ops)
+set(im2col_anchor "    auto pipeline = ggml_metal_library_get_pipeline_im2col(lib, op);\n\n    if (KH*KW <= ggml_metal_pipeline_max_theads_per_threadgroup(pipeline)) {")
+string(FIND "${metal_ops}" "${im2col_anchor}" found)
+if(found EQUAL -1)
+    message(FATAL_ERROR "Pinned Metal im2col anchor changed")
+endif()
+set(im2col_flat "    if (KH*KW <= 1024 && (uint64_t) N*OH*OW*CHW < (1ull << 32)) {\n        const char * flat = op->type == GGML_TYPE_F16 ? \"kernel_heimdall_im2col_f16\" : \"kernel_heimdall_im2col_f32\";\n        auto fp = ggml_metal_library_get_pipeline(lib, flat);\n        if (!fp.pipeline) fp = ggml_metal_library_compile_pipeline(lib, flat, flat, nullptr);\n        const uint64_t total = (uint64_t) N*OH*OW*CHW;\n        uint32_t shape[4] = {(uint32_t) OH, (uint32_t) OW, (uint32_t) total, (uint32_t) (total >> 32)};\n        const uint64_t groups = std::min<uint64_t>((total + 255)/256, 65536);\n        ggml_metal_encoder_set_pipeline(enc, fp);\n        ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);\n        ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[1]), 1);\n        ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         2);\n        ggml_metal_encoder_set_bytes   (enc, shape, sizeof(shape), 3);\n        ggml_metal_encoder_dispatch_threadgroups(enc, groups, 1, 1, 256, 1, 1);\n        return 1;\n    }\n${im2col_anchor}")
+string(REPLACE "${im2col_anchor}" "${im2col_flat}" metal_ops "${metal_ops}")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/heimdall-metal-ops.cpp" "${metal_ops}")

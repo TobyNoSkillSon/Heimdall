@@ -1,0 +1,53 @@
+[package]
+name = "splash"
+edition.workspace = true
+version.workspace = true
+# The port follows Splash's own licence (Apache-2.0); NOTICE and THIRD_PARTY_NOTICES ship beside the engine.
+license = "Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+
+# Splash's server in Rust: an OpenAI-compatible HTTP front over the native engine, with no Python.
+[[bin]]
+name = "heimdall-splash"
+path = "src/main.rs"
+
+[dependencies]
+heimdall-home = { path = "../home" }
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+# float_roundtrip: decimals in tool schemas and histories read back exactly, as Python reads them.
+serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
+crossbeam-channel = "0.5"
+libc = "0.2"
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
+minijinja = { version = "3", features = ["json", "preserve_order", "loop_controls", "builtins", "macros"] }
+minijinja-contrib = { version = "3", features = ["pycompat"] }
+llguidance = "1.9"
+toktrie_hf_tokenizers = "1.9"
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net", "signal"] }
+tokio-stream = "0.1"
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking", "stream"] }
+sha2 = "0.10"
+sha1 = "0.10"
+hex = "0.4"
+memmap2 = "0.9"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+# GIF first frames as indices, so the canvas can be built as Pillow builds it (already in the tree via image).
+gif = "0.14"
+# PNG with checksums unchecked, as Pillow reads it (already in the tree via image).
+png = "0.18"
+base64 = "0.22"
+rand = "0.8"
+# JSON Schema meta-checks and response validation (schema_validation.py); 0.29 shares llguidance's `referencing`.
+jsonschema = { version = "0.29", default-features = false }
+# Refusing schema patterns Python's meta-check refuses (format "regex"); the version jsonschema already links.
+fancy-regex = "0.14"
+blake2b_simd = "1"
+
+[dev-dependencies]
+tempfile = "3"

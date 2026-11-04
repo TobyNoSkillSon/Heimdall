@@ -1,0 +1,2084 @@
+{
+ "tokenizer": "469b4497c8e3e5cff64591ad71a0aa828d59cdf241c84772599878d51566b454",
+ "traces": [
+  {
+   "name": "tool_call",
+   "case": "auto_strict",
+   "grammar": "{\"grammars\":[{\"name\":\"tool_output\",\"lark_grammar\":\"%llguidance {}\\nstart: think (TEXT (call_0 | call_1))* TEXT\\nthink: TEXT <[248069]>\\ncall_0: <tool_call> \\\"\\\\n<function=get_weather>\\\\n\\\" @free_arguments \\\"</function>\\\\n\\\" </tool_call>\\ncall_1: <tool_call> \\\"\\\\n<function=search>\\\\n\\\" @arguments_1 \\\"</function>\\\\n\\\" </tool_call>\\nWS: /[ \\\\t\\\\n\\\\r]{0,64}/\\nTEXT: /(?s:.*)/ & ~/(?s:.*)(<tool_call>|<\\\\/think>)(?s:.*)/\\n\"},{\"name\":\"free_arguments\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter*\\nparameter: \\\"<parameter=\\\" NAME \\\">\\\\n\\\" value\\nvalue[suffix=\\\"\\\\n</parameter>\\\\n\\\"]: /(?s:.*)/\\nNAME: /[^<> \\\\t\\\\n\\\\r]([^<>\\\\n\\\\r]{0,254}[^<> \\\\t\\\\n\\\\r])?/\\n\"},{\"name\":\"arguments_1\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter_0 parameter_1? parameter_2? parameter_3? parameter_4\\nparameter_0: \\\"<parameter=\\\" \\\"query\\\" \\\">\\\\n\\\" parameter_0_value\\nparameter_0_value[suffix=\\\"\\\\n</parameter>\\\\n\\\"]: /(?s:.*)/\\nparameter_1: \\\"<parameter=\\\" \\\"limit\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"integer\\\",\\\"minimum\\\":1,\\\"maximum\\\":100,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_2: \\\"<parameter=\\\" \\\"filters\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"site\\\":{\\\"type\\\":\\\"string\\\",\\\"pattern\\\":\\\"^[a-z.]+$\\\"},\\\"after\\\":{\\\"type\\\":\\\"string\\\",\\\"format\\\":\\\"date\\\"}},\\\"required\\\":[\\\"site\\\"],\\\"additionalProperties\\\":false,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_3: \\\"<parameter=\\\" \\\"safe\\\" \\\">\\\\n\\\" (\\\"true\\\" | \\\"false\\\") \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_4: \\\"<parameter=\\\" \\\"mode\\\" \\\">\\\\n\\\" (\\\"fast\\\" | \\\"deep\\\" | \\\"3\\\" | \\\"null\\\" | \\\"1.5\\\") \\\"\\\\n</parameter>\\\\n\\\"\\n\"}]}",
+   "openings": [
+    [
+     [
+      248069,
+      248058,
+      198,
+      27,
+      1628,
+      93260,
+      29,
+      198
+     ],
+     "tool search has too many parameters to constrain"
+    ]
+   ],
+   "ops": [
+    {
+     "op": "masks",
+     "simulation": []
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      40,
+      1220,
+      2624
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      13,
+      248069,
+      271,
+      248058
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      13,
+      248069,
+      271
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      248058,
+      198,
+      27,
+      1628
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      248058,
+      198,
+      27
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      1628,
+      9,
+      29,
+      198
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      1628,
+      93260,
+      29
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      198,
+      27,
+      15704,
+      76478
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      198,
+      27,
+      15704
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      76478,
+      29,
+      198,
+      36212
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      76478,
+      29,
+      198
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      36212,
+      321,
+      12228,
+      198
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      36212,
+      321,
+      12228
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      198,
+      510,
+      15704,
+      29
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      198,
+      510,
+      15704
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      29,
+      198,
+      27,
+      15704
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      29,
+      198,
+      27
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      15704,
+      28,
+      8255,
+      29
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      15704,
+      28,
+      8255
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      29,
+      198,
+      9071,
+      198
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      29,
+      198,
+      9071
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      198,
+      510,
+      15704,
+      29
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      198,
+      510,
+      15704
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      29,
+      198,
+      510,
+      1628
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      29,
+      198,
+      510
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      1628,
+      29,
+      198,
+      248059
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      1628,
+      29,
+      198
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      248059
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      248059
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": []
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      248046
+     ]
+    },
+    {
+     "op": "finish"
+    }
+   ],
+   "results": [
+    {
+     "rows": [
+      [
+       "c2229142e8c312f6",
+       248112
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "c2229142e8c312f6",
+       248112
+      ],
+      [
+       "c2229142e8c312f6",
+       248112
+      ],
+      [
+       "76fdeacdbfcdefbc",
+       248114
+      ],
+      [
+       "76fdeacdbfcdefbc",
+       248114
+      ],
+      [
+       "79ee6e951931f8c8",
+       1
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "76fdeacdbfcdefbc",
+       248114
+      ],
+      [
+       "79ee6e951931f8c8",
+       1
+      ],
+      [
+       "60fcf64fc319caa7",
+       1
+      ],
+      [
+       "338bb543c6b1f6ac",
+       1
+      ],
+      [
+       "0738e95f1de62f64",
+       5
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "338bb543c6b1f6ac",
+       1
+      ],
+      [
+       "0738e95f1de62f64",
+       5
+      ],
+      [
+       "0738e95f1de62f64",
+       5
+      ],
+      [
+       "0738e95f1de62f64",
+       5
+      ],
+      [
+       "0738e95f1de62f64",
+       5
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "79ee6e951931f8c8",
+       1
+      ],
+      [
+       "60fcf64fc319caa7",
+       1
+      ],
+      [
+       "7c204b5fb1d6bc45",
+       1
+      ],
+      [
+       "a3a647e17addd799",
+       1
+      ],
+      [
+       "c5b38fe26df0dac0",
+       1
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "a3a647e17addd799",
+       1
+      ],
+      [
+       "c5b38fe26df0dac0",
+       1
+      ],
+      [
+       "fc05f5594395c253",
+       34
+      ],
+      [
+       "34347fad595c54f3",
+       248111
+      ],
+      [
+       "34347fad595c54f3",
+       248111
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "34347fad595c54f3",
+       248111
+      ],
+      [
+       "34347fad595c54f3",
+       248111
+      ],
+      [
+       "34347fad595c54f3",
+       248111
+      ],
+      [
+       "34347fad595c54f3",
+       248111
+      ],
+      [
+       "34347fad595c54f3",
+       248111
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "34347fad595c54f3",
+       248111
+      ],
+      [
+       "34347fad595c54f3",
+       248111
+      ],
+      [
+       "34347fad595c54f3",
+       248111
+      ],
+      [
+       "34347fad595c54f3",
+       248111
+      ],
+      [
+       "9791afa2bcd1d9d6",
+       248078
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "34347fad595c54f3",
+       248111
+      ],
+      [
+       "9791afa2bcd1d9d6",
+       248078
+      ],
+      [
+       "60fcf64fc319caa7",
+       1
+      ],
+      [
+       "7c204b5fb1d6bc45",
+       1
+      ],
+      [
+       "039d8b02d40c33f4",
+       5
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "7c204b5fb1d6bc45",
+       1
+      ],
+      [
+       "039d8b02d40c33f4",
+       5
+      ],
+      [
+       "a8068621a3947ae4",
+       18
+      ],
+      [
+       "c5b38fe26df0dac0",
+       1
+      ],
+      [
+       "79ee6e951931f8c8",
+       1
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "c5b38fe26df0dac0",
+       1
+      ],
+      [
+       "79ee6e951931f8c8",
+       1
+      ],
+      [
+       "16fb9a61aab046aa",
+       14
+      ],
+      [
+       "79ee6e951931f8c8",
+       1
+      ],
+      [
+       "305d20c63dca50fe",
+       1
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "79ee6e951931f8c8",
+       1
+      ],
+      [
+       "305d20c63dca50fe",
+       1
+      ],
+      [
+       "7c204b5fb1d6bc45",
+       1
+      ],
+      [
+       "c5b38fe26df0dac0",
+       1
+      ],
+      [
+       "79ee6e951931f8c8",
+       1
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "c5b38fe26df0dac0",
+       1
+      ],
+      [
+       "79ee6e951931f8c8",
+       1
+      ],
+      [
+       "305d20c63dca50fe",
+       1
+      ],
+      [
+       "338bb543c6b1f6ac",
+       1
+      ],
+      [
+       "c5b38fe26df0dac0",
+       1
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "338bb543c6b1f6ac",
+       1
+      ],
+      [
+       "c5b38fe26df0dac0",
+       1
+      ],
+      [
+       "79ee6e951931f8c8",
+       1
+      ],
+      [
+       "265ef402e8a9de5b",
+       1
+      ],
+      [
+       "76fdeacdbfcdefbc",
+       248114
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "265ef402e8a9de5b",
+       1
+      ],
+      [
+       "76fdeacdbfcdefbc",
+       248114
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "76fdeacdbfcdefbc",
+       248114
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "ok": true
+    }
+   ]
+  },
+  {
+   "name": "named_call",
+   "case": "named_event",
+   "grammar": "{\"grammars\":[{\"name\":\"tool_output\",\"lark_grammar\":\"%llguidance {}\\nstart: think WS (call_0) WS\\nthink: TEXT <[248069]>\\ncall_0: <tool_call> \\\"\\\\n<function=create_event>\\\\n\\\" @arguments_0 \\\"</function>\\\\n\\\" </tool_call>\\nWS: /[ \\\\t\\\\n\\\\r]{0,64}/\\nTEXT: /(?s:.*)/ & ~/(?s:.*)(<tool_call>|<\\\\/think>)(?s:.*)/\\n\"},{\"name\":\"arguments_0\",\"lark_grammar\":\"%llguidance {}\\nstart: parameter_0 parameter_1? parameter_2? parameter_3 parameter_4? parameter_5? parameter_6?\\nparameter_0: \\\"<parameter=\\\" \\\"title\\\" \\\">\\\\n\\\" parameter_0_value\\nparameter_0_value[suffix=\\\"\\\\n</parameter>\\\\n\\\"]: /(?s:.*)/\\nparameter_1: \\\"<parameter=\\\" \\\"attendees\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"array\\\",\\\"items\\\":{\\\"$ref\\\":\\\"#/$defs/__splash_root/$defs/person\\\"},\\\"$defs\\\":{\\\"__splash_root\\\":{\\\"type\\\":\\\"object\\\",\\\"$defs\\\":{\\\"person\\\":{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"name\\\":{\\\"type\\\":\\\"string\\\"},\\\"email\\\":{\\\"type\\\":\\\"string\\\"}},\\\"required\\\":[\\\"name\\\"],\\\"additionalProperties\\\":false}},\\\"properties\\\":{\\\"title\\\":{\\\"type\\\":\\\"string\\\"},\\\"attendees\\\":{\\\"type\\\":\\\"array\\\",\\\"items\\\":{\\\"$ref\\\":\\\"#/$defs/__splash_root/$defs/person\\\"}},\\\"when\\\":{\\\"anyOf\\\":[{\\\"type\\\":\\\"string\\\"},{\\\"type\\\":\\\"null\\\"}]},\\\"priority\\\":{\\\"anyOf\\\":[{\\\"type\\\":\\\"integer\\\",\\\"multipleOf\\\":5},{\\\"const\\\":\\\"high\\\"}]},\\\"tags\\\":{\\\"type\\\":[\\\"array\\\",\\\"null\\\"],\\\"items\\\":{\\\"type\\\":\\\"string\\\"},\\\"minItems\\\":2},\\\"empty\\\":{\\\"enum\\\":[\\\"\\\",\\\"x\\\"]},\\\"weight\\\":{\\\"type\\\":\\\"number\\\",\\\"maximum\\\":1e+16,\\\"minimum\\\":1.5e-07}},\\\"required\\\":[\\\"title\\\",\\\"priority\\\"],\\\"additionalProperties\\\":false}},\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_2: \\\"<parameter=\\\" \\\"when\\\" \\\">\\\\n\\\" parameter_2_value\\nparameter_2_value[suffix=\\\"\\\\n</parameter>\\\\n\\\"]: /(?s:.*)/\\nparameter_3: \\\"<parameter=\\\" \\\"priority\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"integer\\\",\\\"multipleOf\\\":5,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}} | \\\"high\\\") \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_4: \\\"<parameter=\\\" \\\"tags\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":[\\\"array\\\",\\\"null\\\"],\\\"items\\\":{\\\"type\\\":\\\"string\\\"},\\\"minItems\\\":2,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_5_empty_0:\\nparameter_5: \\\"<parameter=\\\" \\\"empty\\\" \\\">\\\\n\\\" (parameter_5_empty_0 | \\\"x\\\") \\\"\\\\n</parameter>\\\\n\\\"\\nparameter_6: \\\"<parameter=\\\" \\\"weight\\\" \\\">\\\\n\\\" (%json {\\\"type\\\":\\\"number\\\",\\\"maximum\\\":1e+16,\\\"minimum\\\":1.5e-07,\\\"x-guidance\\\":{\\\"lenient\\\":true,\\\"whitespace_pattern\\\":\\\"[ \\\\\\\\t\\\\\\\\n\\\\\\\\r]{0,64}\\\"}}) \\\"\\\\n</parameter>\\\\n\\\"\\n\"}]}",
+   "openings": [
+    [
+     [
+      248069,
+      248058,
+      198,
+      27,
+      1628,
+      87950,
+      6536,
+      29,
+      198
+     ],
+     "tool create_event has too many parameters to constrain"
+    ]
+   ],
+   "ops": [
+    {
+     "op": "masks",
+     "simulation": []
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      19860,
+      13,
+      248069,
+      271
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      248058,
+      198,
+      27,
+      1628,
+      87950
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      248058,
+      198,
+      27,
+      1628
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      87950,
+      6536,
+      29,
+      198,
+      27
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      87950,
+      6536,
+      29,
+      198
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      27,
+      15704,
+      87393,
+      29,
+      198
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      27,
+      15704,
+      87393,
+      29
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      198,
+      47105,
+      446,
+      198,
+      510
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      198,
+      47105,
+      446,
+      198
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      510,
+      15704,
+      29,
+      198,
+      27
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      510,
+      15704,
+      29,
+      198
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      27,
+      15704,
+      16874,
+      8508,
+      29
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      27,
+      15704,
+      16874,
+      8508
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      29,
+      198,
+      16,
+      20,
+      198
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      29,
+      198,
+      16,
+      20
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      198,
+      510,
+      15704,
+      29,
+      198
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      198,
+      510,
+      15704,
+      29
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      198,
+      27,
+      15704,
+      28,
+      3092
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      198,
+      27,
+      15704,
+      28
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      3092,
+      29,
+      271,
+      510,
+      15704
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      3092,
+      29,
+      271,
+      510
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      15704,
+      29,
+      198,
+      510,
+      1628
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      15704,
+      29,
+      198,
+      510
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      1628,
+      29,
+      198,
+      248059
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      1628,
+      29,
+      198,
+      248059
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": []
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      248046
+     ]
+    },
+    {
+     "op": "finish"
+    }
+   ],
+   "results": [
+    {
+     "rows": [
+      [
+       "c2229142e8c312f6",
+       248112
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "747381f649469f6c",
+       399
+      ],
+      [
+       "79ee6e951931f8c8",
+       1
+      ],
+      [
+       "60fcf64fc319caa7",
+       1
+      ],
+      [
+       "338bb543c6b1f6ac",
+       1
+      ],
+      [
+       "2e60f70106883c75",
+       1
+      ],
+      [
+       "6ed73c24439ba972",
+       1
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "2e60f70106883c75",
+       1
+      ],
+      [
+       "6ed73c24439ba972",
+       1
+      ],
+      [
+       "c5b38fe26df0dac0",
+       1
+      ],
+      [
+       "79ee6e951931f8c8",
+       1
+      ],
+      [
+       "60fcf64fc319caa7",
+       1
+      ],
+      [
+       "7c204b5fb1d6bc45",
+       1
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "60fcf64fc319caa7",
+       1
+      ],
+      [
+       "7c204b5fb1d6bc45",
+       1
+      ],
+      [
+       "ac96a4d8c74eb830",
+       1
+      ],
+      [
+       "c5b38fe26df0dac0",
+       1
+      ],
+      [
+       "fc05f5594395c253",
+       34
+      ],
+      [
+       "34347fad595c54f3",
+       248111
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "fc05f5594395c253",
+       34
+      ],
+      [
+       "34347fad595c54f3",
+       248111
+      ],
+      [
+       "34347fad595c54f3",
+       248111
+      ],
+      [
+       "34347fad595c54f3",
+       248111
+      ],
+      [
+       "34347fad595c54f3",
+       248111
+      ],
+      [
+       "34347fad595c54f3",
+       248111
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "34347fad595c54f3",
+       248111
+      ],
+      [
+       "34347fad595c54f3",
+       248111
+      ],
+      [
+       "34347fad595c54f3",
+       248111
+      ],
+      [
+       "9791afa2bcd1d9d6",
+       248078
+      ],
+      [
+       "60fcf64fc319caa7",
+       1
+      ],
+      [
+       "7c204b5fb1d6bc45",
+       1
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "60fcf64fc319caa7",
+       1
+      ],
+      [
+       "7c204b5fb1d6bc45",
+       1
+      ],
+      [
+       "2bdd0ec49153dd9b",
+       4
+      ],
+      [
+       "1330515c8981f6e6",
+       1
+      ],
+      [
+       "c5b38fe26df0dac0",
+       1
+      ],
+      [
+       "79ee6e951931f8c8",
+       1
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "c5b38fe26df0dac0",
+       1
+      ],
+      [
+       "79ee6e951931f8c8",
+       1
+      ],
+      [
+       "2683091614d9a4d3",
+       14
+      ],
+      [
+       "ab6daad46eb8e3d4",
+       10
+      ],
+      [
+       "3c446566fea3ed0c",
+       11
+      ],
+      [
+       "305d20c63dca50fe",
+       1
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "3c446566fea3ed0c",
+       11
+      ],
+      [
+       "305d20c63dca50fe",
+       1
+      ],
+      [
+       "7c204b5fb1d6bc45",
+       1
+      ],
+      [
+       "c5b38fe26df0dac0",
+       1
+      ],
+      [
+       "79ee6e951931f8c8",
+       1
+      ],
+      [
+       "34c6fa086a95401b",
+       3
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "79ee6e951931f8c8",
+       1
+      ],
+      [
+       "34c6fa086a95401b",
+       3
+      ],
+      [
+       "ffff6949926a6896",
+       9
+      ],
+      [
+       "1dcf843469e9106e",
+       4
+      ],
+      [
+       "50d90c799781bda9",
+       15
+      ],
+      [
+       "c5b38fe26df0dac0",
+       1
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "50d90c799781bda9",
+       15
+      ],
+      [
+       "c5b38fe26df0dac0",
+       1
+      ],
+      [
+       "6757c61895784b33",
+       2
+      ],
+      [
+       "305d20c63dca50fe",
+       1
+      ],
+      [
+       "7c204b5fb1d6bc45",
+       1
+      ],
+      [
+       "c5b38fe26df0dac0",
+       1
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "7c204b5fb1d6bc45",
+       1
+      ],
+      [
+       "c5b38fe26df0dac0",
+       1
+      ],
+      [
+       "79ee6e951931f8c8",
+       1
+      ],
+      [
+       "34c6fa086a95401b",
+       3
+      ],
+      [
+       "338bb543c6b1f6ac",
+       1
+      ],
+      [
+       "c5b38fe26df0dac0",
+       1
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "338bb543c6b1f6ac",
+       1
+      ],
+      [
+       "c5b38fe26df0dac0",
+       1
+      ],
+      [
+       "79ee6e951931f8c8",
+       1
+      ],
+      [
+       "265ef402e8a9de5b",
+       1
+      ],
+      [
+       "033f3556ec53b9e3",
+       402
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "033f3556ec53b9e3",
+       402
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "ok": true
+    }
+   ]
+  },
+  {
+   "name": "json_answer",
+   "case": "json_plain_answer",
+   "grammar": "%llguidance {}\nstart: WS %json {\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"},\"score\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":10},\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"string\",\"pattern\":\"^\\\\w+$\"}},\"note\":{\"type\":\"string\"}},\"required\":[\"answer\",\"score\"],\"additionalProperties\":false,\"x-guidance\":{\"lenient\":true,\"whitespace_pattern\":\"[ \\\\t\\\\n\\\\r]{0,64}\"}}\nWS: /[ \\t\\n\\r]{0,64}/\n",
+   "openings": [],
+   "ops": [
+    {
+     "op": "masks",
+     "simulation": []
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      4754,
+      8944
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      763,
+      328,
+      9405
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      763,
+      328
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      9405,
+      9,
+      424
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      9405,
+      11
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      424,
+      369,
+      487
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      424,
+      369
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      487,
+      328,
+      11985
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      487,
+      328
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      11985,
+      763,
+      220
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      11985,
+      763
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      220,
+      22,
+      11
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      220,
+      22
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      11,
+      328,
+      13679
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      11,
+      328
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      13679,
+      763,
+      4241
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      13679,
+      763
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      4241,
+      64,
+      853
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      4241,
+      64
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      853,
+      89254
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      853,
+      89254
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": []
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      248046
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      248046
+     ]
+    },
+    {
+     "op": "finish"
+    }
+   ],
+   "results": [
+    {
+     "rows": [
+      [
+       "e103257fa8b0e59d",
+       404
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "9234d77fb9ab4492",
+       8
+      ],
+      [
+       "1afe2c42fba8b77a",
+       793
+      ],
+      [
+       "b50e431c38e1a710",
+       245662
+      ],
+      [
+       "b50e431c38e1a710",
+       245662
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "b50e431c38e1a710",
+       245662
+      ],
+      [
+       "b50e431c38e1a710",
+       245662
+      ],
+      [
+       "b50e431c38e1a710",
+       245662
+      ],
+      [
+       "b50e431c38e1a710",
+       245662
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "b50e431c38e1a710",
+       245662
+      ],
+      [
+       "b50e431c38e1a710",
+       245662
+      ],
+      [
+       "b50e431c38e1a710",
+       245662
+      ],
+      [
+       "7795e04f9682d79f",
+       403
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "b50e431c38e1a710",
+       245662
+      ],
+      [
+       "7795e04f9682d79f",
+       403
+      ],
+      [
+       "1d28ca1a50553b36",
+       1
+      ],
+      [
+       "601b71e13e110810",
+       2
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "1d28ca1a50553b36",
+       1
+      ],
+      [
+       "601b71e13e110810",
+       2
+      ],
+      [
+       "10f5b12efb57f478",
+       410
+      ],
+      [
+       "667ab6ce93cbd115",
+       409
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "10f5b12efb57f478",
+       410
+      ],
+      [
+       "667ab6ce93cbd115",
+       409
+      ],
+      [
+       "712da17a3944e0c6",
+       406
+      ],
+      [
+       "3bfadb0b4f9efedb",
+       402
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "712da17a3944e0c6",
+       406
+      ],
+      [
+       "3bfadb0b4f9efedb",
+       402
+      ],
+      [
+       "ef21db1d48656fea",
+       8
+      ],
+      [
+       "e9b7562450a9ccaf",
+       4
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "ef21db1d48656fea",
+       8
+      ],
+      [
+       "e9b7562450a9ccaf",
+       4
+      ],
+      [
+       "a8cab6ae06393671",
+       410
+      ],
+      [
+       "88bf974bf081a92d",
+       41996
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "a8cab6ae06393671",
+       410
+      ],
+      [
+       "88bf974bf081a92d",
+       41996
+      ],
+      [
+       "348f975b57cfe1c0",
+       42003
+      ],
+      [
+       "348f975b57cfe1c0",
+       42003
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "348f975b57cfe1c0",
+       42003
+      ],
+      [
+       "348f975b57cfe1c0",
+       42003
+      ],
+      [
+       "f642a4437ed45b29",
+       2
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "f642a4437ed45b29",
+       2
+      ]
+     ]
+    },
+    {
+     "rows": [
+      [
+       "f642a4437ed45b29",
+       2
+      ],
+      [
+       "f642a4437ed45b29",
+       2
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "ok": true
+    }
+   ]
+  },
+  {
+   "name": "none_text",
+   "case": "none",
+   "grammar": "{\"grammars\":[{\"name\":\"tool_output\",\"lark_grammar\":\"%llguidance {}\\nstart: think TEXT\\nthink: TEXT <[248069]>\\nWS: /[ \\\\t\\\\n\\\\r]{0,64}/\\nTEXT: /(?s:.*)/ & ~/(?s:.*)(<tool_call>|<\\\\/think>)(?s:.*)/\\n\"}]}",
+   "openings": [],
+   "ops": [
+    {
+     "op": "masks",
+     "simulation": []
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      90700,
+      13,
+      248069,
+      271,
+      2665
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      7141,
+      4221,
+      13
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      7141,
+      4221,
+      13
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": []
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      248058,
+      248046,
+      300000
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      248058
+     ]
+    },
+    {
+     "op": "finish"
+    }
+   ],
+   "results": [
+    {
+     "rows": [
+      [
+       "c2229142e8c312f6",
+       248112
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "fff7a6f89d279e55",
+       248113
+      ],
+      [
+       "fff7a6f89d279e55",
+       248113
+      ],
+      [
+       "fff7a6f89d279e55",
+       248113
+      ],
+      [
+       "fff7a6f89d279e55",
+       248113
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "fff7a6f89d279e55",
+       248113
+      ]
+     ]
+    },
+    {
+     "rows": [
+      [
+       "fff7a6f89d279e55",
+       248113
+      ],
+      [
+       "fff7a6f89d279e55",
+       248113
+      ],
+      [
+       "fff7a6f89d279e55",
+       248113
+      ],
+      [
+       "fff7a6f89d279e55",
+       248113
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "error": "Parser Error: token \"\ufffd[248058]\" doesn't satisfy the grammar; byte '\u00ff' fails parse"
+    }
+   ]
+  },
+  {
+   "name": "fresh_rows",
+   "case": "json_object",
+   "grammar": "%llguidance {}\nstart: WS %json {\"type\":\"object\",\"x-guidance\":{\"lenient\":true,\"whitespace_pattern\":\"[ \\\\t\\\\n\\\\r]{0,64}\"}}\nWS: /[ \\t\\n\\r]{0,64}/\n",
+   "openings": [],
+   "ops": [
+    {
+     "op": "masks",
+     "simulation": []
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      90
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      92,
+      248046
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      92
+     ]
+    },
+    {
+     "op": "finish"
+    }
+   ],
+   "results": [
+    {
+     "rows": [
+      [
+       "d614ce5f4341ae19",
+       406
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "f14e4ebaac7848f4",
+       787
+      ],
+      [
+       "f642a4437ed45b29",
+       2
+      ],
+      [
+       "4370d5568ff558dd",
+       248320
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "ok": true
+    }
+   ]
+  },
+  {
+   "name": "limits",
+   "case": "json_plain_answer",
+   "grammar": "%llguidance {}\nstart: WS %json {\"type\":\"object\",\"properties\":{\"answer\":{\"type\":\"string\"},\"score\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":10},\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"string\",\"pattern\":\"^\\\\w+$\"}},\"note\":{\"type\":\"string\"}},\"required\":[\"answer\",\"score\"],\"additionalProperties\":false,\"x-guidance\":{\"lenient\":true,\"whitespace_pattern\":\"[ \\\\t\\\\n\\\\r]{0,64}\"}}\nWS: /[ \\t\\n\\r]{0,64}/\n",
+   "openings": [],
+   "ops": [
+    {
+     "op": "masks",
+     "simulation": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      300000
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      90
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": [
+      300000,
+      5
+     ]
+    },
+    {
+     "op": "commit",
+     "tokens": [
+      9,
+      9
+     ]
+    },
+    {
+     "op": "masks",
+     "simulation": []
+    }
+   ],
+   "results": [
+    {
+     "error": "too many simulation tokens"
+    },
+    {
+     "error": "generated token is out of range"
+    },
+    {
+     "ok": true
+    },
+    {
+     "rows": [
+      [
+       "0bade42b97250032",
+       403
+      ],
+      [
+       "0bade42b97250032",
+       403
+      ],
+      [
+       "0bade42b97250032",
+       403
+      ]
+     ]
+    },
+    {
+     "ok": true
+    },
+    {
+     "error": "Parser Error: token \"*\" doesn't satisfy the grammar; byte '*' fails parse"
+    }
+   ]
+  }
+ ]
+}

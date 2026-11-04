@@ -1,0 +1,115 @@
+{
+  "argv": [
+    "/Users/user/.local/bin/claude",
+    "-p",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--replay-user-messages",
+    "--model",
+    "haiku",
+    "--effort",
+    "low",
+    "--safe-mode",
+    "--tools",
+    "",
+    "--strict-mcp-config",
+    "--mcp-config",
+    "{\"mcpServers\":{}}",
+    "--no-session-persistence",
+    "--permission-prompts",
+    "none",
+    "--session-id",
+    "810fff7a-6297-46a8-8a0c-9567ac33c666"
+  ],
+  "cwd": "/Users/user/Notes",
+  "date_utc": "2026-10-11T11:10:54Z",
+  "cli_version": "2.1.295",
+  "input": [
+    {
+      "elapsed_s": 1.7208047211170197e-05,
+      "wire": {
+        "type": "user",
+        "uuid": "2be0b872-eace-432d-add8-aa0191c3f6cc",
+        "message": {
+          "role": "user",
+          "content": "Observation only: the local test code is LIME."
+        },
+        "parent_tool_use_id": null,
+        "shouldQuery": false
+      }
+    },
+    {
+      "elapsed_s": 0.18875220802146941,
+      "wire": {
+        "type": "user",
+        "uuid": "d4d9fceb-d340-4c61-8b73-0a33ec38db0a",
+        "message": {
+          "role": "user",
+          "content": "What code did I give you? Reply with the code only."
+        },
+        "parent_tool_use_id": null
+      }
+    },
+    {
+      "elapsed_s": 1.5246508330455981,
+      "wire": {
+        "type": "user",
+        "uuid": "5df8dc82-31c5-4658-8eb8-3825ef2d9532",
+        "message": {
+          "role": "user",
+          "content": "Reply with the observation code only."
+        },
+        "parent_tool_use_id": null
+      }
+    }
+  ],
+  "results": [
+    {
+      "elapsed_s": 0.188730416004546,
+      "result": "",
+      "subtype": "success",
+      "is_error": false,
+      "session_id": "810fff7a-6297-46a8-8a0c-9567ac33c666"
+    },
+    {
+      "elapsed_s": 2.34649566601729,
+      "result": "LIME",
+      "subtype": "success",
+      "is_error": false,
+      "session_id": "810fff7a-6297-46a8-8a0c-9567ac33c666"
+    },
+    {
+      "elapsed_s": 3.530494875041768,
+      "result": "LIME",
+      "subtype": "success",
+      "is_error": false,
+      "session_id": "810fff7a-6297-46a8-8a0c-9567ac33c666"
+    }
+  ],
+  "observation_echo": true,
+  "elapsed_s": 4.7152695410186425,
+  "exit_code": 0,
+  "stderr": "",
+  "verification_note": "The supervisor initially counted the empty no-query result as an inference result. The recorded wire proves num_turns=0, zero usage and duration_api_ms=0 for append; the two querying messages both returned LIME. No second real smoke was run.",
+  "verified_query_results": [
+    {
+      "elapsed_s": 2.34649566601729,
+      "result": "LIME",
+      "subtype": "success",
+      "is_error": false,
+      "session_id": "810fff7a-6297-46a8-8a0c-9567ac33c666"
+    },
+    {
+      "elapsed_s": 3.530494875041768,
+      "result": "LIME",
+      "subtype": "success",
+      "is_error": false,
+      "session_id": "810fff7a-6297-46a8-8a0c-9567ac33c666"
+    }
+  ],
+  "observation_api_ms": 0,
+  "observation_num_turns": 0
+}

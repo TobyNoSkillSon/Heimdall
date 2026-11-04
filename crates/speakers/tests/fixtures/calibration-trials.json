@@ -1,0 +1,2690 @@
+[
+  {
+    "score": 0.7101696133613586,
+    "same_speaker": true
+  },
+  {
+    "score": 0.4245142340660095,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7661738395690918,
+    "same_speaker": true
+  },
+  {
+    "score": 0.326409250497818,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7472889423370361,
+    "same_speaker": true
+  },
+  {
+    "score": 0.46300336718559265,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7027952075004578,
+    "same_speaker": true
+  },
+  {
+    "score": 0.35762423276901245,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7861059904098511,
+    "same_speaker": true
+  },
+  {
+    "score": 0.35777416825294495,
+    "same_speaker": false
+  },
+  {
+    "score": 0.73527592420578,
+    "same_speaker": true
+  },
+  {
+    "score": 0.410956472158432,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7468001246452332,
+    "same_speaker": true
+  },
+  {
+    "score": 0.35642164945602417,
+    "same_speaker": false
+  },
+  {
+    "score": 0.8009747862815857,
+    "same_speaker": true
+  },
+  {
+    "score": 0.47084495425224304,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7446907758712769,
+    "same_speaker": true
+  },
+  {
+    "score": 0.42272862792015076,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7436544299125671,
+    "same_speaker": true
+  },
+  {
+    "score": 0.37045586109161377,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7723163366317749,
+    "same_speaker": true
+  },
+  {
+    "score": 0.4045523703098297,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7842112183570862,
+    "same_speaker": true
+  },
+  {
+    "score": 0.37508171796798706,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7886552214622498,
+    "same_speaker": true
+  },
+  {
+    "score": 0.36608564853668213,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7755106687545776,
+    "same_speaker": true
+  },
+  {
+    "score": 0.44865065813064575,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7195103168487549,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3722838759422302,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7450986504554749,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3570675849914551,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7238517999649048,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2851657569408417,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7588316798210144,
+    "same_speaker": true
+  },
+  {
+    "score": 0.28201621770858765,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7422853112220764,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2680947482585907,
+    "same_speaker": false
+  },
+  {
+    "score": 0.750006377696991,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2576943635940552,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7466992139816284,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3753926753997803,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7163359522819519,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2702188789844513,
+    "same_speaker": false
+  },
+  {
+    "score": 0.752994954586029,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3640792667865753,
+    "same_speaker": false
+  },
+  {
+    "score": 0.715151309967041,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2938963770866394,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6378888487815857,
+    "same_speaker": true
+  },
+  {
+    "score": 0.29022276401519775,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6551011800765991,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3047718107700348,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6846103668212891,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3162134885787964,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7156351208686829,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2221813201904297,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7834078669548035,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3193732500076294,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7695176005363464,
+    "same_speaker": true
+  },
+  {
+    "score": 0.24027779698371887,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7007203698158264,
+    "same_speaker": true
+  },
+  {
+    "score": 0.19785232841968536,
+    "same_speaker": false
+  },
+  {
+    "score": 0.737270712852478,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2607097029685974,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7211335897445679,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3127007782459259,
+    "same_speaker": false
+  },
+  {
+    "score": 0.671222984790802,
+    "same_speaker": true
+  },
+  {
+    "score": 0.23619195818901062,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6857659220695496,
+    "same_speaker": true
+  },
+  {
+    "score": 0.24768996238708496,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6796744465827942,
+    "same_speaker": true
+  },
+  {
+    "score": 0.24220158159732819,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7206822633743286,
+    "same_speaker": true
+  },
+  {
+    "score": 0.23287974298000336,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6999718546867371,
+    "same_speaker": true
+  },
+  {
+    "score": 0.24040527641773224,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6389440298080444,
+    "same_speaker": true
+  },
+  {
+    "score": 0.25452330708503723,
+    "same_speaker": false
+  },
+  {
+    "score": 0.66817706823349,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2744441032409668,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6828284859657288,
+    "same_speaker": true
+  },
+  {
+    "score": 0.24681656062602997,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6722853779792786,
+    "same_speaker": true
+  },
+  {
+    "score": 0.25872084498405457,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7931042313575745,
+    "same_speaker": true
+  },
+  {
+    "score": 0.274860680103302,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7687825560569763,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3021742105484009,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7601292133331299,
+    "same_speaker": true
+  },
+  {
+    "score": 0.31801819801330566,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7578210830688477,
+    "same_speaker": true
+  },
+  {
+    "score": 0.29865968227386475,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7014182209968567,
+    "same_speaker": true
+  },
+  {
+    "score": 0.19211570918560028,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6112416386604309,
+    "same_speaker": true
+  },
+  {
+    "score": 0.35565993189811707,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6287925243377686,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3727821707725525,
+    "same_speaker": false
+  },
+  {
+    "score": 0.765853762626648,
+    "same_speaker": true
+  },
+  {
+    "score": 0.39055776596069336,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7493864893913269,
+    "same_speaker": true
+  },
+  {
+    "score": 0.47157299518585205,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6926795840263367,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3536091148853302,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7648221850395203,
+    "same_speaker": true
+  },
+  {
+    "score": 0.35594701766967773,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7365651726722717,
+    "same_speaker": true
+  },
+  {
+    "score": 0.4227723777294159,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7320602536201477,
+    "same_speaker": true
+  },
+  {
+    "score": 0.35089603066444397,
+    "same_speaker": false
+  },
+  {
+    "score": 0.8055057525634766,
+    "same_speaker": true
+  },
+  {
+    "score": 0.4844658374786377,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7552810311317444,
+    "same_speaker": true
+  },
+  {
+    "score": 0.41802695393562317,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7494093775749207,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3832729756832123,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7731170654296875,
+    "same_speaker": true
+  },
+  {
+    "score": 0.40644317865371704,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7665460109710693,
+    "same_speaker": true
+  },
+  {
+    "score": 0.40395036339759827,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7803945541381836,
+    "same_speaker": true
+  },
+  {
+    "score": 0.4061477780342102,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7724387049674988,
+    "same_speaker": true
+  },
+  {
+    "score": 0.4526740312576294,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7261828780174255,
+    "same_speaker": true
+  },
+  {
+    "score": 0.36808136105537415,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7552182674407959,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3734559416770935,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7251242399215698,
+    "same_speaker": true
+  },
+  {
+    "score": 0.30311617255210876,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7534129619598389,
+    "same_speaker": true
+  },
+  {
+    "score": 0.316349595785141,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7179526090621948,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2820236086845398,
+    "same_speaker": false
+  },
+  {
+    "score": 0.729638397693634,
+    "same_speaker": true
+  },
+  {
+    "score": 0.31876716017723083,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7240525484085083,
+    "same_speaker": true
+  },
+  {
+    "score": 0.423100084066391,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6735664010047913,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3270963728427887,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7349387407302856,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3619920313358307,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7164366841316223,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3098592162132263,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6284434795379639,
+    "same_speaker": true
+  },
+  {
+    "score": 0.292440801858902,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6586553454399109,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3152776062488556,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6975399851799011,
+    "same_speaker": true
+  },
+  {
+    "score": 0.33126944303512573,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7264909744262695,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2493491917848587,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7820319533348083,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3661438524723053,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7459014654159546,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2645261883735657,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7032323479652405,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2104613035917282,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7053826451301575,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3122430741786957,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7338844537734985,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3267378509044647,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6515839099884033,
+    "same_speaker": true
+  },
+  {
+    "score": 0.23256953060626984,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7034118175506592,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2609790861606598,
+    "same_speaker": false
+  },
+  {
+    "score": 0.695794939994812,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2467491775751114,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7009811401367188,
+    "same_speaker": true
+  },
+  {
+    "score": 0.23963534832000732,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7077093124389648,
+    "same_speaker": true
+  },
+  {
+    "score": 0.28899091482162476,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6293095946311951,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2482372224330902,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6636399030685425,
+    "same_speaker": true
+  },
+  {
+    "score": 0.24594824016094208,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6848583221435547,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2652398645877838,
+    "same_speaker": false
+  },
+  {
+    "score": 0.672072172164917,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2602560222148895,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7860608696937561,
+    "same_speaker": true
+  },
+  {
+    "score": 0.28299957513809204,
+    "same_speaker": false
+  },
+  {
+    "score": 0.741327166557312,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2947513461112976,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7622203826904297,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2991270124912262,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7309791445732117,
+    "same_speaker": true
+  },
+  {
+    "score": 0.28963303565979004,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6853331923484802,
+    "same_speaker": true
+  },
+  {
+    "score": 0.1887340098619461,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6060114502906799,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3531760275363922,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7085764408111572,
+    "same_speaker": true
+  },
+  {
+    "score": 0.4224206805229187,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7763131856918335,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3366887867450714,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7505638003349304,
+    "same_speaker": true
+  },
+  {
+    "score": 0.4575079381465912,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6866711378097534,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3440653383731842,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7841323018074036,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3569681942462921,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7321754097938538,
+    "same_speaker": true
+  },
+  {
+    "score": 0.4020669162273407,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7422957420349121,
+    "same_speaker": true
+  },
+  {
+    "score": 0.35514143109321594,
+    "same_speaker": false
+  },
+  {
+    "score": 0.8102152943611145,
+    "same_speaker": true
+  },
+  {
+    "score": 0.458206444978714,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7549876570701599,
+    "same_speaker": true
+  },
+  {
+    "score": 0.40500491857528687,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7357614040374756,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3676660358905792,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7707636952400208,
+    "same_speaker": true
+  },
+  {
+    "score": 0.4046206474304199,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7744510173797607,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3632808029651642,
+    "same_speaker": false
+  },
+  {
+    "score": 0.796230137348175,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3733178675174713,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7700079679489136,
+    "same_speaker": true
+  },
+  {
+    "score": 0.4588600695133209,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7113310694694519,
+    "same_speaker": true
+  },
+  {
+    "score": 0.37444907426834106,
+    "same_speaker": false
+  },
+  {
+    "score": 0.738808274269104,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3599218726158142,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7218649983406067,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2854311764240265,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7530294060707092,
+    "same_speaker": true
+  },
+  {
+    "score": 0.28697699308395386,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7355403304100037,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2750236988067627,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7431191205978394,
+    "same_speaker": true
+  },
+  {
+    "score": 0.26779642701148987,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7523632645606995,
+    "same_speaker": true
+  },
+  {
+    "score": 0.36568257212638855,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7169347405433655,
+    "same_speaker": true
+  },
+  {
+    "score": 0.26638272404670715,
+    "same_speaker": false
+  },
+  {
+    "score": 0.749950647354126,
+    "same_speaker": true
+  },
+  {
+    "score": 0.36613842844963074,
+    "same_speaker": false
+  },
+  {
+    "score": 0.712464451789856,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2950921952724457,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6386350989341736,
+    "same_speaker": true
+  },
+  {
+    "score": 0.28155428171157837,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6587812900543213,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3147672712802887,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6943181157112122,
+    "same_speaker": true
+  },
+  {
+    "score": 0.32870545983314514,
+    "same_speaker": false
+  },
+  {
+    "score": 0.714283287525177,
+    "same_speaker": true
+  },
+  {
+    "score": 0.22428211569786072,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7744789719581604,
+    "same_speaker": true
+  },
+  {
+    "score": 0.33261576294898987,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7535920739173889,
+    "same_speaker": true
+  },
+  {
+    "score": 0.254089891910553,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7016244530677795,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2119515985250473,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7338225245475769,
+    "same_speaker": true
+  },
+  {
+    "score": 0.26209425926208496,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7142653465270996,
+    "same_speaker": true
+  },
+  {
+    "score": 0.31130602955818176,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6711709499359131,
+    "same_speaker": true
+  },
+  {
+    "score": 0.22725102305412292,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6814106106758118,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2357640564441681,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6897537708282471,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2406647503376007,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7213582992553711,
+    "same_speaker": true
+  },
+  {
+    "score": 0.22205385565757751,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6917232275009155,
+    "same_speaker": true
+  },
+  {
+    "score": 0.24950239062309265,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6447528004646301,
+    "same_speaker": true
+  },
+  {
+    "score": 0.24034585058689117,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6631560325622559,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2542901933193207,
+    "same_speaker": false
+  },
+  {
+    "score": 0.683468759059906,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2303292155265808,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6774246692657471,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2540677785873413,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7887377738952637,
+    "same_speaker": true
+  },
+  {
+    "score": 0.27322569489479065,
+    "same_speaker": false
+  },
+  {
+    "score": 0.772336483001709,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3049759864807129,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7559534311294556,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3038482964038849,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7543447613716125,
+    "same_speaker": true
+  },
+  {
+    "score": 0.28706473112106323,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6921810507774353,
+    "same_speaker": true
+  },
+  {
+    "score": 0.19088894128799438,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6351370811462402,
+    "same_speaker": true
+  },
+  {
+    "score": 0.338718444108963,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7324635982513428,
+    "same_speaker": true
+  },
+  {
+    "score": 0.1847098171710968,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6650229692459106,
+    "same_speaker": true
+  },
+  {
+    "score": 0.168151393532753,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7053202390670776,
+    "same_speaker": true
+  },
+  {
+    "score": 0.1893581598997116,
+    "same_speaker": false
+  },
+  {
+    "score": 0.69208163022995,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2898300886154175,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6904914975166321,
+    "same_speaker": true
+  },
+  {
+    "score": 0.12764672935009003,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6758430600166321,
+    "same_speaker": true
+  },
+  {
+    "score": 0.17786769568920135,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6530630588531494,
+    "same_speaker": true
+  },
+  {
+    "score": 0.15409785509109497,
+    "same_speaker": false
+  },
+  {
+    "score": 0.663398802280426,
+    "same_speaker": true
+  },
+  {
+    "score": 0.1820138394832611,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6248321533203125,
+    "same_speaker": true
+  },
+  {
+    "score": 0.1563701182603836,
+    "same_speaker": false
+  },
+  {
+    "score": 0.3301665186882019,
+    "same_speaker": true
+  },
+  {
+    "score": 0.1236228197813034,
+    "same_speaker": false
+  },
+  {
+    "score": 0.4758457839488983,
+    "same_speaker": true
+  },
+  {
+    "score": 0.25675156712532043,
+    "same_speaker": false
+  },
+  {
+    "score": 0.39820438623428345,
+    "same_speaker": true
+  },
+  {
+    "score": 0.30382928252220154,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6639370918273926,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2444094717502594,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6981176733970642,
+    "same_speaker": true
+  },
+  {
+    "score": 0.15917004644870758,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6576082110404968,
+    "same_speaker": true
+  },
+  {
+    "score": 0.13940252363681793,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6623845100402832,
+    "same_speaker": true
+  },
+  {
+    "score": 0.18879997730255127,
+    "same_speaker": false
+  },
+  {
+    "score": 0.697182297706604,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3475351333618164,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7579687237739563,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2996055483818054,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7018505930900574,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2235444188117981,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7521926760673523,
+    "same_speaker": true
+  },
+  {
+    "score": 0.25383636355400085,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7069671154022217,
+    "same_speaker": true
+  },
+  {
+    "score": 0.24079354107379913,
+    "same_speaker": false
+  },
+  {
+    "score": 0.621058464050293,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3307112753391266,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7294237017631531,
+    "same_speaker": true
+  },
+  {
+    "score": 0.280020147562027,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6758236289024353,
+    "same_speaker": true
+  },
+  {
+    "score": 0.35641756653785706,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7403004765510559,
+    "same_speaker": true
+  },
+  {
+    "score": 0.23840554058551788,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6913272738456726,
+    "same_speaker": true
+  },
+  {
+    "score": 0.25783494114875793,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7141595482826233,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2404937595129013,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6654980182647705,
+    "same_speaker": true
+  },
+  {
+    "score": 0.21632295846939087,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7378440499305725,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2631155848503113,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7443397045135498,
+    "same_speaker": true
+  },
+  {
+    "score": 0.23591776192188263,
+    "same_speaker": false
+  },
+  {
+    "score": 0.707408607006073,
+    "same_speaker": true
+  },
+  {
+    "score": 0.25280702114105225,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7289794087409973,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2360791265964508,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7374419569969177,
+    "same_speaker": true
+  },
+  {
+    "score": 0.44101911783218384,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7036440968513489,
+    "same_speaker": true
+  },
+  {
+    "score": 0.28980761766433716,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6821402907371521,
+    "same_speaker": true
+  },
+  {
+    "score": 0.41140851378440857,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7096872329711914,
+    "same_speaker": true
+  },
+  {
+    "score": 0.39753514528274536,
+    "same_speaker": false
+  },
+  {
+    "score": 0.707785964012146,
+    "same_speaker": true
+  },
+  {
+    "score": 0.32162144780158997,
+    "same_speaker": false
+  },
+  {
+    "score": 0.67563796043396,
+    "same_speaker": true
+  },
+  {
+    "score": 0.24793259799480438,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6538979411125183,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2936103045940399,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7146425247192383,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2763373851776123,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6706699132919312,
+    "same_speaker": true
+  },
+  {
+    "score": 0.32179564237594604,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7504506707191467,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3112615942955017,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6541451811790466,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2541811466217041,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6721046566963196,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2941531538963318,
+    "same_speaker": false
+  },
+  {
+    "score": 0.673774003982544,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2556415796279907,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7124191522598267,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2749960720539093,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7800698280334473,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3661741018295288,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6795218586921692,
+    "same_speaker": true
+  },
+  {
+    "score": 0.32702726125717163,
+    "same_speaker": false
+  },
+  {
+    "score": 0.721747875213623,
+    "same_speaker": true
+  },
+  {
+    "score": 0.27425703406333923,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7019203305244446,
+    "same_speaker": true
+  },
+  {
+    "score": 0.29927903413772583,
+    "same_speaker": false
+  },
+  {
+    "score": 0.711547315120697,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3314131796360016,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7609872221946716,
+    "same_speaker": true
+  },
+  {
+    "score": 0.32501864433288574,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6481950879096985,
+    "same_speaker": true
+  },
+  {
+    "score": 0.20076873898506165,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7012115716934204,
+    "same_speaker": true
+  },
+  {
+    "score": 0.30099332332611084,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6776425242424011,
+    "same_speaker": true
+  },
+  {
+    "score": 0.253728449344635,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7638686299324036,
+    "same_speaker": true
+  },
+  {
+    "score": 0.34465092420578003,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6712902188301086,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2756955623626709,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6831981539726257,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2936382293701172,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6506466269493103,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2599389851093292,
+    "same_speaker": false
+  },
+  {
+    "score": 0.710003137588501,
+    "same_speaker": true
+  },
+  {
+    "score": 0.30130133032798767,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6486790180206299,
+    "same_speaker": true
+  },
+  {
+    "score": 0.23318563401699066,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6547114849090576,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2705225348472595,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6949673891067505,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2558215856552124,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6626532673835754,
+    "same_speaker": true
+  },
+  {
+    "score": 0.30671659111976624,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7070278525352478,
+    "same_speaker": true
+  },
+  {
+    "score": 0.21692678332328796,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6665180921554565,
+    "same_speaker": true
+  },
+  {
+    "score": 0.18519575893878937,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7207757234573364,
+    "same_speaker": true
+  },
+  {
+    "score": 0.23373331129550934,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7018839716911316,
+    "same_speaker": true
+  },
+  {
+    "score": 0.33253732323646545,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7045880556106567,
+    "same_speaker": true
+  },
+  {
+    "score": 0.13352501392364502,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6759711503982544,
+    "same_speaker": true
+  },
+  {
+    "score": 0.17141158878803253,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6519649028778076,
+    "same_speaker": true
+  },
+  {
+    "score": 0.15962755680084229,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7033625245094299,
+    "same_speaker": true
+  },
+  {
+    "score": 0.16766323149204254,
+    "same_speaker": false
+  },
+  {
+    "score": 0.633564829826355,
+    "same_speaker": true
+  },
+  {
+    "score": 0.1735895872116089,
+    "same_speaker": false
+  },
+  {
+    "score": 0.3065302073955536,
+    "same_speaker": true
+  },
+  {
+    "score": 0.18920214474201202,
+    "same_speaker": false
+  },
+  {
+    "score": 0.4555419981479645,
+    "same_speaker": true
+  },
+  {
+    "score": 0.23567983508110046,
+    "same_speaker": false
+  },
+  {
+    "score": 0.3131197988986969,
+    "same_speaker": true
+  },
+  {
+    "score": 0.18208438158035278,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6006777286529541,
+    "same_speaker": true
+  },
+  {
+    "score": 0.21759632229804993,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7001294493675232,
+    "same_speaker": true
+  },
+  {
+    "score": 0.18671995401382446,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6711897850036621,
+    "same_speaker": true
+  },
+  {
+    "score": 0.1538086235523224,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6723639965057373,
+    "same_speaker": true
+  },
+  {
+    "score": 0.18859392404556274,
+    "same_speaker": false
+  },
+  {
+    "score": 0.685230016708374,
+    "same_speaker": true
+  },
+  {
+    "score": 0.33808407187461853,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7446455359458923,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2876523733139038,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7012420892715454,
+    "same_speaker": true
+  },
+  {
+    "score": 0.20568308234214783,
+    "same_speaker": false
+  },
+  {
+    "score": 0.732873260974884,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2508623003959656,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7204939723014832,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2548932135105133,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6254541277885437,
+    "same_speaker": true
+  },
+  {
+    "score": 0.28741928935050964,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7381622791290283,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2551989257335663,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6833522915840149,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3592374324798584,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7168982625007629,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2573910653591156,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6915332078933716,
+    "same_speaker": true
+  },
+  {
+    "score": 0.27445000410079956,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7304290533065796,
+    "same_speaker": true
+  },
+  {
+    "score": 0.23222874104976654,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6557388305664062,
+    "same_speaker": true
+  },
+  {
+    "score": 0.23259492218494415,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7349288463592529,
+    "same_speaker": true
+  },
+  {
+    "score": 0.26981499791145325,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7554700970649719,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2437148541212082,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7061359882354736,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3011946380138397,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7544321417808533,
+    "same_speaker": true
+  },
+  {
+    "score": 0.22774025797843933,
+    "same_speaker": false
+  },
+  {
+    "score": 0.722793459892273,
+    "same_speaker": true
+  },
+  {
+    "score": 0.42245253920555115,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7081691026687622,
+    "same_speaker": true
+  },
+  {
+    "score": 0.32121267914772034,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6305907368659973,
+    "same_speaker": true
+  },
+  {
+    "score": 0.39172646403312683,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7321527004241943,
+    "same_speaker": true
+  },
+  {
+    "score": 0.4165157973766327,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7073633670806885,
+    "same_speaker": true
+  },
+  {
+    "score": 0.29754745960235596,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6905984878540039,
+    "same_speaker": true
+  },
+  {
+    "score": 0.26167845726013184,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7118972539901733,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3463110327720642,
+    "same_speaker": false
+  },
+  {
+    "score": 0.669209897518158,
+    "same_speaker": true
+  },
+  {
+    "score": 0.306207537651062,
+    "same_speaker": false
+  },
+  {
+    "score": 0.654134213924408,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3257473111152649,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7405099272727966,
+    "same_speaker": true
+  },
+  {
+    "score": 0.32956662774086,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6635709404945374,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2615501880645752,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6741065382957458,
+    "same_speaker": true
+  },
+  {
+    "score": 0.30631932616233826,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7050375938415527,
+    "same_speaker": true
+  },
+  {
+    "score": 0.26329976320266724,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6684836745262146,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2851884365081787,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7609401345252991,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3384045958518982,
+    "same_speaker": false
+  },
+  {
+    "score": 0.703824520111084,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3310558497905731,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7269707918167114,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2495696246623993,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7110035419464111,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3076583445072174,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7089324593544006,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3302449584007263,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7560070157051086,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3616150915622711,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6350482106208801,
+    "same_speaker": true
+  },
+  {
+    "score": 0.20157666504383087,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7043915390968323,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3022648096084595,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6665339469909668,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2837396562099457,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7203394770622253,
+    "same_speaker": true
+  },
+  {
+    "score": 0.343293696641922,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7340142130851746,
+    "same_speaker": true
+  },
+  {
+    "score": 0.29316702485084534,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6883368492126465,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2825431525707245,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6562876105308533,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2736786901950836,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7264116406440735,
+    "same_speaker": true
+  },
+  {
+    "score": 0.32463353872299194,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6493566036224365,
+    "same_speaker": true
+  },
+  {
+    "score": 0.23725959658622742,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6198746562004089,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2672579884529114,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7121486067771912,
+    "same_speaker": true
+  },
+  {
+    "score": 0.26653963327407837,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6906172633171082,
+    "same_speaker": true
+  },
+  {
+    "score": 0.26357126235961914,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7259759902954102,
+    "same_speaker": true
+  },
+  {
+    "score": 0.1978401243686676,
+    "same_speaker": false
+  },
+  {
+    "score": 0.659159243106842,
+    "same_speaker": true
+  },
+  {
+    "score": 0.1707727015018463,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7014316320419312,
+    "same_speaker": true
+  },
+  {
+    "score": 0.1986563801765442,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6986982226371765,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2915624678134918,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7053444385528564,
+    "same_speaker": true
+  },
+  {
+    "score": 0.13918112218379974,
+    "same_speaker": false
+  },
+  {
+    "score": 0.666284441947937,
+    "same_speaker": true
+  },
+  {
+    "score": 0.17882756888866425,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6562480926513672,
+    "same_speaker": true
+  },
+  {
+    "score": 0.16047891974449158,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6764201521873474,
+    "same_speaker": true
+  },
+  {
+    "score": 0.1839391589164734,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6247751116752625,
+    "same_speaker": true
+  },
+  {
+    "score": 0.1542322337627411,
+    "same_speaker": false
+  },
+  {
+    "score": 0.352464884519577,
+    "same_speaker": true
+  },
+  {
+    "score": 0.1462380737066269,
+    "same_speaker": false
+  },
+  {
+    "score": 0.45469099283218384,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2672528326511383,
+    "same_speaker": false
+  },
+  {
+    "score": 0.3585369288921356,
+    "same_speaker": true
+  },
+  {
+    "score": 0.29887449741363525,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6460041403770447,
+    "same_speaker": true
+  },
+  {
+    "score": 0.24446585774421692,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7003259062767029,
+    "same_speaker": true
+  },
+  {
+    "score": 0.17241960763931274,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6647753119468689,
+    "same_speaker": true
+  },
+  {
+    "score": 0.13594695925712585,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6573916077613831,
+    "same_speaker": true
+  },
+  {
+    "score": 0.19047285616397858,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6900748014450073,
+    "same_speaker": true
+  },
+  {
+    "score": 0.33396393060684204,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7514399886131287,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2865558862686157,
+    "same_speaker": false
+  },
+  {
+    "score": 0.705614447593689,
+    "same_speaker": true
+  },
+  {
+    "score": 0.21254712343215942,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7501211166381836,
+    "same_speaker": true
+  },
+  {
+    "score": 0.24445590376853943,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7080153822898865,
+    "same_speaker": true
+  },
+  {
+    "score": 0.22435428202152252,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6208502650260925,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3169613778591156,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7294272780418396,
+    "same_speaker": true
+  },
+  {
+    "score": 0.26204970479011536,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6781814098358154,
+    "same_speaker": true
+  },
+  {
+    "score": 0.35572269558906555,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7388192415237427,
+    "same_speaker": true
+  },
+  {
+    "score": 0.24546517431735992,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6876830458641052,
+    "same_speaker": true
+  },
+  {
+    "score": 0.25021371245384216,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7161725163459778,
+    "same_speaker": true
+  },
+  {
+    "score": 0.23774896562099457,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6576136946678162,
+    "same_speaker": true
+  },
+  {
+    "score": 0.21795427799224854,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7412817478179932,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2629707157611847,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7393062710762024,
+    "same_speaker": true
+  },
+  {
+    "score": 0.23838697373867035,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7057148218154907,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2614593803882599,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7252593040466309,
+    "same_speaker": true
+  },
+  {
+    "score": 0.21910233795642853,
+    "same_speaker": false
+  },
+  {
+    "score": 0.731117308139801,
+    "same_speaker": true
+  },
+  {
+    "score": 0.4251938462257385,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7012075185775757,
+    "same_speaker": true
+  },
+  {
+    "score": 0.29601287841796875,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6784805059432983,
+    "same_speaker": true
+  },
+  {
+    "score": 0.40950679779052734,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7056347131729126,
+    "same_speaker": true
+  },
+  {
+    "score": 0.39710086584091187,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7087625861167908,
+    "same_speaker": true
+  },
+  {
+    "score": 0.32416123151779175,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6758943796157837,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2494015097618103,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6540221571922302,
+    "same_speaker": true
+  },
+  {
+    "score": 0.28637978434562683,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7125858664512634,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2789892554283142,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6471844911575317,
+    "same_speaker": true
+  },
+  {
+    "score": 0.31352320313453674,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7438936829566956,
+    "same_speaker": true
+  },
+  {
+    "score": 0.31280049681663513,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6550450325012207,
+    "same_speaker": true
+  },
+  {
+    "score": 0.26172417402267456,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6636951565742493,
+    "same_speaker": true
+  },
+  {
+    "score": 0.29161325097084045,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6866374611854553,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2645331919193268,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7086792588233948,
+    "same_speaker": true
+  },
+  {
+    "score": 0.27950209379196167,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7738463282585144,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3564172685146332,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6816163063049316,
+    "same_speaker": true
+  },
+  {
+    "score": 0.32238975167274475,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7230893969535828,
+    "same_speaker": true
+  },
+  {
+    "score": 0.27072930335998535,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7020352482795715,
+    "same_speaker": true
+  },
+  {
+    "score": 0.29335683584213257,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7150130271911621,
+    "same_speaker": true
+  },
+  {
+    "score": 0.3266460597515106,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7672927975654602,
+    "same_speaker": true
+  },
+  {
+    "score": 0.33162009716033936,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6477757096290588,
+    "same_speaker": true
+  },
+  {
+    "score": 0.206224262714386,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7037912607192993,
+    "same_speaker": true
+  },
+  {
+    "score": 0.29720690846443176,
+    "same_speaker": false
+  },
+  {
+    "score": 0.67973393201828,
+    "same_speaker": true
+  },
+  {
+    "score": 0.26011255383491516,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7438933849334717,
+    "same_speaker": true
+  },
+  {
+    "score": 0.32953253388404846,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6803420782089233,
+    "same_speaker": true
+  },
+  {
+    "score": 0.28021761775016785,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6846291422843933,
+    "same_speaker": true
+  },
+  {
+    "score": 0.28470030426979065,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6525112986564636,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2528446912765503,
+    "same_speaker": false
+  },
+  {
+    "score": 0.7138074636459351,
+    "same_speaker": true
+  },
+  {
+    "score": 0.2940360903739929,
+    "same_speaker": false
+  },
+  {
+    "score": 0.647989809513092,
+    "same_speaker": true
+  },
+  {
+    "score": 0.22364115715026855,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6534625291824341,
+    "same_speaker": true
+  },
+  {
+    "score": 0.26928800344467163,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6885213851928711,
+    "same_speaker": true
+  },
+  {
+    "score": 0.25042808055877686,
+    "same_speaker": false
+  },
+  {
+    "score": 0.6698626279830933,
+    "same_speaker": true
+  },
+  {
+    "score": 0.30695727467536926,
+    "same_speaker": false
+  }
+]

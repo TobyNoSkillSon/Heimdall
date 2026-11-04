@@ -1,0 +1,404 @@
+{
+ "checkedAt": "2026-11-02T18:00:00+01:00",
+ "source": "T3 Code (Beta) 0.1.6, the live server's MCP tool list as a client of it sees it (read-only, 2 Nov 2026; bug note 2026-11-02T14-56-51-3). inputSchemas: the live schemas of the tools Heimdall calls, nested shapes abbreviated to their keys.",
+ "toolNames": [
+  "create_threads",
+  "delegate_task",
+  "delete_scheduled_task",
+  "device_close",
+  "device_list",
+  "device_open",
+  "device_screenshot",
+  "html_preview",
+  "html_render",
+  "link_pull_request",
+  "list_scheduled_tasks",
+  "list_thread_pull_requests",
+  "orchestrator_capabilities",
+  "preview_act",
+  "preview_dialog",
+  "preview_evaluate",
+  "preview_navigate",
+  "preview_open",
+  "preview_recording_start",
+  "preview_recording_stop",
+  "preview_resize",
+  "preview_set_appearance",
+  "preview_snapshot",
+  "preview_status",
+  "preview_wait_for",
+  "read_pull_request_guide",
+  "request_secret",
+  "run_scheduled_task_now",
+  "schedule_task",
+  "t3_attachment_discard",
+  "t3_attachment_prepare_upload",
+  "t3_background_wait",
+  "t3_environment_preferences_update",
+  "t3_environment_read",
+  "t3_pending_request",
+  "t3_preview_close",
+  "t3_preview_list",
+  "t3_project_clone",
+  "t3_project_create",
+  "t3_project_delete",
+  "t3_project_list",
+  "t3_project_read",
+  "t3_project_update",
+  "t3_queue",
+  "t3_thread_configure",
+  "t3_thread_interrupt",
+  "t3_thread_launch",
+  "t3_thread_list",
+  "t3_thread_organize",
+  "t3_thread_read",
+  "t3_thread_search",
+  "t3_thread_send",
+  "t3_thread_send_attachments",
+  "t3_thread_transfer",
+  "t3_thread_update",
+  "t3_thread_wait",
+  "t3_workflow_stop",
+  "t3_worktree_handoff",
+  "t3_worktree_list",
+  "t3_worktree_status",
+  "task_cancel",
+  "task_status",
+  "unlink_pull_request",
+  "unwatch_pull_request",
+  "watch_pull_request",
+  "write_pull_request_guides"
+ ],
+ "inputSchemas": {
+  "t3_pending_request": {
+   "type": "object",
+   "properties": {
+    "action": {
+     "enum": [
+      "list",
+      "read",
+      "respond"
+     ],
+     "type": "string"
+    },
+    "answers": {
+     "type": "object"
+    },
+    "environmentId": {
+     "type": "string"
+    },
+    "requestId": {
+     "type": "string"
+    },
+    "threadId": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "action"
+   ]
+  },
+  "t3_queue": {
+   "type": "object",
+   "properties": {
+    "action": {
+     "enum": [
+      "list",
+      "read",
+      "edit",
+      "cancel",
+      "reorder",
+      "promote_to_steer"
+     ],
+     "type": "string"
+    },
+    "beforeRunId": {
+     "type": "string"
+    },
+    "cursor": {
+     "minimum": 0,
+     "type": "integer"
+    },
+    "environmentId": {
+     "type": "string"
+    },
+    "limit": {
+     "maximum": 100,
+     "minimum": 1,
+     "type": "integer"
+    },
+    "queuedRunId": {
+     "type": "string"
+    },
+    "targetRunId": {
+     "type": "string"
+    },
+    "text": {
+     "maxLength": 100000,
+     "type": "string"
+    },
+    "threadId": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "action"
+   ]
+  },
+  "t3_thread_transfer": {
+   "type": "object",
+   "properties": {
+    "action": {
+     "enum": [
+      "fork",
+      "merge_back",
+      "status"
+     ],
+     "type": "string"
+    },
+    "environmentId": {
+     "type": "string"
+    },
+    "sourcePoint": {
+     "type": "object"
+    },
+    "targetThreadId": {
+     "type": "string"
+    },
+    "threadId": {
+     "type": "string"
+    },
+    "title": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "action"
+   ]
+  },
+  "t3_thread_list": {
+   "type": "object",
+   "properties": {
+    "allProjects": {
+     "type": "boolean"
+    },
+    "cursor": {
+     "minimum": 0,
+     "type": "integer"
+    },
+    "environmentId": {
+     "type": "string"
+    },
+    "includeSubagents": {
+     "type": "boolean"
+    },
+    "limit": {
+     "maximum": 100,
+     "minimum": 1,
+     "type": "integer"
+    },
+    "projectId": {
+     "type": "string"
+    },
+    "settled": {
+     "type": "boolean"
+    },
+    "snoozed": {
+     "type": "boolean"
+    },
+    "statuses": {
+     "type": "array"
+    },
+    "titleContains": {
+     "type": "string"
+    }
+   }
+  },
+  "t3_thread_read": {
+   "type": "object",
+   "properties": {
+    "afterPosition": {
+     "type": "integer"
+    },
+    "environmentId": {
+     "type": "string"
+    },
+    "itemId": {
+     "type": "string"
+    },
+    "limit": {
+     "type": "integer"
+    },
+    "maxCharsPerItem": {
+     "type": "integer"
+    },
+    "runLimit": {
+     "type": "integer"
+    },
+    "textOffset": {
+     "type": "integer"
+    },
+    "threadId": {
+     "type": "string"
+    },
+    "view": {
+     "enum": [
+      "messages",
+      "activity"
+     ],
+     "type": "string"
+    }
+   },
+   "required": [
+    "threadId"
+   ]
+  },
+  "t3_thread_send": {
+   "type": "object",
+   "properties": {
+    "clientRequestId": {
+     "type": "string"
+    },
+    "environmentId": {
+     "type": "string"
+    },
+    "message": {
+     "type": "string"
+    },
+    "mode": {
+     "enum": [
+      "auto",
+      "queue",
+      "steer",
+      "restart"
+     ],
+     "type": "string"
+    },
+    "threadId": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "threadId",
+    "message"
+   ]
+  },
+  "t3_thread_launch": {
+   "type": "object",
+   "properties": {
+    "attachments": {},
+    "clientRequestId": {},
+    "delegatedFrom": {},
+    "environmentId": {},
+    "interactionMode": {},
+    "message": {},
+    "modelSelection": {},
+    "projectId": {},
+    "runtimeMode": {},
+    "scratch": {},
+    "title": {},
+    "workspaceStrategy": {}
+   },
+   "required": [
+    "title"
+   ]
+  },
+  "t3_thread_wait": {
+   "type": "object",
+   "properties": {
+    "environmentId": {},
+    "runId": {},
+    "threadId": {},
+    "timeoutMs": {},
+    "untilDelegatedWorkSettled": {}
+   },
+   "required": [
+    "threadId"
+   ]
+  },
+  "t3_thread_interrupt": {
+   "type": "object",
+   "properties": {
+    "clientRequestId": {},
+    "environmentId": {},
+    "reason": {},
+    "runId": {},
+    "stop": {},
+    "threadId": {}
+   },
+   "required": [
+    "threadId"
+   ]
+  },
+  "t3_thread_organize": {
+   "type": "object",
+   "properties": {
+    "action": {
+     "enum": [
+      "pin",
+      "unpin",
+      "snooze",
+      "unsnooze",
+      "settle",
+      "unsettle",
+      "archive",
+      "unarchive",
+      "mark_unread"
+     ],
+     "type": "string"
+    },
+    "environmentId": {
+     "type": "string"
+    },
+    "snoozedUntil": {
+     "type": "string"
+    },
+    "threadId": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "action"
+   ]
+  },
+  "t3_project_list": {
+   "type": "object",
+   "properties": {
+    "cursor": {},
+    "environmentId": {},
+    "limit": {}
+   }
+  },
+  "t3_project_read": {
+   "type": "object",
+   "properties": {
+    "environmentId": {},
+    "projectId": {}
+   },
+   "required": [
+    "projectId"
+   ]
+  },
+  "t3_project_create": {
+   "type": "object",
+   "properties": {
+    "createWorkspaceRootIfMissing": {},
+    "defaultModelSelection": {},
+    "environmentId": {},
+    "scripts": {},
+    "title": {},
+    "workspaceRoot": {}
+   },
+   "required": [
+    "title"
+   ]
+  },
+  "orchestrator_capabilities": {
+   "type": "object",
+   "properties": {
+    "environmentId": {},
+    "search": {}
+   }
+  }
+ }
+}

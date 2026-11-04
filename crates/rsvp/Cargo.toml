@@ -1,0 +1,8 @@
+[package]
+name = "rsvp"
+description = "Fast-reading (RSVP) planner: chunking, per-unit timing and recognition points. No dependencies."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

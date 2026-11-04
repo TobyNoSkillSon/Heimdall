@@ -1,0 +1,261 @@
+{
+  "files": [
+    {
+      "repo": "LiquidAI/d1-omni-600M-GGUF",
+      "revision": "04397145ed8381350403aa556db0ec6a49dd8c07",
+      "path": "d1/d1-omni-600M-F16.gguf",
+      "bytes": 764049056,
+      "sha256": "d5dca201170e98fad783ddf65c1dd94244accccbffce4a2746255cbd21b6a21c",
+      "url": "https://huggingface.co/LiquidAI/d1-omni-600M-GGUF/resolve/04397145ed8381350403aa556db0ec6a49dd8c07/d1-omni-600M-F16.gguf",
+      "bundle": false
+    },
+    {
+      "path": "d1/d1-omni-600M-heimdall-F16.gguf",
+      "bytes": 764048160,
+      "sha256": "00f348a7ee36ac3a37a8fa965b13cf8b6c97cb5bb82d4554656fa1a7acdefeed",
+      "provenance": "local fine-tune, training-material/d1/runs/v1, base HF 02b55d70",
+      "bundle": false
+    },
+    {
+      "path": "d1/d1-omni-600M-heimdall-v2-F16.gguf",
+      "bytes": 764048160,
+      "sha256": "ce097d3b074c93cc85c46deb71e980a9d5c9e508f746ca8102083ab2c7e3c72d",
+      "provenance": "local fine-tune v2 from v1, training-material/d1/runs/v2 (17 Oct 2026)",
+      "bundle": false
+    },
+    {
+      "path": "d1/d1-omni-600M-heimdall-v3-F16.gguf",
+      "bytes": 764048160,
+      "sha256": "9f97c7e84d06d802f72ba0e0b457ecbd8da147aabc5069bcfdc2b7ec49c07b40",
+      "provenance": "local fine-tune v3 from v2 (dispatch question with ack lines), training-material/d1/runs/v3 (24 Oct 2026)",
+      "bundle": false
+    },
+    {
+      "path": "d1/d1-omni-600M-heimdall-v4-F16.gguf",
+      "bytes": 764048160,
+      "sha256": "2ba69f67bed685e1f734f4c4a782033c8dbb0258fc12ea4aa10e8508af5050cd",
+      "provenance": "local fine-tune v4 from the d1-train base (sha 0713bb05), same dispatch question as v3, training-material/d1/runs/v4 (25 Oct 2026)",
+      "bundle": false
+    },
+    {
+      "repo": "LiquidAI/d1-omni-600M-GGUF",
+      "revision": "04397145ed8381350403aa556db0ec6a49dd8c07",
+      "path": "d1/mmproj-d1-omni-600M-F16.gguf",
+      "bytes": 441262144,
+      "sha256": "77e4a6b626847876a98fd242756921024b54e608e166b562f3f3596ff29eda53",
+      "url": "https://huggingface.co/LiquidAI/d1-omni-600M-GGUF/resolve/04397145ed8381350403aa556db0ec6a49dd8c07/mmproj-d1-omni-600M-F16.gguf",
+      "bundle": false
+    },
+    {
+      "path": "d1/d1-2B-heimdall-v5/config.json",
+      "bytes": 2903,
+      "sha256": "ffdc4c996152d23dbe8a2659a8c6aabe2992aa3fa3a41601dd0fca8771d6f332",
+      "provenance": "local fine-tune v5 (name-agnostic header, English ack lines, command_check and suggest) from LiquidAI/d1-2B at cfe5760ff5d5998f91d9ac56bd4b2dbd96996d41, training-material/d1/runs/v5/final step 2000 (29 Oct 2026); data Projects/Heimdall-decider-v5-data/data/v5",
+      "bundle": true
+    },
+    {
+      "path": "d1/d1-2B-heimdall-v5/tokenizer.json",
+      "bytes": 17908258,
+      "sha256": "a39eed58008cbcbc09e5b629b81338a654269c64cd13348aaa6090f4db75c7e7",
+      "provenance": "local fine-tune v5 (name-agnostic header, English ack lines, command_check and suggest) from LiquidAI/d1-2B at cfe5760ff5d5998f91d9ac56bd4b2dbd96996d41, training-material/d1/runs/v5/final step 2000 (29 Oct 2026); data Projects/Heimdall-decider-v5-data/data/v5",
+      "bundle": true
+    },
+    {
+      "path": "d1/d1-2B-heimdall-v5/tokenizer_config.json",
+      "bytes": 623,
+      "sha256": "594a96e4caedd07536a595b48f5dc84655bd672b715b6ac891ca3d503d439f76",
+      "provenance": "local fine-tune v5 (name-agnostic header, English ack lines, command_check and suggest) from LiquidAI/d1-2B at cfe5760ff5d5998f91d9ac56bd4b2dbd96996d41, training-material/d1/runs/v5/final step 2000 (29 Oct 2026); data Projects/Heimdall-decider-v5-data/data/v5",
+      "bundle": true
+    },
+    {
+      "path": "d1/d1-2B-heimdall-v5/calibration.json",
+      "bytes": 5035,
+      "sha256": "a2da3ef425630582461ec01d8dad50a9d953f78c458e962628c87670342f412e",
+      "provenance": "local fine-tune v5 (name-agnostic header, English ack lines, command_check and suggest) from LiquidAI/d1-2B at cfe5760ff5d5998f91d9ac56bd4b2dbd96996d41, training-material/d1/runs/v5/final step 2000 (29 Oct 2026); data Projects/Heimdall-decider-v5-data/data/v5",
+      "bundle": true
+    },
+    {
+      "path": "d1/d1-2B-heimdall-v5/model.safetensors",
+      "bytes": 3836417787,
+      "sha256": "f5b7382b92247d083b257aaff4627c9fb458f85440ccf96e073a75c95a7a670d",
+      "provenance": "local fine-tune v5 (name-agnostic header, English ack lines, command_check and suggest) from LiquidAI/d1-2B at cfe5760ff5d5998f91d9ac56bd4b2dbd96996d41, training-material/d1/runs/v5/final step 2000 (29 Oct 2026); data Projects/Heimdall-decider-v5-data/data/v5",
+      "bundle": true
+    },
+    {
+      "path": "d1/d1-2B-heimdall-v5-8bit/config.json",
+      "bytes": 2771,
+      "sha256": "55249be827573c9d6af1878414ada0f9472472443889a3a25bcc6b505f36b3ef",
+      "provenance": "MLX affine group-64 quantization (8-bit) of runs/v5/final's text-trunk linear layers, embedding and head kept BF16 (30 Oct 2026), from Projects/Heimdall-heimdall-decider-mlx-trainer/lab/decider-v5/quant; same tokenizer and calibration as d1/d1-2B-heimdall-v5",
+      "bundle": true
+    },
+    {
+      "path": "d1/d1-2B-heimdall-v5-8bit/tokenizer.json",
+      "bytes": 17908258,
+      "sha256": "a39eed58008cbcbc09e5b629b81338a654269c64cd13348aaa6090f4db75c7e7",
+      "provenance": "MLX affine group-64 quantization (8-bit) of runs/v5/final's text-trunk linear layers, embedding and head kept BF16 (30 Oct 2026), from Projects/Heimdall-heimdall-decider-mlx-trainer/lab/decider-v5/quant; same tokenizer and calibration as d1/d1-2B-heimdall-v5",
+      "bundle": true
+    },
+    {
+      "path": "d1/d1-2B-heimdall-v5-8bit/tokenizer_config.json",
+      "bytes": 623,
+      "sha256": "594a96e4caedd07536a595b48f5dc84655bd672b715b6ac891ca3d503d439f76",
+      "provenance": "MLX affine group-64 quantization (8-bit) of runs/v5/final's text-trunk linear layers, embedding and head kept BF16 (30 Oct 2026), from Projects/Heimdall-heimdall-decider-mlx-trainer/lab/decider-v5/quant; same tokenizer and calibration as d1/d1-2B-heimdall-v5",
+      "bundle": true
+    },
+    {
+      "path": "d1/d1-2B-heimdall-v5-8bit/calibration.json",
+      "bytes": 5035,
+      "sha256": "a2da3ef425630582461ec01d8dad50a9d953f78c458e962628c87670342f412e",
+      "provenance": "MLX affine group-64 quantization (8-bit) of runs/v5/final's text-trunk linear layers, embedding and head kept BF16 (30 Oct 2026), from Projects/Heimdall-heimdall-decider-mlx-trainer/lab/decider-v5/quant; same tokenizer and calibration as d1/d1-2B-heimdall-v5",
+      "bundle": true
+    },
+    {
+      "path": "d1/d1-2B-heimdall-v5-8bit/model.safetensors",
+      "bytes": 2083038047,
+      "sha256": "fc0d77632e2d7c7f0c3d5b633084eb945df49d69e8c91ab93eb5d916ffa4d4e0",
+      "provenance": "MLX affine group-64 quantization (8-bit) of runs/v5/final's text-trunk linear layers, embedding and head kept BF16 (30 Oct 2026), from Projects/Heimdall-heimdall-decider-mlx-trainer/lab/decider-v5/quant; same tokenizer and calibration as d1/d1-2B-heimdall-v5",
+      "bundle": true
+    },
+    {
+      "path": "d1/d1-2B-heimdall-v5-4bit/config.json",
+      "bytes": 2771,
+      "sha256": "2eea29d145448764e5f84661430d06988d6833728aeb5151ffd50773ad0406b5",
+      "provenance": "MLX affine group-64 quantization (4-bit) of runs/v5/final's text-trunk linear layers, embedding and head kept BF16 (30 Oct 2026), from Projects/Heimdall-heimdall-decider-mlx-trainer/lab/decider-v5/quant; same tokenizer and calibration as d1/d1-2B-heimdall-v5",
+      "bundle": true
+    },
+    {
+      "path": "d1/d1-2B-heimdall-v5-4bit/tokenizer.json",
+      "bytes": 17908258,
+      "sha256": "a39eed58008cbcbc09e5b629b81338a654269c64cd13348aaa6090f4db75c7e7",
+      "provenance": "MLX affine group-64 quantization (4-bit) of runs/v5/final's text-trunk linear layers, embedding and head kept BF16 (30 Oct 2026), from Projects/Heimdall-heimdall-decider-mlx-trainer/lab/decider-v5/quant; same tokenizer and calibration as d1/d1-2B-heimdall-v5",
+      "bundle": true
+    },
+    {
+      "path": "d1/d1-2B-heimdall-v5-4bit/tokenizer_config.json",
+      "bytes": 623,
+      "sha256": "594a96e4caedd07536a595b48f5dc84655bd672b715b6ac891ca3d503d439f76",
+      "provenance": "MLX affine group-64 quantization (4-bit) of runs/v5/final's text-trunk linear layers, embedding and head kept BF16 (30 Oct 2026), from Projects/Heimdall-heimdall-decider-mlx-trainer/lab/decider-v5/quant; same tokenizer and calibration as d1/d1-2B-heimdall-v5",
+      "bundle": true
+    },
+    {
+      "path": "d1/d1-2B-heimdall-v5-4bit/calibration.json",
+      "bytes": 5035,
+      "sha256": "a2da3ef425630582461ec01d8dad50a9d953f78c458e962628c87670342f412e",
+      "provenance": "MLX affine group-64 quantization (4-bit) of runs/v5/final's text-trunk linear layers, embedding and head kept BF16 (30 Oct 2026), from Projects/Heimdall-heimdall-decider-mlx-trainer/lab/decider-v5/quant; same tokenizer and calibration as d1/d1-2B-heimdall-v5",
+      "bundle": true
+    },
+    {
+      "path": "d1/d1-2B-heimdall-v5-4bit/model.safetensors",
+      "bytes": 1349902795,
+      "sha256": "83cc23af49117f538adee02b2c727a590b341a0ec919c4302b4cb3d837ddc535",
+      "provenance": "MLX affine group-64 quantization (4-bit) of runs/v5/final's text-trunk linear layers, embedding and head kept BF16 (30 Oct 2026), from Projects/Heimdall-heimdall-decider-mlx-trainer/lab/decider-v5/quant; same tokenizer and calibration as d1/d1-2B-heimdall-v5",
+      "bundle": true
+    },
+    {
+      "path": "d1/d1-2B-heimdall-v6/config.json",
+      "bytes": 2903,
+      "sha256": "ffdc4c996152d23dbe8a2659a8c6aabe2992aa3fa3a41601dd0fca8771d6f332",
+      "provenance": "local fine-tune v6 (multilingual: Polish and eight more languages, corrected wait labels, names and hotkey lessons) from runs/v5/final, training-material/d1/runs/v6/final step 1006 with refitted temperature (4 Nov 2026); data Projects/Heimdall-decider-v6-data/data/v6; gates G1-G6 pass (runs/v6/report.json)",
+      "bundle": true
+    },
+    {
+      "path": "d1/d1-2B-heimdall-v6/tokenizer.json",
+      "bytes": 17908258,
+      "sha256": "a39eed58008cbcbc09e5b629b81338a654269c64cd13348aaa6090f4db75c7e7",
+      "provenance": "local fine-tune v6 (multilingual: Polish and eight more languages, corrected wait labels, names and hotkey lessons) from runs/v5/final, training-material/d1/runs/v6/final step 1006 with refitted temperature (4 Nov 2026); data Projects/Heimdall-decider-v6-data/data/v6; gates G1-G6 pass (runs/v6/report.json)",
+      "bundle": true
+    },
+    {
+      "path": "d1/d1-2B-heimdall-v6/tokenizer_config.json",
+      "bytes": 623,
+      "sha256": "594a96e4caedd07536a595b48f5dc84655bd672b715b6ac891ca3d503d439f76",
+      "provenance": "local fine-tune v6 (multilingual: Polish and eight more languages, corrected wait labels, names and hotkey lessons) from runs/v5/final, training-material/d1/runs/v6/final step 1006 with refitted temperature (4 Nov 2026); data Projects/Heimdall-decider-v6-data/data/v6; gates G1-G6 pass (runs/v6/report.json)",
+      "bundle": true
+    },
+    {
+      "path": "d1/d1-2B-heimdall-v6/calibration.json",
+      "bytes": 5145,
+      "sha256": "aa77df5c2b83a3fc29b43ddde357ff058786c7ba4b712ac518ca1d5e9b7f7f3b",
+      "provenance": "local fine-tune v6 (multilingual: Polish and eight more languages, corrected wait labels, names and hotkey lessons) from runs/v5/final, training-material/d1/runs/v6/final step 1006 with refitted temperature (4 Nov 2026); data Projects/Heimdall-decider-v6-data/data/v6; gates G1-G6 pass (runs/v6/report.json)",
+      "bundle": true
+    },
+    {
+      "path": "d1/d1-2B-heimdall-v6/model.safetensors",
+      "bytes": 3836417787,
+      "sha256": "243b6d3805b25fa83d9f1ba5d3a79775561f746d8aca0ec2cae66c55fdd208a6",
+      "provenance": "local fine-tune v6 (multilingual: Polish and eight more languages, corrected wait labels, names and hotkey lessons) from runs/v5/final, training-material/d1/runs/v6/final step 1006 with refitted temperature (4 Nov 2026); data Projects/Heimdall-decider-v6-data/data/v6; gates G1-G6 pass (runs/v6/report.json)",
+      "bundle": true
+    },
+    {
+      "path": "d1/d1-2B-heimdall-v6-8bit/config.json",
+      "bytes": 2661,
+      "sha256": "22aa15d8386bc8f2ca1fcfe12b3ee3b28d9a6dc9fdf3001d9eed3e2b3db2a2e4",
+      "provenance": "MLX affine group-64 quantization (8-bit) of runs/v6/final's text-trunk linear layers, embedding and head kept BF16 (4 Nov 2026), training-material/d1/runs/v6/quant/v6/int8; same tokenizer and calibration as d1/d1-2B-heimdall-v6",
+      "bundle": true
+    },
+    {
+      "path": "d1/d1-2B-heimdall-v6-8bit/tokenizer.json",
+      "bytes": 17908258,
+      "sha256": "a39eed58008cbcbc09e5b629b81338a654269c64cd13348aaa6090f4db75c7e7",
+      "provenance": "MLX affine group-64 quantization (8-bit) of runs/v6/final's text-trunk linear layers, embedding and head kept BF16 (4 Nov 2026), training-material/d1/runs/v6/quant/v6/int8; same tokenizer and calibration as d1/d1-2B-heimdall-v6",
+      "bundle": true
+    },
+    {
+      "path": "d1/d1-2B-heimdall-v6-8bit/tokenizer_config.json",
+      "bytes": 623,
+      "sha256": "594a96e4caedd07536a595b48f5dc84655bd672b715b6ac891ca3d503d439f76",
+      "provenance": "MLX affine group-64 quantization (8-bit) of runs/v6/final's text-trunk linear layers, embedding and head kept BF16 (4 Nov 2026), training-material/d1/runs/v6/quant/v6/int8; same tokenizer and calibration as d1/d1-2B-heimdall-v6",
+      "bundle": true
+    },
+    {
+      "path": "d1/d1-2B-heimdall-v6-8bit/calibration.json",
+      "bytes": 5145,
+      "sha256": "aa77df5c2b83a3fc29b43ddde357ff058786c7ba4b712ac518ca1d5e9b7f7f3b",
+      "provenance": "MLX affine group-64 quantization (8-bit) of runs/v6/final's text-trunk linear layers, embedding and head kept BF16 (4 Nov 2026), training-material/d1/runs/v6/quant/v6/int8; same tokenizer and calibration as d1/d1-2B-heimdall-v6",
+      "bundle": true
+    },
+    {
+      "path": "d1/d1-2B-heimdall-v6-8bit/model.safetensors",
+      "bytes": 2083038047,
+      "sha256": "a43d2e9582c864ec54cc89fa1fb181d2886a84ce585abac2597ccb76e7ddd830",
+      "provenance": "MLX affine group-64 quantization (8-bit) of runs/v6/final's text-trunk linear layers, embedding and head kept BF16 (4 Nov 2026), training-material/d1/runs/v6/quant/v6/int8; same tokenizer and calibration as d1/d1-2B-heimdall-v6",
+      "bundle": true
+    },
+    {
+      "path": "d1/d1-2B-heimdall-v6-4bit/config.json",
+      "bytes": 2771,
+      "sha256": "2eea29d145448764e5f84661430d06988d6833728aeb5151ffd50773ad0406b5",
+      "provenance": "MLX affine group-64 quantization (4-bit) of runs/v6/final's text-trunk linear layers, embedding and head kept BF16 (4 Nov 2026), training-material/d1/runs/v6/quant/v6/int4; same tokenizer and calibration as d1/d1-2B-heimdall-v6",
+      "bundle": true
+    },
+    {
+      "path": "d1/d1-2B-heimdall-v6-4bit/tokenizer.json",
+      "bytes": 17908258,
+      "sha256": "a39eed58008cbcbc09e5b629b81338a654269c64cd13348aaa6090f4db75c7e7",
+      "provenance": "MLX affine group-64 quantization (4-bit) of runs/v6/final's text-trunk linear layers, embedding and head kept BF16 (4 Nov 2026), training-material/d1/runs/v6/quant/v6/int4; same tokenizer and calibration as d1/d1-2B-heimdall-v6",
+      "bundle": true
+    },
+    {
+      "path": "d1/d1-2B-heimdall-v6-4bit/tokenizer_config.json",
+      "bytes": 623,
+      "sha256": "594a96e4caedd07536a595b48f5dc84655bd672b715b6ac891ca3d503d439f76",
+      "provenance": "MLX affine group-64 quantization (4-bit) of runs/v6/final's text-trunk linear layers, embedding and head kept BF16 (4 Nov 2026), training-material/d1/runs/v6/quant/v6/int4; same tokenizer and calibration as d1/d1-2B-heimdall-v6",
+      "bundle": true
+    },
+    {
+      "path": "d1/d1-2B-heimdall-v6-4bit/calibration.json",
+      "bytes": 5145,
+      "sha256": "aa77df5c2b83a3fc29b43ddde357ff058786c7ba4b712ac518ca1d5e9b7f7f3b",
+      "provenance": "MLX affine group-64 quantization (4-bit) of runs/v6/final's text-trunk linear layers, embedding and head kept BF16 (4 Nov 2026), training-material/d1/runs/v6/quant/v6/int4; same tokenizer and calibration as d1/d1-2B-heimdall-v6",
+      "bundle": true
+    },
+    {
+      "path": "d1/d1-2B-heimdall-v6-4bit/model.safetensors",
+      "bytes": 1349902795,
+      "sha256": "bcd2a560883b91e15adc96e19c5e92b74c675749fc3673ccb0ec1e697e483300",
+      "provenance": "MLX affine group-64 quantization (4-bit) of runs/v6/final's text-trunk linear layers, embedding and head kept BF16 (4 Nov 2026), training-material/d1/runs/v6/quant/v6/int4; same tokenizer and calibration as d1/d1-2B-heimdall-v6",
+      "bundle": true
+    }
+  ],
+  "download_bytes": 1205311200
+}

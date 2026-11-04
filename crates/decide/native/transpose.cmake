@@ -1,0 +1,13 @@
+# Tiled F32 transpose copy (transpose.metal). Owned copies only.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/transpose.metal" transpose_metal)
+string(APPEND mm_embed "\n${transpose_metal}")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/heimdall-mul-mm.metal" "${mm_embed}")
+file(READ "${CMAKE_CURRENT_BINARY_DIR}/heimdall-metal-ops.cpp" metal_ops)
+set(cpy_anchor "    auto pipeline = ggml_metal_library_get_pipeline_cpy(lib, op->src[0]->type, op->type);\n")
+string(FIND "${metal_ops}" "${cpy_anchor}" found)
+if(found EQUAL -1)
+    message(FATAL_ERROR "Pinned Metal cpy anchor changed")
+endif()
+set(cpy_tiled "    if (op->src[0]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32 && ggml_is_contiguous(op) &&\n        nb01 < nb00 && ne00 >= 8 && ne01 >= 8 && ggml_nelements(op) == ggml_nelements(op->src[0])) {\n        auto tp = ggml_metal_library_get_pipeline(lib, \"kernel_heimdall_cpy_tiled_f32\");\n        if (!tp.pipeline) tp = ggml_metal_library_compile_pipeline(lib, \"kernel_heimdall_cpy_tiled_f32\", \"kernel_heimdall_cpy_tiled_f32\", nullptr);\n        ggml_metal_kargs_cpy targs = {};\n        targs.ne00 = ne00; targs.ne01 = ne01; targs.ne02 = ne02; targs.ne03 = ne03;\n        targs.nb00 = nb00; targs.nb01 = nb01; targs.nb02 = nb02; targs.nb03 = nb03;\n        ggml_metal_encoder_set_pipeline(enc, tp);\n        ggml_metal_encoder_set_bytes   (enc, &targs, sizeof(targs), 0);\n        ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[0]), 1);\n        ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         2);\n        ggml_metal_encoder_dispatch_threadgroups(enc, (ne00 + 31)/32, (ne01 + 31)/32, (int64_t) ne02*ne03, 32, 8, 1);\n        return 1;\n    }\n${cpy_anchor}")
+string(REPLACE "${cpy_anchor}" "${cpy_tiled}" metal_ops "${metal_ops}")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/heimdall-metal-ops.cpp" "${metal_ops}")

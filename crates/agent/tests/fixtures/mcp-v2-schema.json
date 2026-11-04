@@ -1,0 +1,1835 @@
+[
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Talk to User while you work: an update, a question, something he should know now. He reads it on the island; with Speaking on he also hears it in Heimdall's own voice. Your final reply reaches him the same way when your turn ends, so never repeat it here. The only way to make sound: never use say, other TTS or audio files, and never search files for a voice. Returns at once; speech stops when User talks. While User talks with other people (a call), Heimdall holds speech unless he addressed you by name, shows it silently on the island, and the result says so.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "language": {
+          "enum": [
+            "en",
+            "pl"
+          ],
+          "type": "string"
+        },
+        "text": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "type": "object"
+    },
+    "name": "speak"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Get one current screen preview or up to four archived frames by time or chunk ID.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "at": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "chunk_id": {
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        },
+        "count": {
+          "default": 1,
+          "maximum": 4,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "display_id": {
+          "maxLength": 32,
+          "minLength": 1,
+          "type": "string"
+        },
+        "quality": {
+          "enum": [
+            "preview",
+            "full"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "screen_frames"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Search what User's Mac heard and showed: literal query, vector.query by meaning, time, kinds, tags. One line per moment: time · source · similarity · [handle] matching words. id: a handle, for the whole text. cursor: the More line's. output: full (whole texts, ids), frames (screenshots), clip (a movie of the hits).",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        },
+        "end": {
+          "format": "date-time",
+          "maxLength": 64,
+          "type": "string"
+        },
+        "id": {
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        },
+        "kinds": {
+          "items": {
+            "enum": [
+              "text",
+              "speech_audio",
+              "other_audio",
+              "moment",
+              "screen"
+            ],
+            "type": "string"
+          },
+          "maxItems": 5,
+          "type": "array"
+        },
+        "limit": {
+          "default": 10,
+          "maximum": 50,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "output": {
+          "enum": [
+            "lines",
+            "full",
+            "frames",
+            "clip"
+          ],
+          "type": "string"
+        },
+        "query": {
+          "maxLength": 2048,
+          "minLength": 1,
+          "type": "string"
+        },
+        "start": {
+          "format": "date-time",
+          "maxLength": 64,
+          "type": "string"
+        },
+        "tags": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "key": {
+                "enum": [
+                  "speaker",
+                  "source",
+                  "app",
+                  "language",
+                  "command_kind",
+                  "agent",
+                  "listening",
+                  "window_title"
+                ],
+                "type": "string"
+              },
+              "value": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "key",
+              "value"
+            ],
+            "type": "object"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "vector": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "query": {
+                  "maxLength": 8192,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "query"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "model_id": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "model_version": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "values": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 32768,
+                  "minItems": 1,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "model_id",
+                "model_version",
+                "values"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "timeline_search"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Turn a time window of the archive into a movie file: the screen of one display at its capture times, each audio source (microphone, apps, every call) on its own track, and the transcript as speaker-labelled subtitles plus an .srt beside it. start and end are at most two hours apart; display_id defaults to the busiest display; width and fps shrink or resample the video; path is an absolute .mp4 or .mov (default: Heimdall's clips folder). Returns the file and what each track holds. Tasks get the same movie by running heimdall-clip.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "display_id": {
+          "maxLength": 32,
+          "minLength": 1,
+          "type": "string"
+        },
+        "end": {
+          "format": "date-time",
+          "maxLength": 64,
+          "type": "string"
+        },
+        "fps": {
+          "maximum": 60,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "path": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "start": {
+          "format": "date-time",
+          "maxLength": 64,
+          "type": "string"
+        },
+        "width": {
+          "maximum": 4096,
+          "minimum": 64,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "type": "object"
+    },
+    "name": "archive_clip"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Show User something to read rather than hear: a table, a list, code, links, a chart or an image. It opens in the island's pull-down under a title of one to three words. detail is text, a table (headers + rows), an SVG drawn on black (use light colours), or an archived image by archive_id. Pass notice_id to replace one you showed earlier. Not for status or progress: say those with speak.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "detail": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "text": {
+                  "maxLength": 16000,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "type": {
+                  "enum": [
+                    "text"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "text"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "headers": {
+                  "items": {
+                    "maxLength": 64,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "maxItems": 8,
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "rows": {
+                  "items": {
+                    "items": {
+                      "maxLength": 200,
+                      "minLength": 0,
+                      "type": "string"
+                    },
+                    "maxItems": 8,
+                    "minItems": 1,
+                    "type": "array"
+                  },
+                  "maxItems": 200,
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "type": {
+                  "enum": [
+                    "table"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "headers",
+                "rows"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "svg": {
+                  "maxLength": 65536,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "type": {
+                  "enum": [
+                    "svg"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "svg"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "archive_id": {
+                  "maxLength": 512,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "type": {
+                  "enum": [
+                    "image"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "archive_id"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "notice_id": {
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        },
+        "text": {
+          "maxLength": 40,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "detail"
+      ],
+      "type": "object"
+    },
+    "name": "island_notice"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Ask User one adaptive card: one short question, or up to four in one card, each with two to four options. Options are numbered 1 to 4 on the card; each may carry a short description. Pass questions, each with question, options (a label, or {label, description}), optional header (a step chip of up to 12 characters), multiSelect (several options may be picked) and allowOther (default true: a last row where he types his own answer). A question with options still works for one quick question (labels of one to three words). He answers by click, by Option and a digit, by saying the number (\"2\", \"one and three\", \"both\") or by typing in the last row. Returns pending with request_id. For questions, his answer comes back as one line per question, keyed by its id (q1, q2 ...): the labels he picked, and his typed words. When he talks to you while it is up, the card stays open and you are told; it closes on his click, on Option and a digit, on typed text, on his dismiss (the x or Esc, which comes back as \"dismissed\"), or when you call ask_close because his words answered it. A question longer than one sentence: ask by voice instead. Silence never approves.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "options": {
+          "items": {
+            "maxLength": 24,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 4,
+          "minItems": 2,
+          "type": "array"
+        },
+        "question": {
+          "maxLength": 120,
+          "minLength": 1,
+          "type": "string"
+        },
+        "questions": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "allowOther": {
+                "default": true,
+                "type": "boolean"
+              },
+              "header": {
+                "maxLength": 12,
+                "minLength": 1,
+                "type": "string"
+              },
+              "multiSelect": {
+                "default": false,
+                "type": "boolean"
+              },
+              "options": {
+                "items": {
+                  "oneOf": [
+                    {
+                      "maxLength": 40,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "description": {
+                          "maxLength": 80,
+                          "minLength": 0,
+                          "type": "string"
+                        },
+                        "grant": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "delete": {
+                              "items": {
+                                "maxLength": 1024,
+                                "minLength": 1,
+                                "type": "string"
+                              },
+                              "maxItems": 8,
+                              "minItems": 1,
+                              "type": "array"
+                            },
+                            "loginItems": {
+                              "items": {
+                                "maxLength": 128,
+                                "minLength": 1,
+                                "type": "string"
+                              },
+                              "maxItems": 4,
+                              "minItems": 1,
+                              "type": "array"
+                            }
+                          },
+                          "required": [],
+                          "type": "object"
+                        },
+                        "label": {
+                          "maxLength": 40,
+                          "minLength": 1,
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "label"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                },
+                "maxItems": 4,
+                "minItems": 2,
+                "type": "array"
+              },
+              "question": {
+                "maxLength": 120,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "question",
+              "options"
+            ],
+            "type": "object"
+          },
+          "maxItems": 4,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "ask"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Close an open ask card when his words answer it: call this once what he said, while it was up or before it appeared, answers the question. Talk to you while it is up does not close it. Pass request_id and his answer in a few words.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "answer": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        "request_id": {
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_id",
+        "answer"
+      ],
+      "type": "object"
+    },
+    "name": "ask_close"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Show User a longer explanation or recap to read word by word in the island (he clicks to start, sets the speed, can pause and replay). Write for one pass at about 240 words per minute: plain spoken English, the answer first, sentences of 8 to 16 words with the verb early, at most one number per sentence, the noun repeated instead of a distant 'it'; no lists, tables, parentheses, code, paths or markdown. Not for tables or anything he must keep exactly. Returns pending; 'read at N wpm' or 'dismissed' arrives later as a notice.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 40,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "type": "object"
+    },
+    "name": "fast_read"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Draw on User's screen to show him something. Do not deliberate: look at the screenshot and draw at once; approximate is fine. One command per line, coordinates in the screenshot's pixels from its top-left:\nsize W H  (the screenshot's size; first)\ncircle|box|underline|arrow X Y W H \"label\"  (the target's box; arrow also takes a point X Y)\npath <SVG path: M L H V Q C Z> \"label\"\nLabels are optional, 1-3 words, never the target's own text. Optional after a label: left|right|above|below. Optional after an arrow: from X Y. Optional lines: hold SECONDS, display N (1 is the main display; default: the one User is on). Display-only: his clicks pass through. Returns one line at once; the marks hold while you speak, then fade. Without a screenshot of the screen in this turn, call look first.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "spec": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "spec"
+      ],
+      "type": "object"
+    },
+    "name": "point"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Bring an app forward (switching to its Space if needed) and get a screenshot of the display User is on, as an image to point at, with its size line for point. Without app, only the screenshot. Use it when no screenshot came with the turn.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "app": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "look"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Open or close User's drawing overlay on the display he is on: he draws on the screen, Return attaches the marked screenshot to his next message, Esc closes. Open it when he asks to draw or mark something for you; to show him something yourself, use point.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "open": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "open"
+      ],
+      "type": "object"
+    },
+    "name": "drawing_mode"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Schedule supervised Pi/MCP reload after this turn settles. Preserves the conversation and returns a durable receipt.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "maxLength": 500,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "reload_me"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Start a task in a new T3 thread (full access) and return at once with its taskId, which is also its threadId. task is the thread's whole brief. target picks the model: model id, optional providerInstanceId, and options such as {\"effort\":\"high\"}. path is the project folder (default: the Vault); isolation worktree gives it its own git worktree. When the task is done, a notice brings its final reply in full, so end your turn: no polling. A task waiting on its own sub-agents or background commands is not done and wakes nothing. Heimdall puts the standing task rules above every brief by itself, so write only the task: Heimdall is untouchable, the cursor, system changes, no contacting anyone, checks, design rules, picks, BF16 checks, and the cleanup clause (before its final reply the task permanently deletes, rm -rf on exact paths, the build output it made itself, keeping its deliverables and reporting the disk freed; never cargo clean or a shared target/ another task may be building in, never models, User's data or uncommitted work).",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "branch": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "isolation": {
+          "enum": [
+            "shared",
+            "worktree"
+          ],
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "target": {
+          "additionalProperties": false,
+          "properties": {
+            "model": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            "options": {
+              "type": "object"
+            },
+            "providerInstanceId": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "model"
+          ],
+          "type": "object"
+        },
+        "task": {
+          "maxLength": 65536,
+          "minLength": 1,
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 160,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "task",
+        "title",
+        "target"
+      ],
+      "type": "object"
+    },
+    "name": "delegate_task"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Your tasks. Without taskId: one line each, newest first: taskId, title, state (working, waiting on its sub-agents, done, failed), model. With taskId: its state and its latest reply in full.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "taskId": {
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "task_status"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Stop or close one of your tasks: interrupts its running turn, if any, and archives its thread (history kept). Use it when User drops the work, or once he has seen and accepted a finished task's result. Its own sub-agents may still finish on their own.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "maxLength": 500,
+          "minLength": 1,
+          "type": "string"
+        },
+        "taskId": {
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "taskId"
+      ],
+      "type": "object"
+    },
+    "name": "task_cancel"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "List T3 threads across all projects, also User's own, one line each: title, state, how long ago, threadId; active ones first, then the most recent. query filters by title words.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "maximum": 50,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "query": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "t3_thread_list"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Read any T3 thread: its state line and its latest messages in full (last, default 3), oldest first. threadIds reads up to five threads in one call. view activity lists the latest timeline items (tool calls, errors, sub-agents) one line each; itemId returns one item's whole text. details adds its runs and settings.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "details": {
+          "type": "boolean"
+        },
+        "itemId": {
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        },
+        "last": {
+          "maximum": 20,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "textOffset": {
+          "maximum": 1000000000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "threadId": {
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        },
+        "threadIds": {
+          "items": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 5,
+          "minItems": 1,
+          "type": "array"
+        },
+        "view": {
+          "enum": [
+            "messages",
+            "activity"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "t3_thread_read"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Send a message to any T3 thread, also User's own or one of your tasks. mode: auto (default: starts an idle thread, steers a running turn), steer, queue (a separate later turn) or restart. When the run it starts or joins is done, a notice brings its reply, so end your turn. Restarting a thread you did not start returns CONFIRM_REQUIRED like t3_call.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "confirm": {
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        },
+        "message": {
+          "maxLength": 65536,
+          "minLength": 1,
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "auto",
+            "steer",
+            "queue",
+            "restart"
+          ],
+          "type": "string"
+        },
+        "threadId": {
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId",
+        "message"
+      ],
+      "type": "object"
+    },
+    "name": "t3_thread_send"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "List the rest of T3 Code's orchestrator tools (projects, worktrees, queues, scheduled tasks, pull requests, previews, model settings, archiving), filtered by query words; with tool, that tool's full description and its arguments, one per line.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "query": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        "tool": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "t3_tools"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Call any tool from t3_tools with its arguments in args, on any thread or project, also ones User started. Returns a short plain answer. You have no current thread or project: always pass threadId or projectId. clientRequestId is filled in. Deleting a project or scheduled task, changing environment settings, and interrupting, restarting, archiving, editing the queue of or any other destructive call on a thread you did not start return CONFIRM_REQUIRED with a question: ask it, and after User clicks Yes repeat the call with confirm set to the ask's request_id. A spoken yes does not count.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "args": {
+          "type": "object"
+        },
+        "confirm": {
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        },
+        "tool": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool"
+      ],
+      "type": "object"
+    },
+    "name": "t3_call"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "File a bug note for the overnight round that fixes Heimdall: in plain English, what went wrong, when, and what was expected. Use it when User says something is broken, or when you notice something wrong or wasteful yourself (a failed or misleading tool, a wall of JSON, a slow step). Put an error line or a short excerpt of the bad output in evidence. Heimdall stamps the note with the real date and time, so give times of day, and a date only for another day. Returns one line.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "maxLength": 32000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "text": {
+          "maxLength": 8000,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "type": "object"
+    },
+    "name": "bug_note"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Wake yourself later with a note to yourself: at a local time (\"07:00\" is the next 07:00; \"2026-10-23 07:00\" a given day) or after in_minutes. The note comes back as a notice that starts a turn, also after a restart; one that came due while Heimdall was off arrives at its next start, marked late. Returns one line with the wake id and its time.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "at": {
+          "maxLength": 16,
+          "minLength": 4,
+          "type": "string"
+        },
+        "in_minutes": {
+          "maximum": 43200,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "message": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "message"
+      ],
+      "type": "object"
+    },
+    "name": "schedule_wake"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Your pending scheduled wakes, one line each: id, local time, note.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "list_wakes"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Cancel one pending scheduled wake by the id schedule_wake or list_wakes gave.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "cancel_wake"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Refresh the job islands without a thread now, and let the background pass propose a promise for Scheduled when you and User agreed on something with a real time; it also shows a plan list he closed again. Returns at once; if anything changed a notice brings you the short diff. Nothing it drafts enters Scheduled without User's yes, and Goals and Settled keep themselves (their own background job; Settled only from proof), so never edit them for bookkeeping.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "name": "refresh_plan"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Show or update a floating island on User's screen for work that runs a while. One call carries title (1-3 words naming the thing), state (running, waiting, done, failed), stage (1-2 words: \"Downloading\"), summary (one line), steps, items, kv, image, open (a URL or file shown as a button) and parts (text, stat, bars, line, list, image, button, toggle, slider), and icon: an SF Symbol name or a tiny SVG of plain shapes drawing what the island is about. Merges into the island with that id; an empty list clears it. thread binds it to a T3 thread: Heimdall then keeps its state, stage and the thread's questions (as buttons) in sync, also through new runs. sent is what a job was sent to do, one line, kept once written; goal is the Goals id it serves (plan_edit show), drawn as a chip and lighting that goal while it runs. His clicks come back as notices. Returns one line.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "expanded": {
+          "type": "boolean"
+        },
+        "goal": {
+          "maxLength": 64,
+          "minLength": 0,
+          "type": "string"
+        },
+        "icon": {
+          "maxLength": 2048,
+          "minLength": 0,
+          "type": "string"
+        },
+        "id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "image": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "done": {
+                "type": "boolean"
+              },
+              "group": {
+                "enum": [
+                  "running",
+                  "waiting",
+                  "discussed"
+                ],
+                "type": "string"
+              },
+              "title": {
+                "maxLength": 100,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "title"
+            ],
+            "type": "object"
+          },
+          "maxItems": 30,
+          "type": "array"
+        },
+        "kv": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "label": {
+                "maxLength": 40,
+                "minLength": 1,
+                "type": "string"
+              },
+              "value": {
+                "maxLength": 80,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "label",
+              "value"
+            ],
+            "type": "object"
+          },
+          "maxItems": 8,
+          "type": "array"
+        },
+        "open": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "parts": {
+          "items": {
+            "type": "object"
+          },
+          "maxItems": 20,
+          "type": "array"
+        },
+        "sent": {
+          "maxLength": 110,
+          "minLength": 1,
+          "type": "string"
+        },
+        "side": {
+          "enum": [
+            "left",
+            "right",
+            "top"
+          ],
+          "type": "string"
+        },
+        "stage": {
+          "maxLength": 40,
+          "minLength": 1,
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "running",
+            "waiting",
+            "done",
+            "failed"
+          ],
+          "type": "string"
+        },
+        "steps": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "state": {
+                "enum": [
+                  "done",
+                  "now",
+                  "failed",
+                  "todo"
+                ],
+                "type": "string"
+              },
+              "title": {
+                "maxLength": 80,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "title"
+            ],
+            "type": "object"
+          },
+          "maxItems": 20,
+          "type": "array"
+        },
+        "summary": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        "thread": {
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 40,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "islands_put"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Open any file in a viewer island: markdown, text, code, image, PDF, audio, video, HTML, or anything Quick Look shows. actions puts proposed-action buttons at its top; his click comes back as a notice. An HTML report speaks back too: its own buttons call window.heimdall.send(action, value, label) and his choice reaches you as a notice; send(\"save\", {file: \"picks.json\", data}) also writes the picks beside the page. Returns one line.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "actions": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "maxLength": 64,
+                "minLength": 1,
+                "type": "string"
+              },
+              "label": {
+                "maxLength": 24,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "label",
+              "action"
+            ],
+            "type": "object"
+          },
+          "maxItems": 4,
+          "minItems": 1,
+          "type": "array"
+        },
+        "path": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 40,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "name": "islands_view"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Remove islands by id once their work is over and User has seen the result. Returns one line.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "ids": {
+          "items": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "ids"
+      ],
+      "type": "object"
+    },
+    "name": "islands_remove"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "User's plan islands: Goals (his goals and their steps), Scheduled (promises with a time) and Settled (finished work with its proof). Nothing enters Goals or Scheduled without his yes, so when you want something there, propose it: a new goal (list goals, icon, about), a next step under a goal (list goals, goal: its id from show) or a promise (list scheduled, due: the local date-time, \"2026-10-24T10:00\"; tonight is 23:00), placed where it would live, with why: the words behind it. One proposal shows per list; say it to him in one short line. His yes by voice is accept (quote his words; due when he names another time: \"move it to Thursday\"), his no is decline; a click on Yes arrives as a notice and is already done. Unanswered, a proposal is archived after two days and never comes back. add is only for what he asked for in his own words: a promise with due and quote (his words), or an ask in Goals (kind and goal: something only he can do now, a decision, an approval, a test; it shows on Scheduled's waiting line until answered; a proposal on it gives his buttons). Settled takes proof only (proof: a commit, a passing test run, an install or an output file; or quote: his own words for a decision). move changes a promise's time, tick and undo mark what is done, remove takes something off; show puts a list on screen again (also one he closed) and returns what it holds, proposals and what waits on him included. item is a short line naming the project first (\"Arsenal: pick the icon\"), or an existing item's or proposal's id or title. Returns one line.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "about": {
+          "maxLength": 140,
+          "minLength": 1,
+          "type": "string"
+        },
+        "action": {
+          "enum": [
+            "propose",
+            "accept",
+            "decline",
+            "add",
+            "move",
+            "tick",
+            "undo",
+            "remove",
+            "show"
+          ],
+          "type": "string"
+        },
+        "detail": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "due": {
+          "maxLength": 40,
+          "minLength": 16,
+          "type": "string"
+        },
+        "goal": {
+          "maxLength": 64,
+          "minLength": 0,
+          "type": "string"
+        },
+        "icon": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "item": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "approve",
+            "test",
+            "pick",
+            "send",
+            "decide",
+            "review",
+            "write",
+            "fix",
+            "answer"
+          ],
+          "type": "string"
+        },
+        "list": {
+          "enum": [
+            "goals",
+            "scheduled",
+            "settled"
+          ],
+          "type": "string"
+        },
+        "proof": {
+          "maxLength": 500,
+          "minLength": 1,
+          "type": "string"
+        },
+        "proposal": {
+          "additionalProperties": false,
+          "properties": {
+            "actions": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "action": {
+                    "maxLength": 64,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "label": {
+                    "maxLength": 24,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "label",
+                  "action"
+                ],
+                "type": "object"
+              },
+              "maxItems": 4,
+              "minItems": 1,
+              "type": "array"
+            },
+            "text": {
+              "maxLength": 4000,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "type": "object"
+        },
+        "quote": {
+          "maxLength": 500,
+          "minLength": 1,
+          "type": "string"
+        },
+        "when": {
+          "maxLength": 40,
+          "minLength": 1,
+          "type": "string"
+        },
+        "why": {
+          "maxLength": 300,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "type": "object"
+    },
+    "name": "plan_edit"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Name a voice when User tells you who someone is. voice is the label the transcript shows for them: a code such as \"Speaker Fri 23 Oct 21h #3\" (find it with timeline_search: \"the last person we talked to about the server is John\") or a name to correct; or \"latest\" for the unnamed voice that spoke last in his last conversation (\"I was just talking to Elizabeth\"), no search needed. Every earlier line of that voice is relabelled and Heimdall knows the voice from then on. Returns one line: with \"latest\", also what that voice last said and any other unnamed voice of that conversation, to rename if it was the wrong one.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "voice": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "voice",
+        "name"
+      ],
+      "type": "object"
+    },
+    "name": "name_voice"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Start or stop acting on a call guest's requests when User says so (\"listen to Vim\", \"don't listen to him\"). speaker is their name as the transcript shows it. While on, their lines show marked (listened to) and their requests by name wake you; it stays on until he turns it off. Only User's own words count: in a turn a guest woke or steered, it is refused. Returns one line.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "on": {
+          "type": "boolean"
+        },
+        "speaker": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "speaker",
+        "on"
+      ],
+      "type": "object"
+    },
+    "name": "listen_to"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Record one judgement of User's in the taste ledger the moment you hear it: praise, a rejection or complaint, a correction of you, or a standing preference. words are his exact words; why is the quality he cares about, in one line (\"reports must read at a glance\"); subject names what he judged. Add what he was looking at: lines (handles or ids from timeline_search, the line he said it in first, then any context), screen_at (when the screen showed it) and files (paths or URLs of the work). at defaults to the first line's time, else now. When he judges a change made after an earlier verdict, pass that entry's id as follows. A repeat is skipped. Returns one line.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "maxLength": 64,
+          "type": "string"
+        },
+        "files": {
+          "items": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 10,
+          "minItems": 1,
+          "type": "array"
+        },
+        "follows": {
+          "maxLength": 64,
+          "minLength": 7,
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "report",
+            "page",
+            "app",
+            "icon",
+            "image",
+            "voice",
+            "audio",
+            "writing",
+            "code",
+            "behaviour",
+            "other"
+          ],
+          "type": "string"
+        },
+        "lines": {
+          "items": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "type": "array"
+        },
+        "screen_at": {
+          "format": "date-time",
+          "maxLength": 64,
+          "type": "string"
+        },
+        "subject": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        "verdict": {
+          "enum": [
+            "like",
+            "dislike",
+            "correction",
+            "preference"
+          ],
+          "type": "string"
+        },
+        "why": {
+          "maxLength": 400,
+          "minLength": 1,
+          "type": "string"
+        },
+        "words": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "subject",
+        "kind",
+        "verdict",
+        "words",
+        "why"
+      ],
+      "type": "object"
+    },
+    "name": "taste_note"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Search User's past judgements in the taste ledger by topic words (\"report headings\", \"voice\"), optionally one verdict and a since date. One line each, best match first: time, verdict, kind, subject, his words, why, id.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "default": 10,
+          "maximum": 20,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "query": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        "since": {
+          "format": "date-time",
+          "maxLength": 64,
+          "type": "string"
+        },
+        "verdict": {
+          "enum": [
+            "like",
+            "dislike",
+            "correction",
+            "preference"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "taste_search"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Older name for settings; use settings. Changes your name (also your wake word), the name you call User, your mark in the menu bar and notch, and your speaking model and voice, only when User asks. Pass only what changes; no arguments returns the current values and the choices. icon is \"helmet\", an SF Symbol name or an absolute PNG, PDF or SVG path; icon_svg is your own drawing: one colour, a square viewBox, solid filled shapes that read at 16 points. speaking_model with voice picks a preset or a voice of that model. wake_words is ignored: the wake word is the name. Returns one line.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "icon": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "icon_svg": {
+          "maxLength": 20000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 32,
+          "minLength": 1,
+          "type": "string"
+        },
+        "speaking_model": {
+          "enum": [
+            "drama3",
+            "supertonic",
+            "phonon",
+            "own_engine",
+            "elevenlabs"
+          ],
+          "type": "string"
+        },
+        "user_name": {
+          "maxLength": 32,
+          "minLength": 1,
+          "type": "string"
+        },
+        "voice": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "wake_words": {
+          "items": {
+            "maxLength": 32,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 8,
+          "minItems": 0,
+          "type": "array"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "name": "personalise"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Read or change any Heimdall setting the menu shows. list: every setting and its value. get key: its value and choices. set key value: change it, only when User asks or it plainly serves what he asked. item names the microphone, app or task for extra_microphone, app_audio and background_task (\"enable app audio from Ego\": key app_audio, item Ego, value true); devices and apps go by the names the menu shows. A change applies at once, as a click in the menu would, and the menu shows it. Never switch yourself off: agent false (and engine false while you run on the local engine) is refused unless owner_asked quotes User's own words asking for it, as the transcript has them. agent_model and agent_context restart you at once: say what you are doing first and make it the turn's last call. A new name or user_name reloads you after this turn with the conversation kept, so end the turn. The name is also your wake word. ack_delay is in seconds, as User says it (2 or 2.5). Never quit or restart Heimdall for a setting. Returns one line.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "enum": [
+            "list",
+            "get",
+            "set"
+          ],
+          "type": "string"
+        },
+        "item": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "key": {
+          "enum": [
+            "listening",
+            "seeing",
+            "speaking",
+            "agent",
+            "engine",
+            "microphone",
+            "extra_microphone",
+            "app_audio",
+            "recording_resolution",
+            "recording_fps",
+            "islands_on_streams",
+            "agent_model",
+            "agent_thinking",
+            "agent_speed",
+            "agent_context",
+            "agent_relay",
+            "agent_relay_model",
+            "agent_relay_account",
+            "name",
+            "user_name",
+            "icon",
+            "speaking_model",
+            "voice",
+            "voice_speed",
+            "wake_sound",
+            "ack_delay",
+            "background_model",
+            "background_task",
+            "show_islands",
+            "launch_at_login"
+          ],
+          "type": "string"
+        },
+        "owner_asked": {
+          "maxLength": 500,
+          "minLength": 1,
+          "type": "string"
+        },
+        "value": {
+          "oneOf": [
+            {
+              "maxLength": 20000,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "maximum": 10000000,
+              "minimum": 0,
+              "type": "number"
+            }
+          ]
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "type": "object"
+    },
+    "name": "settings"
+  }
+]

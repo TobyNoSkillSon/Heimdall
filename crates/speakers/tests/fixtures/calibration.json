@@ -1,0 +1,9 @@
+{
+  "threshold": 0.455542,
+  "model_id": "redimnet2-b6-vb2+vox2-lm:d960e9f713eaba712f44498e82221b6fc12fcd7eaacd367c9eac45d3a6ce59ec",
+  "dataset": "AMI ES2002a/b + IS1000a/b SDM: seven calibration speakers, enrollment meeting a and query meeting b; 2 independent raw enrollment windows/name, 6 s each; 336 genuine + 336 max-other-name impostor queries, raw/Opus 24/64 share intervals. ES2004 and IS1009 speakers/sessions and VoxConverse reserved for testing.",
+  "genuine_trials": 336,
+  "impostor_trials": 336,
+  "false_accept_rate": 0.020833333333333332,
+  "false_reject_rate": 0.020833333333333332
+}

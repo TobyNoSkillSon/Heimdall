@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""The island checker: a stronger model reads the recent refresher passes, the islands and plan lists as they stand,
+Heimdall's island capabilities and User's island verdicts, and says what is done well and what is not, with proposed
+prompt edits (adds and prunes) for the refresher. It writes lab/refresher-check/<date>.json and a short HTML summary.
+
+Model: Claude Opus 5.5 at medium effort (on purpose: the checker is the expensive judge; the refresher stays on Haiku).
+Cost: estimated before the call from the input size and the worst-case output; the call is refused above the cap
+(default $0.50). The actual cost is read from the CLI and written beside the findings.
+
+Reads only: Heimdall's logs and island folder, the active session, the prompt in effect, docs/islands-capabilities.md.
+Nothing is written into Heimdall's data folder or its code. Heimdall is not touched.
+
+usage: scripts/refresher-check [--passes 4] [--tail 30] [--cap 0.50] [--dry-run]
+"""
+import argparse, datetime, json, os, subprocess, sys, tempfile
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+LAB = REPO / 'lab' / 'refresher-prompt-condensed'
+sys.path.insert(0, str(LAB))
+import measure_input as mi  # the rendering rules the refresher itself uses
+
+MODEL = 'claude-opus-5-5'
+EFFORT = 'medium'
+# Per million tokens, USD (background_call.rs, claude-opus-5-5): input, cache write 1h, cache read, output.
+PRICE = dict(i=4.0, w=8.0, r=0.20, o=20.0)
+MAX_OUT = 8_000
+BPT = json.loads((LAB / 'input-breakdown.json').read_text())['bytes_per_token_median']
+TASTE_BIN = Path.home() / 'Applications/Heimdall.app/Contents/MacOS/Heimdall'
+
+SCHEMA = {
+    'type': 'object',
+    'properties': {
+        'islands': {'type': 'array', 'items': {'type': 'object', 'properties': {
+            'island': {'type': 'string'}, 'truthful': {'type': 'boolean'}, 'truth_notes': {'type': 'string'},
+            'parts_fit': {'type': 'boolean'}, 'parts_notes': {'type': 'string'},
+            'clarity': {'type': 'integer', 'minimum': 1, 'maximum': 5}, 'issues': {'type': 'array', 'items': {'type': 'string'}}},
+            'required': ['island', 'truthful', 'truth_notes', 'parts_fit', 'parts_notes', 'clarity', 'issues'], 'additionalProperties': False}},
+        'plan': {'type': 'object', 'properties': {
+            'stale': {'type': 'array', 'items': {'type': 'object', 'properties': {'id': {'type': 'string'}, 'why': {'type': 'string'}},
+                                                 'required': ['id', 'why'], 'additionalProperties': False}},
+            'duplicates': {'type': 'array', 'items': {'type': 'string'}},
+            'missing_jobs': {'type': 'array', 'items': {'type': 'string'}}},
+            'required': ['stale', 'duplicates', 'missing_jobs'], 'additionalProperties': False},
+        'proposals': {'type': 'array', 'items': {'type': 'object', 'properties': {
+            'op': {'type': 'string', 'enum': ['add', 'prune']},
+            'section': {'type': 'string'}, 'text': {'type': 'string'}, 'match': {'type': 'string'},
+            'why': {'type': 'string'}, 'evidence': {'type': 'string'}},
+            'required': ['op', 'section', 'text', 'match', 'why', 'evidence'], 'additionalProperties': False}},
+        'summary': {'type': 'string'}},
+        'required': ['islands', 'plan', 'proposals', 'summary'], 'additionalProperties': False,
+}
+
+CHECKER_RULES = """You check the work of Heimdall's plan refresher on User's Mac. The refresher runs every few minutes:
+Claude Haiku reads the conversation, the current lists and the job islands, and rewrites them. You judge the result.
+
+For each job island, say:
+- truthful: does the island tell the truth about its thread and the work (state, stage, summary, steps, numbers,
+  open targets) given the conversation and the thread's state in the input? A running island with no summary, a done
+  island with work still going, or a wrong stage is not truthful.
+- parts_fit: are the parts (stat, bars, line, list, button, toggle, slider, text, image) the right picture for the job,
+  so it reads at a glance? A count is a progress bar or a stat; a sequence is a step timeline; a result is an image
+  or an open target. Parts that repeat what another element shows do not earn their place.
+- clarity 1-5: could User tell at a glance what is going on, whether it works or needs him, and what comes next?
+- issues: concrete problems in one line each.
+
+For the plan lists: stale items (User already settled, dropped or rejected them in the conversation; or a finished
+job's item still open), duplicates, and jobs that run in the conversation but have no island.
+
+The condensed reference is the target the prompt should move towards: prefer prunes that bring the prompt towards it, and
+do not add a rule the reference lacks unless the evidence in this run needs it.
+
+Then propose prompt edits, the smallest that would have produced a better result, each with the evidence (a line
+from the conversation or an island field). An add names the section of the prompt and gives the text. A prune gives
+the exact text to remove (match) and why. Do not propose edits you cannot tie to evidence. Prefer prunes when a rule
+repeats another. Keep the prompt's rules: User's words, one line for a summary, no ids or paths in summaries, no
+chores, no other people's tasks, nothing invented.
+
+Answer with the JSON only."""
+
+
+def taste_text():
+    """User's island verdicts from the installed app's read-only taste search (the CLI exits before any UI starts)."""
+    if not TASTE_BIN.exists():
+        return 'Taste search unavailable: the installed app is not at ~/Applications/Heimdall.app.'
+    r = subprocess.run([str(TASTE_BIN), '--taste', 'search', 'island'], capture_output=True, text=True, cwd='/tmp', timeout=60)
+    return r.stdout.strip() or f'Taste search gave no output ({r.stderr[:200]})'
+
+
+def passes(n):
+    rows = [json.loads(l) for l in (mi.DATA / 'agent/background-runs.jsonl').read_text().splitlines() if l.strip()]
+    rows = [r for r in rows if r['job'] == 'plan refresher'][-n:]
+    return [dict(at=datetime.datetime.fromtimestamp(r['at_ms'] / 1000).strftime('%H:%M'),
+                 prompt_tokens=r['input'] + r['cache_read'] + r['cache_write'], output=r['output'], usd=round(r['usd'], 4))
+            for r in rows]
+
+
+def islands_state():
+    lists, jobs = mi.read_islands()
+    out = {'todo': mi.list_view(lists[0], False), 'scheduled': mi.list_view(lists[1], True), 'settled': mi.list_view(lists[2], False)}
+    out['jobs'] = [mi.job_view(j) for j in jobs[:mi.MAX_JOBS]]
+    return out
+
+
+def build(args):
+    session = Path(json.loads((mi.DATA / 'agent/active-session.json').read_text()))
+    summary, lines, _ = mi.conversation(mi.load_entries(session))
+    tail = lines[-args.tail:]
+    prompt_in_effect = (REPO / 'crates/app/prompt/plan-refresher.md').read_text() + (REPO / 'crates/app/prompt/plan-refresher-examples.md').read_text()
+    caps = (REPO / 'docs/islands-capabilities.md').read_text() if (REPO / 'docs/islands-capabilities.md').exists() else '(missing)'
+    material = {
+        'now': datetime.datetime.now().strftime('%A %Y-%m-%d %H:%M'),
+        'recent_refresher_passes': passes(args.passes),
+        'islands_and_lists_now': islands_state(),
+        'conversation_tail': tail,
+        'prompt_in_effect_for_reference': prompt_in_effect,
+        'condensed_reference_target': (LAB / 'plan-refresher-v2.md').read_text(),
+        'island_capabilities': caps,
+        'owner_island_verdicts': taste_text(),
+    }
+    user = json.dumps(material, ensure_ascii=False, indent=1)
+    return CHECKER_RULES, user, material
+
+
+def estimate(system, user):
+    n_in = (len((system + user).encode())) / BPT
+    worst = (n_in * PRICE['w'] + MAX_OUT * PRICE['o']) / 1e6  # every input token at the cache-write price, full output
+    return int(n_in), worst
+
+
+def call(system, user):
+    with tempfile.TemporaryDirectory(prefix='refresher-check-') as d:
+        sysf = Path(d) / 'system.md'
+        sysf.write_text(system)
+        cmd = ['claude', '-p', '--model', MODEL, '--effort', EFFORT, '--tools', '', '--no-session-persistence',
+               '--setting-sources', '', '--output-format', 'json', '--system-prompt-file', str(sysf),
+               '--json-schema', json.dumps(SCHEMA)]
+        r = subprocess.run(cmd, input=user, capture_output=True, text=True, cwd=d, timeout=900)
+    v = json.loads(r.stdout)
+    if v.get('is_error'):
+        raise SystemExit(f'checker call failed: {str(v)[:300]}')
+    return v['structured_output'], v.get('total_cost_usd'), v.get('usage', {})
+
+
+def html(findings, meta):
+    rows = ''.join(f"<tr><td>{i['island']}</td><td>{'yes' if i['truthful'] else 'no'}</td><td>{'yes' if i['parts_fit'] else 'no'}</td>"
+                   f"<td>{i['clarity']}/5</td><td>{'; '.join(i['issues'])[:300]}</td></tr>" for i in findings['islands'])
+    props = ''.join(f"<li><b>{p['op']}</b> in {p['section']}: {p['text'] or p['match']} <i>({p['why']})</i></li>" for p in findings['proposals'])
+    return f"""<!doctype html><meta charset=utf-8><title>Refresher check {meta['date']}</title>
+<style>body{{background:#0a0a0b;color:#f3f3f5;font:15px/1.5 -apple-system,sans-serif;max-width:1000px;margin:40px auto;padding:0 24px}}
+table{{width:100%;border-collapse:collapse}}td,th{{text-align:left;padding:8px 10px;border-bottom:1px solid #2a2a2e;vertical-align:top}}
+th{{color:#6c6c74;font-weight:400}}li{{margin:8px 0;color:#a1a1a8}}b{{color:#f3f3f5}}</style>
+<h1 style="font-size:28px">{findings['summary']}</h1>
+<table><tr><th>Island</th><th>Truthful</th><th>Parts fit</th><th>Clarity</th><th>Issues</th></tr>{rows}</table>
+<h2 style="font-size:18px;margin-top:32px">Proposed prompt edits</h2><ul>{props or '<li>None.</li>'}</ul>
+<p style="color:#6c6c74;font-size:13px">Checker {meta['model']} at {meta['effort']}; cost ${meta['cost']:.4f} (cap ${meta['cap']:.2f}); input about {meta['input_tokens']:,} tokens.</p>"""
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--passes', type=int, default=4)
+    ap.add_argument('--tail', type=int, default=30)
+    ap.add_argument('--cap', type=float, default=0.50)
+    ap.add_argument('--dry-run', action='store_true')
+    a = ap.parse_args()
+    system, user, material = build(a)
+    n_in, worst = estimate(system, user)
+    print(f'input about {n_in:,} tokens; worst case ${worst:.3f} against the ${a.cap:.2f} cap')
+    if worst > a.cap:
+        raise SystemExit('refused: the worst case is above the cap (use --tail or --passes to shrink the input)')
+    if a.dry_run:
+        print('dry run: no call made')
+        return
+    findings, cost, usage = call(system, user)
+    date = datetime.date.today().isoformat()
+    out = REPO / 'lab' / 'refresher-check'
+    out.mkdir(parents=True, exist_ok=True)
+    meta = dict(date=date, model=MODEL, effort=EFFORT, cap=a.cap, cost=cost or 0.0, usage=usage, input_tokens=n_in,
+                passes=material['recent_refresher_passes'])
+    (out / f'{date}.json').write_text(json.dumps(dict(meta=meta, findings=findings), ensure_ascii=False, indent=1))
+    (out / f'{date}.html').write_text(html(findings, meta))
+    print(f"{findings['summary']}\nproposals: {len(findings['proposals'])}; cost ${cost or 0:.4f}; wrote lab/refresher-check/{date}.json")
+
+
+if __name__ == '__main__':
+    main()

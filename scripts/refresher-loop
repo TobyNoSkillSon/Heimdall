@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""The prompt loop: applies the checker's proposed edits (adds and prunes) to a copy of the refresher prompt in effect,
+replays the eval on the copy, and keeps the edits only if the eval holds or improves and the prompt does not grow by
+more than 10%. Prunes are kept first, so the prompt shrinks before it grows.
+
+Inputs: a checker findings file (lab/refresher-check/<date>.json), the prompt in effect (crates/app/prompt/plan-refresher.md),
+and the baseline replay result for that prompt (fixtures/plan-replay-1024/results/summary-a-high.json: passes out of runs).
+
+Outputs: lab/refresher-loop/<date>.json (what was applied, what was skipped and why, the pass rates, the decision) and,
+only when kept, an updated crates/app/prompt/plan-refresher.md. The change is committed by the night pass, not here.
+
+Cost: the replay runs the candidate three times, one call at a time, at the app's effort (high). The dry run makes no call.
+The paid run needs --yes.
+
+usage: scripts/refresher-loop --findings lab/refresher-check/<date>.json [--runs 3] [--growth 0.10] [--dry-run] [--yes]
+"""
+import argparse, datetime, json, subprocess, sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+LAB = REPO / 'lab' / 'refresher-prompt-condensed'
+PROMPT = REPO / 'crates/app/prompt/plan-refresher.md'
+EXAMPLES = REPO / 'crates/app/prompt/plan-refresher-examples.md'
+BASELINE = LAB / 'fixtures/plan-replay-1024/results/summary-a-high.json'  # the prompt in effect: today's, at high (3 of 3)
+
+
+def apply(text, proposals):
+    """Returns (candidate, applied, skipped). Prunes first, then adds into the named section."""
+    applied, skipped = [], []
+    for p in [p for p in proposals if p['op'] == 'prune']:
+        n = text.count(p['match'])
+        if p['match'] and n == 1:
+            text = text.replace(p['match'], '', 1)
+            applied.append(('prune', p['match'][:60]))
+        else:
+            skipped.append(('prune', p['match'][:60], f'found {n} times'))
+    for p in [p for p in proposals if p['op'] == 'add']:
+        lines = text.split('\n')
+        name = p['section'].split('>')[-1].strip().lower()  # 'Job islands > One job' -> the heading 'One job'
+        heads = [i for i, l in enumerate(lines) if l.startswith('#') and name in l.lower()]
+        if len(heads) != 1:
+            skipped.append(('add', p['section'], f'section found {len(heads)} times'))
+            continue
+        start = heads[0] + 1
+        end = next((i for i in range(start, len(lines)) if lines[i].startswith('#')), len(lines))
+        lines[end:end] = ['', p['text'].strip()]
+        text = '\n'.join(lines)
+        applied.append(('add', p['section'], p['text'][:60]))
+    return text, applied, skipped
+
+
+def pass_rate(path):
+    runs = json.loads(path.read_text())
+    return sum(1 for r in runs if r['passed']), len(runs)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--findings', required=True)
+    ap.add_argument('--runs', type=int, default=3)
+    ap.add_argument('--growth', type=float, default=0.10)
+    ap.add_argument('--dry-run', action='store_true')
+    ap.add_argument('--yes', action='store_true', help='allow the paid replay')
+    ap.add_argument('--budget-used', type=float, default=0.0, help='USD already spent in this approved batch')
+    ap.add_argument('--hard-stop', type=float, default=1.30, help='total USD for this batch that may not be passed')
+    a = ap.parse_args()
+    findings = json.loads(Path(a.findings).read_text())['findings']
+    base = PROMPT.read_text()
+    base_words = len(base.split())
+    prunes = [p for p in findings['proposals'] if p['op'] == 'prune']
+    adds = [p for p in findings['proposals'] if p['op'] == 'add']
+    dropped = []
+    while True:
+        cand, applied, skipped = apply(base, prunes + adds)
+        cand_words = len(cand.split())
+        growth = (cand_words - base_words) / base_words
+        if growth <= a.growth or not adds:
+            break
+        last = adds.pop()  # over the limit: the last add goes first, prunes stay
+        dropped.append(('add', last['section'], f'dropped for size (growth over {a.growth:.0%})'))
+    skipped = skipped + dropped
+    base_pass, base_n = pass_rate(BASELINE)
+    date = datetime.date.today().isoformat()
+    out = REPO / 'lab' / 'refresher-loop'
+    out.mkdir(parents=True, exist_ok=True)
+    tmp = out / f'{date}-candidate.md'
+    tmp.write_text(cand)
+    full = cand + EXAMPLES.read_text()  # what the app sends: the main file, then the examples file
+    (out / f'{date}-candidate-full.md').write_text(full)
+    decision = {'date': date, 'base_words': base_words, 'candidate_words': cand_words, 'growth': round(growth, 4),
+                'applied': applied, 'skipped': skipped, 'baseline_pass': f'{base_pass}/{base_n}', 'candidate_pass': None,
+                'kept': False}
+    print(f"words {base_words} -> {cand_words} ({growth:+.1%}); applied {len(applied)}, skipped {len(skipped)}; "
+          f"baseline {base_pass}/{base_n}")
+    if a.dry_run or not a.yes:
+        decision['note'] = 'dry run: no replay, nothing kept'
+        (out / f'{date}.json').write_text(json.dumps(decision, ensure_ascii=False, indent=1))
+        print('dry run: no replay call made; decision file written')
+        return
+    if growth > a.growth:
+        decision['note'] = 'rejected: growth over the limit even with only prunes'
+    else:
+        # One call at a time. Before each call: if the next one (the last call's cost, or $0.30 at first) would pass
+        # the hard stop, stop. Each run is its own invocation, so the cost is read after every call.
+        spent, costs, passes, runs = a.budget_used, [], [], []
+        for i in range(1, a.runs + 1):
+            est = costs[-1] if costs else 0.20  # later calls read the cache the first one wrote; the first costs about $0.19
+            if spent + est > a.hard_stop:
+                decision['stopped'] = f'hard stop before run {i}: ${spent:.2f} spent, next call about ${est:.2f}, limit ${a.hard_stop:.2f}'
+                break
+            tag = f'-cand{date}-{i}'
+            subprocess.run([sys.executable, '-I', str(LAB / 'replay_1024.py'), '--config', 'b', '--runs', '1',
+                            '--system', str(out / f'{date}-candidate-full.md'), '--sequential', f'--tag={tag}'], cwd=str(LAB), check=False)
+            summary = LAB / f'fixtures/plan-replay-1024/results/summary-b{tag}-high.json'
+            if not summary.exists():  # the call failed or was stopped: nothing to count, no more calls
+                decision['stopped'] = f'run {i} produced no result; no further calls'
+                break
+            rec = json.loads(summary.read_text())[0]
+            spent += rec['cost'] or 0.0
+            costs.append(rec['cost'] or 0.0)
+            passes.append(rec['passed'])
+            runs.append({'run': i, 'passed': rec['passed'], 'cost': rec['cost'], 'output': rec['output']})
+        decision['candidate_runs'] = runs
+        decision['spent_this_batch'] = round(spent, 4)
+        cand_pass, cand_n = sum(passes), len(passes)
+        decision['candidate_pass'] = f'{cand_pass}/{cand_n}'
+        holds = cand_n == a.runs and all(passes)  # adopt only on 3 of 3
+        decision['kept'] = bool(holds)
+        decision['note'] = ('kept: the replay passed every run and growth is within the limit' if holds
+                            else 'rejected: the replay did not pass 3 of 3' + (' (stopped at the hard limit)' if 'stopped' in decision else ''))
+        if holds:
+            PROMPT.write_text(cand)
+    (out / f'{date}.json').write_text(json.dumps(decision, ensure_ascii=False, indent=1))
+    print(decision['note'], f"(baseline {decision['baseline_pass']}, candidate {decision['candidate_pass']})")
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,5 @@
+Fast reading works best on short, predictable text. The studies agree on one point: comprehension drops above about 250 words per minute, and the loss comes mostly from not being able to look back. Showing two short words together, like "of the", costs almost nothing and saves time. Longer words need more time, and rare words need more still.
+
+The reading-speed review by Brysbaert covered 190 studies with 18,573 readers. Its average for non-fiction was 238 words per minute. That's why the default speed is 240, and why the dial moves in steps of 25.
+
+The full notes are at https://example.com/rsvp-notes for later.

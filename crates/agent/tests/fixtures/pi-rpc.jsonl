@@ -1,0 +1,6 @@
+{"type":"response","id":"one","command":"prompt","success":true,"data":{"disposition":"started"}}
+{"type":"message_end","message":{"role":"user","content":"[Heimdall delivery: one]\nżółć"}}
+{"type":"compaction_start","reason":"threshold"}
+{"type":"compaction_end","result":{"summary":"continuity","firstKeptEntryId":"abc"},"aborted":false,"willRetry":false}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"LIME"}],"stopReason":"stop"}}
+{"type":"agent_settled","aborted":false}

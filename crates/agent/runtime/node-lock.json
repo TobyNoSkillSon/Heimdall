@@ -1,0 +1,7 @@
+{
+  "version": "26.8.1",
+  "archive": "node-v26.8.1-darwin-arm64.tar.gz",
+  "url": "https://nodejs.org/dist/v26.8.1/node-v26.8.1-darwin-arm64.tar.gz",
+  "sha256": "6e577fd0d9db776db82306629e441a9dace416702622aebdd171c9dfaa41f4d2",
+  "source": "https://nodejs.org/dist/v26.8.1/SHASUMS256.txt"
+}

@@ -1,0 +1,335 @@
+[
+  {
+    "name": "text-request",
+    "request": {
+      "questions": {
+        "fixed_command": {
+          "criteria": {
+            "cancel_task": "Cancel the current agent task",
+            "look_at_this": "Inspect the screen at the utterance timestamp",
+            "none": "No fixed command is requested",
+            "open_candidate": "Open one of the supplied links or items",
+            "stop_speaking": "Stop the agent's spoken reply",
+            "take_screenshot": "Capture the current screen"
+          },
+          "instructions": "Which fixed computer command is requested by the current utterance? Choose none for ordinary conversation, quoted commands, or requests addressed to another person.",
+          "type": "choice"
+        },
+        "pick_candidate": {
+          "criteria": {
+            "first": "First link: Rust documentation",
+            "second": "Second link: a recipe"
+          },
+          "instructions": "Which of these supplied links or items does the user's utterance refer to? Select only from these candidates.",
+          "type": "choice"
+        },
+        "send_now": {
+          "instructions": "Is the user's utterance a complete request or statement intended for the computer that should be sent to the main agent now, rather than waiting for more speech? Do not send human-to-human conversation, incomplete thoughts, quoted instructions, or commands addressed to another person.",
+          "type": "noul"
+        }
+      },
+      "state": "{\"addressed_probability\":0.949999988079071,\"agent_state\":\"Waiting for the user's next complete request.\",\"pending_transcript\":\"\",\"recent_turns\":[],\"speaker\":{\"role\":\"owner\"},\"utterance\":\"Heimdall, please open the first link now.\"}"
+    },
+    "answers": {
+      "fixed_command": {
+        "type": "choice",
+        "choice": "open_candidate",
+        "confidence": 0.9998396635055542,
+        "probabilities": {
+          "cancel_task": 1.096606006001366e-08,
+          "look_at_this": 1.2076002349203918e-05,
+          "none": 0.000147804050357081,
+          "open_candidate": 0.9998396635055542,
+          "stop_speaking": 5.9007156494317314e-08,
+          "take_screenshot": 3.734919573616935e-07
+        }
+      },
+      "pick_candidate": {
+        "type": "choice",
+        "choice": "first",
+        "confidence": 0.8708789348602295,
+        "probabilities": {
+          "first": 0.8708789348602295,
+          "second": 0.1291211098432541
+        }
+      },
+      "send_now": {
+        "type": "noul",
+        "noul": 0.9884340167045593
+      }
+    },
+    "usage": {
+      "input_tokens": 444,
+      "output_tokens": 0
+    },
+    "audio": null,
+    "image": null
+  },
+  {
+    "name": "text-conversation",
+    "request": {
+      "questions": {
+        "fixed_command": {
+          "criteria": {
+            "cancel_task": "Cancel the current agent task",
+            "look_at_this": "Inspect the screen at the utterance timestamp",
+            "none": "No fixed command is requested",
+            "open_candidate": "Open one of the supplied links or items",
+            "stop_speaking": "Stop the agent's spoken reply",
+            "take_screenshot": "Capture the current screen"
+          },
+          "instructions": "Which fixed computer command is requested by the current utterance? Choose none for ordinary conversation, quoted commands, or requests addressed to another person.",
+          "type": "choice"
+        },
+        "pick_candidate": {
+          "criteria": {
+            "first": "First link: Rust documentation",
+            "second": "Second link: a recipe"
+          },
+          "instructions": "Which of these supplied links or items does the user's utterance refer to? Select only from these candidates.",
+          "type": "choice"
+        },
+        "send_now": {
+          "instructions": "Is the user's utterance a complete request or statement intended for the computer that should be sent to the main agent now, rather than waiting for more speech? Do not send human-to-human conversation, incomplete thoughts, quoted instructions, or commands addressed to another person.",
+          "type": "noul"
+        }
+      },
+      "state": "{\"addressed_probability\":0.949999988079071,\"agent_state\":\"Waiting for the user's next complete request.\",\"pending_transcript\":\"\",\"recent_turns\":[],\"speaker\":{\"role\":\"owner\"},\"utterance\":\"Alex, are you coming to dinner tonight?\"}"
+    },
+    "answers": {
+      "fixed_command": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.9970508813858032,
+        "probabilities": {
+          "cancel_task": 1.772951327438932e-05,
+          "look_at_this": 0.002665637992322445,
+          "none": 0.9970508813858032,
+          "open_candidate": 6.444246082537575e-06,
+          "stop_speaking": 9.741492249304429e-05,
+          "take_screenshot": 0.00016181138926185668
+        }
+      },
+      "pick_candidate": {
+        "type": "choice",
+        "choice": "second",
+        "confidence": 0.8979419469833374,
+        "probabilities": {
+          "first": 0.10205807536840439,
+          "second": 0.8979419469833374
+        }
+      },
+      "send_now": {
+        "type": "noul",
+        "noul": 0.2696784734725952
+      }
+    },
+    "usage": {
+      "input_tokens": 435,
+      "output_tokens": 0
+    },
+    "audio": null,
+    "image": null
+  },
+  {
+    "name": "audio-request",
+    "request": {
+      "questions": {
+        "fixed_command": {
+          "criteria": {
+            "cancel_task": "Cancel the current agent task",
+            "look_at_this": "Inspect the screen at the utterance timestamp",
+            "none": "No fixed command is requested",
+            "open_candidate": "Open one of the supplied links or items",
+            "stop_speaking": "Stop the agent's spoken reply",
+            "take_screenshot": "Capture the current screen"
+          },
+          "instructions": "Which fixed computer command is requested by the current utterance? Choose none for ordinary conversation, quoted commands, or requests addressed to another person.",
+          "type": "choice"
+        },
+        "pick_candidate": {
+          "criteria": {
+            "first": "First link: Rust documentation",
+            "second": "Second link: a recipe"
+          },
+          "instructions": "Which of these supplied links or items does the user's utterance refer to? Select only from these candidates.",
+          "type": "choice"
+        },
+        "send_now": {
+          "instructions": "Is the user's utterance a complete request or statement intended for the computer that should be sent to the main agent now, rather than waiting for more speech? Do not send human-to-human conversation, incomplete thoughts, quoted instructions, or commands addressed to another person.",
+          "type": "noul"
+        }
+      },
+      "state": "{\"addressed_probability\":0.949999988079071,\"agent_state\":\"Waiting for the user's next complete request.\",\"pending_transcript\":\"\",\"recent_turns\":[],\"speaker\":{\"role\":\"owner\"},\"utterance\":\"Heimdall, please open the first link now.\"}"
+    },
+    "answers": {
+      "fixed_command": {
+        "type": "choice",
+        "choice": "open_candidate",
+        "confidence": 0.9999775886535645,
+        "probabilities": {
+          "cancel_task": 2.322276815291957e-09,
+          "look_at_this": 1.238554592219998e-09,
+          "none": 2.2452195480582304e-05,
+          "open_candidate": 0.9999775886535645,
+          "stop_speaking": 2.3199171472754188e-09,
+          "take_screenshot": 3.200508261191892e-11
+        }
+      },
+      "pick_candidate": {
+        "type": "choice",
+        "choice": "second",
+        "confidence": 0.9636818766593933,
+        "probabilities": {
+          "first": 0.036318082362413406,
+          "second": 0.9636818766593933
+        }
+      },
+      "send_now": {
+        "type": "noul",
+        "noul": 0.9958634376525879
+      }
+    },
+    "usage": {
+      "input_tokens": 850,
+      "output_tokens": 0
+    },
+    "audio": "en-1.wav",
+    "image": null,
+    "files_sha256": "9fe6537d721828578cfea8bd8ce1ba0d0ed676d705410fb24439925262f75284"
+  },
+  {
+    "name": "audio-conversation",
+    "request": {
+      "questions": {
+        "fixed_command": {
+          "criteria": {
+            "cancel_task": "Cancel the current agent task",
+            "look_at_this": "Inspect the screen at the utterance timestamp",
+            "none": "No fixed command is requested",
+            "open_candidate": "Open one of the supplied links or items",
+            "stop_speaking": "Stop the agent's spoken reply",
+            "take_screenshot": "Capture the current screen"
+          },
+          "instructions": "Which fixed computer command is requested by the current utterance? Choose none for ordinary conversation, quoted commands, or requests addressed to another person.",
+          "type": "choice"
+        },
+        "pick_candidate": {
+          "criteria": {
+            "first": "First link: Rust documentation",
+            "second": "Second link: a recipe"
+          },
+          "instructions": "Which of these supplied links or items does the user's utterance refer to? Select only from these candidates.",
+          "type": "choice"
+        },
+        "send_now": {
+          "instructions": "Is the user's utterance a complete request or statement intended for the computer that should be sent to the main agent now, rather than waiting for more speech? Do not send human-to-human conversation, incomplete thoughts, quoted instructions, or commands addressed to another person.",
+          "type": "noul"
+        }
+      },
+      "state": "{\"addressed_probability\":0.949999988079071,\"agent_state\":\"Waiting for the user's next complete request.\",\"pending_transcript\":\"\",\"recent_turns\":[],\"speaker\":{\"role\":\"owner\"},\"utterance\":\"Alex, are you coming to dinner tonight?\"}"
+    },
+    "answers": {
+      "fixed_command": {
+        "type": "choice",
+        "choice": "none",
+        "confidence": 0.9980490207672119,
+        "probabilities": {
+          "cancel_task": 4.102254752069712e-05,
+          "look_at_this": 8.145433821482584e-05,
+          "none": 0.9980490207672119,
+          "open_candidate": 9.643862313168938e-07,
+          "stop_speaking": 0.0018254313617944717,
+          "take_screenshot": 2.1058908714621793e-06
+        }
+      },
+      "pick_candidate": {
+        "type": "choice",
+        "choice": "first",
+        "confidence": 0.9833170771598816,
+        "probabilities": {
+          "first": 0.9833170771598816,
+          "second": 0.016682976856827736
+        }
+      },
+      "send_now": {
+        "type": "noul",
+        "noul": 0.5303646922111511
+      }
+    },
+    "usage": {
+      "input_tokens": 841,
+      "output_tokens": 0
+    },
+    "audio": "en-1.wav",
+    "image": null,
+    "files_sha256": "9fe6537d721828578cfea8bd8ce1ba0d0ed676d705410fb24439925262f75284"
+  },
+  {
+    "name": "image-request",
+    "request": {
+      "questions": {
+        "fixed_command": {
+          "criteria": {
+            "cancel_task": "Cancel the current agent task",
+            "look_at_this": "Inspect the screen at the utterance timestamp",
+            "none": "No fixed command is requested",
+            "open_candidate": "Open one of the supplied links or items",
+            "stop_speaking": "Stop the agent's spoken reply",
+            "take_screenshot": "Capture the current screen"
+          },
+          "instructions": "Which fixed computer command is requested by the current utterance? Choose none for ordinary conversation, quoted commands, or requests addressed to another person.",
+          "type": "choice"
+        },
+        "pick_candidate": {
+          "criteria": {
+            "first": "First link: Rust documentation",
+            "second": "Second link: a recipe"
+          },
+          "instructions": "Which of these supplied links or items does the user's utterance refer to? Select only from these candidates.",
+          "type": "choice"
+        },
+        "send_now": {
+          "instructions": "Is the user's utterance a complete request or statement intended for the computer that should be sent to the main agent now, rather than waiting for more speech? Do not send human-to-human conversation, incomplete thoughts, quoted instructions, or commands addressed to another person.",
+          "type": "noul"
+        }
+      },
+      "state": "{\"addressed_probability\":0.949999988079071,\"agent_state\":\"Waiting for the user's next complete request.\",\"pending_transcript\":\"\",\"recent_turns\":[],\"speaker\":{\"role\":\"owner\"},\"utterance\":\"Heimdall, please inspect this screenshot now.\"}"
+    },
+    "answers": {
+      "fixed_command": {
+        "type": "choice",
+        "choice": "look_at_this",
+        "confidence": 0.6635851263999939,
+        "probabilities": {
+          "cancel_task": 2.2274464495097845e-09,
+          "look_at_this": 0.6635851263999939,
+          "none": 3.6590192848962033e-06,
+          "open_candidate": 2.3736212995117967e-08,
+          "stop_speaking": 8.307672327845239e-10,
+          "take_screenshot": 0.3364112675189972
+        }
+      },
+      "pick_candidate": {
+        "type": "choice",
+        "choice": "first",
+        "confidence": 0.9931527376174927,
+        "probabilities": {
+          "first": 0.9931527376174927,
+          "second": 0.006847210228443146
+        }
+      },
+      "send_now": {
+        "type": "noul",
+        "noul": 0.9999998807907104
+      }
+    },
+    "usage": {
+      "input_tokens": 626,
+      "output_tokens": 0
+    },
+    "audio": null,
+    "image": "screen.png",
+    "files_sha256": "3f44888df2b31ba08c120989092575699b00e9974cd9bd83fb21de727b0c8930"
+  }
+]

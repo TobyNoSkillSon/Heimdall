@@ -1,0 +1,9 @@
+Heimdall's built-in inference engine
+
+The engine (Contents/Resources/splash/engine: splash, splash.metallib, host-step.metallib) is Splash 1.4.1 by incoai,
+https://github.com/incoai/splash, licensed under the Apache License, Version 2.0 (splash-LICENSE.txt), with the
+third-party notices in splash-THIRD_PARTY_NOTICES.txt. It is redistributed unmodified, re-signed for this app.
+
+heimdall-splash (Contents/MacOS/heimdall-splash) is a Rust port of Splash's Python server and installer
+(server/ and install/ of the same release), also under the Apache License, Version 2.0. It was changed from the
+original: rewritten in Rust, limited to the APIs Heimdall uses (crates/splash in Heimdall's source).

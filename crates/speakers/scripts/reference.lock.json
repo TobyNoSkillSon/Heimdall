@@ -1,0 +1,11 @@
+{
+  "python": "3.12.13",
+  "nemo": "NVIDIA-NeMo/Speech@e4a34fd25f895ecd7f64f0e56bc288165e078da9",
+  "lhotse": "lhotse-speech/lhotse@264a0bb5aeee09c7b76ee2b709c601d44b45b09d",
+  "checkpoint": "nvidia/Nemotron-3-Diarization@f667ed73aee57d40cc39428eb768b4fd87a0a29e/Nemotron-3-Diarization.nemo",
+  "reason": "PyPI NeMo 3.0.0 cannot load this checkpoint's RoPE encoder; source package needs lhotse.indexing. Reference CPU float32, no CUDA/bf16 claim.",
+  "torch": "2.14.1",
+  "onnxruntime_python": "1.31.0",
+  "checkpoint_sha256": "867c53f552998f772e5b5e5c082962ae85ee7ca5669c2bc17d7f615133d4e96d",
+  "window_header_sha256": "5b063a22f93801490d6ea9792b5bbfa8ca04960c1dd1e47e8a297bc0c5d46b08"
+}

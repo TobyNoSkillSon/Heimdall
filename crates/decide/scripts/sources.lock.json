@@ -1,0 +1,74 @@
+[
+  {
+    "repo": "LiquidAI/d1-omni-600M",
+    "revision": "02b55d7076f15129e59ab3f94783f32c4b088674",
+    "path": "crates/decide/ref/d1-omni-600M/LICENSE",
+    "sha256": "9953509cbd8c1c6ce7b06ddf74fcc204a892692316201dd8f7400a84790d4120",
+    "bytes": 10572,
+    "url": "https://huggingface.co/LiquidAI/d1-omni-600M/resolve/02b55d7076f15129e59ab3f94783f32c4b088674/LICENSE"
+  },
+  {
+    "repo": "LiquidAI/d1-omni-600M",
+    "revision": "02b55d7076f15129e59ab3f94783f32c4b088674",
+    "path": "crates/decide/ref/d1-omni-600M/audio.py",
+    "sha256": "c5ff09d52d6a079e79d0505c89dbd0582ba2bc9abf2b26595d8d5b1d0c347bdf",
+    "bytes": 11829,
+    "url": "https://huggingface.co/LiquidAI/d1-omni-600M/resolve/02b55d7076f15129e59ab3f94783f32c4b088674/audio.py"
+  },
+  {
+    "repo": "LiquidAI/d1-omni-600M",
+    "revision": "02b55d7076f15129e59ab3f94783f32c4b088674",
+    "path": "crates/decide/ref/d1-omni-600M/config.json",
+    "sha256": "dfccae241822f81752426629c88c8b8d7efdd03dd19418b6645c604fad43d619",
+    "bytes": 1993,
+    "url": "https://huggingface.co/LiquidAI/d1-omni-600M/resolve/02b55d7076f15129e59ab3f94783f32c4b088674/config.json"
+  },
+  {
+    "repo": "LiquidAI/d1-omni-600M",
+    "revision": "02b55d7076f15129e59ab3f94783f32c4b088674",
+    "path": "crates/decide/ref/d1-omni-600M/encoder.py",
+    "sha256": "5f2e20319ee42a7367febf06c7653d7b3f9b28ef99a64cb9ec7739563dcfcffe",
+    "bytes": 7732,
+    "url": "https://huggingface.co/LiquidAI/d1-omni-600M/resolve/02b55d7076f15129e59ab3f94783f32c4b088674/encoder.py"
+  },
+  {
+    "repo": "LiquidAI/d1-omni-600M",
+    "revision": "02b55d7076f15129e59ab3f94783f32c4b088674",
+    "path": "crates/decide/ref/d1-omni-600M/modeling_d1.py",
+    "sha256": "2b71a5c909ec5d3aa6307378a41a0fd24af1e17d5c1c1f8d510582147051a686",
+    "bytes": 8655,
+    "url": "https://huggingface.co/LiquidAI/d1-omni-600M/resolve/02b55d7076f15129e59ab3f94783f32c4b088674/modeling_d1.py"
+  },
+  {
+    "repo": "LiquidAI/d1-omni-600M",
+    "revision": "02b55d7076f15129e59ab3f94783f32c4b088674",
+    "path": "crates/decide/ref/d1-omni-600M/prompt.py",
+    "sha256": "a6b29a55ec8345f1fc1fdbfcc4b64d80d473dc4316f095a62c51cb6cce1194cf",
+    "bytes": 6309,
+    "url": "https://huggingface.co/LiquidAI/d1-omni-600M/resolve/02b55d7076f15129e59ab3f94783f32c4b088674/prompt.py"
+  },
+  {
+    "repo": "LiquidAI/d1-omni-600M",
+    "revision": "02b55d7076f15129e59ab3f94783f32c4b088674",
+    "path": "crates/decide/ref/d1-omni-600M/tokenizer.json",
+    "sha256": "1efc3a6609abf6b63b1f47188d139f3b59973a6a434dffe970a7261a51ed2711",
+    "bytes": 4733371,
+    "url": "https://huggingface.co/LiquidAI/d1-omni-600M/resolve/02b55d7076f15129e59ab3f94783f32c4b088674/tokenizer.json"
+  },
+  {
+    "repo": "LiquidAI/d1-omni-600M",
+    "revision": "02b55d7076f15129e59ab3f94783f32c4b088674",
+    "path": "crates/decide/ref/d1-omni-600M/tokenizer_config.json",
+    "sha256": "03efc74b752b899b6292ff7e607738be59e6f206fec9aca32bbc05e9184090fc",
+    "bytes": 259,
+    "url": "https://huggingface.co/LiquidAI/d1-omni-600M/resolve/02b55d7076f15129e59ab3f94783f32c4b088674/tokenizer_config.json"
+  },
+  {
+    "repo": "LiquidAI/d1-omni-600M",
+    "revision": "02b55d7076f15129e59ab3f94783f32c4b088674",
+    "path": "crates/decide/ref/d1-omni-600M/vision.py",
+    "sha256": "43ad71029f82e20fd26b97574627773d47639d7a3742c8b04fe5bf55f41c4c28",
+    "bytes": 5233,
+    "url": "https://huggingface.co/LiquidAI/d1-omni-600M/resolve/02b55d7076f15129e59ab3f94783f32c4b088674/vision.py"
+  }
+]

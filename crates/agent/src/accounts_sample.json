@@ -1,0 +1,68 @@
+{
+  "checked_at": "2026-10-30T07:42:01+01:00",
+  "method": "live provider rate-limit read; no prompt sent",
+  "accounts": [
+    {
+      "provider": "claude",
+      "account": "default (~/.claude)",
+      "windows": [
+        {
+          "window": "5-hour",
+          "used_percent": 10.0,
+          "remaining_percent": 90.0,
+          "resets_at": "2026-10-30T07:50+01:00",
+          "window_minutes": 300
+        },
+        {
+          "window": "weekly",
+          "used_percent": 94.0,
+          "remaining_percent": 6.0,
+          "resets_at": "2026-11-02T13:00+01:00",
+          "window_minutes": 10080
+        }
+      ]
+    },
+    {
+      "provider": "claude",
+      "account": "~/.claude-account2",
+      "windows": [
+        {
+          "window": "5-hour",
+          "used_percent": 12.0,
+          "remaining_percent": 88.0,
+          "resets_at": "2026-10-30T12:10+01:00",
+          "window_minutes": 300
+        },
+        {
+          "window": "weekly",
+          "used_percent": 19.0,
+          "remaining_percent": 81.0,
+          "resets_at": "2026-10-30T09:00+01:00",
+          "window_minutes": 10080
+        }
+      ]
+    },
+    {
+      "provider": "codex",
+      "account": "default (~/.codex)",
+      "windows": [
+        {
+          "window": "5-hour",
+          "used_percent": 80.0,
+          "remaining_percent": 20.0,
+          "resets_at": "2026-10-30T08:13+01:00",
+          "window_minutes": 300
+        },
+        {
+          "window": "weekly",
+          "used_percent": 22.0,
+          "remaining_percent": 78.0,
+          "resets_at": "2026-11-04T10:30+01:00",
+          "window_minutes": 10080
+        }
+      ],
+      "plan": "plus",
+      "reached": null
+    }
+  ]
+}
