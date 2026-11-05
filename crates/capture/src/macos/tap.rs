@@ -44,10 +44,10 @@ pub struct NativeSource {
     /// Microphones only: where a voice-processing session for this device puts its cleaned audio (`echo.rs`).
     pub echo: Option<Arc<EchoRing>>,
 }
-/// Asks macOS for System Audio Recording now: a private global tap is made and destroyed at once, which is what shows
-/// the prompt. It blocks until the user answers, so it runs on its own thread (the app: at Setup's Allow All, before
-/// listening can start; VM run 5 Nov 07:16: the prompt otherwise came with the first capture, minutes later on
-/// Getting ready, and the capture's HAL thread waited in tap creation until macOS gave up).
+/// Asks macOS for System Audio Recording now: a private global tap in a private aggregate device, its IOProc started
+/// and stopped at once, and everything destroyed. Starting audio through the tap is what shows the prompt (VM runs 5
+/// Nov 08:09-08:41: making and destroying a tap showed nothing; the prompt came with the first capture's start), and
+/// the start waits for the answer, so this runs on its own thread (`tap_gate`). Nothing is read or kept.
 pub fn ask_system_audio() -> Result<()> {
     unsafe {
         let none = NSArray::<NSNumber>::new();
@@ -57,9 +57,27 @@ pub fn ask_system_audio() -> Result<()> {
         d.setMuteBehavior(CATapMuteBehavior::Unmuted);
         let mut tap = 0;
         hal::check("create process tap", AudioHardwareCreateProcessTap(Some(&d), &mut tap))?;
-        if tap != 0 { AudioHardwareDestroyProcessTap(tap); }
+        anyhow::ensure!(tap != 0, "tap returned no object");
+        let result = (|| -> Result<()> {
+            let aggregate = create_aggregate(&d.UUID().UUIDString())?;
+            let block: IoBlock = RcBlock::new(|_: NonNull<AudioTimeStamp>, _: NonNull<AudioBufferList>, _: NonNull<AudioTimeStamp>, out: NonNull<AudioBufferList>, _: NonNull<AudioTimeStamp>| {
+                zero_output(out.as_ptr());
+            });
+            let mut io: AudioDeviceIOProcID = None;
+            let started = hal::check("create IOProc", AudioDeviceCreateIOProcIDWithBlock(NonNull::from(&mut io), aggregate, None, RcBlock::as_ptr(&block)))
+                .and_then(|()| { anyhow::ensure!(io.is_some(), "callback registration returned no IOProc"); Ok(()) })
+                .and_then(|()| hal::check("start the permission request", AudioDeviceStart(aggregate, io)));
+            if io.is_some() {
+                let _ = AudioDeviceStop(aggregate, io);
+                let _ = AudioDeviceDestroyIOProcID(aggregate, io);
+            }
+            let _ = AudioHardwareDestroyAggregateDevice(aggregate);
+            drop(block);
+            started
+        })();
+        let _ = AudioHardwareDestroyProcessTap(tap);
+        result
     }
-    Ok(())
 }
 
 impl NativeSource {

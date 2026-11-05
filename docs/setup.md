@@ -93,7 +93,7 @@ One row each; Start stays off until all are green. A red row says why and offers
 | Microphone | sound arrived from the chosen input in the last five seconds (it waits for listening; ten seconds of silence turn it red) | Choose… (back to step 7: "No microphone found", "No sound from …"); Retry when the capture didn't start ("Couldn't start listening: …"); "Opening the microphone…" while it starts |
 | Voice | Phonon S loaded with the chosen voice | Retry |
 | Listening | Parakeet loaded, listening running and the Microphone row green ("Waits for the microphone" until then) | Allow… (the microphone), or wait for the models |
-| System audio (only while its ask is out or failed) | never required: "Waits for its permission" or "Off: not allowed", in grey; nothing once its taps run | the menu's or Setup's Allow asks again |
+| System audio (only while its ask is out, failed or denied) | never required: "Waits for its permission" or "Off: not allowed" (a failed ask, or its taps silent while audio played), in grey; nothing once its taps run | Allow… (asks again while unanswered, else opens its System Settings pane) |
 | Memory search (once EmbeddingGemma 2 is in) | its worker loaded and indexed; it needs 8 GB free memory, and without it the row says "Needs 8 GB free memory" in grey and Start doesn't wait for it (`--check`: `optional`) | none |
 | Decider | downloaded (with its progress) and its SHA-256 matched, then loaded and answering | Retry (a failed download; a failed load retries by itself) |
 | Agent | one real request to the agent's model answered | Choose… (no agent yet), Sign In… (a sign-in failed), Retry |
@@ -112,7 +112,7 @@ macOS lets no program grant these; Setup and the command open the right place an
 | Microphone (required) | Click Allow in the macOS prompt (after Allow All, or `--open-permissions`); plug one in if there is none |
 | Screen Recording (optional) | System Settings ▸ Privacy & Security ▸ Screen Recording: turn on Heimdall Alpha |
 | Accessibility (optional) | System Settings ▸ Privacy & Security ▸ Accessibility: turn on Heimdall Alpha |
-| System Audio Recording | Click Allow in the prompt macOS shows after Allow All (or the first time Heimdall listens); unanswered, the microphone can't open either |
+| System Audio Recording (optional) | Click Allow in the prompt macOS shows after Allow All or the Allow page's System Audio Recording row; unanswered or denied, listening runs on the microphone alone and Getting ready's System audio row offers Allow… |
 | A subscription sign-in | Approve in the browser page Heimdall opens (ChatGPT, OpenCode) |
 | Claude Code's own sign-in | `claude` in a terminal, once, if it was never signed in |
 | T3 Code's Connect | The Connect click (or `--t3 connect` from the command, which is the user's yes given to their agent) |

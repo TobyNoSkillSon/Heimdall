@@ -65,7 +65,7 @@ impl Status {
             let (state, why, fix) = match &r.state {
                 ui::ReadyState::Ready => ("ready", None, None),
                 // Not needed to start: `--check` and `--wait` don't wait for it.
-                ui::ReadyState::Optional { why } => ("optional", Some(why.clone()), None),
+                ui::ReadyState::Optional { why, fix } => ("optional", Some(why.clone()), fix.as_ref().map(|f| f.title().to_string())),
                 ui::ReadyState::Working { words, .. } | ui::ReadyState::Blocked { words } => ("working", Some(words.clone()), None),
                 ui::ReadyState::Problem { why, fix: Some(f @ ui::ReadyFix::Step { .. }) } => ("needs_user", Some(why.clone()), Some(f.title().to_string())),
                 ui::ReadyState::Problem { why, fix } => ("failed", Some(why.clone()), fix.as_ref().map(|f| f.title().to_string())),

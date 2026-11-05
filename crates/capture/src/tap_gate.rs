@@ -1,4 +1,4 @@
-//! System audio's permission, apart from the microphone (Toby, 5 Nov 07:45).
+//! System audio's permission, apart from the microphone.
 //!
 //! macOS asks for System Audio Recording when a process makes its first process tap, and that call blocks until the
 //! prompt is answered: unanswered, it waited about three minutes in the VM runs of 5 Nov 06:56-07:16, and the capture's

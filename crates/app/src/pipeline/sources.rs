@@ -145,6 +145,10 @@ impl Pipeline {
             _ => false,
         })
     }
+    /// Whether `id` is the tap of Heimdall's own output (its voice), for reading a denied System Audio from silence.
+    pub(crate) fn own_audio_source(&self, id: &str) -> bool {
+        self.own_audio(id)
+    }
     pub(super) fn own_audio(&self, id: &str) -> bool {
         self.sources.get(id).is_some_and(|i|matches!(&i.kind,capture::SourceKind::Process{pid,bundle_id,..} if *pid==std::process::id() || bundle_id.as_deref()==Some("dev.heimdall.app")))
     }

@@ -105,7 +105,7 @@ fn the_check_has_the_microphone_row_and_one_decider_row() {
     assert_eq!((mic.state.as_str(), mic.why.as_deref(), mic.fix.as_deref()), ("needs_user", Some("No microphone found"), Some("Choose…")));
     assert_eq!(s.exit_code(), 2, "no microphone needs the user");
     // Memory search that can't run here is optional: reported, never waited for.
-    let memory = ui::SetupReadiness { rows: vec![row("memory", "Memory search", ui::ReadyState::Optional { why: "Needs 8 GB free memory".into() })] };
+    let memory = ui::SetupReadiness { rows: vec![row("memory", "Memory search", ui::ReadyState::Optional { why: "Needs 8 GB free memory".into(), fix: None })] };
     let done = ui::ModelDownloads { rows: vec![ui::ModelDownload { title: "EmbeddingGemma 2".into(), state: ui::DownloadState::Done, total: 1, done: 1, ..Default::default() }] };
     let m = Status::of(&done, &memory, false);
     assert_eq!((m.rows.len(), m.rows[0].state.as_str(), m.exit_code()), (1, "optional", 0), "{:?}", m.rows);

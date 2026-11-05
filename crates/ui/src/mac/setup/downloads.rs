@@ -102,7 +102,7 @@ pub(crate) fn ready_line(r: &ReadyRow) -> Line {
         },
         ReadyState::Working { words, progress: None } => Line { words: words.clone(), working: true, ..base },
         ReadyState::Blocked { words } => Line { words: words.clone(), dim: true, ..base },
-        ReadyState::Optional { why } => Line { words: why.clone(), ..base },
+        ReadyState::Optional { why, fix } => Line { words: why.clone(), fix: fix.as_ref().map(|f| f.title().to_string()), ..base },
         ReadyState::Problem { why, fix } => Line { words: why.clone(), fix: fix.as_ref().map(|f| f.title().to_string()), problem: true, ..base },
     }
 }
@@ -117,6 +117,7 @@ pub(crate) fn lines(downloads: &ModelDownloads, ready: &SetupReadiness) -> Vec<(
     let mut list: Vec<(Line, Option<ReadyFix>)> = downloads.rows.iter().filter(|d| !(own_decider && d.title == "Decider") && !(own_memory && d.title == MEMORY_MODEL))
         .map(|d| (download_line(d), matches!(d.state, DownloadState::Failed(_)).then(retry).flatten())).collect();
     list.extend(ready.rows.iter().map(|r| {
+        if let ReadyState::Optional { fix: Some(f), .. } = &r.state { return (ready_line(r), Some(f.clone())); }
         let fix = match &r.state { ReadyState::Problem { fix, .. } => fix.clone(), _ => None };
         (ready_line(r), fix)
     }));
@@ -285,7 +286,7 @@ mod lines_tests {
         if cfg!(feature = "public") { assert!(!super::super::start_allowed(&ModelDownloads::default(), &green), "Start waits for the models"); }
         // Memory search that can't run here (VM run 5 Nov 05:43): its own row in place of its download, its reason in
         // grey with no spinner or fix, and Start doesn't wait for it.
-        let memory = ReadyState::Optional { why: "Needs 8 GB free memory".into() };
+        let memory = ReadyState::Optional { why: "Needs 8 GB free memory".into(), fix: None };
         let with_memory = SetupReadiness { rows: vec![r("agent", ReadyState::Ready), r("memory", memory)] };
         let both = ModelDownloads { rows: vec![d("Parakeet", DownloadState::Done), d(MEMORY_MODEL, DownloadState::Done)] };
         let l = lines(&both, &with_memory);

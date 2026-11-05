@@ -237,6 +237,42 @@ pub(super) fn apply_recorded_apps(app: &pipeline::Pipeline, capture: &Option<Cap
         c.set_recorded_apps(keys.clone());
     }
 }
+/// Whether a tap's chunk is from audio that should be sounding: an app checked in App Audio playing, or Heimdall's
+/// own voice on its own tap (VM run 5 Nov 08:36, denied: no app played, so the denial never showed).
+pub(super) fn tap_playing(own_tap: bool, heimdall_speaking: bool, recorded_playing: bool) -> bool {
+    recorded_playing || (own_tap && heimdall_speaking)
+}
+
+/// What the System Audio button (the Allow page's, Getting ready's Allow…) does now.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum SystemAudioButton { Ask, OpenSettings, Nothing }
+pub(super) fn system_audio_button(access: Option<capture::tap_gate::TapAccess>, denied: bool) -> SystemAudioButton {
+    use capture::tap_gate::TapAccess;
+    match access {
+        _ if denied => SystemAudioButton::OpenSettings,
+        Some(TapAccess::Waiting) => SystemAudioButton::Nothing,
+        // Answered in this launch: macOS asks once per app, so the switch is in System Settings.
+        Some(TapAccess::Open) => SystemAudioButton::OpenSettings,
+        None | Some(TapAccess::Off(_)) => SystemAudioButton::Ask,
+    }
+}
+
+/// A System Audio verdict read from the taps, in the log and on Getting ready.
+pub(super) fn system_audio_noted(app: &mut pipeline::Pipeline, update: &ui::UiUpdate) {
+    let ui::UiUpdate::Permissions(states) = update else { return };
+    for (permission, state) in states {
+        if *permission != ui::Permission::SystemAudio { continue; }
+        match state {
+            ui::PermissionState::Denied => {
+                app.system_audio_denied = true;
+                crate::diagnostics::line("capture", "System audio off: not allowed (its taps stayed silent while audio played); the microphone runs without it");
+            }
+            ui::PermissionState::Granted => app.system_audio_denied = false,
+            _ => {}
+        }
+    }
+}
+
 /// Whether Allow All asks for System Audio Recording itself: only when listening does not start with it (the first
 /// capture's process tap is what asks otherwise), and not once it is confirmed.
 pub(super) fn ask_system_audio_now(listening_starts: bool, confirmed: bool) -> bool {
@@ -532,6 +568,14 @@ pub(super) fn live(
                         reconcile_screen(&mut app,&mut screens,true,permissions);
                     }
                 },
+                ui::UiAction::AskSystemAudio=>match system_audio_button(capture::system_audio(),app.system_audio_denied) {
+                    SystemAudioButton::Ask=>{
+                        capture::ask_system_audio();
+                        if let Some(c)=capture.as_ref().and_then(|c: &CaptureRun| c.capture.as_ref()){c.refresh_permissions(permissions.consent());}
+                    }
+                    SystemAudioButton::OpenSettings=>ui::permissions::open_system_settings(ui::Permission::SystemAudio),
+                    SystemAudioButton::Nothing=>{}
+                },
                 ui::UiAction::RetrySystemAudio=>{
                     if wants_listen && app.settings.setup_requested {
                         if let Some(c) = capture.as_ref().and_then(|c: &CaptureRun| c.capture.as_ref()) {
@@ -570,8 +614,11 @@ pub(super) fn live(
                 if let Some(state)=microphones.try_iter().last(){seen_microphones=state;app.microphone_state(&seen_microphones);u.send(ui::UiUpdate::Microphones(app.menu_microphones(&seen_microphones)));}
                 let e=e?;
                 if let capture::CaptureEvent::Audio(c)=&e {
-                    if let Some(update)=permissions.audio_permission_transition(&c.source_id.0,&c.samples,c.host_ns,recorded_playing){
+                    // Heimdall's own voice counts as audio playing for its own tap: a denial shows without any app.
+                    let playing=tap_playing(app.own_audio_source(&c.source_id.0),app.tools.heimdall_speaking(),recorded_playing);
+                    if let Some(update)=permissions.audio_permission_transition(&c.source_id.0,&c.samples,c.host_ns,playing){
                         system_audio_health(&mut app, &update);
+                        system_audio_noted(&mut app, &update);
                         u.send(update);
                         if permissions.system_confirmed&&!app.settings.system_audio_confirmed{app.settings.system_audio_confirmed=true;app.save_or_note();}
                     }
@@ -963,6 +1010,34 @@ pub(super) fn drain_vella(app: &mut pipeline::Pipeline, rx: &crossbeam_channel::
 #[cfg(test)]
 mod off_loop_tests {
     use super::*;
+
+    /// VM run 5 Nov 08:36 (denied): no App Audio app played, so silent taps never read as a denial and nothing said
+    /// system audio was off. Heimdall's own voice on its own tap counts: silent while it speaks for the window is a
+    /// denial; any sound grants; another app's quiet tap while Heimdall speaks is no evidence.
+    #[test]
+    fn a_denied_system_audio_shows_from_heimdalls_own_silent_voice() {
+        use ui::{Permission::SystemAudio, PermissionState::*, UiUpdate::Permissions};
+        let s = 1_000_000_000u64;
+        let silence = [0.0f32; 320];
+        let mut p = LivePermissions::default();
+        assert!(!tap_playing(false, true, false), "another app's tap while Heimdall speaks");
+        assert!(tap_playing(true, true, false) && tap_playing(false, false, true) && !tap_playing(true, false, false));
+        for t in 0..10 {
+            let update = p.audio_permission_transition("process:42:7:1", &silence, t * s, tap_playing(true, true, false));
+            assert!(update.is_none(), "{t} s");
+        }
+        let denied = p.audio_permission_transition("process:42:7:1", &silence, 10 * s, tap_playing(true, true, false));
+        assert!(matches!(&denied, Some(Permissions(v)) if v == &[(SystemAudio, Denied)]), "{denied:?}");
+        let mut granted = LivePermissions::default();
+        assert!(matches!(granted.audio_permission_transition("process:42:7:1", &[0.2; 320], 0, tap_playing(true, true, false)), Some(Permissions(v)) if v == [(SystemAudio, Granted)]));
+        // The button: ask while unanswered, the settings pane once answered or denied, nothing while the ask is out.
+        use capture::tap_gate::TapAccess;
+        assert_eq!(system_audio_button(None, false), SystemAudioButton::Ask);
+        assert_eq!(system_audio_button(Some(TapAccess::Off("x".into())), false), SystemAudioButton::Ask);
+        assert_eq!(system_audio_button(Some(TapAccess::Waiting), false), SystemAudioButton::Nothing);
+        assert_eq!(system_audio_button(Some(TapAccess::Open), false), SystemAudioButton::OpenSettings);
+        assert_eq!(system_audio_button(None, true), SystemAudioButton::OpenSettings);
+    }
 
     /// Allow All asks for System Audio itself when listening can't start with it (the models still downloading), so the
     /// prompt shows on the Allow page and not with a capture minutes later.

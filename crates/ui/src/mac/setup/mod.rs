@@ -348,6 +348,9 @@ pub struct SetupWindow {
     allowed_at: Option<std::time::Instant>,
     /// The app active before the latest activation (`app_activated`).
     last_front: Option<String>,
+    /// The watch for macOS's prompts while Setup shows (`prompt_tick`), and whether one was on screen at its last tick.
+    prompt_watch: Option<Retained<objc2_foundation::NSTimer>>,
+    prompt_up: bool,
     /// A voice was clicked on the Voice step: a mark's voice no longer replaces it (`mark_choice`).
     voice_picked: bool,
     /// Welcome offers Let my agent set it up (the public edition's Setup; its command is the public app's).
@@ -517,6 +520,8 @@ impl SetupWindow {
             allow_sent: false,
             allowed_at: None,
             last_front: None,
+            prompt_watch: None,
+            prompt_up: false,
             voice_picked: false,
             agent_offered: harness_step,
             t3: T3Setup::default(),
@@ -1050,8 +1055,35 @@ impl SetupWindow {
 
     pub fn close(&mut self) {
         self.window.orderOut(None);
-        self.stop_meter();
+        self.closed();
         leave_app_mode(self.mtm);
+    }
+
+    /// Every way the window goes (Start, its close button, Quit): the meter's input and the prompt watch stop.
+    pub(crate) fn closed(&mut self) {
+        self.stop_meter();
+        if let Some(t) = self.prompt_watch.take() { t.invalidate(); }
+    }
+
+    /// While Setup shows, a once-a-second look for macOS's prompts (VM run 5 Nov 08:18: a System Audio prompt that came
+    /// late, mid-wizard, left the keyboard elsewhere when it closed, and Return did nothing). Nothing draws.
+    pub(crate) fn watch_prompts(&mut self) {
+        if self.prompt_watch.is_some() { return; }
+        let block = block2::RcBlock::new(|_: std::ptr::NonNull<objc2_foundation::NSTimer>| {
+            super::with_state(|s| if let Some(w) = s.setup.as_mut() { w.prompt_tick() });
+        });
+        self.prompt_watch = Some(unsafe { objc2_foundation::NSTimer::scheduledTimerWithTimeInterval_repeats_block(1.0, true, &block) });
+    }
+
+    /// One look: a prompt that was on screen and is gone hands focus back to Setup (`refocus_after_prompt`).
+    pub(crate) fn prompt_tick(&mut self) {
+        if !self.window.isVisible() { self.prompt_up = false; return; }
+        let up = prompt_on_screen();
+        let front = objc2_app_kit::NSWorkspace::sharedWorkspace().frontmostApplication();
+        let own = front.as_ref().is_some_and(|a| a.processIdentifier() == std::process::id() as i32);
+        let bundle = front.and_then(|a| a.bundleIdentifier()).map(|b| b.to_string());
+        if refocus_after_prompt(self.prompt_up, up, bundle.as_deref(), own, self.window.isKeyWindow()) { self.refocus(); }
+        self.prompt_up = up;
     }
 
     /// The level meter's input stream closed: on every way the window goes (Start, its close button, Quit; review 5
@@ -1087,6 +1119,32 @@ pub(crate) fn meter_wanted(visible: bool, on_step: bool, allowed: bool, micropho
 /// The system processes that show macOS's permission prompts (Accessibility's, TCC's); each may take activation
 /// while its prompt is up.
 const PROMPT_AGENTS: [&str; 4] = ["com.apple.accessibility.universalAccessAuthWarn", "com.apple.UserNotificationCenter", "com.apple.coreservices.uiagent", "com.apple.tccd"];
+
+/// The processes that own macOS's permission prompts' windows, as the window list names them.
+const PROMPT_OWNERS: [&str; 4] = ["UserNotificationCenter", "universalAccessAuthWarn", "CoreServicesUIAgent", "tccd"];
+
+/// Whether one of macOS's prompts has a window on screen (the window list's owner names; no permission needed).
+fn prompt_on_screen() -> bool {
+    use objc2_foundation::{NSArray, NSDictionary, NSString};
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGWindowListCopyWindowInfo(option: u32, relative_to: u32) -> *mut AnyObject;
+    }
+    // kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements.
+    let raw = unsafe { CGWindowListCopyWindowInfo(1 | 16, 0) };
+    let Some(list) = (unsafe { Retained::<NSArray<NSDictionary<NSString, AnyObject>>>::from_raw(raw.cast()) }) else { return false };
+    let key = NSString::from_str("kCGWindowOwnerName");
+    list.iter().any(|d| d.objectForKey(&key).and_then(|o| o.downcast_ref::<NSString>().map(|s| PROMPT_OWNERS.contains(&s.to_string().as_str()))).unwrap_or(false))
+}
+
+/// Whether a closed prompt hands focus back to Setup: a prompt was on screen at the last look and is gone, and what is
+/// in front is what a prompt leaves (Finder, a prompt's own process, nothing) or Heimdall without Setup key. Any
+/// prompt, any step, any time while Setup shows (VM run 5 Nov 08:18); never over an app the user went to.
+pub(crate) fn refocus_after_prompt(was_up: bool, up: bool, front: Option<&str>, own_front: bool, setup_key: bool) -> bool {
+    if !was_up || up { return false; }
+    if own_front { return !setup_key; }
+    front.is_none_or(|b| b == "com.apple.finder" || PROMPT_AGENTS.contains(&b))
+}
 
 /// Whether Setup takes activation back when `activated` becomes the active app (VM run 5 Nov 05:07: after the prompts
 /// closed, macOS made Finder active, its menu bar showed and Return went to Finder on "Can you hear me?"). Back when a
@@ -1332,6 +1390,21 @@ mod tests {
         assert_eq!(meter_wanted(true, false, true, &m), None, "another step");
         assert_eq!(meter_wanted(true, true, false, &m), None, "the microphone not allowed");
         assert_eq!(meter_wanted(true, true, true, &Microphones::default()), None, "no input");
+    }
+
+    /// VM run 5 Nov 08:18: a System Audio prompt mid-wizard (on T3, minutes after Allow All) left Return going nowhere
+    /// when it closed. Any prompt that closes while Setup shows hands focus back, unless the user went to another app.
+    #[test]
+    fn wizard_takes_focus_back_after_any_prompt_closes() {
+        let finder = Some("com.apple.finder");
+        assert!(refocus_after_prompt(true, false, finder, false, false), "Finder after the prompt");
+        assert!(refocus_after_prompt(true, false, Some("com.apple.UserNotificationCenter"), false, false));
+        assert!(refocus_after_prompt(true, false, None, true, false), "Heimdall in front without Setup key");
+        assert!(!refocus_after_prompt(true, false, None, true, true), "already key");
+        assert!(!refocus_after_prompt(true, true, finder, false, false), "the prompt is still up");
+        assert!(!refocus_after_prompt(false, false, finder, false, false), "no prompt: Finder is the user's");
+        assert!(!refocus_after_prompt(true, false, Some("com.apple.Safari"), false, false), "the user went elsewhere");
+        assert!(!refocus_after_prompt(true, false, Some("com.apple.systempreferences"), false, false), "Open Settings");
     }
 
     /// VM run 5 Nov 05:07: after the permission prompts closed, Finder was active and Return went to it on "Can you hear

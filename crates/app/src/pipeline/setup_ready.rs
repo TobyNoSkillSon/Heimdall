@@ -199,14 +199,19 @@ pub(crate) fn decider_row(phase: &decider::Phase, label: String, download: Optio
 
 /// System audio's row, when there is something to say (optional; listening runs on the microphone
 /// alone): its ask out or failed (`capture::tap_gate`), never holding Start. Before the ask, and once its taps run, none.
-pub(crate) fn system_audio_row(access: Option<capture::tap_gate::TapAccess>) -> Option<ui::ReadyRow> {
+/// Denied (read from its silent taps, VM run 5 Nov 08:36) is a row too, and so is a failed ask: "Off: not allowed",
+/// with Allow… (`UiAction::AskSystemAudio`: asks again, or opens its System Settings pane).
+pub(crate) fn system_audio_row(access: Option<capture::tap_gate::TapAccess>, denied: bool) -> Option<ui::ReadyRow> {
     use capture::tap_gate::TapAccess;
-    let why = match access? {
-        TapAccess::Open => return None,
-        TapAccess::Waiting => "Waits for its permission".to_string(),
-        TapAccess::Off(_) => "Off: not allowed".to_string(),
+    let why = match access {
+        _ if denied => "Off: not allowed".to_string(),
+        Some(TapAccess::Waiting) => "Waits for its permission".to_string(),
+        Some(TapAccess::Off(_)) => "Off: not allowed".to_string(),
+        None | Some(TapAccess::Open) => return None,
     };
-    Some(row("system-audio", "System audio", None, "waveform.circle", ui::ReadyState::Optional { why }))
+    // Optional, so it never holds Start; off has Allow….
+    let fix = why.starts_with("Off").then(|| ui::ReadyFix::Action { title: "Allow\u{2026}".into(), action: Box::new(ui::UiAction::AskSystemAudio) });
+    Some(row("system-audio", "System audio", None, "waveform.circle", ui::ReadyState::Optional { why, fix }))
 }
 
 /// The free memory memory search's worker needs to load (`embedding/worker.py`'s admission).
@@ -220,9 +225,9 @@ pub(crate) fn memory_row(downloaded: bool, search: crate::embeddings::Search, fr
     if !downloaded { return None; }
     let state = match search {
         Search::Running => ui::ReadyState::Ready,
-        Search::NoMemory => ui::ReadyState::Optional { why: "Needs 8 GB free memory".into() },
-        Search::NotYet if free.is_some_and(|f| f < MEMORY_NEEDED) => ui::ReadyState::Optional { why: "Needs 8 GB free memory".into() },
-        Search::NotYet => ui::ReadyState::Optional { why: "Starts with the first thing to index".into() },
+        Search::NoMemory => ui::ReadyState::Optional { why: "Needs 8 GB free memory".into(), fix: None },
+        Search::NotYet if free.is_some_and(|f| f < MEMORY_NEEDED) => ui::ReadyState::Optional { why: "Needs 8 GB free memory".into(), fix: None },
+        Search::NotYet => ui::ReadyState::Optional { why: "Starts with the first thing to index".into(), fix: None },
     };
     Some(row("memory", "Memory search", Some("EmbeddingGemma 2".into()), "magnifyingglass", state))
 }
@@ -277,7 +282,7 @@ impl Pipeline {
         let search = self._embeddings.as_ref().map_or(crate::embeddings::Search::NotYet, |j| j.search());
         let free = (memory_in && search == crate::embeddings::Search::NotYet).then(crate::diagnostics::available_memory_bytes).flatten();
         rows.extend(memory_row(memory_in, search, free));
-        rows.extend(system_audio_row(capture::system_audio()));
+        rows.extend(system_audio_row(capture::system_audio(), self.system_audio_denied));
         let local = self.settings.agent_model.is_local() && !self.settings.agent_relay;
         let mut engine_waits = false;
         if local {

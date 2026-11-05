@@ -1585,7 +1585,10 @@ impl State {
         let window = setup.window.clone();
         self.present(&window);
         // Heimdall's own menu bar while Setup shows (renders stay offscreen and change nothing).
-        if self.options.render_dir.is_none() { setup::enter_app_mode(self.mtm, &self.target()); }
+        if self.options.render_dir.is_none() {
+            setup::enter_app_mode(self.mtm, &self.target());
+            if let Some(w) = self.setup.as_mut() { w.watch_prompts(); }
+        }
         self.report_setup_step();
         self.emit(UiAction::SetupOpened);
         self.start_setup_polling();
@@ -1668,7 +1671,7 @@ define_class!(
             let unfinished = with_state_now(|s| !s.runtime_settings.setup_done).unwrap_or(false);
             if !unfinished { return objc2::runtime::Bool::YES; }
             let quit = with_state_now(|s| s.mtm).is_some_and(|mtm| setup::confirm_quit(mtm));
-            if quit { with_state(|s| { if let Some(w) = s.setup.as_mut() { w.stop_meter(); } s.quit(); }); }
+            if quit { with_state(|s| { if let Some(w) = s.setup.as_mut() { w.closed(); } s.quit(); }); }
             objc2::runtime::Bool::NO
         }
 
@@ -1677,7 +1680,7 @@ define_class!(
         fn window_will_close(&self, _note: &objc2_foundation::NSNotification) {
             if let Some(mtm) = MainThreadMarker::new() { setup::leave_app_mode(mtm) }
             // Its level meter's input stream goes with it.
-            with_state(|s| if let Some(w) = s.setup.as_mut() { w.stop_meter() });
+            with_state(|s| if let Some(w) = s.setup.as_mut() { w.closed() });
         }
     }
 
@@ -2343,7 +2346,7 @@ define_class!(
 
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: &AnyObject) {
-            with_state(|s| { if let Some(w) = s.setup.as_mut() { w.stop_meter(); } s.quit(); });
+            with_state(|s| { if let Some(w) = s.setup.as_mut() { w.closed(); } s.quit(); });
         }
 
         /// The updater's row (public edition): Check for Updates…, or Update to X… once one is offered.
@@ -2806,8 +2809,11 @@ define_class!(
                 if s.options.fake_permissions {
                     return;
                 }
-                if let Some(permission) = Permission::ALL.get(index) {
-                    permissions::open_system_settings(*permission);
+                // System Audio Recording has no settings switch until macOS asked once: the app asks first.
+                match Permission::ALL.get(index) {
+                    Some(Permission::SystemAudio) => s.emit(UiAction::AskSystemAudio),
+                    Some(permission) => permissions::open_system_settings(*permission),
+                    None => {}
                 }
             });
         }

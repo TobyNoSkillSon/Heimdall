@@ -16,16 +16,26 @@ makes its first process tap, and that call blocks until the prompt is answered: 
 unanswered prompt held the HAL thread's first pass for about three minutes, its start timed out, and the microphone
 never opened. Now (`src/tap_gate.rs`):
 
-- The first tap is asked for once per process, on its own thread (`TapGate::access`: a private global tap made and
-  destroyed, `macos::tap::ask_system_audio`). The app sends it at Setup's Allow All too (`capture::ask_system_audio`,
-  non-blocking), so the prompt shows there.
+- The first tap is asked for once per process, on its own thread (`TapGate::access`, `macos::tap::ask_system_audio`):
+  a private global tap in a private aggregate device whose IOProc is started and stopped at once. Starting audio
+  through a tap is what shows the prompt (VM runs 5 Nov 08:09-08:41: making a tap alone showed nothing), and the start
+  waits for the answer. The app sends it at Setup's Allow All and from the Allow page's System Audio Recording button
+  (`capture::ask_system_audio`, non-blocking; a failed ask is sent again). The capture's consent to taps starts only at
+  Allow All, so no launch asks before the Allow page.
 - Each HAL pass opens the selected microphones at once and makes per-process taps only once the ask came back
   (`tap_gate::opens`). The first pass (and the start's ready signal) never includes a tap that is still being asked.
 - The ask coming back wakes the HAL thread; the taps join on that pass, and the open microphones are not stopped or
   reopened (`tap_gate::stops`: only sleep, a route change, a wake, or a source no longer wanted stop one).
 - A failed ask is `Off`: no taps, a capture diagnostic "System audio off: …; the microphone runs without it", asked
   again after a new grant (`refresh_permissions`, the menu's or Setup's Allow). Still out after 15 s: "System audio
-  waits for its permission; …". macOS reports a denial only as silent taps; the app reads that from the audio.
+  waits for its permission; …".
+- macOS reports a denial only as silent taps, and there is no public status call (`TCCAccessPreflight` with
+  `kTCCServiceAudioCapture` is private and its results undocumented, so it is not used). The app reads it from the
+  audio (`live_loop::tap_playing`, `LivePermissions::audio_permission_transition`): a tap of an App Audio app that is
+  playing, or Heimdall's own tap while Heimdall speaks, delivering only zeros for 10 s is a denial: the log line
+  "System audio off: not allowed (…); the microphone runs without it", the island's notice, and Getting ready's grey
+  System audio row with Allow… (System Settings ▸ Privacy & Security ▸ Screen & System Audio Recording). Any sound
+  from a tap grants it.
 - `capture::system_audio()` says where the ask is, for the app's Getting ready note.
 
 ## Stream contract (for app and listen)

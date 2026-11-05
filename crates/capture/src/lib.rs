@@ -163,10 +163,13 @@ impl MicrophoneState {
 }
 /// The archive session a standalone capture writes: `path` itself when it already names a session
 /// (`.../session-*`), else a new `session-<ms>-capture` inside the store at `path`.
-/// Asks for System Audio Recording now, without capturing: macOS's prompt shows (once per process; `tap_gate`). Returns
-/// at once; the capture's taps start when the ask comes back, and the microphone never waits for it.
+/// Asks for System Audio Recording now, without capturing: macOS's prompt shows (`tap_gate`). Returns at once; the
+/// capture's taps start when the ask comes back, and the microphone never waits for it. Asked again after a failed
+/// ask; once answered in this launch, it answers at once (macOS shows its prompt once per app anyway).
 pub fn ask_system_audio() -> tap_gate::TapAccess {
-    tap_gate::global().access()
+    let gate = tap_gate::global();
+    gate.ask_again();
+    gate.access()
 }
 
 /// Where system audio's ask is now (`tap_gate::TapAccess`), without sending it.

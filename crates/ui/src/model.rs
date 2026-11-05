@@ -1713,6 +1713,9 @@ pub enum UiAction {
     PermissionsChanged(Vec<(Permission, PermissionState)>),
     /// Retry an already-consented tap; AudioCapture has no passive grant query.
     RetrySystemAudio,
+    /// The Allow page's System Audio Recording button, Getting ready's Allow…: ask for it while unanswered (the
+    /// capture's `tap_gate`), else open its System Settings pane (VM runs 5 Nov 08:09-08:41).
+    AskSystemAudio,
     SetSpeakReplies(bool),
     /// Personalisation ▸ Wake Sound: the soft tick when a spoken request goes to the agent; persisted.
     SetWakeSound(bool),
@@ -2067,8 +2070,9 @@ pub enum ReadyState {
     /// is moving (VM run 5 Nov: a spinner beside a red row promised progress that would not come).
     Blocked { words: String },
     /// Can't run on this Mac now, and isn't needed to start ("Needs 8 GB free memory": memory search, VM run 5 Nov
-    /// 05:43): its reason in grey, no fix, and Start doesn't wait for it.
-    Optional { why: String },
+    /// 05:43; "Off: not allowed": system audio): its reason in grey, a fix when the user has one (Allow…), and Start
+    /// doesn't wait for it.
+    Optional { why: String, fix: Option<ReadyFix> },
     /// Not ready: why, and the fix the row offers.
     Problem { why: String, fix: Option<ReadyFix> },
 }

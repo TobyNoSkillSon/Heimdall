@@ -72,15 +72,22 @@ fn microphone_and_listening_never_wait_on_each_other() {
     }
 }
 
-/// System audio is optional. Its ask out or failed is a grey note that never holds Start; asked and
-/// running, or never asked, says nothing.
+/// System audio is optional. Its ask out, failed, or denied (read from its silent taps: VM run 5
+/// Nov 08:36 left no trace) is a grey note that never holds Start; off offers Allow…; asked and running, or never
+/// asked, says nothing.
 #[test]
 fn system_audio_is_a_note_never_a_blocker() {
     use capture::tap_gate::TapAccess;
-    assert!(system_audio_row(None).is_none() && system_audio_row(Some(TapAccess::Open)).is_none());
-    for (access, why) in [(TapAccess::Waiting, "Waits for its permission"), (TapAccess::Off("create process tap: 'what'".into()), "Off: not allowed")] {
-        let r = system_audio_row(Some(access)).unwrap();
-        assert_eq!(r.state, ui::ReadyState::Optional { why: why.into() });
+    assert!(system_audio_row(None, false).is_none() && system_audio_row(Some(TapAccess::Open), false).is_none());
+    let allow = Some(ui::ReadyFix::Action { title: "Allow\u{2026}".into(), action: Box::new(ui::UiAction::AskSystemAudio) });
+    for (access, denied, why, fix) in [
+        (Some(TapAccess::Waiting), false, "Waits for its permission", None),
+        (Some(TapAccess::Off("create process tap: 'what'".into())), false, "Off: not allowed", allow.clone()),
+        (Some(TapAccess::Open), true, "Off: not allowed", allow.clone()),
+        (None, true, "Off: not allowed", allow.clone()),
+    ] {
+        let r = system_audio_row(access, denied).unwrap();
+        assert_eq!(r.state, ui::ReadyState::Optional { why: why.into(), fix });
         assert!(ui::SetupReadiness { rows: vec![r] }.ready(), "never holds Start");
     }
 }
@@ -102,7 +109,7 @@ fn the_memory_search_row_says_whether_it_can_run() {
     use crate::embeddings::Search;
     assert!(memory_row(false, Search::Running, None).is_none(), "the download row stands until the model is in");
     assert_eq!(state(&memory_row(true, Search::Running, Some(1)).unwrap()), &ui::ReadyState::Ready);
-    let no_memory = ui::ReadyState::Optional { why: "Needs 8 GB free memory".into() };
+    let no_memory = ui::ReadyState::Optional { why: "Needs 8 GB free memory".into(), fix: None };
     assert_eq!(state(&memory_row(true, Search::NoMemory, Some(64 << 30)).unwrap()), &no_memory, "the worker's refusal");
     assert_eq!(state(&memory_row(true, Search::NotYet, Some(6 << 30)).unwrap()), &no_memory, "too little free memory to load");
     assert!(matches!(state(&memory_row(true, Search::NotYet, Some(40 << 30)).unwrap()), ui::ReadyState::Optional { .. }), "not green before it ran");

@@ -362,6 +362,8 @@ pub struct Pipeline {
     mic_audio: HashMap<String, Instant>,
     /// When capture last started (Setup's Microphone row waits `MIC_SILENT` for sound from then).
     pub(crate) capture_since: Option<Instant>,
+    /// System Audio Recording read as denied from its silent taps (`live_loop::tap_playing`): Getting ready's grey row.
+    pub(crate) system_audio_denied: bool,
     capture_ladder: crate::health::Ladder,
     agent_ladder: crate::health::Ladder,
     /// The listen worker's finished-work count and since when it stood still with work waiting.
@@ -692,6 +694,7 @@ impl Pipeline {
             listening: false,
             mic_audio: HashMap::new(),
             capture_since: None,
+            system_audio_denied: false,
             capture_ladder: crate::health::Ladder::new(std::time::Duration::from_secs(600)),
             agent_ladder: crate::health::Ladder::new(std::time::Duration::from_secs(600)),
             worker_watch: None,
