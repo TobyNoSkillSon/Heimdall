@@ -44,6 +44,24 @@ pub struct NativeSource {
     /// Microphones only: where a voice-processing session for this device puts its cleaned audio (`echo.rs`).
     pub echo: Option<Arc<EchoRing>>,
 }
+/// Asks macOS for System Audio Recording now: a private global tap is made and destroyed at once, which is what shows
+/// the prompt. It blocks until the user answers, so it runs on its own thread (the app: at Setup's Allow All, before
+/// listening can start; VM run 5 Nov 07:16: the prompt otherwise came with the first capture, minutes later on
+/// Getting ready, and the capture's HAL thread waited in tap creation until macOS gave up).
+pub fn ask_system_audio() -> Result<()> {
+    unsafe {
+        let none = NSArray::<NSNumber>::new();
+        let d = CATapDescription::initStereoGlobalTapButExcludeProcesses(CATapDescription::alloc(), &none);
+        d.setName(&NSString::from_str("Heimdall permission request"));
+        d.setPrivate(true);
+        d.setMuteBehavior(CATapMuteBehavior::Unmuted);
+        let mut tap = 0;
+        hal::check("create process tap", AudioHardwareCreateProcessTap(Some(&d), &mut tap))?;
+        if tap != 0 { AudioHardwareDestroyProcessTap(tap); }
+    }
+    Ok(())
+}
+
 impl NativeSource {
     pub fn create(
         candidate: &Candidate,

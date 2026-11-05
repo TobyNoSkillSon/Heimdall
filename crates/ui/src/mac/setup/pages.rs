@@ -594,7 +594,8 @@ fn reason(permission: Permission) -> &'static str {
 /// any choice; VM run 5 Nov 05:07: nothing said they were optional). The microphone's denial is macOS's own.
 pub(crate) fn permission_words(permission: Permission, state: PermissionState) -> (&'static str, bool) {
     match (permission, state) {
-        (Permission::ScreenRecording | Permission::Accessibility, s) if s != PermissionState::Granted => ("Optional", false),
+        // System audio too: listening runs on the microphone alone; its taps join once allowed.
+        (Permission::ScreenRecording | Permission::Accessibility | Permission::SystemAudio, s) if s != PermissionState::Granted => ("Optional", false),
         _ => permission_text(state),
     }
 }

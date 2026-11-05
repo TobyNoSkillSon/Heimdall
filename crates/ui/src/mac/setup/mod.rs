@@ -1312,6 +1312,11 @@ mod tests {
             assert_eq!(permission_words(Permission::Accessibility, state), ("Optional", false));
         }
         assert_eq!(permission_words(Permission::Microphone, PermissionState::NotDetermined).0, "Not asked");
+        // System audio is optional as well: listening runs on the microphone alone.
+        for state in [PermissionState::NotDetermined, PermissionState::Unconfirmed, PermissionState::Denied] {
+            assert_eq!(permission_words(Permission::SystemAudio, state), ("Optional", false));
+        }
+        assert_eq!(permission_words(Permission::SystemAudio, PermissionState::Granted), ("Allowed", true));
         assert_eq!(permission_words(Permission::Microphone, PermissionState::Denied).0, "Denied", "the microphone's denial is real");
         assert_eq!(permission_words(Permission::ScreenRecording, PermissionState::Granted), ("Allowed", true));
     }

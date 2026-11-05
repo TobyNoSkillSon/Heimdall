@@ -8,6 +8,7 @@ mod macos;
 mod pipeline;
 mod resample;
 mod source;
+pub mod tap_gate;
 mod time;
 use anyhow::Result;
 pub use archive::{Archive, ArchivedBlock};
@@ -162,6 +163,17 @@ impl MicrophoneState {
 }
 /// The archive session a standalone capture writes: `path` itself when it already names a session
 /// (`.../session-*`), else a new `session-<ms>-capture` inside the store at `path`.
+/// Asks for System Audio Recording now, without capturing: macOS's prompt shows (once per process; `tap_gate`). Returns
+/// at once; the capture's taps start when the ask comes back, and the microphone never waits for it.
+pub fn ask_system_audio() -> tap_gate::TapAccess {
+    tap_gate::global().access()
+}
+
+/// Where system audio's ask is now (`tap_gate::TapAccess`), without sending it.
+pub fn system_audio() -> Option<tap_gate::TapAccess> {
+    tap_gate::global().peek()
+}
+
 pub fn session_address(path: &std::path::Path) -> PathBuf {
     if path.file_name().is_some_and(|n| n.to_string_lossy().starts_with("session-")) {
         return path.to_path_buf();

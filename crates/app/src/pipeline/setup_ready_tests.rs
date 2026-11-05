@@ -49,6 +49,42 @@ fn voice_listening_and_decider_rows_say_why_they_wait() {
     assert!(matches!(state(&decider_row(&decider::Phase::Failed("x".into()), "V6 4-bit".into(), None)), ui::ReadyState::Working { .. }), "it retries by itself");
 }
 
+/// VM run 5 Nov 07:16 (3 of 3): the capture never started (its HAL thread waited on macOS's System Audio prompt, which
+/// came only with that first capture, on Getting ready, and nobody answered), and the two rows waited on each other
+/// forever: Microphone "Waits for listening", Listening "Waits for the microphone". Once listening is on, the
+/// Microphone row says the capture is opening, or why it failed with Retry; it waits for listening only before.
+#[test]
+fn microphone_and_listening_never_wait_on_each_other() {
+    let name = || Some("BlackHole 2ch".to_string());
+    let failure = capture_start(true, false, Some("Capture: HAL discovery startup failed: Err(Timeout)".into()));
+    let failed = microphone_row(1, name(), false, None, failure);
+    assert!(matches!(state(&failed), ui::ReadyState::Problem { why, fix: Some(ui::ReadyFix::Action { action, .. }) }
+        if why == "Couldn't start listening: the audio system did not answer" && **action == ui::UiAction::RetrySystemAudio), "{failed:?}");
+    assert!(matches!(state(&microphone_row(1, name(), false, None, capture_start(true, true, None))), ui::ReadyState::Working { words, .. } if words == "Opening the microphone\u{2026}"));
+    assert!(matches!(capture_start(true, false, None), CaptureStart::Failed(_)), "listening on with no capture at all is a failure, never a wait");
+    assert_eq!(capture_start(false, false, None), CaptureStart::NotYet);
+    assert_eq!(capture_start(true, true, Some("old".into())), CaptureStart::Starting, "a retry in flight");
+    // Every state of listening on, with the microphone not yet heard: never both rows waiting.
+    for start in [capture_start(true, true, None), capture_start(true, false, None), capture_start(true, false, Some("x".into()))] {
+        let mic = microphone_row(1, name(), false, None, start);
+        let listening = listening_row(true, true, false, true, mic.state == ui::ReadyState::Ready);
+        assert!(!(matches!(mic.state, ui::ReadyState::Blocked { .. }) && matches!(listening.state, ui::ReadyState::Blocked { .. })), "{mic:?} / {listening:?}");
+    }
+}
+
+/// System audio is optional. Its ask out or failed is a grey note that never holds Start; asked and
+/// running, or never asked, says nothing.
+#[test]
+fn system_audio_is_a_note_never_a_blocker() {
+    use capture::tap_gate::TapAccess;
+    assert!(system_audio_row(None).is_none() && system_audio_row(Some(TapAccess::Open)).is_none());
+    for (access, why) in [(TapAccess::Waiting, "Waits for its permission"), (TapAccess::Off("create process tap: 'what'".into()), "Off: not allowed")] {
+        let r = system_audio_row(Some(access)).unwrap();
+        assert_eq!(r.state, ui::ReadyState::Optional { why: why.into() });
+        assert!(ui::SetupReadiness { rows: vec![r] }.ready(), "never holds Start");
+    }
+}
+
 /// Review 5 Nov (merge): the Microphone row is green only for sound from the input actually capturing, and only once
 /// that is the one chosen (a mic picked while capture was starting left it green on the old input).
 #[test]
@@ -97,12 +133,12 @@ fn the_microphone_row_is_green_only_when_sound_arrives() {
     use std::time::Duration;
     let name = || Some("MacBook Pro Microphone".to_string());
     let choose = |r: &ui::ReadyRow| matches!(state(r), ui::ReadyState::Problem { fix: Some(ui::ReadyFix::Step { step: ui::SetupStep::Microphone, .. }), .. });
-    let none = microphone_row(0, None, false, None);
+    let none = microphone_row(0, None, false, None, CaptureStart::NotYet);
     assert!(choose(&none) && matches!(state(&none), ui::ReadyState::Problem { why, .. } if why == "No microphone found"), "{none:?}");
-    assert_eq!(state(&microphone_row(1, name(), true, Some(Duration::from_secs(1)))), &ui::ReadyState::Ready);
-    assert!(matches!(state(&microphone_row(1, name(), false, None)), ui::ReadyState::Blocked { words } if words == "Waits for listening"));
-    assert!(matches!(state(&microphone_row(1, name(), false, Some(Duration::from_secs(3)))), ui::ReadyState::Working { .. }));
-    let silent = microphone_row(1, name(), false, Some(MIC_SILENT + Duration::from_secs(1)));
+    assert_eq!(state(&microphone_row(1, name(), true, Some(Duration::from_secs(1)), CaptureStart::NotYet)), &ui::ReadyState::Ready);
+    assert!(matches!(state(&microphone_row(1, name(), false, None, CaptureStart::NotYet)), ui::ReadyState::Blocked { words } if words == "Waits for listening"));
+    assert!(matches!(state(&microphone_row(1, name(), false, Some(Duration::from_secs(3)), CaptureStart::NotYet)), ui::ReadyState::Working { .. }));
+    let silent = microphone_row(1, name(), false, Some(MIC_SILENT + Duration::from_secs(1)), CaptureStart::NotYet);
     assert!(choose(&silent) && matches!(state(&silent), ui::ReadyState::Problem { why, .. } if why.contains("MacBook Pro Microphone")), "{silent:?}");
 }
 

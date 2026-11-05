@@ -9,6 +9,25 @@ Nothing in compilation, synthetic tests, `Capture::discover_only` or `Capture::i
 checks screen or AX access, requests a permission or plays a probe. Live capture runs only in the signed app after
 the user's setup grant.
 
+## Microphones first, system audio on its own
+
+The microphone never waits for system audio. macOS asks for System Audio Recording when a process
+makes its first process tap, and that call blocks until the prompt is answered: in the VM runs of 5 Nov 06:56-07:16 an
+unanswered prompt held the HAL thread's first pass for about three minutes, its start timed out, and the microphone
+never opened. Now (`src/tap_gate.rs`):
+
+- The first tap is asked for once per process, on its own thread (`TapGate::access`: a private global tap made and
+  destroyed, `macos::tap::ask_system_audio`). The app sends it at Setup's Allow All too (`capture::ask_system_audio`,
+  non-blocking), so the prompt shows there.
+- Each HAL pass opens the selected microphones at once and makes per-process taps only once the ask came back
+  (`tap_gate::opens`). The first pass (and the start's ready signal) never includes a tap that is still being asked.
+- The ask coming back wakes the HAL thread; the taps join on that pass, and the open microphones are not stopped or
+  reopened (`tap_gate::stops`: only sleep, a route change, a wake, or a source no longer wanted stop one).
+- A failed ask is `Off`: no taps, a capture diagnostic "System audio off: …; the microphone runs without it", asked
+  again after a new grant (`refresh_permissions`, the menu's or Setup's Allow). Still out after 15 s: "System audio
+  waits for its permission; …". macOS reports a denial only as silent taps; the app reads that from the audio.
+- `capture::system_audio()` says where the ask is, for the app's Getting ready note.
+
 ## Stream contract (for app and listen)
 
 ```rust,ignore

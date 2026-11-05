@@ -237,6 +237,11 @@ pub(super) fn apply_recorded_apps(app: &pipeline::Pipeline, capture: &Option<Cap
         c.set_recorded_apps(keys.clone());
     }
 }
+/// Whether Allow All asks for System Audio Recording itself: only when listening does not start with it (the first
+/// capture's process tap is what asks otherwise), and not once it is confirmed.
+pub(super) fn ask_system_audio_now(listening_starts: bool, confirmed: bool) -> bool {
+    !listening_starts && !confirmed
+}
 /// Whether an app checked in App Audio is playing now: only then does a silent tap say anything about System Audio.
 pub(super) fn recording_playing(app: &pipeline::Pipeline, playing: &[capture::AppIdentity]) -> bool {
     let keys = app.settings.recorded_app_keys();
@@ -509,6 +514,11 @@ pub(super) fn live(
                     permissions.system=true;permissions.observe(&ui::permissions::status());
                     if wants_listen {start_live(&mut app,&mut capture,&mut screens,&tx,&listen_tx,&mut worker_started,permissions)?;discovering.take();}
                     else {start_unheard(&mut app,&mut screens,permissions);}
+                    // Listening can't start yet (its models are still coming): macOS's System Audio prompt shows now,
+                    // while the user is at Allow, not with the first capture minutes later (VM run 5 Nov 07:16).
+                    // The ask is the capture's own (`capture::tap_gate`): sent once, on its own thread, never in the
+                    // microphone's way.
+                    if ask_system_audio_now(wants_listen,permissions.system_confirmed) { capture::ask_system_audio(); }
                     u.send(ui::UiUpdate::Permissions(vec![(ui::Permission::SystemAudio,ui::PermissionState::Unconfirmed)]));
                 },
                 ui::UiAction::PermissionsChanged(states)=>{
@@ -953,6 +963,15 @@ pub(super) fn drain_vella(app: &mut pipeline::Pipeline, rx: &crossbeam_channel::
 #[cfg(test)]
 mod off_loop_tests {
     use super::*;
+
+    /// Allow All asks for System Audio itself when listening can't start with it (the models still downloading), so the
+    /// prompt shows on the Allow page and not with a capture minutes later.
+    #[test]
+    fn allow_all_asks_for_system_audio_when_listening_does_not_start() {
+        assert!(ask_system_audio_now(false, false));
+        assert!(!ask_system_audio_now(true, false), "the capture's own tap asks");
+        assert!(!ask_system_audio_now(false, true), "already confirmed");
+    }
 
     /// VM run 5 Nov: capture's HAL discovery waited 10-30 s on the live loop and the watchdog relaunched Heimdall
     /// mid-Setup. A start handed to `off_loop` returns at once; its result arrives later on the channel.

@@ -100,6 +100,7 @@ pub fn start_with_archive(
     let capture = spawn(Some(pipeline), consent.bits(), &config)?;
     Ok((capture, receiver))
 }
+pub use tap::ask_system_audio;
 pub fn discover_only(config: &CaptureConfig) -> Result<Capture> {
     spawn(None, 0, config)
 }
@@ -182,6 +183,10 @@ fn run(
     let mut published_apps: Option<Vec<crate::AppIdentity>> = None;
     let own_pid = std::process::id();
     let wake = thread::current();
+    // System audio's ask, apart from the microphone (`tap_gate`): it wakes this thread when it comes back.
+    let gate = crate::tap_gate::global();
+    gate.wake_on(wake.clone());
+    let mut tap_note: Option<String> = None;
     if let Some(p) = &pipeline {
         if let Ok(mut w) = p.control_wake.lock() {
             *w = Some(wake.clone());
@@ -367,7 +372,8 @@ fn run(
                 failed.clear();
             }
             let grants = access.fetch_and(!4, Ordering::AcqRel);
-            if grants & 4 != 0 { failed.clear(); }
+            // A new grant (the menu's or Setup's Allow) also asks for system audio again after a failed ask.
+            if grants & 4 != 0 { failed.clear(); gate.ask_again(); }
             // One primary microphone (the chosen one, else built-in) plus only the extras
             // the user switched on. An explicit choice retries a mic whose recovery was exhausted.
             if bits & hal::MICROPHONE != 0 {
@@ -402,19 +408,24 @@ fn run(
                 published = Some(mic_state.clone());
             }
             if let Some(p) = pipeline.as_ref() {
+                // Process taps wait for system audio's ask (its first tap can block for minutes on the prompt);
+                // microphones never do. The ask is sent only once a tap is wanted.
+                let taps = (grants & 2 != 0 && candidates.iter().any(|c| matches!(c.kind, crate::SourceKind::Process { .. })))
+                    .then(|| gate.access());
+                if let Some(t) = &taps {
+                    let note = crate::tap_gate::note(t, gate.waiting_for());
+                    if let Some(n) = note.as_ref().filter(|n| tap_note.as_ref() != Some(*n)) { send(p, Command::Diagnostic(n.clone())); }
+                    tap_note = note;
+                }
                 let permitted = |c: &&Candidate| match c.kind {
-                    crate::SourceKind::InputDevice { .. } => {
-                        grants & 1 != 0 && mic_keys.contains(&c.key)
-                    }
-                    crate::SourceKind::Process { .. } => grants & 2 != 0,
+                    crate::SourceKind::InputDevice { .. } => crate::tap_gate::opens(true, mic_keys.contains(&c.key), grants, None),
+                    crate::SourceKind::Process { .. } => crate::tap_gate::opens(false, true, grants, taps.as_ref()),
                 };
                 let wanted: HashMap<_, _> = candidates.iter().filter(permitted).map(|c| (c.key.clone(), c)).collect();
                 let remove: Vec<_> = active
                     .iter()
                     .filter(|(key, a)| {
-                        sleeping
-                            || bits & (hal::ROUTE | hal::WAKE) != 0
-                            || wanted.get(*key).is_none_or(|c| **c != a.candidate)
+                        crate::tap_gate::stops(sleeping, bits & (hal::ROUTE | hal::WAKE) != 0, wanted.get(*key).is_some_and(|c| **c == a.candidate))
                     })
                     .map(|(key, _)| key.clone())
                     .collect();

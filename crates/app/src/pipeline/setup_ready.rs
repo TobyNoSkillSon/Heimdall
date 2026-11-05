@@ -121,18 +121,56 @@ pub(crate) fn hearing_chosen(chosen: Option<&str>, capturing: Option<&str>) -> b
     capturing.is_some() && chosen.is_none_or(|c| Some(c) == capturing)
 }
 
+/// A capture failure in a few plain words for the row (the log keeps the whole error).
+pub(crate) fn capture_words(why: &str) -> String {
+    let lower = why.to_lowercase();
+    if lower.contains("timeout") || lower.contains("timed out") { return "the audio system did not answer".into(); }
+    if lower.contains("permission") || lower.contains("not authorized") || lower.contains("denied") { return "macOS did not allow it".into(); }
+    let line = why.lines().next().unwrap_or(why);
+    if line.chars().count() > 40 { format!("{}\u{2026}", line.chars().take(39).collect::<String>()) } else { line.to_string() }
+}
+
+/// The capture's state for the Microphone row: a failure reported (`Pipeline::fail`'s "capture" status) wins; then a
+/// start in flight; listening on with neither is a capture that never began.
+pub(crate) fn capture_start(listening_on: bool, starting: bool, failure: Option<String>) -> CaptureStart {
+    match (failure, starting) {
+        (Some(why), false) => CaptureStart::Failed(why.trim_start_matches("Capture: ").to_string()),
+        (_, true) => CaptureStart::Starting,
+        (None, false) if listening_on => CaptureStart::Failed("the microphone did not open".into()),
+        _ => CaptureStart::NotYet,
+    }
+}
+
 /// How long the chosen input may stay silent once capture runs before its row turns red ("No sound from …"), rather
 /// than waiting with a spinner forever.
 pub(crate) const MIC_SILENT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// The microphone's row (5 Nov: the microphone is required): green once audio actually arrives from the
 /// input in use. No input at all, or one silent past `MIC_SILENT`, is red with Choose… (Setup's Microphone step).
-pub(crate) fn microphone_row(inputs: usize, name: Option<String>, hearing: bool, capturing: Option<std::time::Duration>) -> ui::ReadyRow {
+/// Where the microphone's capture is when no sound arrives yet (`microphone_row`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CaptureStart {
+    /// Listening is not on yet: nothing to open.
+    NotYet,
+    /// Listening is on and the capture is starting.
+    Starting,
+    /// Listening is on but no capture runs or starts (it failed, or never began): why.
+    Failed(String),
+}
+
+pub(crate) fn microphone_row(inputs: usize, name: Option<String>, hearing: bool, capturing: Option<std::time::Duration>, start: CaptureStart) -> ui::ReadyRow {
     let choose = || Some(ui::ReadyFix::Step { title: "Choose\u{2026}".into(), step: ui::SetupStep::Microphone });
+    // VM run 5 Nov 07:16: a capture that never started left this row "Waits for listening" beside Listening's "Waits
+    // for the microphone", forever. Once listening is on, the row says what the capture does: starting, or why not.
+    let retry = || Some(ui::ReadyFix::Action { title: "Retry".into(), action: Box::new(ui::UiAction::RetrySystemAudio) });
     let state = if inputs == 0 { problem("No microphone found", choose()) }
         else if hearing { ui::ReadyState::Ready }
         else { match capturing {
-            None => blocked("Waits for listening"),
+            None => match start {
+                CaptureStart::NotYet => blocked("Waits for listening"),
+                CaptureStart::Starting => working("Opening the microphone\u{2026}"),
+                CaptureStart::Failed(why) => problem(&format!("Couldn't start listening: {}", capture_words(&why)), retry()),
+            },
             Some(d) if d < MIC_SILENT => working("Listening for sound\u{2026}"),
             Some(_) => problem(&format!("No sound from {}", name.as_deref().unwrap_or("the microphone")), choose()),
         } };
@@ -157,6 +195,18 @@ pub(crate) fn decider_row(phase: &decider::Phase, label: String, download: Optio
         decider::Phase::Failed(why) => ui::ReadyState::Working { words: format!("{} \u{b7} retrying", crate::model_store::short(why)), progress: None },
     };
     row("decider", "Decider", Some(label), "target", state)
+}
+
+/// System audio's row, when there is something to say (optional; listening runs on the microphone
+/// alone): its ask out or failed (`capture::tap_gate`), never holding Start. Before the ask, and once its taps run, none.
+pub(crate) fn system_audio_row(access: Option<capture::tap_gate::TapAccess>) -> Option<ui::ReadyRow> {
+    use capture::tap_gate::TapAccess;
+    let why = match access? {
+        TapAccess::Open => return None,
+        TapAccess::Waiting => "Waits for its permission".to_string(),
+        TapAccess::Off(_) => "Off: not allowed".to_string(),
+    };
+    Some(row("system-audio", "System audio", None, "waveform.circle", ui::ReadyState::Optional { why }))
 }
 
 /// The free memory memory search's worker needs to load (`embedding/worker.py`'s admission).
@@ -213,7 +263,9 @@ impl Pipeline {
         let hearing = hearing_chosen(chosen.as_deref(), capturing.as_ref().map(|(uid, _)| uid.as_str()));
         let shown = if hearing { capturing.as_ref().map(|(uid, _)| uid.clone()) } else { chosen.clone().or_else(|| mics.in_use.clone()) };
         let name = shown.and_then(|id| inputs.iter().find(|d| d.id == id).map(|d| d.name.clone()).or_else(|| capturing.as_ref().map(|(_, n)| n.clone())));
-        let mic = microphone_row(inputs.len(), name, hearing, self.capture_since.map(|t| t.elapsed()));
+        let listening_on = self.live_worker.as_ref().is_some_and(|w| w.is_ready() && !w.is_finished());
+        let start = capture_start(listening_on, self.capture_starting.is_some(), self.component_status.get("capture").cloned());
+        let mic = microphone_row(inputs.len(), name, hearing, self.capture_since.map(|t| t.elapsed()), start);
         let mic_ready = mic.state == ui::ReadyState::Ready;
         rows.push(mic);
         rows.push(voice_row(self.settings.speak_replies, preset.as_deref(), learnt, learning, waits));
@@ -225,6 +277,7 @@ impl Pipeline {
         let search = self._embeddings.as_ref().map_or(crate::embeddings::Search::NotYet, |j| j.search());
         let free = (memory_in && search == crate::embeddings::Search::NotYet).then(crate::diagnostics::available_memory_bytes).flatten();
         rows.extend(memory_row(memory_in, search, free));
+        rows.extend(system_audio_row(capture::system_audio()));
         let local = self.settings.agent_model.is_local() && !self.settings.agent_relay;
         let mut engine_waits = false;
         if local {

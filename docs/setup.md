@@ -24,7 +24,7 @@ Setup at the step it was on. The menu's Set Up… opens it again later.
 | 3 | Subscription or local model | One tile: Codex, Claude Code, OpenCode Go, This Mac, Custom | The first one connected becomes the agent's model (below) |
 | 4 | How should I listen? | The decider's precision: 4-bit (default), 8-bit, 16-bit | Continue starts the model downloads (below) |
 | 5 | How should I sound? | One of Phonon S's 25 voices (Edwin default) | The voice; a pick here is kept over a mark's voice |
-| 6 | Allow Heimdall | Allow All | macOS asks for the Microphone (required); Screen Recording and Accessibility (optional) need the user in System Settings; System Audio Recording is asked when Heimdall first listens |
+| 6 | Allow Heimdall | Allow All | macOS asks for the Microphone (required); Screen Recording and Accessibility (optional) need the user in System Settings; System Audio Recording is asked at Allow All too, or when Heimdall first listens |
 | 7 | Can you hear me? | The microphone (default: macOS's default input) | Below |
 | 8 | Where should I keep my files? | The home folder (default: the user's home) | Heimdall's own files go in `<home>/.heimdall` |
 | 9 | Setting up T3 Code | Install (if missing), Connect | T3 Code runs coding tasks; Connect is the user's consent |
@@ -34,8 +34,10 @@ Setup at the step it was on. The menu's Set Up… opens it again later.
 | 13 | Customise me | A mark; the name (also the wake word) | Each mark brings its name and voice; a typed name or a picked voice is kept |
 | 14 | Getting ready *public* | Nothing: a checklist | Start stays off until every row is green (below) |
 
-Screen Recording and Accessibility are optional (their rows read Optional until allowed): Heimdall sees the screen
-and acts in apps only with them, and neither ever holds Start back. The microphone is required. When the macOS prompts
+Screen Recording, Accessibility and System Audio Recording are optional (their rows read Optional until allowed); listening
+runs on the microphone alone, and app audio joins when System Audio Recording is allowed, later too, without the
+microphone restarting (docs/capture.md, "Microphones first"). Heimdall sees the screen and acts in apps only with
+the first two, and none of them ever holds Start back. The microphone is required. When the macOS prompts
 close, Setup takes focus back, so its menu bar shows and Return keeps working.
 
 ### The agent (step 3)
@@ -88,9 +90,10 @@ One row each; Start stays off until all are green. A red row says why and offers
 |---|---|---|
 | Each model above but the decider | downloaded and its SHA-256 matched | Retry |
 | This Mac's model (when chosen) | downloaded and loaded by the engine | Retry |
-| Microphone | sound arrived from the chosen input in the last five seconds (it waits for listening; ten seconds of silence turn it red) | Choose… (back to step 7: "No microphone found", "No sound from …") |
+| Microphone | sound arrived from the chosen input in the last five seconds (it waits for listening; ten seconds of silence turn it red) | Choose… (back to step 7: "No microphone found", "No sound from …"); Retry when the capture didn't start ("Couldn't start listening: …"); "Opening the microphone…" while it starts |
 | Voice | Phonon S loaded with the chosen voice | Retry |
 | Listening | Parakeet loaded, listening running and the Microphone row green ("Waits for the microphone" until then) | Allow… (the microphone), or wait for the models |
+| System audio (only while its ask is out or failed) | never required: "Waits for its permission" or "Off: not allowed", in grey; nothing once its taps run | the menu's or Setup's Allow asks again |
 | Memory search (once EmbeddingGemma 2 is in) | its worker loaded and indexed; it needs 8 GB free memory, and without it the row says "Needs 8 GB free memory" in grey and Start doesn't wait for it (`--check`: `optional`) | none |
 | Decider | downloaded (with its progress) and its SHA-256 matched, then loaded and answering | Retry (a failed download; a failed load retries by itself) |
 | Agent | one real request to the agent's model answered | Choose… (no agent yet), Sign In… (a sign-in failed), Retry |
@@ -109,7 +112,7 @@ macOS lets no program grant these; Setup and the command open the right place an
 | Microphone (required) | Click Allow in the macOS prompt (after Allow All, or `--open-permissions`); plug one in if there is none |
 | Screen Recording (optional) | System Settings ▸ Privacy & Security ▸ Screen Recording: turn on Heimdall Alpha |
 | Accessibility (optional) | System Settings ▸ Privacy & Security ▸ Accessibility: turn on Heimdall Alpha |
-| System Audio Recording | Click Allow in the prompt macOS shows the first time Heimdall listens |
+| System Audio Recording | Click Allow in the prompt macOS shows after Allow All (or the first time Heimdall listens); unanswered, the microphone can't open either |
 | A subscription sign-in | Approve in the browser page Heimdall opens (ChatGPT, OpenCode) |
 | Claude Code's own sign-in | `claude` in a terminal, once, if it was never signed in |
 | T3 Code's Connect | The Connect click (or `--t3 connect` from the command, which is the user's yes given to their agent) |
