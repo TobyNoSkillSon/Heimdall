@@ -125,7 +125,8 @@ fn exact_name_for(n: &Names, w: &str) -> bool {
     (n.assistant == crate::names::DEFAULT_ASSISTANT && exact_heimdall(w)) || n.exact(w)
 }
 fn exact_heimdall(w: &str) -> bool {
-    matches!(w, "heimdall" | "heimdal" | "heimdell" | "hemdall" | "hemdal" | "haimdall" | "haimdal")
+    // VM runs 5 Nov: Parakeet hears Phonon S's "Heimdall" as "Hindor" or "Hindol".
+    matches!(w, "heimdall" | "heimdal" | "heimdell" | "hemdall" | "hemdal" | "haimdall" | "haimdal" | "hindor" | "hindol")
 }
 /// A token's letters and digits, lowercased, apostrophes dropped ("Don't," → "dont").
 fn bare(token: &str) -> String {

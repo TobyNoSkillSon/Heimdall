@@ -903,6 +903,12 @@ impl State {
             UiUpdate::ShowTranscript => self.show_transcript(),
             UiUpdate::ShowSetup => self.show_setup(),
             UiUpdate::ShowSetupAt(step) => self.show_setup_at(Some(step)),
+            // The phrase was heard: Setup closes as Start would (its first message is the app's).
+            UiUpdate::SetupHeard => {
+                if let Some(advance) = self.setup.as_mut().filter(|w| w.is_visible()).map(|w| w.finish()) {
+                    self.after_setup_advance(advance);
+                }
+            }
             UiUpdate::Home(home) => {
                 if let Some(w) = self.setup.as_mut() { w.set_home(&home); }
                 self.setup_home = home;
@@ -2778,6 +2784,30 @@ define_class!(
                         s.report_setup_step();
                     }
                 }
+            });
+        }
+
+        /// Getting ready's phrase card ▸ its microphone fix (Retry, Choose…), shown only when the microphone failed.
+        #[unsafe(method(setupPhraseFix:))]
+        fn setup_phrase_fix(&self, _sender: &AnyObject) {
+            with_state(|s| {
+                let Some(fix) = s.setup.as_ref().and_then(|w| w.phrase_fix()) else { return };
+                match fix {
+                    ReadyFix::Action { action, .. } => s.emit(*action),
+                    ReadyFix::Step { step, .. } => {
+                        if let Some(w) = s.setup.as_mut() { w.go_to(step); }
+                        s.report_setup_step();
+                    }
+                }
+            });
+        }
+
+        /// Getting ready's phrase card ▸ Start without speaking: only while the microphone has failed.
+        #[unsafe(method(setupStartSilent:))]
+        fn setup_start_silent(&self, _sender: &AnyObject) {
+            with_state(|s| {
+                let Some(advance) = s.setup.as_mut().filter(|w| w.phrase_fix_offered()).map(|w| w.finish()) else { return };
+                s.after_setup_advance(advance);
             });
         }
 

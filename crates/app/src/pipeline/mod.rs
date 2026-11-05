@@ -42,6 +42,7 @@ pub(crate) mod echo_guard;
 mod vella;
 mod catch_up;
 mod model_downloads;
+pub(crate) mod setup_phrase;
 pub(crate) mod setup_ready;
 use self::commands::*;
 

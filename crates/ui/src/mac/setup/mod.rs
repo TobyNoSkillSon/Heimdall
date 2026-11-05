@@ -10,6 +10,7 @@
 mod arsenal;
 mod downloads;
 mod microphone;
+pub(crate) mod phrase;
 mod kit;
 mod pages;
 mod render;
@@ -312,6 +313,10 @@ pub struct SetupWindow {
     vella_page: VellaPage,
     arsenal_page: arsenal::ArsenalPage,
     downloads_page: downloads::DownloadsPage,
+    /// Getting ready's last card: the phrase the user says (`phrase`), and since when it is silent.
+    phrase_card: phrase::PhraseCard,
+    phrase_quiet_since: Option<std::time::Instant>,
+    phrase_hearing: bool,
     custom: CustomPage,
     pub(crate) allow: Retained<Pad>,
     all_granted: bool,
@@ -420,6 +425,7 @@ impl SetupWindow {
         let harness_page = HarnessPage::build(target, mtm);
         let vella_page = VellaPage::build(target, mtm);
         let downloads_page = downloads::DownloadsPage::build(target, mtm);
+        let phrase_card = phrase::PhraseCard::build(&downloads_page.frame.doc, downloads::ACTS_WIDTH, target, mtm);
         let arsenal_page = arsenal::ArsenalPage::build(target, mtm);
         let custom = CustomPage::build(target, &identity, mtm);
         // The page keeps the delegate (it is weak).
@@ -493,6 +499,9 @@ impl SetupWindow {
             vella_page,
             arsenal_page,
             downloads_page,
+            phrase_card,
+            phrase_quiet_since: None,
+            phrase_hearing: false,
             custom,
             allow,
             all_granted: false,
@@ -576,6 +585,7 @@ impl SetupWindow {
             self.window.makeFirstResponder(Some(&self.name.field));
         }
         self.sync_focus();
+        self.sync_phrase();
         self.sync_buttons();
         self.sync_meter();
     }
@@ -589,7 +599,10 @@ impl SetupWindow {
 
     /// The meter runs only on screen, on the Microphone step, with the microphone allowed, on the input shown.
     fn sync_meter(&mut self) {
-        let wanted = meter_wanted(self.window.isVisible(), self.current() == PageKind::Builtin(SetupStep::Microphone), self.mic_allowed, &self.microphones);
+        // The Microphone step's meter, and the phrase card's indicator while it listens (not once the microphone failed).
+        let phrase = self.current() == PageKind::Builtin(SetupStep::Models) && phrase::card_shown(&self.downloads, &self.readiness)
+            && phrase::mic_failure(&self.readiness).is_none();
+        let wanted = meter_wanted(self.window.isVisible(), self.current() == PageKind::Builtin(SetupStep::Microphone) || phrase, self.mic_allowed, &self.microphones);
         if self.meter.as_ref().map(|m| &m.uid) == wanted.as_ref() { return; }
         self.meter = None;
         self.mic_page.set_level(0.0);
@@ -599,7 +612,56 @@ impl SetupWindow {
     /// The meter's poll: the level moves while sound comes in; nothing changes (or draws) otherwise.
     pub(crate) fn mic_tick(&mut self) {
         let Some(db) = self.meter.as_ref().and_then(|m| m.power()) else { return };
-        self.mic_page.set_level(microphone::level_share(db));
+        let share = microphone::level_share(db);
+        self.mic_page.set_level(share);
+        if self.phrase_card.state.is_some() {
+            let hearing = share >= phrase::HEARD;
+            if hearing { self.phrase_quiet_since = Some(std::time::Instant::now()); }
+            if hearing != self.phrase_hearing { self.phrase_hearing = hearing; self.sync_phrase(); }
+            if hearing { self.phrase_card.set_level(share); }
+        }
+    }
+
+    /// Getting ready's last card (`phrase`): shown in place of Start once every row is green, in its state now.
+    fn sync_phrase(&mut self) {
+        let shown = self.current() == PageKind::Builtin(SetupStep::Models) && phrase::card_shown(&self.downloads, &self.readiness);
+        if !shown {
+            if self.phrase_card.state.is_some() { self.phrase_card.hide(); }
+            self.phrase_quiet_since = None;
+            self.phrase_hearing = false;
+            return;
+        }
+        let quiet = self.phrase_quiet_since.get_or_insert_with(std::time::Instant::now).elapsed();
+        let state = phrase::card_state(&self.readiness, self.phrase_hearing, quiet);
+        let y = self.downloads_page.below();
+        // The name the user gave on Customise, as Start would have said it, else the saved one.
+        let typed = self.custom.field.stringValue().to_string();
+        let name = if typed.trim().is_empty() { self.identity.name.clone() } else { typed.trim().to_string() };
+        self.phrase_card.sync(y, &phrase::phrase(&name), &state);
+        self.downloads_page.frame.set_height(y + phrase::PhraseCard::height());
+    }
+
+    /// The card's state follows the clock too (the hint after `phrase::HINT_AFTER` of silence): the prompt watch's tick.
+    fn phrase_tick(&mut self) {
+        if let Some(state) = self.phrase_card.state.clone() {
+            let quiet = self.phrase_quiet_since.map_or(std::time::Duration::ZERO, |t| t.elapsed());
+            if phrase::card_state(&self.readiness, self.phrase_hearing, quiet) != state { self.sync_phrase(); }
+        }
+    }
+
+    /// Setup ends now (the phrase heard, or Start without speaking): as Start did.
+    pub(crate) fn finish(&mut self) -> Advance {
+        Advance::Close(vec![])
+    }
+
+    /// The phrase card's microphone fix, while the microphone has failed.
+    pub(crate) fn phrase_fix(&self) -> Option<ReadyFix> {
+        phrase::mic_failure(&self.readiness).and_then(|(_, fix)| fix)
+    }
+
+    /// Whether the card offers Start without speaking now (only a failed microphone).
+    pub(crate) fn phrase_fix_offered(&self) -> bool {
+        matches!(self.phrase_card.state, Some(phrase::CardState::Failed { .. }))
     }
 
     /// The Microphone step's pop-up: the input picked there, when it is not the one in use.
@@ -673,8 +735,9 @@ impl SetupWindow {
                     return Advance::Wait(vec![UiAction::InstallArsenal]);
                 }
             },
-            // Start waits for every row (its button is off until then; Return does nothing either).
-            PageKind::Builtin(SetupStep::Models) if !self.start_ready() => return Advance::Stay,
+            // Getting ready ends when the phrase is heard (or, with a failed microphone, Start without speaking):
+            // `finish`. Its button and Return do nothing.
+            PageKind::Builtin(SetupStep::Models) => return Advance::Stay,
             PageKind::Builtin(SetupStep::Home) => leaving_home(&self.home).into_iter().collect(),
             PageKind::Builtin(SetupStep::Decider) => leaving_listening(&self.decider, self.decider_choice.as_deref()),
             PageKind::Builtin(SetupStep::Harnesses) => leaving_harnesses(&self.harnesses).into_iter().collect(),
@@ -731,6 +794,8 @@ impl SetupWindow {
         let width = self.footer.frame().size.width;
         self.next.retitle(&self.primary_title(), PRIMARY_MIN);
         self.next.setEnabled(self.current() != PageKind::Builtin(SetupStep::Models) || self.start_ready());
+        // Getting ready's phrase card stands in for Start.
+        self.next.setHidden(self.current() == PageKind::Builtin(SetupStep::Models) && phrase::card_shown(&self.downloads, &self.readiness));
         let key = self.return_key();
         self.allow.setKeyEquivalent(&ns(if key == ReturnKey::Allow { "\r" } else { "" }));
         self.leave.setKeyEquivalent(&ns(if key == ReturnKey::Leave { "\r" } else { "" }));
@@ -979,14 +1044,18 @@ impl SetupWindow {
     pub fn set_downloads(&mut self, downloads: &ModelDownloads) {
         self.downloads = downloads.clone();
         self.downloads_page.sync(downloads, &self.readiness);
+        self.sync_phrase();
         self.sync_buttons();
+        self.sync_meter();
     }
 
     /// Getting ready's other rows (the voice, listening, the decider, This Mac's model, the agent).
     pub fn set_readiness(&mut self, readiness: &SetupReadiness) {
         self.readiness = readiness.clone();
         self.downloads_page.sync(&self.downloads, readiness);
+        self.sync_phrase();
         self.sync_buttons();
+        self.sync_meter();
     }
 
     /// Start may close Setup: every model in place and every readiness row green (Getting ready is the last step).
@@ -1078,6 +1147,7 @@ impl SetupWindow {
     /// One look: a prompt that was on screen and is gone hands focus back to Setup (`refocus_after_prompt`).
     pub(crate) fn prompt_tick(&mut self) {
         if !self.window.isVisible() { self.prompt_up = false; return; }
+        self.phrase_tick();
         let up = prompt_on_screen();
         let front = objc2_app_kit::NSWorkspace::sharedWorkspace().frontmostApplication();
         let own = front.as_ref().is_some_and(|a| a.processIdentifier() == std::process::id() as i32);

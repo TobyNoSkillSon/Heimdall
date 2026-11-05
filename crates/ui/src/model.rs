@@ -1503,6 +1503,9 @@ pub enum UiUpdate {
     ShowSetup,
     /// Setup opens at this step (the home step at a public first launch, or from the menu's Home Folder…).
     ShowSetupAt(SetupStep),
+    /// Setup's last step was said (the app heard "…, show me what you can do": app `pipeline::setup_phrase`): Setup
+    /// closes as Start would.
+    SetupHeard,
     /// Setup ▸ Home: where Heimdall works and keeps its files, a move waiting for a confirm, or why a choice failed.
     Home(HomeState),
     /// Setup ▸ T3 Code: what was found on this Mac, whether Heimdall may connect, and an install in progress.

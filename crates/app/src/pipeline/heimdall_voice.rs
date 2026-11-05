@@ -101,6 +101,13 @@ impl UserVoice {
     pub(crate) fn ready(&self) -> bool {
         self.embeddings.len() >= USER_MIN_SAMPLES
     }
+    /// Setup's phrase as the user's whole profile: ready at once, refined by later samples (`add`).
+    pub(crate) fn enrol(&mut self, e: Embedding, now_ms: u64) {
+        self.recipe = USER_RECIPE.into();
+        self.rejected.clear();
+        self.embeddings = vec![e; USER_MIN_SAMPLES];
+        self.updated_ms = now_ms;
+    }
     #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn similarity(&self, query: &Embedding) -> Option<f32> {
         self.ready().then(|| self.embeddings.iter().map(|e| e.cosine(query)).fold(f32::NEG_INFINITY, f32::max))
@@ -522,6 +529,8 @@ pub(crate) struct State {
     pub(crate) user_path: Option<PathBuf>,
     /// A user sample is being embedded.
     pub(crate) user_pending: bool,
+    /// The sample on its way is Setup's phrase: it makes the user's profile (`UserVoice::enrol`), not one more sample.
+    pub(crate) user_enrolling: bool,
     pub(crate) encoder: Option<Arc<Encoder>>,
     pub(crate) enrolling: Option<String>,
     pub(crate) retry: std::collections::HashMap<String, Instant>,
@@ -531,7 +540,7 @@ pub(crate) struct State {
 impl State {
     pub(crate) fn new(profiles: std::collections::BTreeMap<String, HeimdallVoice>, encoder: Option<Arc<Encoder>>, user_path: Option<PathBuf>) -> Self {
         let user = user_path.as_deref().map(UserVoice::load).unwrap_or_default();
-        Self { profiles, user, user_path, user_pending: false, encoder, enrolling: None, retry: Default::default(), key: Default::default() }
+        Self { profiles, user, user_path, user_pending: false, user_enrolling: false, encoder, enrolling: None, retry: Default::default(), key: Default::default() }
     }
     /// A window's scores against the user's profile and Heimdall's voices.
     #[cfg_attr(test, allow(dead_code))]
@@ -617,6 +626,20 @@ impl super::Pipeline {
             }))
         }
     }
+    /// Whether the user's voice is known (`UserVoice::ready`): until it is, only the wake name wakes the agent
+    /// (send_worker.rs). The test rigs assume it unless a test says otherwise (`Hooks::no_user_voice`).
+    pub(crate) fn user_voice_known(&self) -> bool {
+        #[cfg(test)]
+        if !self.hooks.no_user_voice { return true; }
+        self.heimdall_voice.user.ready()
+    }
+    /// Setup's phrase, said by the user: their voice's profile from it (`UserVoice::enrol`), embedded off this thread.
+    pub(crate) fn user_voice_enrol(&mut self, samples: &[f32]) {
+        if self.heimdall_voice.user_pending { return; }
+        self.heimdall_voice.user_enrolling = true;
+        self.user_voice_heard(samples, false);
+        if !self.heimdall_voice.user_pending { self.heimdall_voice.user_enrolling = false; }
+    }
     /// One of his own turns woke Heimdall (outside a call, Heimdall silent): a sample of the user's voice, embedded off
     /// this thread and added to his profile (`UserVoice::add`).
     pub(super) fn user_voice_heard(&mut self, samples: &[f32], misfit: bool) {
@@ -653,7 +676,10 @@ impl super::Pipeline {
             }
         };
         let was = self.heimdall_voice.user.ready();
-        let kept = if misfit { self.heimdall_voice.user.misfit(e, unix_ms()) } else { self.heimdall_voice.user.add(e, unix_ms()) };
+        let kept = if std::mem::take(&mut self.heimdall_voice.user_enrolling) {
+            self.heimdall_voice.user.enrol(e, unix_ms());
+            true
+        } else if misfit { self.heimdall_voice.user.misfit(e, unix_ms()) } else { self.heimdall_voice.user.add(e, unix_ms()) };
         if let Some(path) = &self.heimdall_voice.user_path {
             if let Err(e) = self.heimdall_voice.user.save(path) {
                 eprintln!("voice check: the user's voice was not saved: {e:#}");

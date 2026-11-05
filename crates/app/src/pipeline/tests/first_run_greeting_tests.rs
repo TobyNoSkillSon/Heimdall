@@ -129,3 +129,16 @@ fn the_coding_agents_choice_is_saved() {
         assert_eq!(Settings::load(&data.join("settings.json")).unwrap().harness_autonomy, Some(choice));
     }
 }
+
+/// Setup ends with the user's own words, and the first message quotes them and asks for a short
+/// spoken demo; without them (Start without speaking) it is the greeting.
+#[test]
+fn the_first_message_quotes_what_the_user_said() {
+    let said = crate::setup_wizard::first_message(Some("Hindor, show me what you can do."), true, None);
+    assert!(said.starts_with("The user just finished setting you up and said: 'Hindor, show me what you can do.'. Answer with a short spoken demo of what you can do"), "{said}");
+    assert!(said.contains("`speak`") && said.contains("no long tour"), "{said}");
+    assert_eq!(crate::setup_wizard::first_message(None, true, None), crate::setup_wizard::greeting(true, None));
+    assert!(crate::setup_wizard::first_message(Some("it's me"), true, None).contains("'it’s me'"), "a quote never closes early");
+    let kind = agent::notice::NoticeKind::classify(agent::notice::FIRST_RUN, &said);
+    assert!(kind.wakes(), "{kind:?}");
+}

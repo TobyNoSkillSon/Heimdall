@@ -95,3 +95,25 @@ fn a_near_tie_outside_a_call_sends() {
 }
 
 // Barge-in through speakers (bug note 21 Oct 17:44:10) is judged by voice now: heimdall_voice_tests.rs.
+
+/// (the VM's background chat "Did you catch the game last night?" woke the agent, d1 send 0.86):
+/// until the user's voice is known, d1 alone never wakes the agent, only the wake name does ("Hindor" too, as the
+/// ASR hears Heimdall); once it is known (Setup's phrase), d1's send wakes again.
+#[test]
+fn without_a_known_user_voice_only_the_wake_name_wakes() {
+    let (_t, mut a, mic) = rig(false);
+    a.hooks.no_user_voice = true;
+    a.hooks.send_choices.push_back(decide::send::Choice::Send);
+    turn(&mut a, &mic, 5 * S, "Did you catch the game last night?", Detect::Final, 0, None, 3 * S, |_| {});
+    turn(&mut a, &mic, 20 * S, "Hindor, what time is it?", Detect::Final, 0, Some(0.), 3 * S, |_| {});
+    let e = speakers::embedding::Embedding::new(vec![1.; speakers::embedding::DIMENSION]).unwrap();
+    a.heimdall_voice.user.enrol(e, 1);
+    a.hooks.send_choices.push_back(decide::send::Choice::Send);
+    turn(&mut a, &mic, 300 * S, "Can you open the build log?", Detect::Final, 0, None, 3 * S, |_| {});
+    let all: Vec<_> = decisions(&a).iter().map(outcome).collect();
+    assert_eq!(all, [
+        ("held_no_user_voice".into(), None, Some("no_user_voice".into())),
+        ("send".into(), Some("name".into()), None),
+        ("send".into(), Some("d1".into()), None),
+    ], "{all:#?}");
+}

@@ -950,6 +950,12 @@ impl Pipeline {
                     if gate != decide::send::D1Gate::Open {
                         d1_gate = Some(serde_json::json!({"gate":gate,"argmax_send":argmax_send,"near_tie":decide::send::NEAR_TIE}));
                     }
+                    // (the VM's background chat woke the agent): until the user's voice is known, only
+                    // the wake name wakes; d1 alone never does, as no voice on the microphone is known to be theirs.
+                    if trigger.is_some() && !self.user_voice_known() {
+                        trigger = None;
+                        d1_gate = Some(serde_json::json!({"gate":"no_user_voice","argmax_send":argmax_send}));
+                    }
                 }
                 serde_json::json!({"schema":1,"prompt":fitted.request,"context_tokens":fitted.context_tokens,
                     "input_tokens":prediction.input_tokens,"probabilities":prediction.probabilities,"choice":prediction.choice,
@@ -979,7 +985,7 @@ impl Pipeline {
             "send"
         } else if let (Some(gate), true) = (held_by_gate.as_deref(), record["choice"] == "send") {
             // Night pass 1022: d1 said send, the gate kept it as context.
-            if gate == "not_owner" { "held_not_owner" } else { "held_in_call" }
+            match gate { "not_owner" => "held_not_owner", "no_user_voice" => "held_no_user_voice", _ => "held_in_call" }
         } else if trigger.is_none() && record["choice"] == "send" {
             // d1 sent a filler while a question card was up: held (bridge/questions.rs).
             "filler_held"

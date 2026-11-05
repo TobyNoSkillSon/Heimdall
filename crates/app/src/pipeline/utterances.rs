@@ -434,6 +434,8 @@ impl Pipeline {
                 self.project_call(&source)?;
                 if voice.is_some() { self.note_line_voice(&observation.id, if unknown { mic_voice::Line::Unknown } else { mic_voice::Line::Owner }); }
                 let final_ = AgentFinal { audio_error, observation, source:source.clone(), start:u.start, end:end_ns, words:all, notes:u.notes, images:u.images, turn, audio_spans, forced, end_of_turn_probability };
+                // Setup's last step is a phrase the user says (setup_phrase.rs): their own microphone, their voice.
+                if matches!(final_.turn.role, decide::Role::Owner) { self.setup_phrase_line(&final_.observation.text, &final_.turn.audio.samples); }
                 if self.is_call(&source) && track.is_none() {
                     // Never pass a mixed, undiarized call stream as if it belonged to a named speaker.
                     let status = if self.awaiting_speaker.len() < 64 { "awaiting_diarization" } else { "diarization_backlog_full" };

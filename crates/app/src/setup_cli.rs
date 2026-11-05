@@ -41,6 +41,9 @@ pub struct StatusRow {
 pub const STALE: Duration = Duration::from_secs(30);
 pub const HEARTBEAT: Duration = Duration::from_secs(10);
 
+/// The status row of Setup's last step, the phrase the user says.
+pub const PHRASE: &str = "phrase";
+
 fn setup_dir(data: &Path) -> PathBuf {
     data.join("setup")
 }
@@ -72,7 +75,19 @@ impl Status {
             };
             StatusRow { key: r.key.clone(), title: r.title.clone(), detail: r.detail.clone(), state: state.into(), why, fix }
         }));
+        // Setup's last step is the user's to say: once every row is green, it needs them.
+        let rest = Status { at_ms: 0, done, rows: rows.clone() };
+        if !done && rest.ready() {
+            let phrase = format!("the user says \u{201c}{}, show me what you can do\u{201d} on Getting ready", ui::identity::current().name);
+            rows.push(StatusRow { key: PHRASE.into(), title: "Your words".into(), detail: None, state: "needs_user".into(), why: Some(phrase), fix: None });
+        }
         Status { at_ms: agent::now_ms(), done, rows }
+    }
+
+    /// Every row green but the last step's phrase, which only the user can say.
+    pub fn ready_for_phrase(&self) -> bool {
+        let rows: Vec<&StatusRow> = self.rows.iter().filter(|r| r.key != PHRASE).collect();
+        !rows.is_empty() && rows.iter().all(|r| r.state == "ready" || r.state == "optional")
     }
 
     pub fn save(&self, data: &Path) -> Result<()> {
@@ -413,7 +428,8 @@ Flags: --provider claude-code|codex|opencode-go|local|custom  --custom-url URL  
 For an agent: ask the user one question only if --defaults can't pick the provider (exit 2 says so). Run --plan and
 show the user; run with --open-permissions and tell the user, one sentence each, the clicks only they can make
 (Microphone, required: Allow in the prompt; Screen Recording and Accessibility, optional: System Settings > Privacy &
-Security; a browser sign-in). Then --wait; when it exits 0, run --finish. A red Microphone row (\"No microphone
+Security; a browser sign-in). Then --wait; when only the \"phrase\" row is left, tell the user to say it (Setup's last
+step is theirs: \"Heimdall, show me what you can do\", with Heimdall's name) and run --finish, which waits for it. A red Microphone row (\"No microphone
 found\", \"No sound from ...\") needs the user to plug one in or pick one in Setup. Heimdall must be running.";
 
 /// `Heimdall setup …`: prints its lines and returns the exit code.
@@ -477,14 +493,25 @@ pub fn run(args: &[String], data: &Path, env: impl Fn(&str) -> Option<String>) -
             Err(why) => { out(a.json, "agent", "failed", &why); return 4; }
         }
     }
+    // Setup ends when the user says its phrase; no agent can say it for them. --finish waits for it.
     if a.finish {
-        let ready = status.as_ref().is_some_and(Status::ready);
+        if status.as_ref().is_some_and(|s| s.done) { out(a.json, "finish", "done", "Setup is finished"); return 0; }
+        let ready = status.as_ref().is_some_and(Status::ready_for_phrase);
         if !ready {
             out(a.json, "finish", "needs_user", "not every Getting ready row is green yet: run --check");
             if let Some(s) = &status { print_status(a.json, s) }
             return 2;
         }
-        commands.push(Command::Finish);
+        let name = ui::identity::current().name;
+        out(a.json, "finish", "needs_user", &format!("waiting for the user to say \u{201c}{name}, show me what you can do\u{201d}: tell them, in one sentence"));
+        let until = std::time::Instant::now() + Duration::from_secs(a.timeout.unwrap_or(1800));
+        loop {
+            let s = Status::load(data).unwrap_or_default();
+            if !s.fresh(agent::now_ms()) { out(a.json, "heimdall", "failed", "Heimdall stopped running"); return 1; }
+            if s.done { out(a.json, "finish", "done", "the user said it: Setup is finished and the agent answers"); return 0; }
+            if std::time::Instant::now() >= until { print_status(a.json, &s); return 2; }
+            std::thread::sleep(Duration::from_secs(2));
+        }
     }
     if commands.is_empty() && provider.is_none() && a.defaults {
         out(a.json, "agent", "needs_user", QUESTION);

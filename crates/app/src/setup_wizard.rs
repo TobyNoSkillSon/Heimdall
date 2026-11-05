@@ -59,6 +59,23 @@ pub fn greeting(public: bool, check: Option<(&Path, &Path)>) -> String {
         // The tour waits until they ask for it (the `onboarding` skill's "First run").
         text.push_str(" A tour of what you can do waits until they ask (the `onboarding` skill).");
     }
+    with_check(text, check)
+}
+
+/// The first message to the agent after Setup: the user ended Setup by saying "…, show me what
+/// you can do" (`pipeline::setup_phrase`), so the agent answers those words with a short spoken demo; without them
+/// (Setup started without speaking, the personal edition) it is the greeting.
+pub fn first_message(said: Option<&str>, public: bool, check: Option<(&Path, &Path)>) -> String {
+    match said {
+        Some(words) => with_check(format!("{} '{}'. {}", SAID, words.replace('\'', "’"), DEMO), check),
+        None => greeting(public, check),
+    }
+}
+pub const SAID: &str = "The user just finished setting you up and said:";
+pub const DEMO: &str = "Answer with a short spoken demo of what you can do: a few sentences with `speak`, no long tour \
+     (the `onboarding` skill's \"First run\").";
+
+fn with_check(mut text: String, check: Option<(&Path, &Path)>) -> String {
     if let Some((cli, data)) = check {
         let quote = |p: &Path| format!("'{}'", p.display().to_string().replace('\'', "'\\''"));
         text.push_str(&format!(
@@ -106,9 +123,10 @@ impl Pipeline {
         let tools = self.tools.clone();
         let public = crate::edition::PUBLIC;
         let check = crate::harness_autonomy::wanted(public, self.settings.harness_autonomy).then(crate::harness_autonomy::bundled_cli).flatten();
-        let text = greeting(public, check.as_deref().map(|cli| (cli, self.data.as_path())));
+        let text = first_message(self.settings.first_run_said.as_deref(), public, check.as_deref().map(|cli| (cli, self.data.as_path())));
         let s = &mut self.settings;
         if greet(&mut s.first_run_greeted, &mut s.first_run_greeting_due, &text, |id, text| tools.agent_enabled.permit().and_then(|permit| tools.notice(id, text, &permit))) {
+            s.first_run_said = None;
             self.save_or_note();
         }
     }

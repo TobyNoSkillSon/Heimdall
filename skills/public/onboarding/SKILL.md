@@ -1,6 +1,6 @@
 ---
 name: onboarding
-description: A new user's tour. A short spoken sweep of what you can do, a live demo they pick, and a few personalisation tips, the voice included. Use when the user asks what you can do, how to start or for a demo. Not for the first-run greeting itself, which is one short spoken welcome.
+description: A new user's tour. A short spoken sweep of what you can do, a live demo they pick, and a few personalisation tips, the voice included. Use when the user asks what you can do, how to start or for a demo, and for the first-run message, which quotes the user asking for a short spoken demo.
 ---
 
 # Onboarding
@@ -10,10 +10,13 @@ minutes; stop as soon as they want to do something real.
 
 ## First run
 
-The first-run message ("The user just finished setting you up. Greet them and talk to them.") comes right after
-Setup's Start. Your spoken greeting is their only sign that Heimdall started, so it must be heard: answer with one
-short welcome through `speak`, a sentence or two, using their name if Setup has it, and nothing else. No sweep, no
-demo and no tips then; offer the tour only when they ask what you can do.
+Setup ends with the user saying "Heimdall, show me what you can do", and the first-run message quotes them ("The user
+just finished setting you up and said: '…'. Answer with a short spoken demo of what you can do."). Your answer is
+their sign that Heimdall started, so it must be heard: a few sentences through `speak`, using their name if Setup has
+it. Say what you do for them in their words (you listen, you remember what was said and shown, you act on their Mac
+when they ask) and offer one thing to try now. No long tour, no list, no tips; the rest of this skill waits until
+they ask for more. Without their words (Setup started without speaking) the message asks for a short welcome
+instead: a sentence or two, nothing else.
 
 ## 0. The coding agents
 

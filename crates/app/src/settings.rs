@@ -157,6 +157,10 @@ pub struct Settings {
     /// next start. Written only when true.
     #[serde(default, skip_serializing_if = "is_false")]
     pub first_run_greeting_due: bool,
+    /// What the user said to finish Setup ("Heimdall, show me what you can do": `pipeline::setup_phrase`): the first
+    /// message to the agent quotes it. Kept until the greeting went; none when Setup ended without speaking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_run_said: Option<String>,
     /// Setup ▸ T3 Code ▸ Connect was clicked: the public edition connects to T3 Code only after it.
     #[serde(skip_serializing_if = "is_false")]
     pub t3_connect_allowed: bool,
@@ -356,6 +360,7 @@ impl Default for Settings {
             setup_requested: false,
             first_run_greeted: Some(false),
             first_run_greeting_due: false,
+            first_run_said: None,
             t3_connect_allowed: false,
             harness_autonomy: None,
             arsenal_mcp: None,

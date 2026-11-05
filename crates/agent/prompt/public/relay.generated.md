@@ -266,7 +266,7 @@ When a skill file references a relative path, resolve it against the skill direc
   </skill>
   <skill>
     <name>onboarding</name>
-    <description>A new user&apos;s tour. A short spoken sweep of what you can do, a live demo they pick, and a few personalisation tips, the voice included. Use when the user asks what you can do, how to start or for a demo. Not for the first-run greeting itself, which is one short spoken welcome.</description>
+    <description>A new user&apos;s tour. A short spoken sweep of what you can do, a live demo they pick, and a few personalisation tips, the voice included. Use when the user asks what you can do, how to start or for a demo, and for the first-run message, which quotes the user asking for a short spoken demo.</description>
     <location>HEIMDALL_SKILLS_DIR/onboarding/SKILL.md</location>
   </skill>
   <skill>

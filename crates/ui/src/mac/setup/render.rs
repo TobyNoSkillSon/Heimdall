@@ -471,22 +471,45 @@ pub(crate) fn render(dir: &std::path::Path, mtm: MainThreadMarker) -> Vec<String
         // Rows: Parakeet, Speakers, EmbeddingGemma 2, then Microphone, Voice, Listening, Decider (its download, then
         // loaded), Agent.
         let words = p.rows[6].state.stringValue().to_string();
-        let ok = w.current() == PageKind::Builtin(SetupStep::Models) && shown == 8 && w.next.label() == "Start Selene" && w.next.isEnabled() == start
+        // Every row green, or every row but a failed microphone's: the phrase card stands in for Start.
+        let card = !w.phrase_card.band.isHidden();
+        let ok = w.current() == PageKind::Builtin(SetupStep::Models) && shown == 8
+            && (if card { w.next.isHidden() } else { w.next.label() == "Start Selene" && w.next.isEnabled() == start })
             && match name {
                 "12-ready-downloading" => bars == 1 && words == "612 MB of 1.4 GB" && fixes.is_empty() && !p.rows[7].spinner.isHidden() && p.rows[3].spinner.isHidden() && p.rows[5].spinner.isHidden(),
                 "12-ready-failed" => fixes == ["Retry"] && w.fix_at(6) == Some(ReadyFix::Action { title: "Retry".into(), action: Box::new(UiAction::RetryModelDownloads) }),
-                "12-ready-no-mic" => fixes == ["Choose…"] && matches!(w.fix_at(3), Some(ReadyFix::Step { step: SetupStep::Microphone, .. })) && p.rows[5].check.isHidden() && p.rows[5].spinner.isHidden(),
+                // No microphone at all: the card says so, with Choose… and Start without speaking.
+                "12-ready-no-mic" => fixes == ["Choose…"] && matches!(w.fix_at(3), Some(ReadyFix::Step { step: SetupStep::Microphone, .. })) && p.rows[5].check.isHidden() && p.rows[5].spinner.isHidden()
+                    && card && !w.phrase_card.silent.isHidden() && w.phrase_card.fix.label() == "Choose…" && w.phrase_fix_offered(),
                 "12-ready-no-agent" => fixes == ["Choose…"] && matches!(w.fix_at(7), Some(ReadyFix::Step { step: SetupStep::Providers, .. })),
-                _ => p.rows.iter().take(8).all(|r| !r.check.isHidden()),
+                _ => p.rows.iter().take(8).all(|r| !r.check.isHidden()) && card && w.phrase_card.state == Some(phrase::CardState::Waiting)
+                    && w.phrase_card.words.stringValue().to_string() == "\u{201c}Selene, show me what you can do\u{201d}" && w.phrase_card.silent.isHidden(),
             };
         shot(&w, name, ok, &mut failures);
-        if !start && w.advance() != Advance::Stay {
-            failures.push(format!("{name}: Start went past rows that are not green"));
+        if w.advance() != Advance::Stay {
+            failures.push(format!("{name}: Getting ready went on by a click"));
         }
     }
-    let closed = w.advance();
+    // The card's other states: sound arriving (the bars move), silence past the hint's wait, a capture that failed.
+    w.phrase_hearing = true;
+    w.sync_phrase();
+    w.phrase_card.set_level(0.7);
+    let ok = w.phrase_card.state == Some(phrase::CardState::Hearing) && w.phrase_card.line.isHidden() && w.phrase_card.bars.iter().any(|b| b.frame().size.height > 10.0);
+    shot(&w, "12-phrase-hearing", ok, &mut failures);
+    w.phrase_hearing = false;
+    w.phrase_quiet_since = std::time::Instant::now().checked_sub(phrase::HINT_AFTER + std::time::Duration::from_secs(1));
+    w.sync_phrase();
+    let ok = w.phrase_card.state == Some(phrase::CardState::Hint) && w.phrase_card.line.stringValue().to_string() == phrase::HINT && w.phrase_card.silent.isHidden();
+    shot(&w, "12-phrase-hint", ok, &mut failures);
+    let retry = ReadyFix::Action { title: "Retry".into(), action: Box::new(UiAction::RetrySystemAudio) };
+    let failed_capture = ReadyState::Problem { why: "Couldn't start listening: the audio system did not answer".into(), fix: Some(retry.clone()) };
+    w.set_readiness(&readiness_with(failed_capture, ReadyState::Ready, ReadyState::Ready, ReadyState::Ready));
+    let ok = matches!(&w.phrase_card.state, Some(phrase::CardState::Failed { .. })) && w.phrase_fix() == Some(retry) && !w.phrase_card.silent.isHidden()
+        && w.phrase_card.fix.label() == "Retry" && w.next.isHidden() && w.phrase_card.bars.iter().all(|b| b.isHidden());
+    shot(&w, "12-phrase-mic-failed", ok, &mut failures);
+    let closed = w.finish();
     if closed != Advance::Close(vec![]) {
-        failures.push(format!("ready: Start sent {closed:?}"));
+        failures.push(format!("ready: the phrase's close sent {closed:?}"));
     }
 
     // Resized: the window at its minimum and widened; cards stay centred, the footer at the bottom right.

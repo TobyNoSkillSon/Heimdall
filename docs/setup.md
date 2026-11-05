@@ -32,7 +32,7 @@ Setup at the step it was on. The menu's Set Up… opens it again later.
 | 11 | Do you want dictation with Vella? | Add Vella, Not now | Homebrew cask `tobynoskillson/tap/vella` |
 | 12 | Do you want Arsenal? *public* | Add Arsenal / Use it, Not now | Homebrew cask `tobynoskillson/tap/arsenal`; Use it lets the agent call Arsenal's models (docs/editions.md) |
 | 13 | Customise me | A mark; the name (also the wake word) | Each mark brings its name and voice; a typed name or a picked voice is kept |
-| 14 | Getting ready *public* | Nothing: a checklist | Start stays off until every row is green (below) |
+| 14 | Getting ready *public* | The user says "Heimdall, show me what you can do" | A checklist; once all green, the phrase (below) ends Setup |
 
 Screen Recording, Accessibility and System Audio Recording are optional (their rows read Optional until allowed); listening
 runs on the microphone alone, and app audio joins when System Audio Recording is allowed, later too, without the
@@ -84,7 +84,7 @@ its models are in and runs on after Start.
 
 ### Getting ready (step 14)
 
-One row each; Start stays off until all are green. A red row says why and offers its fix.
+One row each; the last step (below) waits until all are green. A red row says why and offers its fix.
 
 | Row | Green when | Fix offered |
 |---|---|---|
@@ -98,10 +98,26 @@ One row each; Start stays off until all are green. A red row says why and offers
 | Decider | downloaded (with its progress) and its SHA-256 matched, then loaded and answering | Retry (a failed download; a failed load retries by itself) |
 | Agent | one real request to the agent's model answered | Choose… (no agent yet), Sign In… (a sign-in failed), Retry |
 
-After Start, the agent greets the user once it is up. The first-run message tells it "The user just finished setting
-you up. Greet them and talk to them." and its first reply is a short spoken welcome, a sentence or two, with no tour of
-what it can do (the public `onboarding` skill waits until the user asks). Hearing it is the user's sign that Heimdall
-started.
+### The last step is said
+
+Getting ready can't be clicked through. Once every required row is green, its Start button gives way to a card with
+the phrase "Heimdall, show me what you can do" (with the assistant's name; English, always) and five small bars that
+move only while sound comes in (`crates/ui/src/mac/setup/phrase.rs`). The user says it; Setup closes when Heimdall
+hears it (`crates/app/src/pipeline/setup_phrase.rs`). The request is matched in any case and punctuation, with or
+without a wake name before it, since the ASR may hear "Heimdall" as "Hindor" or "Hindol".
+
+- Those words are the agent's first message: "The user just finished setting you up and said: '<their words>'.
+  Answer with a short spoken demo of what you can do", a few spoken sentences, no long tour (the public `onboarding`
+  skill's "First run").
+- Their audio becomes the user's voice profile (`user-voice.json`, `UserVoice::enrol`, under the name given in
+  Setup). Until a profile has a known user voice, only the wake name ("Heimdall" or the chosen name, its ASR
+  spellings included) wakes the agent: the decider never sends unaddressed speech then (`d1_gate` "no_user_voice"),
+  so background talk on the microphone can't wake it. After that the decider's usual rules apply, and other voices
+  are not the user.
+- Silence for about 8 s shows one line, "Say it a little louder", and listening goes on. There is nothing to click,
+  unless the microphone has truly failed (no input, a capture that didn't start): then the card shows why, its fix
+  (Retry or Choose…) and Start without speaking, which ends Setup with the plain greeting instead ("The user just
+  finished setting you up. Greet them and talk to them.", a sentence or two).
 
 ## What only the user can do
 
@@ -160,7 +176,7 @@ Set up Heimdall for me. Run "/Applications/Heimdall Alpha.app/Contents/MacOS/Hei
 | `--harnesses` | `set` · `leave` (default) | Step 10 |
 | `--vella`, `--arsenal` | `add` · `skip` (default) | Steps 11, 12 |
 | `--open-permissions` | | Step 6's Allow All: the macOS prompts appear for the user |
-| `--finish` | | Start, once `--check` is all green (the greeting follows) |
+| `--finish` | | Setup's last step is the user's to say: once `--check` is green but for its `phrase` row, waits (up to `--timeout`) until they say it, then exits 0 |
 | `--json` | | One JSON object per line (below) |
 
 ### Defaults (`--defaults`)
@@ -194,7 +210,8 @@ again with `--provider`.
 heimdall setup --plan --defaults --json
 heimdall setup --defaults --open-permissions --json   # exit 2: tell the user each click in one sentence
 heimdall setup --wait --json                          # until green or a row needs the user
-heimdall setup --finish
+# exit 2 with only the "phrase" row left: tell the user to say "Heimdall, show me what you can do"
+heimdall setup --finish                               # waits for them to say it
 ```
 
 ### MCP

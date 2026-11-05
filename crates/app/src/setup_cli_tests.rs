@@ -74,8 +74,15 @@ fn the_status_is_getting_readys_rows_and_its_exit_codes() {
     let models = ui::ModelDownloads { rows: vec![ui::ModelDownload { title: "Parakeet".into(), state: ui::DownloadState::Done, total: 1, done: 1, ..Default::default() }] };
     let row = |key: &str, state| ui::ReadyRow { key: key.into(), title: key.into(), detail: None, symbol: String::new(), state };
     let green = ui::SetupReadiness { rows: vec![row("agent", ui::ReadyState::Ready)] };
-    let s = Status::of(&models, &green, false);
+    let s = Status::of(&models, &green, true);
     assert_eq!((s.ready(), s.exit_code()), (true, 0));
+    // All green, Setup not done: the last step is the user's phrase, which the command can't say.
+    let waiting = Status::of(&models, &green, false);
+    let last = waiting.rows.last().unwrap();
+    assert_eq!((last.key.as_str(), last.state.as_str()), (PHRASE, "needs_user"));
+    assert!(last.why.as_deref().unwrap().contains("show me what you can do"), "{last:?}");
+    assert_eq!(waiting.exit_code(), 2, "needs the user");
+    assert!(waiting.ready_for_phrase() && !waiting.ready());
     let choose = ui::SetupReadiness { rows: vec![row("agent", ui::ReadyState::Problem { why: "No agent chosen yet".into(), fix: Some(ui::ReadyFix::Step { title: "Choose…".into(), step: ui::SetupStep::Providers }) })] };
     assert_eq!(Status::of(&models, &choose, false).exit_code(), 2);
     let failed = ui::SetupReadiness { rows: vec![row("agent", ui::ReadyState::Problem { why: "HTTP 500".into(), fix: Some(ui::ReadyFix::Action { title: "Retry".into(), action: Box::new(ui::UiAction::CheckAgent) }) })] };
@@ -107,7 +114,7 @@ fn the_check_has_the_microphone_row_and_one_decider_row() {
     // Memory search that can't run here is optional: reported, never waited for.
     let memory = ui::SetupReadiness { rows: vec![row("memory", "Memory search", ui::ReadyState::Optional { why: "Needs 8 GB free memory".into(), fix: None })] };
     let done = ui::ModelDownloads { rows: vec![ui::ModelDownload { title: "EmbeddingGemma 2".into(), state: ui::DownloadState::Done, total: 1, done: 1, ..Default::default() }] };
-    let m = Status::of(&done, &memory, false);
+    let m = Status::of(&done, &memory, true);
     assert_eq!((m.rows.len(), m.rows[0].state.as_str(), m.exit_code()), (1, "optional", 0), "{:?}", m.rows);
     // Without a decider row (the personal edition) its download stays listed.
     assert_eq!(Status::of(&models, &ui::SetupReadiness::default(), false).rows.len(), 2);

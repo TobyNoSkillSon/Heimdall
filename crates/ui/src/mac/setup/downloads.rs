@@ -16,6 +16,8 @@ use crate::model::*;
 
 const ROW: f64 = 44.0;
 const ACTS: f64 = 640.0;
+/// The list's width, for the card under it (`phrase`).
+pub(crate) const ACTS_WIDTH: f64 = ACTS;
 const H1_Y: f64 = 12.0;
 /// `.prog`: 120 × 5.
 const PROG: (f64, f64) = (120.0, 5.0);
@@ -215,6 +217,12 @@ impl DownloadsPage {
         let f = self.band.frame();
         self.band.setFrameOrigin(NSPoint::new(f.origin.x, CONTENT_Y));
         self.frame.set_height(CONTENT_Y + y + 4.0);
+    }
+
+    /// Where a card under the list goes (its band's top), and the page's height with it.
+    pub(super) fn below(&self) -> f64 {
+        let f = self.band.frame();
+        f.origin.y + f.size.height + 18.0
     }
 }
 

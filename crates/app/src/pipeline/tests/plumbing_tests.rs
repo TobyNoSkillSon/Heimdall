@@ -56,6 +56,10 @@ pub(crate) struct Hooks {
     pub(crate) suggest: VecDeque<f32>,
     /// A card could follow (an agent running, background calls allowed) without one.
     pub(crate) suggest_allowed: bool,
+    /// The profile's real user voice decides whether d1 may wake (`Pipeline::user_voice_known`); false: assumed known.
+    pub(crate) no_user_voice: bool,
+    /// Setup waits for its last step's phrase (`Pipeline::waits_for_phrase`).
+    pub(crate) phrase_waits: bool,
 }
 const S: u64 = 1_000_000_000;
 use decide::{CommandIntent as I, CommandSelection as C};
