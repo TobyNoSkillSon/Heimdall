@@ -38,9 +38,25 @@ screen. It asks only when it must.
 
 ## Install the alpha
 
-This first alpha is **source only**: build it on your Mac with the steps under [Build and install](#build-and-install);
-`scripts/fetch_models.sh` downloads every model it needs. A ready-to-run app, whose Setup downloads the models for you,
-comes in the next alpha.
+With [Homebrew](https://brew.sh):
+
+```sh
+brew install --cask tobynoskillson/tap/heimdall-alpha
+```
+
+Or download `Heimdall-Alpha-0.1.0-alpha.1-arm64.zip` from the
+[v0.1.0-alpha.1 release](https://github.com/TobyNoSkillSon/Heimdall/releases/tag/v0.1.0-alpha.1), unzip it and move
+`Heimdall Alpha.app` to Applications. The app is ad-hoc signed, not notarised: open it once, then click **Open Anyway**
+in System Settings → Privacy & Security, or run `xattr -dr com.apple.quarantine "/Applications/Heimdall Alpha.app"`
+(Homebrew clears the download flag for you).
+
+Setup walks you through the rest: your name, the agent provider, the macOS permissions and the model downloads (about
+3.8 GB, each file checked against its pinned SHA-256). The full guide, also written for an agent setting Heimdall up
+for you: [tobynoskillson.com/heimdall/docs](https://tobynoskillson.com/heimdall/docs/).
+
+Updates: `brew upgrade --cask heimdall-alpha`, or download the newer zip. The in-app updater is off in this alpha.
+
+To build it yourself instead, see [Build and install](#build-and-install).
 
 ## Privacy, read this first
 
@@ -52,8 +68,8 @@ Go). Tell the people around you, and check the recording laws where you live.
 
 ## Requirements
 
-- A Mac with Apple silicon and **macOS 26 or newer** (memory search needs macOS 26). 32 GB of RAM recommended; the
-  models below use about 4 GB.
+- A Mac with Apple silicon and macOS 14.4 or later; **macOS 26 recommended** (memory search needs it). 32 GB of RAM
+  recommended; the models use about 4 GB.
 - About 6 GB of free disk for the models, plus about 25 GB for the Rust build.
 - Xcode 26 (for Swift, Metal and the macOS SDK), Rust (stable, via [rustup](https://rustup.rs)), CMake, and Python 3.11+
   (build scripts only; nothing Python ships in the app).
@@ -79,8 +95,8 @@ scripts/bundle.sh --adhoc
 With a certificate, `git config heimdall.signingIdentity <SHA-1>` and run `scripts/bundle.sh` instead
 (`security find-identity -v -p codesigning` lists the SHA-1).
 
-An ad-hoc build is unsigned as far as macOS is concerned: right-click **Heimdall Alpha** → **Open** the first time, and
-the permissions may need granting again after each rebuild.
+An ad-hoc build is unsigned as far as macOS is concerned: open it once, then click **Open Anyway** in System Settings →
+Privacy & Security; the permissions may need granting again after each rebuild.
 
 Copy `dist/public/Heimdall Alpha.app` to `/Applications` and open it. The setup wizard asks for a home folder (Heimdall
 keeps its own files in `<home>/.heimdall`), walks through the microphone, screen recording and accessibility
@@ -139,7 +155,7 @@ Beta, expect failures:
 - **Settings menu** and **setup wizard**: new, lightly tested on clean machines.
 - **Bug notes**: the agent can file notes about its own failures.
 
-Not in this release: the local language-model engine, in-app updates (off until a release feed exists; `HEIMDALL_UPDATE=1`
+Not in this release: in-app updates (off until a release feed exists; `HEIMDALL_UPDATE=1`
 turns them on), approval grants, the night pass and a few personal-only parts of the developer's own build.
 
 ## Layout
