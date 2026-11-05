@@ -1,5 +1,7 @@
 # Agent models: providers, windows, context budget, thinking, speed
 
+(The on-device models the public edition downloads on first run are listed under "First-run downloads" at the end.)
+
 The single home for which models the agent can run, how big each request may get and when history compacts.
 Connect flows live elsewhere: ChatGPT in `docs/chatgpt.md`, OpenCode Go and Anthropic keys in `crates/agent/README.md`
 ("API providers"). The menu's layout is in `crates/ui/README.md`. Code: `crates/agent/src/provider.rs`
@@ -21,8 +23,15 @@ Connect flows live elsewhere: ChatGPT in `docs/chatgpt.md`, OpenCode Go and Anth
 - Each provider is its own billing route. Never mix a subscription with a metered API and never fall back from one to
   another. A first-class metered "OpenAI API" provider is not built yet.
 - The default agent model, for new and old profiles, is Claude Haiku 5.5 on OpenCode Go (`AgentModel::default`;
- ). Default added rows: Haiku on OpenCode Go plus Opus, Sonnet and Haiku 5.5 on Anthropic.
-- Signing in to ChatGPT never switches the agent's model. A first Anthropic key does.
+ ). Default added rows: Haiku on OpenCode Go plus Opus, Sonnet and Haiku 5.5 on Anthropic. The public edition starts
+  with nothing chosen (`AgentModel::Unchosen`).
+- A connection never switches an agent that has a model. While nothing is chosen (the public edition's
+  blank start), the first provider connected becomes the agent: its default model (`connect_default`: ChatGPT's probed
+  model, Claude Haiku 5.5 on OpenCode Go, Claude Opus 5.5 on Anthropic; the catalog's first runnable model if it lacks
+  it) is added and selected, and Setup's Claude Code tile makes the relay the agent. The hub keeps the offer until the
+  app takes it and sends it again when the provider's catalog loads (`Hub::offer_default`).
+- Selecting an API model stops the managed local engine and skips Splash readiness. Turning the engine on, picking an
+  engine model, or removing the selected API model makes the local model the agent's again (one model at a time).
 
 ## Where a model's figures come from
 
@@ -139,3 +148,47 @@ shared model through Use Default Model, which names it (`ui::mac::background_pic
   route takes no `prompt_cache_retention`, so passes more than a few minutes apart may still miss. A job's effort follows the model's listed
   levels. The answer is read from the streamed `output_item.done` items in output order, because the completed event
   on this route lists no output.
+
+## First-run downloads (public edition)
+
+The public app bundles only small models (Phonon S, Silero VAD, the stock Smart Turn) and the helpers' runtimes (the
+decider's MLX engine and metallib, the memory-search worker): 332 MB of models, the app 255 MB zipped (measured 4 Nov
+with `ditto`). Setup's Getting ready step downloads the rest from the official Hugging Face repositories at pinned
+revisions into the Heimdall data folder, `<data>/models` (`~/.heimdall/models` by default; `docs/home.md`):
+
+| Model | Repository at revision | Size | Needed for |
+|---|---|---|---|
+| Parakeet | `FluidInference/parakeet-ultra-coreml` @ `95eaa59a` | 632 MB | listening |
+| Speakers (Nemotron 3 diarization, ReDimNet2 B6) | `nvidia/Nemotron-3-Diarization` @ `f667ed73`, `soniqo/ReDimNet2-B6-ONNX-FP32` @ `e911e3f0` | 158 MB | listening |
+| Decider V6 4-bit (default) / 8-bit / 16-bit | `Toby-NoSkillSon/heimdall-d1-v6` @ `c015ecf6`, `int4/`, `int8/`, `bf16/` | 1.37 / 2.10 / 3.48 GB | listening |
+| MossFormer2 | `ipsilondev/MossFormer2-SS-16K-ONNX` @ `abd8b126` | 91 MB | speech split, night pass |
+| EmbeddingGemma 2 | `google/embeddinggemma-2` @ `914f7f89` | 1.53 GB | memory search |
+
+Total at the default precision: 3.78 GB. Every precision is published, so the chosen one downloads directly (nothing is
+converted on the Mac). The published decider files are the bundled ones except each `config.json` (no `auto_map`) and
+the 16-bit weights (the text model alone, MLX names; the engine skips the vision tower anyway).
+
+- The pins: `crates/app/src/model_downloads.lock.json`, written by `scripts/downloads_lock.py` from the listen, decide,
+  embedding and speaker locks (`--check` says whether it is current). A test holds it to those locks.
+- How (`crates/app/src/model_store.rs`): one file at a time to `<path>.part`, resumed with an HTTP Range request, its
+  size and SHA-256 checked from disk, then renamed into place. Each request is capped at 90 s and the next resumes
+  where it stopped; a checksum mismatch fails the file at once. A failed model is retried by itself after 2 minutes,
+  then twice as long each time up to 30 minutes, and the menu says why listening is off. One Heimdall downloads at a
+  time (a lock file in `<data>/models`). A finished model is written to `<data>/models/downloads.json` and never
+  fetched again. `<data>/models` links the bundled models from the app, so
+  every loader reads one folder.
+- When: Continue on Setup's listening page starts them (the precision is known then); they run while Setup continues.
+  A launch after Setup resumes any not finished. Getting ready shows one row per model with its size, progress, a check
+  when it is in place, and the reason with Retry when it failed. Start never waits.
+- Listening stays off until Parakeet, the speaker models and a decider are in place, and starts by itself when they
+  land (no relaunch). A precision chosen later in Setup or the menu downloads; the nearest present one runs until it
+  lands, then it swaps in.
+- Tests use a local HTTP server; `HEIMDALL_NETWORK_TESTS=1` adds one real download of two small pinned Parakeet files.
+
+### Test mirror (test runs only)
+
+`HEIMDALL_MODEL_MIRROR=http://<host>:<port>` points every download at a cache server instead of Hugging Face (the VM
+tests use one on the host, `http://192.168.64.1:8800`). Only the origin changes: the server must serve the same
+paths (`/<repo>/resolve/<revision>/<file>`), and every file is still checked against its pinned SHA-256, so a mirror
+can make a run faster but never give it other bytes. A value with a path, or not `http(s)://`, is ignored; unset (every
+normal run), downloads go to Hugging Face. The app logs `downloads: test mirror …` when one is in use.

@@ -829,6 +829,8 @@ impl Pipeline {
             result?;
             self.dispatched_through = self.dispatched_through.max(through);
             self.pending_text.clear();
+            // The line this run answers: the island's Stop labels it (pipeline/hotkeys.rs).
+            self.tools.speech_policy.line_woke(observation);
             // speech-policy (night 3): a spoken wake went to the agent: the wake sound (bridge/speech_policy.rs).
             // Agent off sends nothing, so it stays quiet.
             // An acknowledgement already says it was sent: no second sound.
@@ -1011,7 +1013,7 @@ impl Pipeline {
         if would_wake && explicit.is_none() {
             // d1 sent it: for Heimdall, so it may close a card (bridge/questions.rs).
             let speaker = if self.owner_line(&source, &observation.id) { agent::Speaker::Owner } else { agent::Speaker::Other };
-            let ack = self.ack_plan(decided_line.as_ref().map(Option::as_deref));
+            let ack = self.ack_plan_for(decided_line.as_ref().map(Option::as_deref), &observation.text);
             self.dispatch_pending(&source, &observation.text, snapshot.through, &turn.id, speaker, permit, true, ack)?;
         }
         // Decider V5 learned three jobs (wake, suggest, screen commands): no fixed-command or end-of-turn reply-line

@@ -66,6 +66,8 @@ mod harness_autonomy; // every agent harness back in its no-prompt mode at each 
 mod resource_watch; // swap past 2 GB tells the agent once; GPU time per part of Heimdall in a `gpu:` line
 mod home_change; // the home folder: fixed at start, changed by the setup wizard (docs/home.md)
 mod updates; // in-app updates, public edition only (docs/updates.md)
+mod model_store; // first-run model downloads into <data>/models, public edition (docs/models.md)
+mod setup_cli; // `Heimdall setup`: a coding agent sets Heimdall up through the window's actions (docs/setup.md)
 #[cfg(test)]
 mod serde_order_tests {
     /// The app's JSON objects keep sorted keys: the decider's questions and tool results are byte-for-byte goldens.
@@ -257,6 +259,12 @@ fn main() -> Result<()> {
             Err(e) => { eprintln!("{e:#}"); std::process::exit(2); }
         }
     }
+    // `Heimdall setup …` (docs/setup.md): a coding agent drives Setup through the running app; prints and exits.
+    if std::env::args().nth(1).as_deref() == Some("setup") {
+        let rest: Vec<String> = std::env::args().skip(2).collect();
+        let data = settings::default_data()?;
+        std::process::exit(setup_cli::run(&rest, &data, |k| std::env::var(k).ok()));
+    }
     if std::env::current_exe()?.file_stem().and_then(|s| s.to_str()) == Some("speech-split-replay") { return pipeline::speech_split::replay(); }
     let a = args()?;
     // The app on a profile: a home move asked for last run happens now, before anything opens the data folder, and
@@ -369,6 +377,18 @@ fn main() -> Result<()> {
         Err(e) => eprintln!("Could not remove the downloaded agent runtime: {e:#}"),
     }
     let u = ui::Ui::handle();
+    // The public edition loads its models from `<data>/models`: the bundled small ones linked from the app, the big
+    // ones downloaded there on first run (model_store.rs, docs/models.md). `--models` keeps a given folder.
+    let model_root = if edition::PUBLIC && a.models.is_none() {
+        model_store::open(&model_root, &data, Some(u)).unwrap_or_else(|e| {
+            // Listening stays off with the reason in the menu (pipeline/model_downloads.rs), never on without Parakeet.
+            eprintln!("Models folder in {} unavailable: {e:#}", data.display());
+            model_store::set_unavailable(format!("{e:#}"));
+            model_root
+        })
+    } else {
+        model_root
+    };
     // ---- Night 1022 [notch]: a floating island that newly needs the user nudges the notch (the host's watcher publishes
     // `IslandsEvent::Changed`; islands/nudge.rs diffs it).
     islands::nudge::listen(move |question| u.send(ui::UiUpdate::FloatingNudge { question }));
@@ -547,6 +567,13 @@ fn ui_action_callback(
                 friends::reply(&card_id, &text);
                 return;
             },
+            // The app's own cards (suggestions, relay recovery, local model, voice names) are answered by the live
+            // loop (`pipeline::app_owns_card`), not the agent: on to `tx.send` below.
+            ui::UiAction::AgentNotice(
+                ui::agent_notice::AgentNoticeAction::Answer { ref request_id, .. }
+                | ui::agent_notice::AgentNoticeAction::Pick { ref request_id, .. }
+                | ui::agent_notice::AgentNoticeAction::Dismiss { ref request_id },
+            ) if pipeline::app_owns_card(request_id) => {},
             ui::UiAction::AgentWindow(action) => {
                 if let Err(e)=tools.window_action(action){
                     eprintln!("Agent window action refused: {e:#}");
@@ -627,3 +654,7 @@ mod agent_ui_tests;
 #[cfg(test)]
 #[path = "main_tests/quit_capture_tests.rs"]
 mod quit_capture_tests;
+
+#[cfg(test)]
+#[path = "main_tests/app_card_routing_tests.rs"]
+mod app_card_routing_tests;

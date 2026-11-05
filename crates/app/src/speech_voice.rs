@@ -415,6 +415,18 @@ impl Voices {
     pub fn release_unused(&self) {
         if !matches!(self.route(), Route::Phonon(_)) { self.phonon.lock().unwrap().take(); }
     }
+    /// Phonon S into memory now (Setup's voice row: learning the chosen voice needs it loaded, and after a relaunch
+    /// nothing else may load it before the user's first reply). Nothing while it is loaded or not the voice.
+    pub fn load_phonon(&self) -> Result<()> {
+        if !matches!(self.route(), Route::Phonon(_)) { return Ok(()) }
+        let mut slot = self.phonon.lock().unwrap();
+        if slot.is_none() {
+            let started = std::time::Instant::now();
+            *slot = Some((self.load_phonon)(&self.phonon_dir).context("Phonon S not loaded")?);
+            eprintln!("voice: Phonon S loaded in {:.1} s (Setup learns the voice)", started.elapsed().as_secs_f64());
+        }
+        Ok(())
+    }
     /// Bank lines are Jarvis's recordings: they play only while Jarvis is the voice.
     pub fn bank_matches(&self) -> bool {
         self.route() == Route::Jarvis

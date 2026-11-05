@@ -1488,7 +1488,7 @@ fn embed_selected(
             // invoking the model. Backfill retires old empty turns through the same lookup.
             if chunk.role == "speaker_turn" && audio_refs(root, &chunk)?.is_empty() {
                 let message = format!("audio chunk {} has no captured samples for {} [{},{})", chunk.id, chunk.source, chunk.start_ns, chunk.end_ns);
-                failed(id, &chunk.content_hash, crate::wall_ns().saturating_add(300_000_000_000) as i64, message)?;
+                failed(id, &chunk.content_hash, crate::wall_ns().saturating_add(RETRY_AFTER_NS) as i64, message)?;
                 continue;
             }
             chunks.push(chunk);
@@ -1517,7 +1517,7 @@ fn embed_selected(
                     // chunk: retire it rather than retry every five minutes forever. A new
                     // revision (put) clears the row and makes the chunk eligible again.
                     let retry=if crate::embedding::no_captured_audio(&error) && capture_passed(&db,id)? {RETIRED}
-                        else {crate::wall_ns().saturating_add(300_000_000_000) as i64};
+                        else {crate::wall_ns().saturating_add(RETRY_AFTER_NS) as i64};
                     let message=format!("{error:#}").chars().take(1024).collect::<String>();
                     failed(id, &chunk.content_hash, retry, message)?;
                     eprintln!("chunk embedding delayed {id}: {error:#}");
@@ -1562,28 +1562,57 @@ fn capture_passed(db: &Connection, id: &str) -> Result<bool> {
     let sql = format!("SELECT ({SPEAKER_CAPTURE_REACHED}) OR c.end_wall_ns<?2 FROM main.timeline_chunks c WHERE c.id=?1");
     Ok(db.query_row(&sql, params![id, horizon], |r| r.get::<_, bool>(0)).optional()?.unwrap_or(true))
 }
+/// A failed chunk is selected again this long after its failure (`retry_wall_ns` = failure + this).
+const RETRY_AFTER_NS: u64 = 300_000_000_000;
 /// Current-content failures survive retry backoff and successful work on other chunks.
 /// Stale revisions/model versions cannot keep index health red, and neither can audio
 /// that was never captured (waiting for a flush, or retired): the user cannot act on either.
+/// A memory pause ("embedding paused": the worker refuses work while free memory is low)
+/// is not a fault and never health (4 Nov: red 2 h 42 min as "the search model is not
+/// responding correctly" while every pass embedded with 0 failures). A model-wide failure
+/// (the model missing, not starting, not responding, the disk full) clears once this model
+/// stored a vector after it: the model works again, though the failed chunk waits its turn.
 pub fn embedding_error_status(root:&Path,model:&Model)->Result<Option<String>> {
     let db=store::read_index(root)?;
-    let message:Option<String>=db.query_row("SELECT min(e.error) FROM chunk_embedding_errors e JOIN timeline_chunks c ON c.id=e.chunk_id AND c.content_hash=e.content_hash WHERE e.model_id=?1 AND e.model_version=?2 AND e.retry_wall_ns<?3 AND e.error NOT LIKE '%database is locked%' AND e.error NOT LIKE '%database table is locked%' AND e.error NOT LIKE 'audio chunk % has no captured samples for %'",params![model.id,model.version,RETIRED],|r|r.get(0))?;
-    Ok(message.map(|m|embedding_failure_status(&m)))
+    let mut stmt=db.prepare("SELECT e.error,max(e.retry_wall_ns) FROM chunk_embedding_errors e JOIN timeline_chunks c ON c.id=e.chunk_id AND c.content_hash=e.content_hash WHERE e.model_id=?1 AND e.model_version=?2 AND e.retry_wall_ns<?3 AND e.error NOT LIKE '%database is locked%' AND e.error NOT LIKE '%database table is locked%' AND e.error NOT LIKE 'audio chunk % has no captured samples for %' AND e.error NOT LIKE '%embedding paused%' GROUP BY e.error ORDER BY e.error")?;
+    let rows:Vec<(String,i64)>=stmt.query_map(params![model.id,model.version,RETIRED],|r|Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+    let mut last_ok:Option<i64>=None;
+    for (error,retry) in rows {
+        let (why,model_wide)=failure_cause(&error);
+        if model_wide {
+            let last=match last_ok {Some(t)=>t,None=>{
+                let t=db.query_row("SELECT coalesce(max(created_wall_ns),0) FROM chunk_embeddings WHERE model_id=?1 AND model_version=?2",params![model.id,model.version],|r|r.get::<_,i64>(0))?;
+                *last_ok.insert(t)
+            }};
+            if last>retry.saturating_sub(RETRY_AFTER_NS as i64) {continue;}
+        }
+        return Ok(Some(failure_sentence(why)));
+    }
+    Ok(None)
 }
 /// The menu line for an indexing failure: one short plain sentence, never a chunk id,
 /// path or SQL text. `cause` is a stored error or a job error rendered with `{:#}`.
+/// A memory pause reads as a pause, not as a fault of the model.
 pub fn embedding_failure_status(cause:&str)->String {
+    if cause.to_ascii_lowercase().contains("embedding paused") {
+        return "Search indexing is paused while memory is low.".into();
+    }
+    failure_sentence(failure_cause(cause).0)
+}
+fn failure_sentence(why:&str)->String {format!("Search indexing is failing because {why}.")}
+/// Why indexing failed, and whether the cause is model-wide (disproved by any later success)
+/// rather than one item's content.
+fn failure_cause(cause:&str)->(&'static str,bool) {
     let c=cause.to_ascii_lowercase();
     let has=|words:&[&str]|words.iter().any(|w|c.contains(w));
-    let why=if has(&["no space left","disk full","storage full","enospc"]) {"the disk is full"}
-        else if has(&["runtime assets unavailable"]) {"the search model is not installed"}
-        else if has(&["start offline embedding worker"]) {"the search model could not start"}
-        else if has(&["embedding worker","timed out","embeddinggemma","identity mismatch","geometry","nonfinite","zero embedding"]) {"the search model is not responding correctly"}
-        else if has(&["image","frame","video"]) {"some screenshots cannot be read"}
-        else if has(&["audio","pcm","block","sample"]) {"some recordings cannot be read"}
-        else if has(&["sqlite","database","sql","query returned"]) {"the archive database returned an error"}
-        else {"some items cannot be read"};
-    format!("Search indexing is failing because {why}.")
+    if has(&["no space left","disk full","storage full","enospc"]) {("the disk is full",true)}
+        else if has(&["runtime assets unavailable"]) {("the search model is not installed",true)}
+        else if has(&["start offline embedding worker"]) {("the search model could not start",true)}
+        else if has(&["embedding worker","timed out","embeddinggemma","identity mismatch","geometry","nonfinite","zero embedding"]) {("the search model is not responding correctly",true)}
+        else if has(&["image","frame","video"]) {("some screenshots cannot be read",false)}
+        else if has(&["audio","pcm","block","sample"]) {("some recordings cannot be read",false)}
+        else if has(&["sqlite","database","sql","query returned"]) {("the archive database returned an error",false)}
+        else {("some items cannot be read",false)}
 }
 /// Resolve a chunk's audio against both hot and cold callback rows. Interval references
 /// remain valid across compaction; object/offset/rate are the *current* stored representation.

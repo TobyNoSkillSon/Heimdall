@@ -53,7 +53,7 @@ pub(crate) fn look(d: &DeciderStatus, pending: Option<&str>) -> Look {
         (None, None) => None,
     };
     let pending = pending.filter(|_| !swapping).map(str::to_string);
-    let enabled = d.options.iter().map(|o| o.present && !swapping).collect();
+    let enabled = d.options.iter().map(|o| (o.present || d.downloadable) && !swapping).collect();
     Look { header, spinning, line, lit, pending, enabled }
 }
 
@@ -61,7 +61,7 @@ pub(crate) fn look(d: &DeciderStatus, pending: Option<&str>) -> Look {
 /// another present one is marked; while a swap runs nothing is.
 pub(crate) fn click(d: &DeciderStatus, key: &str) -> Option<String> {
     let current = look(d, None).lit;
-    let ok = d.option(key).is_some_and(|o| o.present) && !matches!(d.state, DeciderState::Swapping { .. });
+    let ok = d.option(key).is_some_and(|o| o.present || d.downloadable) && !matches!(d.state, DeciderState::Swapping { .. });
     (ok && current.as_deref() != Some(key) && key != d.chosen).then(|| key.to_string())
 }
 
@@ -203,6 +203,7 @@ mod tests {
             fallback: None,
             reason: None,
             state,
+            downloadable: false,
         }
     }
 

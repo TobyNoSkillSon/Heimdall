@@ -293,7 +293,11 @@ fn set_decision(db: &Connection, session: i64, id: &str, decision: &Value) -> Re
 }
 impl Drop for Index {
     fn drop(&mut self) {
-        // Quit: give writes queued behind a held lock a bounded chance to land (the Quit limit is 45 s).
+        // Quit: give writes queued behind a held lock a bounded chance to land (the Quit limit is 45 s), the live
+        // events' writer thread first (`live_event`).
+        if !settle_live_events(std::time::Duration::from_secs(5)) {
+            eprintln!("Archive live events still queued at exit");
+        }
         if !self.queue.settle(std::time::Duration::from_secs(15)) {
             eprintln!("Archive live writes still queued at exit: {}", self.queue.pending());
         }
@@ -301,22 +305,83 @@ impl Drop for Index {
     }
 }
 /// Live-loop evidence written outside the `Index` (send context, a typed send decision, speak-back), as
-/// `Journal::event`: it shares the store's live queue, so it never waits out a held lock either. The session's journal
-/// stays open: opening one opens a connection to the index and reads its header and schema, on the live loop for every
-/// context update (4 Nov 03:36 hang report: the live loop stood 2.2 s in that open, behind the disk).
+/// `Journal::event`. Bug note 2026-11-05T02-53-27-5: the live loop stood 2.1-2.2 s in `Journal::open` (4 Nov 03:36 and
+/// 04:19, a new SQLite connection reading its header behind a struggling disk), and each event also waited for its
+/// commit. Now the caller only queues the event: one worker thread keeps the session's journal open and writes the
+/// events in the order they were queued (`settle_live_events` lets Quit and tests wait for them). A failed write is
+/// logged there. Tests write before returning, as before, so a record is readable at once.
 pub(crate) fn live_event(session: &Path, kind: &str, source: &str, ids: &[String], host_ns: u64, payload: serde_json::Value) -> Result<()> {
-    static OPEN: std::sync::Mutex<Option<(PathBuf, heimdall_archive::Journal)>> = std::sync::Mutex::new(None);
-    // In use by another thread (its event waits up to `live::COMMIT_WAIT`): this one opens its own, as before.
-    let mut open = match OPEN.try_lock() {
-        Ok(open) => open,
-        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
-        Err(std::sync::TryLockError::WouldBlock) => return heimdall_archive::Journal::open(session)?.event(kind, source, ids, host_ns, payload),
-    };
-    if open.as_ref().is_none_or(|(at, _)| at != session) {
-        *open = None;
-        *open = Some((session.to_path_buf(), heimdall_archive::Journal::open(session)?));
+    queue_live_event(session, kind, source, ids, host_ns, payload)?;
+    #[cfg(test)]
+    settle_live_events(std::time::Duration::from_secs(10));
+    Ok(())
+}
+
+struct LiveEvent { session: PathBuf, kind: String, source: String, ids: Vec<String>, host_ns: u64, payload: serde_json::Value }
+
+/// Events queued and events written, with a condvar for `settle_live_events`.
+struct LiveEvents { tx: crossbeam_channel::Sender<LiveEvent>, counts: Mutex<(u64, u64)>, done: std::sync::Condvar }
+
+#[cfg(test)]
+static LIVE_EVENT_GATE: Mutex<()> = Mutex::new(());
+
+fn live_events() -> Result<&'static LiveEvents> {
+    static WORKER: std::sync::OnceLock<std::result::Result<LiveEvents, String>> = std::sync::OnceLock::new();
+    WORKER.get_or_init(|| {
+        let (tx, rx) = crossbeam_channel::unbounded::<LiveEvent>();
+        std::thread::Builder::new().name("heimdall-live-events".into()).spawn(move || {
+            let mut open: Option<(PathBuf, heimdall_archive::Journal)> = None;
+            for e in rx {
+                #[cfg(test)]
+                let _gate = LIVE_EVENT_GATE.lock().unwrap_or_else(|e| e.into_inner());
+                let written = (|| -> Result<()> {
+                    if open.as_ref().is_none_or(|(at, _)| *at != e.session) {
+                        open = None;
+                        open = Some((e.session.clone(), heimdall_archive::Journal::open(&e.session)?));
+                    }
+                    open.as_ref().expect("opened above").1.event(&e.kind, &e.source, &e.ids, e.host_ns, e.payload)
+                })();
+                if let Err(err) = written {
+                    eprintln!("{} not archived: {err:#}", e.kind);
+                    // The next event opens the journal again.
+                    open = None;
+                }
+                if let Ok(w) = live_events() {
+                    w.counts.lock().unwrap_or_else(|e| e.into_inner()).1 += 1;
+                    w.done.notify_all();
+                }
+            }
+        }).map_err(|e| format!("the live event writer did not start: {e}"))?;
+        Ok(LiveEvents { tx, counts: Mutex::new((0, 0)), done: std::sync::Condvar::new() })
+    }).as_ref().map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// Queues one event for the writer thread; never opens the archive or waits on it.
+fn queue_live_event(session: &Path, kind: &str, source: &str, ids: &[String], host_ns: u64, payload: serde_json::Value) -> Result<()> {
+    let w = live_events()?;
+    // Counted before it is sent, so a settle that starts now waits for it.
+    let mut counts = w.counts.lock().unwrap_or_else(|e| e.into_inner());
+    counts.0 += 1;
+    let e = LiveEvent { session: session.to_path_buf(), kind: kind.into(), source: source.into(), ids: ids.to_vec(), host_ns, payload };
+    if w.tx.send(e).is_err() {
+        counts.0 -= 1;
+        anyhow::bail!("the live event writer stopped");
     }
-    open.as_ref().expect("opened above").1.event(kind, source, ids, host_ns, payload)
+    Ok(())
+}
+
+/// Waits up to `limit` for every event queued so far to be written. Whether they all were.
+pub(crate) fn settle_live_events(limit: std::time::Duration) -> bool {
+    let Ok(w) = live_events() else { return true };
+    let deadline = std::time::Instant::now() + limit;
+    let mut counts = w.counts.lock().unwrap_or_else(|e| e.into_inner());
+    let target = counts.0;
+    while counts.1 < target {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() { return false }
+        counts = w.done.wait_timeout(counts, left).unwrap_or_else(|e| e.into_inner()).0;
+    }
+    true
 }
 pub struct ArchiveSearch {
     pub root: PathBuf,
@@ -447,6 +512,35 @@ mod search_tests {
 }
 
 fn timeline_pages()->Arc<crate::mcp_timeline::Pages>{static PAGES:std::sync::OnceLock<Arc<crate::mcp_timeline::Pages>>=std::sync::OnceLock::new();PAGES.get_or_init(||Arc::new(crate::mcp_timeline::Pages::default())).clone()}
+
+#[cfg(test)]
+mod live_event_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// Bug note 2026-11-05T02-53-27-5: the live loop stood 2.2 s opening the journal for a send-context event. Queuing
+    /// returns at once while the writer is stuck (here held at its gate, as behind a slow disk); the events then land
+    /// in the order they were queued.
+    #[test]
+    fn a_live_event_is_queued_without_waiting_on_the_archive_and_lands_in_order() -> Result<()> {
+        let t = tempfile::tempdir()?;
+        std::fs::create_dir_all(t.path().join("archive"))?;
+        let session = t.path().join("archive/session-live");
+        let index = Index::open(&session, 0, Arc::new(Mutex::new(None)))?;
+        let gate = LIVE_EVENT_GATE.lock().unwrap();
+        let at = Instant::now();
+        for n in 0..3 {
+            queue_live_event(&session, "send_context", "heimdall", &[], n, json!({"n": n}))?;
+        }
+        assert!(at.elapsed() < Duration::from_millis(50), "queuing waited {:?}", at.elapsed());
+        assert!(!settle_live_events(Duration::from_millis(100)), "the writer is held");
+        drop(gate);
+        assert!(settle_live_events(Duration::from_secs(10)));
+        let ns: Vec<Value> = index.evidence.records()?.into_iter().filter(|r| r.kind == "send_context").map(|r| r.payload["n"].clone()).collect();
+        assert_eq!(ns, [json!(0), json!(1), json!(2)]);
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod live_lock_tests {

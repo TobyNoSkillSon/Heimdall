@@ -42,6 +42,8 @@ pub enum Control {
     Waiting { id: String, action: String, label: String },
     /// A Settled row's proof chip: shows the proof under the row; a file proof also opens.
     Proof { key: String, open: Option<String> },
+    /// A job island's bottom row: show or hide its stage band (`details`).
+    Details,
 }
 
 impl Control {
@@ -55,6 +57,7 @@ impl Control {
             (Approve { key: x, action: a }, Approve { key: y, action: b }) | (Waiting { id: x, action: a, .. }, Waiting { id: y, action: b, .. }) => x == y && a == b,
             (Yes { list: a, id: x }, Yes { list: b, id: y }) => a == b && x == y,
             (Proof { key: x, .. }, Proof { key: y, .. }) => x == y,
+            (Details, Details) => true,
             _ => false,
         }
     }
@@ -131,6 +134,19 @@ pub fn is_job(i: &Island) -> bool {
     ["task", "waiting", "result", "failed"].contains(&i.look())
 }
 
+/// A job island has something of its own to show besides the stage band: a part of the agent's or the binding's
+/// (HTML, a picture, a chart, a question), key values or an image.
+pub fn job_has_graphic(i: &Island) -> bool {
+    i.parts().iter().any(|q| j::str(q.get("type")) != Some("band")) || !i.facts().is_empty() || i.image().is_some()
+}
+
+/// The stage band shows on a job island while it has nothing else to show, or when the user opened its details (`details`,
+/// a click on the bottom row).
+pub fn job_shows_band(i: &Island) -> bool {
+    // A done island has no disclosure, so an opened band does not outlive the run (review, 4 Nov).
+    !job_has_graphic(i) || (i.state() != "done" && i.raw.get("details").and_then(Value::as_bool) == Some(true))
+}
+
 /// What an open island shows, in order. A job island: the agent's summary, steps, key values and image, its own
 /// parts, then one bottom row with the open target's chip on the left and the glance (stage, a live graphic, how
 /// long) on the right (the content gets the room). Any other island: its status first when it
@@ -145,8 +161,14 @@ pub fn body_parts(i: &Island) -> Vec<Json> {
         if crate::model::onesys::job_goal(i).is_some() {
             p.push(part("goalchip"));
         }
+        // The one telling graphic leads (4 Nov: job islands should look better than a bare stage bar); the stage band goes behind the bottom
+        // row's disclosure once there is something to show, and stays as the body while there is nothing else.
+        let shown = job_shows_band(i);
         for mut q in i.parts() {
             if j::str(q.get("type")) == Some("band") {
+                if !shown {
+                    continue;
+                }
                 q.insert("nohelpers".into(), Value::Bool(true));
             }
             p.push(q);
@@ -844,21 +866,45 @@ fn job_fact(island: &Island, p: &Json, root: &CALayer, y: f64, w: f64, scale: f6
         }
         "waiting" => left("waits on you", orange(), Some("hand.raised"), &mut left_x),
         "failed" => left("failed", red(), Some("xmark"), &mut left_x),
-        _ => match quiet {
-            Some(u) => left(&format!("not heard from in {}", onesys::minutes(time::now() - u)), white(0.62), Some("clock"), &mut left_x),
-            None => left(&onesys::fact_line(onesys::helpers_working(island)), white(0.5), Some("clock"), &mut left_x),
+        _ => match (quiet, island.summary()) {
+            (Some(u), _) => left(&format!("not heard from in {}", onesys::minutes(time::now() - u)), white(0.62), Some("clock"), &mut left_x),
+            // The one-line state (4 Nov): the agent's now line, white, beside the clock; a long one steps down a size.
+            (None, Some(s)) => {
+                let clock = if started.is_some() { text_width(&elapsed(), &f).max(CLOCK_MIN) } else { 0.0 };
+                let room = w - clock - if job_has_graphic(island) && state != "done" { CHEVRON_W } else { 0.0 } - 12.0;
+                let font = [13.0, 12.0].into_iter().map(|z| system(z, Weight::Regular)).find(|ft| text_width(&s, ft) <= room).unwrap_or_else(|| system(12.0, Weight::Regular));
+                let t = text1(&s, &font, &white(0.86), room, scale);
+                t.setPosition(pt(0.0, mid - t.bounds().size.height / 2.0));
+                root.addSublayer(&t);
+            }
+            (None, None) => left(&onesys::fact_line(onesys::helpers_working(island)), white(0.5), Some("clock"), &mut left_x),
         },
     }
+    // With a graphic, the stage band sits behind this row: a click shows or hides it, the small chevron says which.
+    let disclose = job_has_graphic(island) && state != "done";
+    let right = if disclose { CHEVRON_W } else { 0.0 };
+    if disclose {
+        let open = island.raw.get("details").and_then(Value::as_bool) == Some(true);
+        let c = symbol_layer(if open { "chevron.up" } else { "chevron.down" }, 9.0, &[white(0.38)], Weight::Semibold, scale);
+        c.setPosition(pt(w - CHEVRON_W / 2.0 + 2.0, mid));
+        root.addSublayer(&c);
+        body.regions.push(HitRegion { rect: Rect::new(0.0, y, w, h), control: Control::Details });
+    }
     if started.is_some() {
-        let t = text_layer(&elapsed(), &f, &white(0.7), 90.0, 1, Align::Right, false, scale);
+        let t = text_layer(&elapsed(), &f, &white(0.7), CLOCK_W, 1, Align::Right, false, scale);
         let th = t.bounds().size.height;
-        t.setBounds(cgr(Rect::new(0.0, 0.0, 90.0, th)));
-        t.setPosition(pt(w - 90.0, mid - th / 2.0));
+        t.setBounds(cgr(Rect::new(0.0, 0.0, CLOCK_W, th)));
+        t.setPosition(pt(w - CLOCK_W - right, mid - th / 2.0));
         root.addSublayer(&t);
         body.clock = Some((t, Box::new(elapsed)));
     }
     y + h
 }
+
+/// The bottom row's clock box, the least room the now line leaves the clock, and the disclosure's width.
+const CLOCK_W: f64 = 64.0;
+const CLOCK_MIN: f64 = 40.0;
+const CHEVRON_W: f64 = 16.0;
 
 /// A day timeline's colour per kind: Apple's dark-mode system colours.
 pub fn timeline_color(kind: &str) -> Retained<NSColor> {
@@ -1114,6 +1160,22 @@ pub fn capitalized(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 4 Nov: a job island with a graphic folds its stage band behind the bottom row; without one, the band is the body.
+    #[test]
+    fn a_job_islands_band_folds_behind_its_graphic() {
+        let band = crate::jobj! {"type": "band", "code": true, "segments": [{"title": "Reading", "secs": 60.0}]};
+        let html = crate::jobj! {"type": "html", "html": "<span class=\"big\">8.5</span>", "islandAgent": true};
+        let types = |o: Json| body_parts(&Island::new("j", o)).iter().map(|p| j::str(p.get("type")).unwrap_or("").to_owned()).collect::<Vec<_>>();
+        let base = |parts: Vec<Json>, details: bool| crate::jobj! {"title": "Night pass", "state": "running", "sent": "Merge the night's branches", "summary": "Merging the call-state fix",
+            "parts": parts.into_iter().map(Value::Object).collect::<Vec<_>>(), "details": details};
+        assert_eq!(types(base(vec![band.clone()], false)), ["band", "jobfact"]);
+        assert_eq!(types(base(vec![html.clone(), band.clone()], false)), ["html", "jobfact"]);
+        assert_eq!(types(base(vec![html.clone(), band.clone()], true)), ["html", "band", "jobfact"]);
+        let mut done = base(vec![html, band], true);
+        done.insert("state".into(), Value::from("done"));
+        assert_eq!(types(done), ["html", "jobfact"]);
+    }
 
     /// Bounds of -1e308 and 1e308 overflow `hi - lo` to infinity, which used to put the knob at NaN.
     #[test]

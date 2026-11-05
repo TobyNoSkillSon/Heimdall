@@ -5,7 +5,7 @@
 //! (`harness.rs`), and Claude Code runs in `bypassPermissions`. Two hooks in each Claude config cover what that mode
 //! leaves:
 //! - `hook pretool` (`PreToolUse`) runs before every tool call in every mode and refuses only what is on the deny list
-//!   (`deny.rs`: deleting outside the Vault and scratch, disk formatting, the Keychain, system settings). A refusal is an
+//!   (`deny.rs`: deleting outside Heimdall's home folder and scratch, disk formatting, the Keychain, system settings). A refusal is an
 //!   answer the agent reads at once, so nothing waits; anything else it leaves alone.
 //! - `hook permission` (`PermissionRequest`) answers every prompt Claude would show: approve, unless the deny list
 //!   refuses it. Claude still asks through T3 for a few checks bypass mode keeps (a critical-path `rm`, a command its
@@ -162,7 +162,7 @@ pub enum Decision {
 const BACKGROUND: &str = "Heimdall's approval hook: a background call answers with JSON only and uses no tools.";
 
 /// What the permission hook answers for one prompt, or None to leave it to the harness (a question for the user).
-/// `vault` is Heimdall's home (the Vault root), `user` the user's home folder, `cwd` the session's folder.
+/// `vault` is Heimdall's home folder, `user` the user's home folder, `cwd` the session's folder.
 pub fn decide(tool: &str, input: &Value, vault: &Path, user: &Path, cwd: Option<&Path>, background: bool) -> Option<Decision> {
     if tool == "AskUserQuestion" { return None; }
     if background { return Some(Decision::Deny(BACKGROUND.into())); }
@@ -177,7 +177,7 @@ fn user_home() -> PathBuf {
 }
 
 /// `heimdall-emergency hook permission`: reads Claude's PermissionRequest input on stdin and prints the answer. Every
-/// answer is logged. `home` is Heimdall's home folder (the Vault root).
+/// answer is logged. `home` is Heimdall's home folder.
 pub fn hook(data: &Path, home: &Path, stdin: &str) -> String {
     hook_for(data, home, &user_home(), stdin)
 }
@@ -247,9 +247,13 @@ fn granted_at(data: &Path, tool: &str, input: &Value, vault: &Path, user: &Path,
     if tool == "Bash" {
         let command = input["command"].as_str().unwrap_or("");
         let programs = crate::deny::programs(command);
-        const BESIDE: [&str; 8] = ["rm", "rmdir", "unlink", "du", "ls", "stat", "echo", "test"];
+        const BESIDE: [&str; 9] = ["rm", "rmdir", "unlink", "trash", "du", "ls", "stat", "echo", "test"];
         let removal = programs == ["osascript"];
-        if command.contains("HOME=") || !(removal || programs.iter().all(|p| BESIDE.contains(&p.as_str()))) { return None; }
+        // A keychain grant (bug note 2026-11-04T23-01-22): `security` calls and a few readers only, so nothing in the
+        // line can swap the file for a link to another keychain (`ln`, `mv`, `cp`) between this check and the call.
+        const KEYCHAIN_BESIDE: [&str; 6] = ["security", "cat", "echo", "test", "ls", "stat"];
+        let keychain = programs.iter().any(|p| p == "security") && programs.iter().all(|p| KEYCHAIN_BESIDE.contains(&p.as_str()));
+        if command.contains("HOME=") || !(removal || keychain || programs.iter().all(|p| BESIDE.contains(&p.as_str()))) { return None; }
     }
     let ledger = grants::Ledger::load(data, &format!("{tool}\n{input}"), now_ms);
     if ledger.is_empty() { return None; }
@@ -358,7 +362,7 @@ mod tests {
     }
 
     /// Bug note 2026-11-02T22-45-25 and the 2 Nov approvals.log: a heredoc append, a chained du && rm && ls, a pkill by
-    /// pattern, a sed with escapes, an edit outside the Vault: all approved, in any session (the user's own, a nested
+    /// pattern, a sed with escapes, an edit outside the home folder: all approved, in any session (the user's own, a nested
     /// delegate child Heimdall never recorded, a session outside T3).
     #[test]
     fn every_session_gets_an_approval_for_anything_off_the_deny_list() {
@@ -472,6 +476,66 @@ mod tests {
         assert_eq!(ask(&c), "allow", "the permission hook honours the same grant for the same command");
         assert_eq!(ask("rm -rf ~/Documents"), "deny");
         assert!(std::fs::read_to_string(data.join(LOG)).unwrap().contains("[User's yes on ask-7]"));
+    }
+
+    /// Bug note 2026-11-04T18-59-48: the relay's card carried no grant (its tool schema was the one it loaded on 3 Nov,
+    /// before grants), so nothing was written and the rm was refused. With a grant on the card (here written as
+    /// `~/…`, as the relay wrote it), the plain rm of the absolute path passes; the `~` form and a path beside it do not.
+    #[test]
+    fn the_arsenal_card_with_a_grant_lets_its_rm_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let prev = "/Users/t/Applications/Arsenal.app.previous";
+        let c = format!("rm -rf \"{prev}\" && echo deleted");
+        assert_eq!(verdict(&pre(&data, &c)), "deny", "a card with no grant writes nothing");
+        grants::write(&data, &user(), &vault(), "ask-a", "q1", "Delete it", &["~/Applications/Arsenal.app.previous".into()], &[], now()).unwrap();
+        assert_eq!(verdict(&pre(&data, &format!("rm -rf \"{prev}\" \"{prev}.rollback-state\""))), "deny", "a path the card did not name");
+        assert_eq!(verdict(&pre(&data, "rm -rf ~/Applications/Arsenal.app.previous")), "deny", "only from /");
+        assert!(pre(&data, "rm -rf ~/Applications/Arsenal.app.previous")["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().contains("absolute path"));
+        assert_eq!(verdict(&pre(&data, &c)), "allow");
+    }
+
+    /// Bug note 2026-11-04T17-57-58: the command behind T3's "Dangerous rm operation on possibly-empty variable path"
+    /// card. Claude asked the PermissionRequest hook, which allowed it at once (approvals.log 17:55:23, the task's
+    /// transcript: source hook, safetyCheck dangerousRemoval); the PreToolUse guard has nothing against it.
+    #[test]
+    fn the_possibly_empty_variable_rm_in_the_vault_is_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let t = transcript(dir.path(), "t.jsonl", "# Heimdall task");
+        let c = "cd /Users/t/Work/Assistant/Research/climbs/report-beauty-2026-11-04; for w in huel night video; do mkdir -p rounds/0/phone; mv rounds/0/shots/$w/$w-mobile.png rounds/0/phone/; done; sed -i '' 's|rm -f $S/$w-t9\\*.png|rm -f $S/$w-t9*.png; mkdir -p rounds/$N/phone|' tools/render_round.sh; rm -f $S/$w-t9*.png";
+        assert_eq!(ask(&data, &t, "Bash", json!({"command": c}))["hookSpecificOutput"]["decision"]["behavior"], "allow");
+        assert_eq!(pre(&data, c), Value::Null);
+        // A refusal stays one: the same shape aimed at the root.
+        assert_eq!(ask(&data, &t, "Bash", json!({"command": "rm -rf $S/*"}))["hookSpecificOutput"]["decision"]["behavior"], "deny");
+    }
+
+    /// Bug note 2026-11-04T23-01-22: the user's click on a card granting one new keychain file lets the signing setup on
+    /// that file through, in one command or several; nothing that could swap the file or reach another keychain.
+    #[test]
+    fn a_keychain_grant_lets_the_signing_setup_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let k = "/Users/t/Library/Keychains/heimdall-release-signing.keychain-db";
+        let setup = format!("security create-keychain -p \"$(cat keychain-password)\" {k} && security unlock-keychain -p \"$(cat keychain-password)\" {k} && security import key.pem -k {k} -T /usr/bin/codesign >/dev/null");
+        assert_eq!(verdict(&pre(&data, &setup)), "deny", "no click, no keychain");
+        assert!(grants::write_with(&data, &user(), &vault(), "ask-k", "q1", "Allow it", &[], &[], Some("~/Library/Keychains/login.keychain-db"), now()).is_err());
+        grants::write_with(&data, &user(), &vault(), "ask-k", "q1", "Allow it", &[], &[], Some("~/Library/Keychains/heimdall-release-signing.keychain-db"), now()).unwrap();
+        for c in [
+            format!("ln -s /Users/t/Library/Keychains/login.keychain-db {k}; security import key.pem -k {k}"),
+            format!("cp /tmp/x {k} && security import key.pem -k {k}"),
+            format!("{setup} && security find-generic-password -s Heimdall -w"),
+            format!("{setup}; security unlock-keychain -p x /Users/t/Library/Keychains/login.keychain-db"),
+            "security create-keychain -p x /Users/t/Library/Keychains/other.keychain-db".into(),
+            format!("HOME=/tmp security import key.pem -k {k}"),
+        ] {
+            assert_eq!(verdict(&pre(&data, &c)), "deny", "{c}");
+        }
+        let out = pre(&data, &setup);
+        assert_eq!(verdict(&out), "allow", "{out}");
+        assert!(out["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().contains("ask-k"));
+        assert_eq!(verdict(&pre(&data, &format!("security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k pw {k} >/dev/null"))), "allow", "a later step");
+        assert!(std::fs::read_to_string(data.join(LOG)).unwrap().contains("[User's yes on ask-k] security create-keychain"));
     }
 
     #[test]

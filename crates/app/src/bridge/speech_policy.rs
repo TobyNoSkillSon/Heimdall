@@ -9,6 +9,15 @@
 //! starting then is not the user's turn (`hold`), and a microphone utterance lying wholly inside that window is archived
 //! only, never a transcript turn, a decision or a wake (pipeline/utterances.rs).
 //!
+//! **Who may talk in a call** (bug note 2026-11-05T02-32-17: speak only in a quiet gap, and stop as soon as anyone
+//! talks, guests included). A voice opening on a call source (`other_voice`) is reported to the app
+//! (`set_call_voice_hook`): a reply waiting to start waits for the gap (`hold::OwnerVoice::other_voice`), and one
+//! audible when the guest's voice has lasted `GUEST_CUT_AFTER` stops (`Tools::guest_talked_over`). Heimdall's own
+//! voice never reaches a call source's tap (it plays on the Mac, the tap carries the call app's output), and the
+//! `GUEST_CUT_AFTER` wait passes a click, a cough or a blip of echo from a guest's open speakers.
+//! While the user is in a call Heimdall also speaks quieter (`CALL_VOICE_GAIN`, bug note 2026-11-05T00-10-37: it was
+//! too loud).
+//!
 //! **In a conversation.** the user (20 Oct, 23:09): "when I'm talking to someone I don't want you to talk when a worker
 //! updated or whatever, you just ask me a question." the user is in a conversation while the call shows it is live: a call app's
 //! line with words (Discord, Zoom, Slack, Teams, FaceTime: `context_policy::CALL_BUNDLES`, diarized or still waiting
@@ -30,7 +39,9 @@
 //! the latest `HELD_LINES` wait, and once the conversation is over (the call window, or a goodbye), the user is quiet,
 //! Speaking is on, Heimdall is silent and the agent on, they are said through the normal path, each once, with no
 //! lead-in (`mcp_actions::Host::replay_held`, checked on every capture event from `Tools::speech_status`). A line is
-//! dropped instead when it is older than `HELD_FOR`, or a newer reply was queued for speech after it. When the user's own
+//! dropped instead when it is older than `HELD_FOR`, or a newer reply was queued for speech after it. Bug note
+//! 2026-11-05T02-32-37: a voice line minutes late has no point. A held line is shown on the island at once and is said only in the next quiet gap within `HELD_FOR` (a minute); past it,
+//! it stays text only, after the call too (held lines were said 136-472 s late on 4-5 Nov, with `HELD_FOR` 600 s). When the user's own
 //! words reach the agent after a line was held (his wake: a line the decider sent, his name, a typed message, a drop
 //! with his words), he is talking to Heimdall: the newest such line is said as soon as he is quiet, in a call or not
 //! (while nobody else is talking on the call right then), unless a newer reply is queued first, and the older ones are
@@ -64,7 +75,15 @@ pub(crate) const CALL_SOURCE_GONE: Duration = Duration::from_secs(3);
 /// A call source's voice open longer than this without its end proves nothing more (a detector that missed the end).
 pub(crate) const OPEN_VOICE_MAX: Duration = Duration::from_secs(60);
 /// What a `speak` call returns while the user is in a conversation: one line, and what to do instead.
-pub(crate) const HELD_IN_CONVERSATION: &str = "Not spoken: User is talking with other people, so it was shown silently on the island; it is said once the call ends or he next talks to you, unless you reply again first. Until the conversation ends, nothing you say is played unless he addresses you by name; when he needs to answer, use `ask` with two to four short options.";
+pub(crate) const HELD_IN_CONVERSATION: &str = "Not spoken: User is talking with other people, so it was shown silently on the island; it is said only if he talks to you or the call ends within a minute, unless you reply again first, and otherwise stays as text. Until the conversation ends, nothing you say is played unless he addresses you by name; when he needs to answer, use `ask` with two to four short options.";
+/// Heimdall's voice level while the user is in a call (bug note 2026-11-05T00-10-37: it was too loud): half the
+/// amplitude, about 6 dB down, under the call's voices instead of over them.
+pub(crate) const CALL_VOICE_GAIN: f32 = 0.5;
+/// A guest's voice on a call source must last this long while Heimdall is audible before it stops him: past a click,
+/// a cough or a blip of echo, well inside "stop as soon as anyone talks" (bug note 2026-11-05T02-32-17).
+pub(crate) const GUEST_CUT_AFTER: Duration = Duration::from_millis(400);
+/// What the app does when a voice opens (`Some(start)`) or ends (`None`) on call source `source` (`set_call_voice_hook`).
+pub(crate) type CallVoiceHook = Arc<dyn Fn(&str, Option<u64>) + Send + Sync>;
 
 /// The user's `words` ask Heimdall to listen to `target`: a "listen" or "słuchaj" not negated just before it ("stop
 /// listening", "don't listen", "nie słuchaj"), followed within a few words by the target's name ("listen to Vim and
@@ -113,8 +132,11 @@ pub(crate) struct SpeechPolicy {
     /// (`decide::send::call_active_within`).
     farewell_ns: AtomicU64,
     /// The agent's current run was woken by the user addressing Heimdall by name: its replies may be spoken during a
-    /// conversation. Cleared when the run settles, the user stops it, or the agent starts.
-    addressed: AtomicBool,
+    /// conversation. Cleared when the run settles, the user stops it, or the agent starts. Shared with the skipped
+    /// reply's retry, which sets it as it wakes the agent (`addressed_flag`).
+    addressed: Arc<AtomicBool>,
+    /// The app's reaction to a voice on a call source (`set_call_voice_hook`; none in unit tests).
+    call_voice_hook: Mutex<Option<CallVoiceHook>>,
     /// Host-clock spans of Heimdall's own short sounds besides the cue (instant acknowledgements, pipeline/ack.rs),
     /// newest last, at most `OWN_SOUNDS`.
     /// Each is (opens, sounds until, closes): see `own_sound_until`.
@@ -156,12 +178,28 @@ pub(crate) struct Due {
 }
 /// Held lines kept for after the conversation; the oldest goes first past it.
 pub(crate) const HELD_LINES: usize = 4;
-/// A held line older than this is not said after the call: it is stale.
-pub(crate) const HELD_FOR: Duration = Duration::from_secs(600);
+/// A held line older than this is never said, in the call or after it: it stays as the text shown when it was held.
+/// Bug note 2026-11-05T02-32-37: speak it within about 30-60 s, otherwise leave it as text only.
+/// Was 600 s: held lines were said 136-472 s late (20:51:34 178 s, 00:21:01 372 s, bug note 2026-11-05T00-14-40).
+pub(crate) const HELD_FOR: Duration = Duration::from_secs(60);
 #[derive(Default)]
 struct RunVoices {
     owner: Vec<(u64, String)>,
     guest: bool,
+    /// The utterance ID of the microphone line whose wake (a decider send, a wake key, his name) last woke or steered
+    /// this run: the line the island's Stop labels (pipeline/hotkeys.rs).
+    line: Option<String>,
+    /// The user pressed Stop on this run's speech: the rest of its replies show on the island unsaid, until his own words
+    /// reach the agent again or the run settles (review 5 Nov: the turn's final reply was said right after his Stop).
+    stopped: bool,
+    /// Which run this is: one more each time a run settles.
+    run: u64,
+}
+/// The run a reply was queued in, and the microphone line that woke or steered it (none: a T3 result, a notice).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct RunTag {
+    pub(crate) run: u64,
+    pub(crate) line: Option<String>,
 }
 /// The user's words count for `listen_to` this long after they woke the agent (a wake Agent off never delivered goes
 /// stale instead of authorising a later run).
@@ -177,7 +215,7 @@ impl Default for SpeechPolicy {
     fn default() -> Self {
         let cue_at_ns = Arc::new(AtomicU64::new(0));
         let player = Mutex::new(default_player(cue_at_ns.clone()));
-        Self { cue_on: AtomicBool::new(true), speaking_on: AtomicBool::new(true), #[cfg(test)] test_bluetooth: AtomicBool::new(false), cue_at_ns, player, other_line_ns: AtomicU64::new(0), other_voice: Default::default(), call_gone_ns: AtomicU64::new(0), farewell_ns: AtomicU64::new(0), addressed: AtomicBool::new(false), own: Default::default(),
+        Self { cue_on: AtomicBool::new(true), speaking_on: AtomicBool::new(true), #[cfg(test)] test_bluetooth: AtomicBool::new(false), cue_at_ns, player, other_line_ns: AtomicU64::new(0), other_voice: Default::default(), call_gone_ns: AtomicU64::new(0), farewell_ns: AtomicU64::new(0), addressed: Default::default(), call_voice_hook: Default::default(), own: Default::default(),
             played: Default::default(), echo_cancel_until: AtomicU64::new(0), echo_cancel_off: AtomicBool::new(false), run_voices: Default::default(),
             held: Default::default(), reply_queued_ns: AtomicU64::new(0), owner_words_ns: AtomicU64::new(0) }
     }
@@ -316,12 +354,33 @@ impl SpeechPolicy {
     }
     /// Another participant's voice on call source `source` started at `at_ns` (`Some`) or ended (`None`): the call is
     /// live while it is open (a long turn whose words are not in yet).
+    /// The app hears of it (`set_call_voice_hook`) after the lock is released: a voice begun before a goodbye is not
+    /// the call going on and is not reported.
     pub(crate) fn other_voice(&self, source: &str, at_ns: Option<u64>) {
-        let mut open = self.other_voice.lock().unwrap();
-        match at_ns {
-            Some(at) => { open.insert(source.to_owned(), at.max(1)); }
-            None => { open.remove(source); }
-        }
+        let report = {
+            let mut open = self.other_voice.lock().unwrap();
+            match at_ns {
+                Some(at) => { open.insert(source.to_owned(), at.max(1)); (at.max(1) > self.farewell_ns.load(Ordering::Acquire).saturating_add(decide::send::FAREWELL_SLACK_NS)).then_some(Some(at.max(1))) }
+                None => open.remove(source).map(|_| None),
+            }
+        };
+        if let Some(at) = report { self.call_voice(source, at); }
+    }
+    /// When the voice open on call source `source` began (host clock), if one is.
+    pub(crate) fn voice_open_since(&self, source: &str) -> Option<u64> {
+        self.other_voice.lock().unwrap().get(source).copied()
+    }
+    /// The app's reaction to a voice on a call source: the reply hold and the guest barge-in (bridge/speech.rs).
+    pub(crate) fn set_call_voice_hook(&self, hook: Option<CallVoiceHook>) {
+        *self.call_voice_hook.lock().unwrap() = hook;
+    }
+    fn call_voice(&self, source: &str, at_ns: Option<u64>) {
+        let hook = self.call_voice_hook.lock().unwrap().clone();
+        if let Some(hook) = hook { hook(source, at_ns); }
+    }
+    /// Heimdall's voice level for a line queued at `now_ns`: lower while the user is in a call (`CALL_VOICE_GAIN`).
+    pub(crate) fn voice_gain(&self, now_ns: u64) -> f32 {
+        if self.in_conversation(now_ns) { CALL_VOICE_GAIN } else { 1. }
     }
     /// A call source started: a call can be running.
     pub(crate) fn call_source_added(&self) {
@@ -331,7 +390,7 @@ impl SpeechPolicy {
     /// switched off or sleep, after which the call may go on unheard); `any_left`: another call source is still
     /// running. Stopped with none left, the call ends `CALL_SOURCE_GONE` later unless one comes back.
     pub(crate) fn call_source_removed(&self, source: &str, stopped: bool, any_left: bool, at_ns: u64) {
-        self.other_voice.lock().unwrap().remove(source);
+        if self.other_voice.lock().unwrap().remove(source).is_some() { self.call_voice(source, None); }
         if stopped && !any_left {
             self.call_gone_ns.store(at_ns.max(1), Ordering::Release);
         }
@@ -364,15 +423,50 @@ impl SpeechPolicy {
     pub(crate) fn addressed_wake(&self) {
         self.addressed.store(true, Ordering::Release);
     }
+    /// The current run may answer aloud in a conversation (the user addressed Heimdall by name).
+    pub(crate) fn addressed_now(&self) -> bool {
+        self.addressed.load(Ordering::Acquire)
+    }
+    /// The flag itself, for the skipped reply's retry: it wakes the agent from its own thread after the addressed run
+    /// settled, and its answer may be spoken in the call (bug notes 2026-11-04T20-52-24, 2026-11-05T00-14-40).
+    pub(crate) fn addressed_flag(&self) -> Arc<AtomicBool> {
+        self.addressed.clone()
+    }
+    /// The user's latest words that woke the current run, if theirs did (the Stop button's evidence).
+    pub(crate) fn run_words(&self) -> Option<String> {
+        self.run_voices.lock().unwrap().owner.last().map(|(_, w)| w.clone())
+    }
+    /// The user's microphone line `id` woke or steered the current run (`Pipeline::dispatch_pending`).
+    pub(crate) fn line_woke(&self, id: &str) {
+        self.run_voices.lock().unwrap().line = Some(id.to_owned());
+    }
+    /// The current run (a number that changes each time a run settles) and the microphone line that woke or steered
+    /// it: what a reply queued now belongs to (`Tools::run_speech`).
+    pub(crate) fn run_tag(&self) -> RunTag {
+        let v = self.run_voices.lock().unwrap();
+        RunTag { run: v.run, line: v.line.clone() }
+    }
+    /// The user pressed Stop on speech of run `run`: if it is still the current run, its later replies are shown unsaid.
+    pub(crate) fn stop_run(&self, run: u64) {
+        let mut v = self.run_voices.lock().unwrap();
+        if v.run == run { v.stopped = true; }
+    }
+    /// The user stopped the current run's speech: its later replies are shown, not said.
+    pub(crate) fn run_stopped(&self) -> bool {
+        self.run_voices.lock().unwrap().stopped
+    }
     /// The agent's run settled (or was stopped, or the agent started): the next run is not addressed until told.
     pub(crate) fn run_settled(&self) {
         self.addressed.store(false, Ordering::Release);
-        *self.run_voices.lock().unwrap() = RunVoices::default();
+        let mut v = self.run_voices.lock().unwrap();
+        *v = RunVoices { run: v.run.wrapping_add(1), ..RunVoices::default() };
     }
     /// The user's own words (his microphone lines or a typed message) went to the agent at `at_ns`.
     pub(crate) fn owner_woke(&self, words: &str, at_ns: u64) {
         self.owner_words_ns.fetch_max(at_ns, Ordering::AcqRel);
         let mut v = self.run_voices.lock().unwrap();
+        // They spoke to Heimdall again after a Stop: the answer to these words is said.
+        v.stopped = false;
         v.owner.push((at_ns, words.chars().take(2000).collect()));
         let drop = v.owner.len().saturating_sub(16);
         v.owner.drain(..drop);
@@ -811,5 +905,69 @@ mod tests {
         assert!(p.speech_held(320 * S), "the next run is held again");
         p.addressed_wake();
         assert!(!p.speech_held(320 * S + CONVERSATION_NS + 1));
+    }
+
+    /// Bug note 2026-11-05T02-32-37: a voice line five minutes late has no point. A held line is said only within a
+    /// minute of being held, in a quiet gap of the call (his words after it) or after the call; older, it stays the
+    /// text it was shown as (held lines were said 136-472 s late on 4-5 Nov).
+    #[test]
+    fn a_held_line_is_said_only_within_a_minute_and_then_stays_text() {
+        assert_eq!(HELD_FOR, Duration::from_secs(60));
+        let pm = permit();
+        // After the call: a line held 30 s before is said, one held 61 s before is dropped stale.
+        let p = SpeechPolicy::default();
+        p.other_line(100 * S);
+        p.hold_line("Fresh.", "en", 120 * S, &pm);
+        assert!(p.due_held(140 * S, true).is_empty(), "the call is live and he said nothing to Heimdall");
+        assert_eq!(texts(&p.due_held(150 * S, true)), [("Fresh.", false)], "after the call, 30 s old");
+        p.other_line(200 * S);
+        p.hold_line("Stale.", "en", 210 * S, &pm);
+        assert!(p.due_held(200 * S + CONVERSATION_NS + 26 * S, true).is_empty(), "61 s old when the call ended: text only");
+        assert!(p.test_held().is_empty(), "and never later");
+        // In the call: his words after it, and he paused while a guest talked past the minute: text only.
+        p.other_line(300 * S);
+        p.hold_line("Your build is green.", "en", 301 * S, &pm);
+        p.owner_woke("Heimdall, is it green?", 302 * S);
+        p.other_voice("process:discord", Some(303 * S));
+        assert!(p.due_held(340 * S, true).is_empty(), "a guest is talking: no gap yet");
+        p.other_voice("process:discord", None);
+        assert!(p.due_held(362 * S, true).is_empty() && p.test_held().is_empty(), "the gap came 61 s after: too late");
+    }
+
+    /// Bug notes 2026-11-04T20-52-24, 2026-11-05T00-14-40: the skipped reply's retry wakes the agent from its own
+    /// thread after the addressed run settled; through the shared flag its answer may be spoken in the call.
+    #[test]
+    fn the_retry_sets_the_shared_address_flag() {
+        let p = SpeechPolicy::default();
+        p.other_line(100 * S);
+        p.addressed_wake();
+        p.run_settled();
+        assert!(p.speech_held(101 * S) && !p.addressed_now(), "the addressed run settled before the retry");
+        let flag = p.addressed_flag();
+        std::thread::spawn(move || flag.store(true, Ordering::Release)).join().unwrap();
+        assert!(!p.speech_held(101 * S) && p.addressed_now(), "the retry's answer may be spoken");
+    }
+
+    /// Bug note 2026-11-05T02-32-17: a voice opening or ending on a call source reaches the app (the reply hold and
+    /// the guest barge-in), outside the lock; a voice begun before a goodbye does not; a removed source ends its voice.
+    #[test]
+    fn call_voices_reach_the_app() {
+        let p = SpeechPolicy::default();
+        let seen = Arc::new(Mutex::new(Vec::<(String, Option<u64>)>::new()));
+        let log = seen.clone();
+        p.set_call_voice_hook(Some(Arc::new(move |source: &str, at: Option<u64>| log.lock().unwrap().push((source.into(), at)))));
+        p.other_voice("process:discord", Some(10 * S));
+        assert_eq!(p.voice_open_since("process:discord"), Some(10 * S));
+        p.other_voice("process:discord", None);
+        p.other_voice("process:discord", None);
+        p.farewell(20 * S);
+        p.other_voice("process:discord", Some(19 * S));
+        p.call_source_removed("process:discord", true, false, 21 * S);
+        p.call_source_removed("process:discord", true, false, 22 * S);
+        assert_eq!(*seen.lock().unwrap(), [("process:discord".into(), Some(10 * S)), ("process:discord".into(), None), ("process:discord".into(), None)],
+            "one end per voice; the voice begun before the goodbye only ends");
+        assert_eq!(p.voice_gain(23 * S), 1., "no call: full voice");
+        p.other_line(30 * S);
+        assert_eq!(p.voice_gain(31 * S), CALL_VOICE_GAIN, "in a call: quieter (bug note 2026-11-05T00-10-37)");
     }
 }

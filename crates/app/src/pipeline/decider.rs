@@ -43,12 +43,15 @@ impl Pipeline {
         // the version that runs (V5 when V6's folders are missing), its precisions that version's folders.
         let resolved = precision::resolve(chosen, |p| precision::present(&models, p));
         let shown = running.map_or(resolved.used.model, |p| p.model);
+        // The public edition downloads a missing precision when it is chosen; its size is the download's.
+        let downloads = crate::model_store::global();
+        let disk = |p: Precision| downloads.as_ref().and_then(|d| d.lock().group(&crate::model_store::decider_group(p)).map(|g| g.bytes())).unwrap_or(Pick::new(shown, p).disk_bytes());
         ui::DeciderStatus {
             version: precision::version_label(Pick::new(shown, chosen.precision)),
             options: Precision::ALL.iter().map(|p| ui::DeciderOption {
                 key: p.key().into(),
                 label: p.label().into(),
-                disk_bytes: Pick::new(shown, *p).disk_bytes(),
+                disk_bytes: disk(*p),
                 memory_bytes: p.memory_bytes(),
                 present: precision::present(&models, Pick::new(shown, *p)),
             }).collect(),
@@ -57,6 +60,7 @@ impl Pipeline {
             fallback: (resolved.precision_fell_back() && self.decider_swapping.is_none()).then(|| resolved.used.precision.key().into()),
             reason: self.decider_reason.clone().or_else(|| resolved.model_fell_back().then(|| resolved.reason()).flatten()),
             state,
+            downloadable: downloads.is_some(),
         }
     }
 
@@ -101,6 +105,14 @@ impl Pipeline {
             self.publish_decider();
             return;
         }
+        // Not on this Mac yet (the public edition downloads it): what runs is already the nearest one, so nothing
+        // reloads; the owner's next load reads the new choice, and the download's landing swaps it in.
+        let models = self.models.join("decide");
+        if !precision::present(&models, to) && owner.choice.running() == Some(precision::resolve(to, |p| precision::present(&models, p)).used) {
+            owner.choice.set_chosen(to);
+            self.publish_decider();
+            return;
+        }
         let _ = self.index.evidence.event("decider_swap", "heimdall", &[], capture::host_now_ns(),
             serde_json::json!({"from":from.precision.key(),"to":to.precision.key(),"from_model":from.model.key(),"to_model":to.model.key(),"from_folder":from.name(),"to_folder":to.name()}));
         match owner.swap(from, to, move |p, out| { p.decider_swapped(from, to, out); Ok(()) }) {
@@ -115,6 +127,23 @@ impl Pipeline {
         self.publish_decider();
     }
 
+    /// The chosen precision finished downloading while another one runs in its place: it swaps in, as a pick does.
+    pub(super) fn decider_download_landed(&mut self) {
+        let to = self.decider_pick();
+        let running = self.send_worker.as_ref().and_then(|w| w.choice.running());
+        let Some(from) = running.filter(|r| *r != to && self.decider_swapping.is_none()) else {
+            self.publish_decider();
+            return;
+        };
+        let Some(owner) = self.send_worker.as_ref() else { return };
+        let _ = self.index.evidence.event("decider_swap", "heimdall", &[], capture::host_now_ns(),
+            serde_json::json!({"from":from.precision.key(),"to":to.precision.key(),"from_model":from.model.key(),"to_model":to.model.key(),"from_folder":from.name(),"to_folder":to.name(),"reason":"downloaded"}));
+        if owner.swap(from, to, move |p, out| { p.decider_swapped(from, to, out); Ok(()) }).is_ok() {
+            self.decider_swapping = Some((from, to));
+        }
+        self.publish_decider();
+    }
+
     /// The owner's answer to a swap (`decider_swap::Outcome`).
     pub(super) fn decider_swapped(&mut self, from: Pick, to: Pick, out: decider_swap::Outcome) {
         self.decider_swapping = None;
@@ -124,13 +153,19 @@ impl Pipeline {
             decider_swap::Outcome::Failed { reason } => serde_json::json!({"to":to.precision.key(),"to_model":to.model.key(),"outcome":"failed","reason":reason}),
         });
         match out {
-            decider_swap::Outcome::Swapped { .. } => {
+            decider_swap::Outcome::Swapped { used } => {
                 self.decider_reason = None;
                 self.decider_phase = Phase::Ready;
                 self.decider_loaded(Ok(()));
                 // Another pick arrived while this one ran (a settings-file edit): it goes next.
                 if self.decider_pick() != to {
                     self.decider_pick_changed(to);
+                    return;
+                }
+                // The chosen one was missing and a fallback loaded, but it finished downloading meanwhile (its landing
+                // found this swap in flight): it swaps in now.
+                if swap_again(used, to, |p| precision::present(&self.models.join("decide"), p)) {
+                    self.decider_download_landed();
                     return;
                 }
             }
@@ -161,5 +196,24 @@ impl Pipeline {
             self.set_decider_pick(from);
             self.save_or_note();
         }
+    }
+}
+
+/// After a swap to `to` loaded `used`: whether `to` should load now (a fallback ran, and `to` is here by now).
+pub(super) fn swap_again(used: Pick, to: Pick, present: impl Fn(Pick) -> bool) -> bool {
+    used != to && present(to)
+}
+
+#[cfg(test)]
+mod swap_again_tests {
+    use super::*;
+
+    /// Review 5 Nov: a decider that lands while another swap is in flight swaps in once that swap ends.
+    #[test]
+    fn a_decider_that_landed_during_a_swap_loads_after_it() {
+        let (v6_4, v6_8) = (Pick::new(decide::precision::DeciderModel::V6, Precision::Int4), Pick::new(decide::precision::DeciderModel::V6, Precision::Int8));
+        assert!(swap_again(v6_4, v6_8, |p| p == v6_8), "8-bit landed while the 4-bit fallback loaded");
+        assert!(!swap_again(v6_4, v6_8, |_| false), "still downloading: the landing swaps it in later");
+        assert!(!swap_again(v6_8, v6_8, |_| true), "it loaded itself");
     }
 }

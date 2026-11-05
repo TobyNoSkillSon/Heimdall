@@ -36,6 +36,10 @@ impl Paths {
     pub fn streams() -> PathBuf {
         Self::root().join("streams.json")
     }
+    /// The viewer's zoom per file (`model::zoom::Memory`).
+    pub fn viewer_zoom() -> PathBuf {
+        Self::root().join("viewer-zoom.json")
+    }
     pub fn pid() -> PathBuf {
         Self::root().join(".app.pid")
     }

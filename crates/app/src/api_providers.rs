@@ -7,6 +7,39 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Connect a custom server (OpenAI- or Anthropic-compatible): its `/models` must answer with the key (a keyless server
+/// is asked with `NO_KEY`), then the URL and key are kept. The hub's `connect_endpoint` and `Heimdall setup --provider
+/// custom` share it.
+pub(crate) fn verify_and_save_endpoint(provider_id: &str, url: &str, key: &str) -> Result<&'static ProviderInfo, String> {
+    let p = provider::provider(provider_id).filter(|p| p.custom_url).ok_or("Provider not supported")?;
+    let base = provider::normalize_base_url_for(p, url).map_err(|e| e.to_string())?;
+    let key = match key.trim() {
+        "" if !p.key_required => provider::NO_KEY.to_owned(),
+        k => provider::normalize_key(k).map_err(|e| e.to_string())?,
+    };
+    match block_on(provider::check_key(p, &key, None, Some(&provider::models_url_at(p, &base)))) {
+        KeyCheck::Valid { .. } => {}
+        KeyCheck::Rejected => return Err(provider::rejected_message(p)),
+        KeyCheck::Refused(why) => return Err(why),
+        KeyCheck::Unreachable => return Err(format!("{base} unreachable · check the URL")),
+    }
+    provider::save_endpoint(p, &base, Some(&key)).map_err(|e| e.to_string())?;
+    Ok(p)
+}
+
+/// The catalog for `id` just loaded fine and a connection's default waits for it.
+fn result_ok_and_offered(state: &Mutex<State>, id: &'static str) -> bool {
+    let st = state.lock().unwrap();
+    st.offered.contains(id) && st.catalog.get(id).is_some_and(|(_, r)| r.is_ok())
+}
+
+/// Tests that save or forget OpenCode Go's lab key take this first (the lab key store is one per process).
+#[cfg(test)]
+pub(crate) static OPENCODE_KEY: Mutex<()> = Mutex::new(());
+/// The same for Anthropic's lab key.
+#[cfg(test)]
+pub(crate) static ANTHROPIC_KEY: Mutex<()> = Mutex::new(());
+
 /// A failed catalog load is retried on the next menu open; a good one is refreshed after this long.
 const CATALOG_FRESH: Duration = Duration::from_secs(6 * 3600);
 /// models.dev's whole-catalog file (≈6 MB) is reused from disk for a day.
@@ -15,6 +48,8 @@ const METADATA_FRESH: Duration = Duration::from_secs(24 * 3600);
 #[derive(Default)]
 struct State {
     selection: AgentModel,
+    /// The Claude Code relay is the agent (`Settings::agent_relay`): it has a model.
+    relay: bool,
     models: Vec<ApiModel>,
     auth: BTreeMap<&'static str, ui::ProviderAuth>,
     catalog: BTreeMap<&'static str, (Instant, Result<Vec<ApiModel>, String>)>,
@@ -27,6 +62,9 @@ struct State {
     login_urls: BTreeMap<&'static str, String>,
     /// [providers] The model a new connection selects, when its sign-in found it (ChatGPT's probed model).
     defaults: BTreeMap<&'static str, String>,
+    /// Connections whose default model the app has not taken yet (`offer_default`): asked again when the provider's
+    /// catalog loads, so a model the catalog must describe is never lost to the race with the reload.
+    offered: BTreeSet<&'static str>,
     /// Anthropic's monthly credit and renewal day (settings), and the spend counted against it.
     credit: (u32, u8),
     ledger: Option<Ledger>,
@@ -94,6 +132,7 @@ impl Hub {
         {
             let mut st = self.state.lock().unwrap();
             st.selection = s.agent_model.clone();
+            st.relay = s.agent_relay;
             st.models = s.api_models.clone();
             st.credit = (s.anthropic_credit_usd, s.anthropic_credit_day);
         }
@@ -252,6 +291,11 @@ impl Hub {
             st.catalog.insert(p.id, (Instant::now(), result));
             stale
         };
+        // A connection waiting for this catalog: its default model can be described now.
+        let offered = result_ok_and_offered(&self.state, p.id);
+        if offered {
+            if let Some(tx) = self.actions.lock().unwrap().as_ref() { let _ = tx.send(ui::UiAction::AddProviderDefault { provider: p.id.into() }); }
+        }
         // Added rows the catalog now describes better (audit 27 Oct, F2): the app updates its settings.
         if stale {
             if let Some(tx) = self.actions.lock().unwrap().as_ref() { let _ = tx.send(ui::UiAction::RefreshApiModels { provider: p.id.into() }); }
@@ -319,6 +363,7 @@ impl Hub {
                 hub.key_changed(p.id);
                 hub.state.lock().unwrap().catalog.remove(p.id);
                 hub.refresh(false);
+                hub.offer_if_unchosen(p);
             }
             if let Some(ui) = ui { ui.send(ui::UiUpdate::ProviderConnected { provider: p.id.into(), result }); }
         });
@@ -390,8 +435,46 @@ impl Hub {
             self.key_changed(p.id);
             self.state.lock().unwrap().catalog.remove(p.id);
             self.refresh(false);
+            self.offer_if_unchosen(p);
         }
         if let Some(ui) = ui { ui.send(ui::UiUpdate::ProviderConnected { provider: p.id.into(), result: outcome }); }
+    }
+
+    /// A connection's default model offered to the app (`UiAction::AddProviderDefault`): added to the list, and the
+    /// agent's model while it has none (`Pipeline`, actions.rs). Remembered until the app took it (`default_taken`), and
+    /// sent again when the provider's catalog loads.
+    pub fn offer_default(&self, p: &'static ProviderInfo) {
+        // A provider with no default of its own (a custom server) offers its catalog's first runnable model, and only to
+        // an agent with none: a chosen agent gets no row nobody asked for.
+        {
+            let st = self.state.lock().unwrap();
+            if p.connect_default.is_none() && !st.defaults.contains_key(p.id) && (st.selection.is_chosen() || st.relay) { return; }
+        }
+        self.state.lock().unwrap().offered.insert(p.id);
+        if let Some(tx) = self.actions.lock().unwrap().as_ref() { let _ = tx.send(ui::UiAction::AddProviderDefault { provider: p.id.into() }); }
+    }
+
+    /// A sign-in (ChatGPT, OpenCode Go's console) offers its default only to an agent that has no model yet: signing in
+    /// never switches a chosen agent, nor adds a row the user did not ask for.
+    fn offer_if_unchosen(&self, p: &'static ProviderInfo) {
+        let unchosen = { let st = self.state.lock().unwrap(); !st.selection.is_chosen() && !st.relay };
+        if unchosen { self.offer_default(p); }
+    }
+
+    /// Tests: a connection's default is still waiting for the app.
+    #[cfg(test)]
+    pub(crate) fn offered(&self, provider_id: &str) -> bool {
+        self.state.lock().unwrap().offered.contains(provider_id)
+    }
+
+    /// The app took (or no longer needs) the provider's offered default.
+    pub fn default_taken(&self, provider_id: &str) {
+        self.state.lock().unwrap().offered.retain(|p| *p != provider_id);
+    }
+
+    /// The provider's loaded catalog, if it loaded.
+    pub fn catalog_rows(&self, provider_id: &str) -> Option<Vec<ApiModel>> {
+        self.state.lock().unwrap().catalog.get(provider_id)?.1.as_ref().ok().cloned()
     }
 
     /// The model a new connection selects: the one its first request ran on (ChatGPT), else the provider's default.
@@ -485,14 +568,12 @@ impl Hub {
         provider::save_key(p, &key, workspace.as_deref()).map_err(|e| e.to_string())?;
         self.set_auth(p, ui::ProviderAuth::Connected);
         self.key_changed(p.id);
-        // A new connection adds its default model to the list; the agent keeps its model until the user picks another
-        // (30 Oct 01:2x: until then a connection made it the agent's).
-        if first && p.connect_default.is_some() {
-            if let Some(tx) = self.actions.lock().unwrap().as_ref() { let _ = tx.send(ui::UiAction::AddProviderDefault { provider: p.id.into() }); }
-        }
         // The list may differ for a subscriber; reload it with the key.
         self.state.lock().unwrap().catalog.remove(p.id);
         self.refresh(false);
+        // A new connection adds its default model to the list; the agent keeps its model until the user picks another
+        // (30 Oct 01:2x: until then a connection made it the agent's). An agent with none takes it (`offer_default`).
+        if first { self.offer_default(p); } else { self.offer_if_unchosen(p); }
         Ok(())
     }
 
@@ -507,24 +588,19 @@ impl Hub {
     }
 
     fn connect_endpoint_now(self: &Arc<Self>, provider_id: &str, url: &str, key: &str) -> Result<(), String> {
-        let p = provider::provider(provider_id).filter(|p| p.custom_url).ok_or("Provider not supported")?;
-        let base = provider::normalize_base_url_for(p, url).map_err(|e| e.to_string())?;
-        let key = match key.trim() {
-            "" if !p.key_required => provider::NO_KEY.to_owned(),
-            k => provider::normalize_key(k).map_err(|e| e.to_string())?,
-        };
-        match block_on(provider::check_key(p, &key, None, Some(&provider::models_url_at(p, &base)))) {
-            KeyCheck::Valid { .. } => {}
-            KeyCheck::Rejected => return Err(provider::rejected_message(p)),
-            KeyCheck::Refused(why) => return Err(why),
-            KeyCheck::Unreachable => return Err(format!("{base} unreachable · check the URL")),
-        }
-        provider::save_endpoint(p, &base, Some(&key)).map_err(|e| e.to_string())?;
+        let p = verify_and_save_endpoint(provider_id, url, key)?;
+        self.connected_elsewhere(p);
+        Ok(())
+    }
+
+    /// A custom server connected (here, or by `Heimdall setup` in its own process: setup_cli.rs): the hub's state follows
+    /// the saved credential, its catalog reloads, and an agent with none takes its first model.
+    pub fn connected_elsewhere(self: &Arc<Self>, p: &'static ProviderInfo) {
         self.set_auth(p, ui::ProviderAuth::Connected);
         self.key_changed(p.id);
         self.state.lock().unwrap().catalog.remove(p.id);
         self.refresh(false);
-        Ok(())
+        self.offer_if_unchosen(p);
     }
 
     pub fn disconnect(&self, provider_id: &str) -> anyhow::Result<()> {
@@ -786,6 +862,7 @@ mod tests {
         let (urls, task) = rt.block_on(fake());
         let dir = tempfile::tempdir().unwrap();
         let p = provider::provider(provider::OPENCODE_GO).unwrap();
+        let _key = crate::api_providers::OPENCODE_KEY.lock().unwrap_or_else(|e| e.into_inner());
         if std::env::var_os(p.key_env).is_some() { return; }
         provider::forget_key(p).unwrap();
         let hub = Hub::new(None, dir.path().into(), urls);
@@ -877,6 +954,7 @@ mod tests {
     fn anthropic_key_selects_opus_once_lists_models_and_counts_spend() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let p = provider::provider(provider::ANTHROPIC).unwrap();
+        let _key = crate::api_providers::ANTHROPIC_KEY.lock().unwrap_or_else(|e| e.into_inner());
         if std::env::var_os(p.key_env).is_some() { return; }
         provider::forget_key(p).unwrap();
         let app = Router::new().route("/v1/models", get(|h: HeaderMap| async move {
@@ -899,8 +977,13 @@ mod tests {
         assert!(rx.try_recv().is_err());
         assert_eq!(hub.connect_key_now("anthropic", "sk-ant-api03-good-0123456789abcdefghij"), Ok(()));
         assert_eq!(rx.try_recv().ok(), Some(ui::UiAction::AddProviderDefault { provider: "anthropic".into() }));
+        // The app took it; a catalog load that landed first may have offered it once more (harmless: the app's handler
+        // adds a row once).
+        hub.default_taken("anthropic");
+        while rx.try_recv().is_ok() {}
         assert_eq!(hub.connect_key_now("anthropic", "sk-ant-api03-good-0123456789abcdefghij"), Ok(()));
-        assert!(rx.try_recv().is_err(), "a replaced key keeps User's selection");
+        // A catalog load may still resend the first offer (harmless); a replaced key makes no new one.
+        assert!(!hub.offered("anthropic"), "a replaced key keeps User's selection");
         wait(|| hub.snapshot().catalog.iter().filter(|r| r.provider == "anthropic").count() == 2);
         let s = hub.snapshot();
         let row = |id: &str| s.catalog.iter().find(|r| r.provider == "anthropic" && r.id == id).unwrap().clone();
@@ -926,6 +1009,7 @@ mod tests {
     fn unscoped_anthropic_key_connects_through_its_default_workspace() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let p = provider::provider(provider::ANTHROPIC).unwrap();
+        let _key = crate::api_providers::ANTHROPIC_KEY.lock().unwrap_or_else(|e| e.into_inner());
         if std::env::var_os(p.key_env).is_some() { return; }
         provider::forget_key(p).unwrap();
         const KEY: &str = "sk-ant-usr-lab-0123456789abcdefghij";
@@ -1063,6 +1147,7 @@ mod tests {
         use axum::routing::post;
         let rt = tokio::runtime::Runtime::new().unwrap();
         let p = provider::provider(provider::OPENCODE_GO).unwrap();
+        let _key = crate::api_providers::OPENCODE_KEY.lock().unwrap_or_else(|e| e.into_inner());
         if std::env::var_os(p.key_env).is_some() { return; }
         provider::forget_key(p).unwrap();
         let polls = Arc::new(Mutex::new(0u32));
@@ -1138,7 +1223,10 @@ mod tests {
         let hub = Hub::new(None, dir.path().into(), Urls { chatgpt: Some((base, 0)), ..Default::default() });
         let (tx, rx) = crossbeam_channel::unbounded();
         hub.set_actions(tx);
-        hub.set_settings(&crate::settings::Settings::default());
+        // An agent with a model (the personal default; the public edition starts unchosen, and there a first sign-in
+        // offers its default: `offer_if_unchosen`).
+        let chosen = agent::provider::AgentModel::Api { provider: agent::provider::OPENCODE_GO.into(), id: agent::provider::HAIKU.into() };
+        hub.set_settings(&crate::settings::Settings { agent_model: chosen, ..Default::default() });
         // The browser: the consent page's redirect, as a consenting user's browser follows it.
         let consent = |hub: &Arc<Hub>, issued: &str, registers: bool| {
             let mut url = String::new();
@@ -1189,6 +1277,7 @@ mod tests {
         use axum::routing::post;
         let rt = tokio::runtime::Runtime::new().unwrap();
         let p = provider::provider(provider::OPENCODE_GO).unwrap();
+        let _key = crate::api_providers::OPENCODE_KEY.lock().unwrap_or_else(|e| e.into_inner());
         if std::env::var_os(p.key_env).is_some() { return; }
         provider::forget_key(p).unwrap();
         let app = Router::new()

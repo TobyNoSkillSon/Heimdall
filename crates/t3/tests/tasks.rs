@@ -130,7 +130,7 @@ fn detail(t: &Value) -> Value {
     let count = t["items"].as_array().unwrap().len();
     json!({"threadId":t["threadId"],"projectId":t["projectId"],"title":t["title"],"model":t["model"],"providerInstanceId":"claudeAgent",
         "status":status,"latestRunId":latest_id,"activeRunId":active_id,"pendingRequestCount":pending,"itemCount":count,
-        "archived":t["archived"],"runtimeMode":"full-access","relationshipToParent":t["relationshipToParent"],"parentThreadId":t["parentThreadId"],"creationSource":t["creationSource"],"updatedAt":t["updatedAt"],"createdAt":t["updatedAt"]})
+        "archived":t["archived"],"runtimeMode":"full-access","relationshipToParent":t["relationshipToParent"],"parentThreadId":t["parentThreadId"],"creationSource":t["creationSource"],"updatedAt":t["updatedAt"],"createdAt":t["updatedAt"],"link":t["link"]})
 }
 fn row(t: &Value) -> Value {
     let mut d = detail(t);
@@ -2774,4 +2774,153 @@ async fn a_cleared_task_is_archived_once_finished_and_reported_and_never_stopped
     l.owner_thread("owner", "User's research", 1);
     assert!(!l.w.clear_task("owner").unwrap());
     assert!(!l.w.clear_task(&done).unwrap());
+}
+
+/// Bug note 2026-11-04T18-30-26 ('Beauty climb', 4 Nov 17:55): pending approvals in Heimdall's task threads never
+/// woke the agent. The hook answered the rm prompt and the command ran, so that card is no wait; but a real prompt
+/// beside it (here one whose card is not in the thread's activity, as a sub-agent's) was hidden by it. Every real wait
+/// wakes once per request with the command, Claude's reason and the link that opens the thread, and the task's island
+/// can read it (`approval_wait`) until the prompt is gone.
+#[tokio::test]
+async fn a_task_waiting_on_an_approval_wakes_once_per_request_with_its_command() {
+    let l = Lab::new().await;
+    let task = l.delegate("Beauty climb").await;
+    l.with(&task, |t| t["link"] = json!("<t3-thread://v2/env/beauty>"));
+    let card = |call: &str| format!("turn-item:runtime-request:runtime-request%3Aprovider%3AclaudeAgent%3Anative-request%3A{call}%3Ad555");
+    let command = |call: &str| format!("turn-item:provider:claudeAgent:native-item:{call}");
+    // The hook's answered card: its command ran, T3 still counts it.
+    l.item(&task, "command_execution", "completed", "$ sed -i '' 's|rm -f $S/x|y|' tools/render.sh", json!({"itemId":command("toolu_A")}));
+    l.item(&task, "approval_request", "waiting", "sed -i … Dangerous rm operation on possibly-empty variable path", json!({"itemId":card("toolu_A")}));
+    l.with(&task, |t| t["approvals"] = json!(1));
+    l.pass().await;
+    let approvals = |l: &Lab| l.deliveries().into_iter().filter(|(id, _)| id.starts_with("approval:")).collect::<Vec<_>>();
+    assert!(approvals(&l).is_empty(), "the hook's answered card is no wait: {:?}", l.deliveries());
+    assert_eq!(l.w.approval_wait(&task).unwrap(), None);
+    // A second prompt T3 counts, its card not in this thread's activity: a wait, though the answered card is in view.
+    l.with(&task, |t| t["approvals"] = json!(2));
+    l.pass().await;
+    let got = approvals(&l);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0].0, format!("approval:{task}:run:{task}:1"));
+    assert!(got[0].1.contains("'Beauty climb'") && got[0].1.contains("waits for an approval") && got[0].1.contains("Open it: t3-thread://v2/env/beauty"), "{}", got[0].1);
+    // A real prompt with its card: a wake of its own, with the command and the reason.
+    l.item(&task, "command_execution", "running", "$ rm -f $S/$w-t9*.png", json!({"itemId":command("toolu_B")}));
+    l.item(&task, "approval_request", "waiting", "rm -f $S/$w-t9*.png\nDangerous rm operation on possibly-empty variable path: $S/$w-t9*.png", json!({"itemId":card("toolu_B")}));
+    l.with(&task, |t| t["approvals"] = json!(3));
+    l.pass().await;
+    l.pass().await;
+    let got = approvals(&l);
+    assert_eq!(got.len(), 2, "one wake per request, never repeated: {got:?}");
+    let b = got.iter().find(|(id, _)| id == &format!("approval:{task}:run:{task}:1:toolu_B")).expect("the card's own wake");
+    assert!(b.1.contains("It asks: rm -f $S/$w-t9*.png Dangerous rm operation on possibly-empty variable path"), "{}", b.1);
+    let wait = l.w.approval_wait(&task).unwrap().expect("the island's record");
+    assert_eq!(wait.link.as_deref(), Some("t3-thread://v2/env/beauty"));
+    assert!(wait.text.as_deref().is_some_and(|t| t.starts_with("rm -f $S/$w-t9*.png Dangerous rm")), "{wait:?}");
+    // The run ends: no wait any more, and its result wakes as usual.
+    l.item(&task, "assistant_message", "completed", "Climb done.", json!({}));
+    l.end_run(&task, "completed");
+    l.pass().await;
+    assert_eq!(l.w.approval_wait(&task).unwrap(), None);
+    assert!(l.deliveries().iter().any(|(id, text)| id.starts_with("terminal:") && text.contains("Climb done.")), "{:?}", l.deliveries());
+}
+
+/// Bug note 2026-11-04T22-25-15 (setup-wizard task, 4 Nov 22:22): T3 queued its own turn to hand over a finished
+/// sub-agent while the task's turn still ran, then cancelled that queued turn before it started. T3's thread status
+/// is its latest run's, so the task read "cancelled" while its turn (and its work) went on, and once that turn ended
+/// the dropped run would have been reported as the task's ending. A run that never started is no state: the task
+/// stays working, nothing terminal goes out, and the turn that ran brings the result.
+#[tokio::test]
+async fn a_queued_run_t3_cancelled_before_it_started_is_not_the_tasks_ending() {
+    let l = Lab::new().await;
+    let task = l.delegate("Rebuild setup wizard").await;
+    let first = format!("run:{task}:1");
+    let helper = l.item(&task, "subagent", "running", "", json!({"title":"Rebuild native wizard"}));
+    l.pass().await;
+    l.set_item(&task, &helper, "completed");
+    let dropped = l.queue_run(&task);
+    l.set_run(&task, &dropped, "cancelled");
+    l.pass().await;
+    l.pass().await;
+    assert!(l.deliveries().is_empty(), "nothing ended: {:?}", l.deliveries());
+    let status = l.call("task_status", json!({"taskId":task})).await.unwrap();
+    assert!(status.contains("· working") && !status.contains("cancelled"), "{status}");
+    l.item_in(&task, &first, "assistant_message", "completed", "The wizard is rebuilt.", json!({}));
+    l.set_run(&task, &first, "completed");
+    l.pass().await;
+    l.pass().await;
+    let got = l.deliveries();
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0].0, format!("terminal:{task}:{first}:completed"));
+    assert!(got[0].1.contains("completed") && got[0].1.contains("The wizard is rebuilt."), "{}", got[0].1);
+    assert!(!got.iter().any(|(id, _)| id.contains("cancelled")), "{got:?}");
+}
+
+/// Review 5 Nov (b): Heimdall's own follow-up into a finished task, cancelled by T3 before it started. The task no
+/// longer reads "completed" with the earlier turn's result: it reads cancelled, and one notice says nothing of the
+/// message ran, so it can be sent again. Also when the message was queued behind the turn that was still running:
+/// that turn's own result still goes out first, once.
+#[tokio::test]
+async fn heimdalls_own_message_t3_dropped_before_it_started_reads_cancelled() {
+    let l = Lab::new().await;
+    let task = l.delegate("Disk cleanup").await;
+    l.item(&task, "assistant_message", "completed", "Freed 12 GB.", json!({}));
+    l.end_run(&task, "completed");
+    l.pass().await;
+    assert_eq!(l.deliveries().len(), 1);
+    l.call("t3_call", json!({"tool":"t3_thread_send","args":{"threadId":task,"message":"Also clear the Xcode caches."}})).await.unwrap();
+    // T3 drops it before the provider starts it.
+    l.with(&task, |t| {
+        let r = t["runs"].as_array_mut().unwrap().last_mut().unwrap();
+        r["status"] = json!("cancelled");
+        r["startedAt"] = json!(null);
+        r["completedAt"] = json!(iso(0));
+    });
+    l.pass().await;
+    l.pass().await;
+    let got = l.deliveries();
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert_eq!(got[1].0, format!("terminal:{task}:run:{task}:2:cancelled"));
+    assert!(got[1].1.contains("cancelled Heimdall's message before it started") && !got[1].1.contains("Freed 12 GB"), "{}", got[1].1);
+    let status = l.call("task_status", json!({"taskId":task})).await.unwrap();
+    assert!(status.contains("cancelled") && !status.contains("completed"), "{status}");
+
+    // Queued behind a turn that is still running, then dropped when that turn ends.
+    let busy = l.delegate("Voice benchmark").await;
+    let first = format!("run:{busy}:1");
+    l.call("t3_call", json!({"tool":"t3_thread_send","args":{"threadId":busy,"message":"Then try Kokoro too.","mode":"queue"}})).await.unwrap();
+    let queued = format!("run:{busy}:2");
+    l.item_in(&busy, &first, "assistant_message", "completed", "Supertonic: 120x real time.", json!({}));
+    l.set_run(&busy, &first, "completed");
+    l.set_run(&busy, &queued, "cancelled");
+    l.pass().await;
+    l.pass().await;
+    let mine: Vec<_> = l.deliveries().into_iter().filter(|(id, _)| id.contains(&busy)).collect();
+    assert_eq!(mine.len(), 2, "{mine:?}");
+    assert!(mine[0].0 == format!("terminal:{busy}:{first}:completed") && mine[0].1.contains("Supertonic: 120x"), "{mine:?}");
+    assert_eq!(mine[1].0, format!("terminal:{busy}:{queued}:cancelled"));
+}
+
+/// Review 5 Nov (a): a result recorded against a run T3 dropped before it started (as before the never-started rule)
+/// must not make the earlier run look newer: the cleared, reported task is archived. A run T3 itself dropped (not
+/// Heimdall's message) is still no ending.
+#[tokio::test]
+async fn a_result_recorded_against_a_dropped_run_still_lets_the_task_be_archived() {
+    let l = Lab::new().await;
+    let task = l.delegate("Rebuild setup wizard").await;
+    let first = format!("run:{task}:1");
+    l.item_in(&task, &first, "assistant_message", "completed", "The wizard is rebuilt.", json!({}));
+    l.set_run(&task, &first, "completed");
+    // T3 queues and drops its own hand-over turn, and an older build's pass recorded the task's ending against it.
+    let dropped = l.queue_run(&task);
+    l.set_run(&task, &dropped, "cancelled");
+    {
+        // What it wrote: the latest run (the dropped one), T3's status, and the notice that went out for it.
+        let db = rusqlite::Connection::open(l.dir.path().join("workers.db")).unwrap();
+        db.execute("UPDATE workers SET run=?,status='cancelled' WHERE thread=?", [&dropped, &task]).unwrap();
+        db.execute("INSERT INTO notices VALUES(?,?,?,'terminal')", [format!("terminal:{task}:{dropped}:cancelled"), task.clone(), dropped.clone()]).unwrap();
+    }
+    l.pass().await;
+    assert!(l.deliveries().is_empty(), "the ending is not reported again under the earlier run: {:?}", l.deliveries());
+    assert!(l.w.clear_task(&task).unwrap());
+    assert_eq!(l.w.archive_cleared().await.unwrap(), vec!["Rebuild setup wizard".to_string()]);
 }

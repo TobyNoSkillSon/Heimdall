@@ -9,6 +9,7 @@ pub mod embedding;
 pub mod legacy;
 pub mod live;
 pub mod migrate;
+pub mod readers;
 pub mod records;
 pub mod diagnostics;
 pub mod event_timeline;

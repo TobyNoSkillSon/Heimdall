@@ -160,9 +160,10 @@ pub(crate) struct Seen {
 pub(crate) enum End {
     /// Taken, or let go away from the notch.
     Nothing,
-    /// Let go over the notch, and macOS never offered it there: the catcher was covered (bug note
-    /// 2026-11-03T18-33-35: twice while the agent worked, the notch never saw a screenshot let go over it). Its items
-    /// are still on the drag pasteboard: they are taken from there, as if dropped.
+    /// Let go over the notch, and macOS never dropped it there: never offered (the catcher was covered, bug note
+    /// 2026-11-03T18-33-35: twice while the agent worked, the notch never saw a screenshot let go over it), or offered
+    /// and never dropped (twice on 4–5 Nov, each a few seconds after the agent started working). Its items are still on
+    /// the drag pasteboard: they are taken from there, as if dropped.
     TakeLate,
     /// Let go over the notch and not taken, and nothing more to do: why.
     Missed(&'static str),
@@ -174,7 +175,7 @@ impl Seen {
     pub(crate) fn end(self, over: bool) -> End {
         match self.missed(over) {
             None => End::Nothing,
-            Some(_) if !self.offered && !self.refused && !self.performed => End::TakeLate,
+            Some(_) if !self.refused && !self.performed => End::TakeLate,
             Some(why) => End::Missed(why),
         }
     }
@@ -196,7 +197,7 @@ impl Seen {
     }
 }
 
-/// What is known at the end of a drag that macOS never offered to the notch, for a late take (`late_take`). A late
+/// What is known at the end of a drag that macOS never dropped on the notch, for a late take (`late_take`). A late
 /// take must never deliver a drop twice or take a drag that was not meant for the notch: when in doubt it is skipped.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct LateFacts {
@@ -210,7 +211,7 @@ pub(crate) struct LateFacts {
     pub rewritten: bool,
 }
 
-/// Whether a drag let go over the notch and never offered to it is taken from the drag pasteboard.
+/// Whether a drag let go over the notch and never dropped on it is taken from the drag pasteboard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Late {
     /// Read its pasteboard; take its images and files (`late_items`).
@@ -294,8 +295,11 @@ mod seen_tests {
         assert_eq!(Seen::default().end(false), End::Nothing, "let go elsewhere: never taken");
         // Offered and dropped on the notch: the catcher took it, nothing to add.
         assert_eq!(Seen { offered: true, performed: true, taken: true, ..Seen::default() }.end(true), End::Nothing);
-        // Offered, never dropped (Esc over the notch, or macOS slid it back): left alone.
-        assert!(matches!(Seen { offered: true, ..Seen::default() }.end(true), End::Missed(w) if w.starts_with("offered, but")));
+        // Offered, never dropped (4 Nov 19:27:30 and 5 Nov 00:00:51, each a few seconds after the agent started
+        // working; no covering window was named since 4 Nov): taken late too, behind the same guards (Esc is
+        // `key_pressed`, another app's window over the notch is `covered_by_other`).
+        assert_eq!(Seen { offered: true, ..Seen::default() }.end(true), End::TakeLate);
+        assert_eq!(Seen { offered: true, ..Seen::default() }.end(false), End::Nothing);
         // Dropped with nothing usable: the pasteboard was already read; reading it again finds nothing more.
         assert!(matches!(Seen { offered: true, performed: true, ..Seen::default() }.end(true), End::Missed(_)));
         // Heimdall's own invite (or a move-only drag) is refused when offered: never taken late either.
@@ -819,16 +823,18 @@ impl Target {
         self.after(now);
     }
 
-    /// An armed drag ended (`release`: where the button came up): a drop over the notch that macOS never offered to
-    /// the catcher is taken from the drag pasteboard when nothing says it was meant elsewhere (`End::TakeLate`,
+    /// An armed drag ended (`release`: where the button came up): a drop over the notch that macOS never dropped on
+    /// the catcher (never offered, or offered and not dropped) is taken from the drag pasteboard when nothing says it was meant elsewhere (`End::TakeLate`,
     /// `late_take`, bug note 2026-11-03T18-33-35); any other miss is said in the log.
     fn end_drag(&mut self, release: Release) {
         let screen = release.at.map(|(x, y)| NSPoint::new(x, y)).unwrap_or_else(NSEvent::mouseLocation);
         let at = self.place.from_screen(screen);
-        let why = match self.seen.end(self.in_zone(at)) {
+        let over = self.in_zone(at);
+        let why = match self.seen.end(over) {
             End::Nothing => return,
             End::Missed(why) => why,
             End::TakeLate => {
+                let missed = self.seen.missed(over).unwrap_or_default();
                 let cover = covering_app(&self.catcher, screen);
                 let facts = LateFacts {
                     own: self.own,
@@ -839,13 +845,13 @@ impl Target {
                 match late_take(facts) {
                     Late::Take => match self.take_late(at) {
                         Ok(n) => {
-                            eprintln!("drop: macOS never offered a drag let go over the notch to it; {n} item(s) were taken from its pasteboard");
+                            eprintln!("drop: a drag let go over the notch was taken late ({missed}): {n} item(s) from its pasteboard");
                             return;
                         }
                         Err(why) => why,
                     },
                     Late::Skip(why) if cover.is_some() => {
-                        eprintln!("drop: a drag let go over the notch was not taken: macOS never offered it to the notch; {why} ({})", cover.unwrap_or_default());
+                        eprintln!("drop: a drag let go over the notch was not taken: {missed}; {why} ({})", cover.unwrap_or_default());
                         return;
                     }
                     Late::Skip(why) => why,
@@ -862,9 +868,9 @@ impl Target {
         let snap = pasteboard::snapshot(&pb);
         if snap.files.is_empty() && snap.image.is_none() {
             return Err(if pasteboard::promises(&pb).is_empty() {
-                "macOS never offered it to the notch, and it held no picture or file (a link or text is not taken late)"
+                "macOS never dropped it on the notch, and it held no picture or file (a link or text is not taken late)"
             } else {
-                "macOS never offered it to the notch, and its files were only promised (they cannot arrive once the drag is over)"
+                "macOS never dropped it on the notch, and its files were only promised (they cannot arrive once the drag is over)"
             });
         }
         let at_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
@@ -873,7 +879,7 @@ impl Target {
         let only = drop::Snapshot { urls: vec![], text: None, ..snap };
         let items = late_items(drop::classify(only, &|p: &Path| p.is_dir(), &mut |name, bytes| save(&dir, name, bytes), &stamp));
         if items.is_empty() {
-            return Err("macOS never offered it to the notch, and nothing on its pasteboard could be read");
+            return Err("macOS never dropped it on the notch, and nothing on its pasteboard could be read");
         }
         let n = items.len();
         self.seen.taken = true;
@@ -1325,7 +1331,16 @@ define_class!(
                 return false.into();
             }
             let at = sender.draggingLocation();
-            with_target(|t| t.motion.is_over() || t.in_zone(t.island_point(at))).unwrap_or(false)
+            with_target(|t| {
+                let p = t.island_point(at);
+                let ok = t.motion.is_over() || t.in_zone(p);
+                if !ok {
+                    // The next "offered, but never dropped" says whether the notch itself turned it down here.
+                    eprintln!("drop: the notch turned a drop down: let go at ({:.0}, {:.0}), outside its zone", p.x, p.y);
+                }
+                ok
+            })
+            .unwrap_or(false)
         }
 
         #[unsafe(method(performDragOperation:))]

@@ -360,6 +360,34 @@ pub fn open_approvals(items: &[serde_json::Value]) -> Option<usize> {
     Some(waiting.iter().filter(|i| i["itemId"].as_str().and_then(tool_call).is_none_or(|c| !ran(&c))).count())
 }
 
+/// The tool call id an approval card waits on (`native-request%3A<tool call id>%3A<uuid>`), if its id carries one.
+pub fn approval_call(card_id: &str) -> Option<String> {
+    card_id.rsplit_once("native-request%3A").and_then(|(_, rest)| rest.split("%3A").next()).filter(|c| !c.is_empty()).map(str::to_owned)
+}
+
+/// Whether a thread whose T3 count holds `counted` approvals (its `pendingRequestCount` less its listed questions)
+/// really waits on one, and the first waiting card whose tool call has not run (its item id), if one is in `items`.
+/// A wait: a waiting card whose call has not run, more approvals counted than cards the hook already answered (bug
+/// note 2026-11-04T18-30-26: one answered card in view must not hide a second prompt, say a sub-agent's, whose card is
+/// not in this thread's activity), or no waiting card in view at all (nothing to tell it apart by).
+pub fn approval_wait(items: &[serde_json::Value], counted: u64) -> (bool, Option<String>) {
+    let ran = |call: &str| items.iter().any(|i| {
+        i["type"] != "approval_request"
+            && i["itemId"].as_str().is_some_and(|id| id.ends_with(&format!("native-item:{call}")))
+            && matches!(i["status"].as_str(), Some("completed" | "failed"))
+    });
+    let waiting: Vec<&serde_json::Value> = items.iter().filter(|i| i["type"] == "approval_request" && i["status"] == "waiting").collect();
+    let (open, answered): (Vec<&&serde_json::Value>, Vec<&&serde_json::Value>) =
+        waiting.iter().partition(|i| i["itemId"].as_str().and_then(approval_call).is_none_or(|c| !ran(&c)));
+    let card = open.first().and_then(|i| i["itemId"].as_str()).map(str::to_owned);
+    (waiting.is_empty() || !open.is_empty() || counted > answered.len() as u64, card)
+}
+
+/// An approval card's text (the command and the reason Claude asks) as one bounded line.
+pub fn approval_text(text: &str) -> String {
+    crate::client::bounded_text(&text.split_whitespace().collect::<Vec<_>>().join(" "), 500)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -470,5 +498,14 @@ mod tests {
         assert_eq!(open_approvals(&[command("toolu_A", "completed"), card("toolu_A", "waiting"), card("toolu_B", "waiting")]), Some(1));
         assert_eq!(open_approvals(&[card("toolu_A", "completed")]), None, "no waiting card in view: cannot tell");
         assert_eq!(open_approvals(&[]), None);
+        // Bug note 2026-11-04T18-30-26: an answered card in view never hides a second prompt T3 counts.
+        let a = [command("toolu_A", "completed"), card("toolu_A", "waiting")];
+        assert_eq!(approval_wait(&a, 1), (false, None), "the hook's answered card alone");
+        assert_eq!(approval_wait(&a, 2), (true, None), "one more counted than answered: a card not in view");
+        let b = [command("toolu_A", "completed"), card("toolu_A", "waiting"), card("toolu_B", "waiting")];
+        let (waits, card_id) = approval_wait(&b, 2);
+        assert!(waits && card_id.as_deref().and_then(approval_call).as_deref() == Some("toolu_B"), "{card_id:?}");
+        assert_eq!(approval_wait(&[], 0).0, true, "nothing in view: cannot tell");
+        assert_eq!(approval_text("rm -f $S/x\n\nDangerous rm   operation"), "rm -f $S/x Dangerous rm operation");
     }
 }

@@ -20,6 +20,7 @@ pub(crate) fn demo_decider() -> DeciderStatus {
         fallback: None,
         reason: None,
         state: DeciderState::Ready,
+        downloadable: false,
     }
 }
 
@@ -67,7 +68,9 @@ pub(crate) fn render(dir: &std::path::Path, mtm: MainThreadMarker) -> Vec<String
     if (size.width - W).abs() > 0.5 || (size.height - H).abs() > 0.5 {
         failures.push(format!("window: {} × {}, not {W} × {H}", size.width, size.height));
     }
-    let ok = w.current() == PageKind::Builtin(SetupStep::Welcome) && w.back.isHidden() && w.next.label() == "Set Up" && w.next.keyEquivalent().to_string() == "\r";
+    let ok = w.current() == PageKind::Builtin(SetupStep::Welcome) && w.back.isHidden() && w.next.label() == "Set Up" && w.next.keyEquivalent().to_string() == "\r"
+        && !w.agent.isHidden() && w.agent.label() == AGENT_BUTTON
+        && agent_line(std::path::Path::new("/Applications/Heimdall Alpha.app/Contents/MacOS/Heimdall")).contains("setup --help");
     shot(&w, "01-welcome", ok, &mut failures);
 
     let advanced = w.advance();
@@ -101,6 +104,11 @@ pub(crate) fn render(dir: &std::path::Path, mtm: MainThreadMarker) -> Vec<String
     w.choose_provider(ProviderChoice::SplashEngine);
     let ok = selected(&w) == [ProviderChoice::SplashEngine] && !w.brain.rows[1].label.isHidden();
     shot(&w, "03-brain-local", ok, &mut failures);
+    // Custom: a server of the user's own (an OpenAI- or Anthropic-compatible URL, a key if it needs one).
+    w.choose_provider(ProviderChoice::Custom);
+    let ok = selected(&w) == [ProviderChoice::Custom] && w.brain.tiles.len() == 5 && w.brain.rows[0].button.label() == "Connect…";
+    shot(&w, "03-brain-custom", ok, &mut failures);
+    w.choose_provider(ProviderChoice::SplashEngine);
 
     // Listening: 4-bit by default with its RAM and disk; a pick goes on Continue.
     let decider = demo_decider();
@@ -121,7 +129,7 @@ pub(crate) fn render(dir: &std::path::Path, mtm: MainThreadMarker) -> Vec<String
     w.choose_decider(eight);
     shot(&w, "04-listening-8bit-missing", checked(&w) == "16bit" && !w.listen.seg.isEnabledForSegment(1), &mut failures);
     let advanced = w.advance();
-    if advanced != Advance::Next(vec![UiAction::SetDeciderPrecision("16bit".into())]) {
+    if advanced != Advance::Next(vec![UiAction::SetDeciderPrecision("16bit".into()), UiAction::StartModelDownloads]) {
         failures.push(format!("listening: Continue sent {advanced:?}"));
     }
 
@@ -140,7 +148,9 @@ pub(crate) fn render(dir: &std::path::Path, mtm: MainThreadMarker) -> Vec<String
     shot(&w, "06-allow-fresh", ok, &mut failures);
     let denied: Vec<_> = Permission::ALL.iter().map(|p| (*p, match p { Permission::Microphone => PermissionState::Granted, Permission::ScreenRecording => PermissionState::Denied, Permission::SystemAudio => PermissionState::Unconfirmed, _ => PermissionState::NotDetermined })).collect();
     w.show(&denied);
-    let ok = !w.allow_page.rows[2].open.isHidden() && w.allow_page.rows[0].open.isHidden() && !w.allow_page.rows[0].check.isHidden();
+    // Screen Recording and Accessibility read Optional until allowed, asked or not (VM run 5 Nov 05:07).
+    let optional = |i: usize| w.allow_page.rows[i].state.stringValue().to_string() == "Optional";
+    let ok = !w.allow_page.rows[2].open.isHidden() && w.allow_page.rows[0].open.isHidden() && !w.allow_page.rows[0].check.isHidden() && optional(2) && optional(3);
     shot(&w, "06-allow-denied", ok, &mut failures);
     w.show(&granted);
     let ok = w.allow.isHidden() && w.next.keyEquivalent().to_string() == "\r" && w.allow_page.rows.iter().all(|r| r.state.stringValue().to_string() == "Allowed");
@@ -157,6 +167,31 @@ pub(crate) fn render(dir: &std::path::Path, mtm: MainThreadMarker) -> Vec<String
     let again = w.advance();
     if again != Advance::Next(vec![]) {
         failures.push(format!("allow: a second Continue sent {again:?}"));
+    }
+    // Can you hear me? The input in use (macOS's default until another is chosen) with its level, the pop-up of every
+    // connected input, and no input at all said plainly (5 Nov). The live meter needs a real input and the
+    // screen; the renders show a level set by hand.
+    let mic = |id: &str, name: &str| Microphone { id: id.into(), name: name.into(), connected: true, built_in: id == "built-in" };
+    let two = Microphones { devices: vec![mic("built-in", "MacBook Pro Microphone"), mic("shure", "Shure MV7i")], in_use: Some("built-in".into()), ..Default::default() };
+    w.set_microphones(&two);
+    w.show_level(0.62);
+    let p = &w.mic_page;
+    let ok = w.current() == PageKind::Builtin(SetupStep::Microphone) && p.name.stringValue().to_string() == "MacBook Pro Microphone"
+        && !p.track.isHidden() && p.fill.frame().size.width > 90.0 && p.picker.numberOfItems() == 2 && w.picked_microphone().is_none();
+    shot(&w, "06b-mic-level", ok, &mut failures);
+    w.mic_page.picker.selectItemAtIndex(1);
+    let picked = w.picked_microphone();
+    w.set_microphones(&Microphones { in_use: Some("shure".into()), ..two.clone() });
+    w.show_level(0.35);
+    let ok = picked.as_deref() == Some("shure") && w.mic_page.name.stringValue().to_string() == "Shure MV7i";
+    shot(&w, "06b-mic-picker", ok, &mut failures);
+    w.set_microphones(&Microphones::default());
+    let p = &w.mic_page;
+    let ok = p.name.stringValue().to_string() == "No microphone found" && p.track.isHidden() && p.picker.isHidden();
+    shot(&w, "06b-no-mic", ok, &mut failures);
+    w.set_microphones(&two);
+    if w.advance() != Advance::Next(vec![]) {
+        failures.push("microphone: Continue sent something".into());
     }
     let ok = w.current() == PageKind::Builtin(SetupStep::Home) && w.home_page.pending.isHidden();
     shot(&w, "07-home", ok, &mut failures);
@@ -253,7 +288,7 @@ pub(crate) fn render(dir: &std::path::Path, mtm: MainThreadMarker) -> Vec<String
     w.set_vella(&VellaSetup { install: T3Install::Failed("Error: Cask 'vella' is unavailable".into()), ..missing.clone() });
     let ok = w.current() == PageKind::Builtin(SetupStep::Vella) && w.vella_page.spinner.isHidden() && !w.vella_page.progress.isHidden();
     shot(&w, "10-vella-failed", ok, &mut failures);
-    if w.advance() != Advance::Next(vec![]) || w.current() != PageKind::Builtin(SetupStep::Customise) {
+    if w.advance() != Advance::Next(vec![]) || w.current() != PageKind::Builtin(SetupStep::Arsenal) {
         failures.push("vella: Continue after a failure does not move on".into());
     }
     w.back();
@@ -262,7 +297,7 @@ pub(crate) fn render(dir: &std::path::Path, mtm: MainThreadMarker) -> Vec<String
     w.advance();
     w.set_vella(&VellaSetup { install: T3Install::Working("Installing Vella with Homebrew…".into()), ..missing.clone() });
     w.set_vella(&VellaSetup { found: Some(vella_app.clone()), brew: true, install: T3Install::Idle });
-    if w.current() != PageKind::Builtin(SetupStep::Customise) {
+    if w.current() != PageKind::Builtin(SetupStep::Arsenal) {
         failures.push("vella: a finished install does not move on".into());
     }
     w.back();
@@ -273,10 +308,99 @@ pub(crate) fn render(dir: &std::path::Path, mtm: MainThreadMarker) -> Vec<String
         failures.push(format!("vella: Continue with Vella installed sent {advanced:?}"));
     }
 
-    // Customise: the hero, the name, the marks, the wake words and the greeting; Start closes Setup.
-    let ok = w.current() == PageKind::Builtin(SetupStep::Customise) && w.next.label() == "Start Heimdall" && w.custom.marks.len() == 12
+    // Arsenal (public edition): Add Arsenal (Homebrew here) by default, its line and the eight kinds; Continue with Add
+    // installs and waits; installed, Use it turns it on, and Not now turns it off again. The real bundle on this Mac
+    // gives the icon (read only).
+    let arsenal_app = ArsenalApp { path: "/Applications/Arsenal.app".into(), version: "1.0.2".into() };
+    let missing = ArsenalSetup { found: None, brew: true, install: T3Install::Idle, on: false };
+    w.set_arsenal(&missing);
+    let p = &w.arsenal_page;
+    let ok = w.current() == PageKind::Builtin(SetupStep::Arsenal) && p.add.is_selected() && !p.not_now.is_selected() && p.add.label() == "Add Arsenal"
+        && p.status.stringValue().to_string() == "70 MB" && p.kinds.len() == 8 && p.spinner.isHidden();
+    shot(&w, "10-arsenal-missing", ok, &mut failures);
+    let waited = w.advance();
+    if waited != Advance::Wait(vec![UiAction::InstallArsenal]) || w.current() != PageKind::Builtin(SetupStep::Arsenal) {
+        failures.push(format!("arsenal: Continue with Add sent {waited:?}"));
+    }
+    w.set_arsenal(&ArsenalSetup { install: T3Install::Working("Installing Arsenal with Homebrew…".into()), ..missing.clone() });
+    shot(&w, "10-arsenal-installing", !w.arsenal_page.spinner.isHidden() && !w.arsenal_page.progress.isHidden(), &mut failures);
+    // Not now while that install runs: Setup moves on, and the install landing later leaves Arsenal off (review 5 Nov).
+    w.choose_arsenal(false);
+    let skipped = w.advance();
+    if skipped != Advance::Next(vec![]) || w.set_arsenal(&ArsenalSetup { found: Some(arsenal_app.clone()), ..missing.clone() }) {
+        failures.push(format!("arsenal: Not now during the install sent {skipped:?} or turned it on when it landed"));
+    }
+    // An install Continue waits for that lands: Heimdall uses it, and the page moves on.
+    w.back();
+    w.set_arsenal(&missing);
+    w.choose_arsenal(true);
+    let waited = w.advance();
+    let landed = w.set_arsenal(&ArsenalSetup { found: Some(arsenal_app.clone()), ..missing.clone() });
+    if waited != Advance::Wait(vec![UiAction::InstallArsenal]) || !landed || w.current() != PageKind::Builtin(SetupStep::Customise) {
+        failures.push("arsenal: a finished install does not turn it on and move on".into());
+    }
+    w.back();
+    let installed = ArsenalSetup { found: Some(arsenal_app.clone()), brew: true, install: T3Install::Idle, on: true };
+    w.set_arsenal(&installed);
+    let p = &w.arsenal_page;
+    let ok = p.add.label() == "Use it" && p.add.is_selected() && p.status.stringValue().to_string() == "Found Arsenal 1.0.2" && !p.icon.isHidden();
+    shot(&w, "10-arsenal-installed", ok, &mut failures);
+    w.choose_arsenal(false);
+    let off = w.advance();
+    if off != Advance::Next(vec![UiAction::SetArsenal(false)]) {
+        failures.push(format!("arsenal: Not now while on sent {off:?}"));
+    }
+    w.back();
+    w.choose_arsenal(true);
+    let again = w.advance();
+    if again != Advance::Next(vec![]) || w.current() != PageKind::Builtin(SetupStep::Customise) {
+        failures.push(format!("arsenal: Use it while on sent {again:?}"));
+    }
+
+    // Customise: the hero, the name, the marks, the wake words and the greeting; Continue goes to Getting ready.
+    let ok = w.current() == PageKind::Builtin(SetupStep::Customise) && w.next.label() == "Continue" && w.custom.marks.len() == 12
         && w.custom.preview.greeting() == "Hi Ada. I’m Heimdall." && !w.custom.chips[2].isHidden() && w.custom.voice.stringValue().to_string() == "Edwin";
     shot(&w, "11-customise", ok, &mut failures);
+    // A mark brings its persona at once (the field held the default name): the sparkle is Lumi, who speaks as Lottie.
+    // The app's answers (identity, voice) come back as the menu's would; everything that shows the name follows.
+    let mark_at = |w: &SetupWindow, name: &str| w.marks().iter().position(|i| *i == Icon::Symbol { name: name.into() }).unwrap_or(0);
+    let sparkle = Icon::Symbol { name: "sparkle".into() };
+    // The name field being edited when the mark is clicked (VM run 5 Nov: the chip and greeting lagged a click behind).
+    let editing = w.window.makeFirstResponder(Some(&w.custom.field)) && w.is_editing(&w.custom.field);
+    if !editing {
+        failures.push("customise: the name field could not be put in editing for the mark check".into());
+    }
+    let sent = w.choose_mark(mark_at(&w, "sparkle"));
+    if w.custom.wake.stringValue().to_string() != "“Lumi”" || w.custom.preview.greeting() != "Hi Ada. I’m Lumi." {
+        failures.push(format!("customise: the chip says {} and the greeting {} right after the mark", w.custom.wake.stringValue(), w.custom.preview.greeting()));
+    }
+    let lumi = Identity { name: "Lumi".into(), icon: sparkle.clone(), ..ada.clone() };
+    crate::identity::set(lumi.clone());
+    w.set_identity(&lumi);
+    w.set_voice(&crate::speech_voice::SpeechVoiceState { preset: "Lottie".into(), ..voice.clone() });
+    let lottie = crate::speech_voice::SpeechVoiceAction::SetPreset("Lottie".into());
+    let ok = sent == [UiAction::Identity(IdentityAction::SetIcon(sparkle.clone())), UiAction::Identity(IdentityAction::SetName("Lumi".into())), UiAction::SpeechVoice(lottie)]
+        && w.custom.field.stringValue().to_string() == "Lumi" && w.primary_title() == "Continue" && w.custom.wake.stringValue().to_string() == "“Lumi”"
+        && w.custom.voice.stringValue().to_string() == "Lottie" && w.custom.preview.greeting() == "Hi Ada. I’m Lumi." && w.window.title().to_string() == "Set Up Lumi"
+        && w.welcome.title.stringValue().to_string() == "Welcome to Lumi" && w.welcome.tile.icon() == sparkle
+        && w.voice_page.tiles.iter().filter(|(_, t)| t.is_selected()).count() == 1 && voice_chosen(&w.voice) == Some("Lottie");
+    shot(&w, "11-customise-mark-lumi", ok, &mut failures);
+    // A name the user typed stays when the mark changes; the voice still follows (none was picked on the Voice step).
+    w.custom.field.setStringValue(&ns("Juno"));
+    w.name_typed();
+    let crown = Icon::Symbol { name: "crown".into() };
+    let sent = w.choose_mark(mark_at(&w, "crown"));
+    let jarvis = Identity { name: "Juno".into(), icon: crown.clone(), ..ada.clone() };
+    crate::identity::set(jarvis.clone());
+    w.set_identity(&jarvis);
+    w.set_voice(&crate::speech_voice::SpeechVoiceState { preset: "Miles".into(), ..voice.clone() });
+    let ok = sent == [UiAction::Identity(IdentityAction::SetIcon(crown)), UiAction::SpeechVoice(crate::speech_voice::SpeechVoiceAction::SetPreset("Miles".into()))]
+        && w.window.title().to_string() == "Set Up Juno" && w.custom.voice.stringValue().to_string() == "Miles";
+    shot(&w, "11-customise-mark-typed-name", ok, &mut failures);
+    w.custom.field.setStringValue(&ns("Heimdall"));
+    crate::identity::set(ada.clone());
+    w.set_identity(&ada);
+    w.set_voice(&voice);
     let moon = w.marks().iter().position(|i| *i == Icon::Symbol { name: "moon.stars".into() }).unwrap_or(0);
     let mark = w.mark_action(moon);
     let selene = Identity { icon: Icon::Symbol { name: "moon.stars".into() }, ..ada.clone() };
@@ -284,15 +408,85 @@ pub(crate) fn render(dir: &std::path::Path, mtm: MainThreadMarker) -> Vec<String
     w.set_identity(&selene);
     w.custom.field.setStringValue(&ns("Selene"));
     w.name_typed();
-    if w.next.label() != "Start Selene" {
-        failures.push(format!("customise: the button says {} while Selene is typed", w.next.label()));
-    }
     let ok = mark == Some(UiAction::Identity(IdentityAction::SetIcon(Icon::Symbol { name: "moon.stars".into() })))
         && w.custom.preview.greeting() == "Hi Ada. I’m Selene." && w.custom.wake.stringValue().to_string() == "“Selene”";
     shot(&w, "11-customise-last", ok, &mut failures);
+    let next = w.advance();
+    if next != Advance::Next(vec![UiAction::Identity(IdentityAction::SetName("Selene".into()))]) || w.current() != PageKind::Builtin(SetupStep::Models) {
+        failures.push(format!("customise: Continue sent {next:?}"));
+    }
+
+    // Getting ready (public edition), the last step: one row per model (its size waiting, its progress, a check when it
+    // is in place, the reason and Retry when it failed), then the voice, listening, the decider and the agent; Start
+    // stays off until every row is green (5 Nov).
+    let row = |title: &str, detail: Option<&str>, symbol: &str, done: u64, total: u64, state: DownloadState| ModelDownload {
+        title: title.into(), detail: detail.map(Into::into), symbol: symbol.into(), done, total, state,
+    };
+    let rows = |p: DownloadState, s: DownloadState, d: DownloadState, e: DownloadState, done: u64| ModelDownloads { rows: vec![
+        row("Parakeet", None, "waveform", if p == DownloadState::Done { 632_165_613 } else { 0 }, 632_165_613, p),
+        row("Speakers", None, "person.2.wave.2", if s == DownloadState::Done { 158_235_581 } else { 0 }, 158_235_581, s),
+        row("Decider", Some("4-bit"), "target", done, 1_367_819_482, d),
+        row("EmbeddingGemma 2", None, "magnifyingglass", 0, 1_525_787_092, e),
+    ] };
+    use DownloadState::{Done, Downloading, Failed, Waiting};
+    let ready_row = |key: &str, title: &str, detail: &str, symbol: &str, state: ReadyState| ReadyRow { key: key.into(), title: title.into(), detail: (!detail.is_empty()).then(|| detail.into()), symbol: symbol.into(), state };
+    // As the app sends them: no input names none; listening waits while a listening model downloads, then for sound
+    // from the microphone.
+    let readiness_with = |mic: ReadyState, decider: ReadyState, agent: ReadyState, voice: ReadyState| {
+        let listening = match (&decider, &mic) {
+            (ReadyState::Ready, ReadyState::Ready) => ReadyState::Ready,
+            (ReadyState::Ready, _) => ReadyState::Blocked { words: "Waits for the microphone".into() },
+            _ => ReadyState::Blocked { words: "Waits for its models".into() },
+        };
+        SetupReadiness { rows: vec![
+            ready_row("microphone", "Microphone", if matches!(mic, ReadyState::Problem { .. }) { "" } else { "MacBook Pro Microphone" }, "mic.fill", mic),
+            ready_row("voice", "Voice", "Phonon S · Edwin", "speaker.wave.2.fill", voice),
+            ready_row("listening", "Listening", "Parakeet", "waveform", listening),
+            ready_row("decider", "Decider", "V6 4-bit", "target", decider),
+            ready_row("agent", "Agent", "Claude Haiku 5.5 · OpenCode Go", "sparkles", agent),
+        ] }
+    };
+    let readiness = |agent: ReadyState, voice: ReadyState| readiness_with(ReadyState::Ready, ReadyState::Ready, agent, voice);
+    let downloading = ReadyState::Working { words: "Downloading".into(), progress: Some((612_000_000, 1_367_819_482)) };
+    let decider_failed = ReadyState::Problem { why: "No connection to Hugging Face".into(), fix: Some(ReadyFix::Action { title: "Retry".into(), action: Box::new(UiAction::RetryModelDownloads) }) };
+    let no_mic = ReadyState::Problem { why: "No microphone found".into(), fix: Some(ReadyFix::Step { title: "Choose…".into(), step: SetupStep::Microphone }) };
+    let choose = ReadyState::Problem { why: "No agent chosen yet".into(), fix: Some(ReadyFix::Step { title: "Choose…".into(), step: SetupStep::Providers }) };
+    let asking = ReadyState::Working { words: "Asking it a first question…".into(), progress: None };
+    let learning = ReadyState::Working { words: "Learning the voice…".into(), progress: None };
+    let all_done = ModelDownloads { rows: rows(Done, Done, Done, Done, 1_367_819_482).rows.into_iter().map(|r| ModelDownload { done: r.total, ..r }).collect() };
+    let ready_states = [
+        ("12-ready-downloading", rows(Done, Done, Downloading, Waiting, 612_000_000), readiness_with(ReadyState::Blocked { words: "Waits for listening".into() }, downloading, asking.clone(), learning.clone()), false),
+        ("12-ready-failed", rows(Done, Done, Failed("No connection to Hugging Face".into()), Waiting, 612_000_000), readiness_with(ReadyState::Ready, decider_failed, asking.clone(), learning), false),
+        ("12-ready-no-mic", all_done.clone(), readiness_with(no_mic, ReadyState::Ready, ReadyState::Ready, ReadyState::Ready), false),
+        ("12-ready-no-agent", all_done.clone(), readiness(choose, ReadyState::Ready), false),
+        ("12-ready-all-green", all_done.clone(), readiness(ReadyState::Ready, ReadyState::Ready), true),
+    ];
+    for (name, state, ready, start) in ready_states {
+        w.set_downloads(&state);
+        w.set_readiness(&ready);
+        let p = &w.downloads_page;
+        let shown = p.rows.iter().filter(|r| !r.row.isHidden()).count();
+        let bars = p.rows.iter().filter(|r| !r.row.isHidden() && !r.bar.track.isHidden()).count();
+        let fixes: Vec<String> = p.rows.iter().filter(|r| !r.row.isHidden() && !r.retry.isHidden()).map(|r| r.retry.label()).collect();
+        // Rows: Parakeet, Speakers, EmbeddingGemma 2, then Microphone, Voice, Listening, Decider (its download, then
+        // loaded), Agent.
+        let words = p.rows[6].state.stringValue().to_string();
+        let ok = w.current() == PageKind::Builtin(SetupStep::Models) && shown == 8 && w.next.label() == "Start Selene" && w.next.isEnabled() == start
+            && match name {
+                "12-ready-downloading" => bars == 1 && words == "612 MB of 1.4 GB" && fixes.is_empty() && !p.rows[7].spinner.isHidden() && p.rows[3].spinner.isHidden() && p.rows[5].spinner.isHidden(),
+                "12-ready-failed" => fixes == ["Retry"] && w.fix_at(6) == Some(ReadyFix::Action { title: "Retry".into(), action: Box::new(UiAction::RetryModelDownloads) }),
+                "12-ready-no-mic" => fixes == ["Choose…"] && matches!(w.fix_at(3), Some(ReadyFix::Step { step: SetupStep::Microphone, .. })) && p.rows[5].check.isHidden() && p.rows[5].spinner.isHidden(),
+                "12-ready-no-agent" => fixes == ["Choose…"] && matches!(w.fix_at(7), Some(ReadyFix::Step { step: SetupStep::Providers, .. })),
+                _ => p.rows.iter().take(8).all(|r| !r.check.isHidden()),
+            };
+        shot(&w, name, ok, &mut failures);
+        if !start && w.advance() != Advance::Stay {
+            failures.push(format!("{name}: Start went past rows that are not green"));
+        }
+    }
     let closed = w.advance();
-    if closed != Advance::Close(vec![UiAction::Identity(IdentityAction::SetName("Selene".into()))]) {
-        failures.push(format!("customise: Start sent {closed:?}"));
+    if closed != Advance::Close(vec![]) {
+        failures.push(format!("ready: Start sent {closed:?}"));
     }
 
     // Resized: the window at its minimum and widened; cards stay centred, the footer at the bottom right.

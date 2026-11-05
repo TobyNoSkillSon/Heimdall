@@ -8,7 +8,38 @@ pub(super) struct CaptureRun {
     pub(super) stop: Arc<AtomicBool>,
     pub(super) draining: Arc<AtomicBool>,
 }
+/// Runs `start` on its own thread and hands its result back on the returned channel at once: the live loop never waits
+/// for it (`CaptureRun::begin`).
+pub(super) fn off_loop<T: Send + 'static>(name: &str, start: impl FnOnce() -> Result<T> + Send + 'static) -> crossbeam_channel::Receiver<Result<T>> {
+    let (tx, rx) = bounded(1);
+    let failed = tx.clone();
+    if let Err(e) = std::thread::Builder::new().name(name.into()).spawn(move || { let _ = tx.send(start()); }) {
+        let _ = failed.send(Err(anyhow::anyhow!("{name} did not start: {e}")));
+    }
+    rx
+}
 impl CaptureRun {
+    /// Capture starting off the live loop (its HAL discovery waits up to 10 s): the result arrives on
+    /// `app.capture_starting` and `adopt` makes the run. One start at a time.
+    pub(super) fn begin(app: &mut pipeline::Pipeline, permissions: LivePermissions) -> Result<()> {
+        if app.capture_starting.is_some() { return Ok(()); }
+        let (config, consent, archive) = (mic_config(app, app.session.clone()), permissions.consent(), app.raw_archive()?);
+        app.capture_starting = Some(off_loop("heimdall-capture-start", move || capture::Capture::start_with_archive(config, consent, archive)));
+        Ok(())
+    }
+    /// The started capture as a run: its event pump and echo guard.
+    pub(super) fn adopt(app: &pipeline::Pipeline, tx: crossbeam_channel::Sender<capture::CaptureEvent>, capture: capture::Capture, rx: capture::CaptureReceiver) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let s = stop.clone();
+        let draining = Arc::new(AtomicBool::new(false));
+        let drain = draining.clone();
+        let pump = std::thread::spawn(move || pump_capture_events(
+            || rx.recv_timeout(Duration::from_secs(1)), tx, s, drain));
+        if let Err(e) = crate::bridge::echo_cancel::spawn(capture.echo_control(), Arc::downgrade(&app.tools), stop.clone()) {
+            eprintln!("Echo cancellation control did not start: {e}");
+        }
+        Self { capture: Some(capture), pump: Some(pump), stop, draining }
+    }
     pub(super) fn start(
         app: &pipeline::Pipeline,
         tx: crossbeam_channel::Sender<capture::CaptureEvent>,
@@ -196,6 +227,8 @@ pub(super) fn mic_config(app: &pipeline::Pipeline, archive_dir: PathBuf) -> capt
         microphones: Some(microphone_reports().0.clone()),
         recorded_apps: app.settings.recorded_app_keys(),
         playing_apps: Some(playing_reports().0.clone()),
+        // The public edition starts on macOS's default input (5 Nov).
+        system_default_input: crate::edition::PUBLIC,
     }
 }
 pub(super) fn apply_recorded_apps(app: &pipeline::Pipeline, capture: &Option<CaptureRun>, discovering: &Option<capture::Capture>) {
@@ -299,7 +332,11 @@ pub(super) fn live(
     let mut seen_microphones = capture::MicrophoneState::default();
     // Listening off survives relaunch: no capture starts, and the archive records why there is no audio. The agent
     // and the screen still start below, on their own switches.
-    let mut wants_listen = app.settings.setup_requested && !app.settings.paused;
+    // The public edition's downloads: a launch after Setup resumes any not finished; listening waits for its models
+    // (pipeline/model_downloads.rs) and the settings tick starts it when they land.
+    if crate::setup_wizard::downloads_wanted(&app.settings) { app.start_model_downloads(); }
+    app.models_tick();
+    let mut wants_listen = app.settings.setup_requested && !app.settings.paused && app.listen_models_ready();
     if app.settings.setup_requested && app.settings.paused {
         app.set_running(false, "launched off")?;
         u.send(ui::UiUpdate::Listen(ui::ListenState::Paused));
@@ -355,7 +392,13 @@ pub(super) fn live(
         let screen_events = screens.as_ref().map(|s: &screen::ScreenCapture| s.events.clone()).unwrap_or_else(crossbeam_channel::never);
         // A drop onto the notch nobody's words took goes alone when due (pipeline/drops.rs).
         let drop_due = app.drop_deadline().map(crossbeam_channel::at).unwrap_or_else(crossbeam_channel::never);
+        let capture_ready = app.capture_starting.clone().unwrap_or_else(crossbeam_channel::never);
         select! {
+            recv(capture_ready)->started=>{
+                let started=started.unwrap_or_else(|_| Err(anyhow::anyhow!("the capture start thread ended")));
+                let wanted=wants_listen&&app.settings.setup_requested;
+                adopt_capture(&mut app,&mut capture,&tx,started,wanted);
+            },
             recv(internal)->e=>if let Err(e)=app.internal(e?){app.note_line(&format!("Agent pre-flight: {e:#}"));},
             recv(drop_due)->_=>if let Err(e)=app.drop_tick(){app.note_line(&format!("Drop: {e:#}"));},
             recv(engine_downloads)->e=>if let Ok(e)=e {app.engine_download_event(e);},
@@ -371,6 +414,17 @@ pub(super) fn live(
                 app.catch_up_tick();
                 // Health and Jarvis's residency also without capture events (Listening off).
                 app.component_tick();
+                // `Heimdall setup`'s requests (setup_cli.rs), then Getting ready's rows and the status file.
+                app.setup_requests_tick();
+                app.setup_ready_tick();
+                // Listening's models landed (or went): listening follows, no relaunch.
+                if app.models_tick() {
+                    let now = app.settings.setup_requested && !app.settings.paused && app.listen_models_ready();
+                    if now != wants_listen {
+                        wants_listen = now;
+                        reconcile_listening(&mut app,wants_listen,&mut capture,&mut screens,&mut discovering,&events,&listen_events,&tx,&listen_tx,&mut worker_started,permissions,u)?;
+                    }
+                }
                 if let Some(old) = reload_settings(&mut app, &mut settings_watch) {
                 apply_microphones(&app,&capture,&discovering);
                 apply_recorded_apps(&app,&capture,&discovering);
@@ -385,7 +439,7 @@ pub(super) fn live(
                     }
                 }
                 if old.paused != app.settings.paused || old.setup_requested != app.settings.setup_requested {
-                    wants_listen = app.settings.setup_requested && !app.settings.paused;
+                    wants_listen = app.settings.setup_requested && !app.settings.paused && app.listen_models_ready();
                     reconcile_listening(&mut app,wants_listen,&mut capture,&mut screens,&mut discovering,&events,&listen_events,&tx,&listen_tx,&mut worker_started,permissions,u)?;
                     if !wants_listen && app.settings.setup_requested { if let Err(e)=app.ensure_agent(){app.fail(&format!("Agent: {e:#}"));} }
                 }
@@ -421,7 +475,7 @@ pub(super) fn live(
                 archive::prune(&app.data.join("archive"),app.settings.retention_days,Some(&app.session))?;
             },
             recv(actions)->a=>match a? {
-                ui::UiAction::Quit=>{app.request_engine_stop();quitting=true;},
+                ui::UiAction::Quit=>{app.request_engine_stop();if let Some(d)=crate::model_store::global(){d.stop();}quitting=true;},
                 ui::UiAction::Reload=>{
                     if let Err(e)=app.retry_settings(){app.note_line(&format!("Reload: {e:#}"));}
                     if app.pending_reload.contains_key("Screen Recording") {
@@ -448,7 +502,10 @@ pub(super) fn live(
                 ui::UiAction::RequestSystemAudio=>{
                     // This callback exists only after the setup Allow All button; its On intent was SetupAllowed.
                     // A failed save is noted and retried by the settings tick; it never ends the live loop.
-                    if let Err(e)=app.setup_requested(){app.note_save_failure(&e);}wants_listen = !app.settings.paused;
+                    if let Err(e)=app.setup_requested(){app.note_save_failure(&e);}
+                    // Allow All also (re)starts the model downloads, so listening's models are on their way.
+                    app.start_model_downloads();
+                    wants_listen = !app.settings.paused && app.listen_models_ready();
                     permissions.system=true;permissions.observe(&ui::permissions::status());
                     if wants_listen {start_live(&mut app,&mut capture,&mut screens,&tx,&listen_tx,&mut worker_started,permissions)?;discovering.take();}
                     else {start_unheard(&mut app,&mut screens,permissions);}
@@ -470,17 +527,14 @@ pub(super) fn live(
                         if let Some(c) = capture.as_ref().and_then(|c: &CaptureRun| c.capture.as_ref()) {
                             c.refresh_permissions(permissions.consent());
                         } else if permissions.system {
-                            match CaptureRun::start(&app,tx.clone(),permissions) {
-                                Ok(c)=>{app.capture_started();capture=Some(c)},
-                                Err(e)=>app.fail(&format!("Capture: {e:#}")),
-                            }
+                            if let Err(e)=CaptureRun::begin(&mut app,permissions){app.fail(&format!("Capture: {e:#}"));}
                         }
                     }
                 },
                 ui::UiAction::SetListening(_)=>{
                     // The latch already holds the intent; a failed save is retried by the settings tick.
                     if let Err(e)=app.heimdall_intent_processed(){app.note_save_failure(&e);}
-                    wants_listen=!app.settings.paused&&app.settings.setup_requested;
+                    wants_listen=!app.settings.paused&&app.settings.setup_requested&&app.listen_models_ready();
                     reconcile_listening(&mut app,wants_listen,&mut capture,&mut screens,&mut discovering,&events,&listen_events,&tx,&listen_tx,&mut worker_started,permissions,u)?;
                     if !app.settings.paused&&!app.settings.setup_requested{u.send(ui::UiUpdate::ShowSetup);}
                 },
@@ -577,10 +631,7 @@ pub(super) fn recover(
             if let Some(c) = capture.take() { c.retire(true); }
             app.capture_restarting();
             while let Ok(e) = events.try_recv() { if let Err(e) = app.capture_event(e) { eprintln!("Capture drain failed; restarting anyway: {e:#}"); } }
-            match CaptureRun::start(app, tx.clone(), permissions) {
-                Ok(c) => { app.capture_started(); *capture = Some(c) },
-                Err(e) => app.fail(&format!("Capture: {e:#}")),
-            }
+            if let Err(e) = CaptureRun::begin(app, permissions) { app.fail(&format!("Capture: {e:#}")); }
         }
         health::Recovery::RestartScreen(why) => {
             if !app.settings.setup_requested { return Ok(()); }
@@ -696,7 +747,8 @@ pub(super) fn start_live(
     app: &mut pipeline::Pipeline,
     capture: &mut Option<CaptureRun>,
     screens: &mut Option<screen::ScreenCapture>,
-    tx: &crossbeam_channel::Sender<capture::CaptureEvent>,
+    // Capture now starts off the loop (`CaptureRun::begin`); its sender is `adopt_capture`'s.
+    _tx: &crossbeam_channel::Sender<capture::CaptureEvent>,
     listen_tx: &crossbeam_channel::Sender<Option<listen::WorkerEvent>>,
     worker_started: &mut bool,
     permissions: LivePermissions,
@@ -711,12 +763,13 @@ pub(super) fn start_live(
         if let Err(e) = app.ensure_live_worker(listen_tx.clone()) { app.fail(&format!("Listen: {e:#}")); }
         *worker_started = true;
         if capture.is_none() {
-            match CaptureRun::start(app, tx.clone(), permissions) {
-                Ok(c) => { app.capture_started(); *capture = Some(c) },
-                Err(e) => app.fail(&format!("Capture: {e:#}")),
-            }
+            // Off the live loop: `adopt_capture` takes it when it is up.
+            if let Err(e) = CaptureRun::begin(app, permissions) { app.fail(&format!("Capture: {e:#}")); }
         } else if let Some(c) = capture.as_ref().and_then(|c| c.capture.as_ref()) { c.refresh_permissions(permissions.consent()); }
-    } else if let Some(c) = capture.take() { c.retire(false); }
+    } else {
+        if let Some(c) = capture.take() { c.retire(false); }
+        drop_starting_capture(app);
+    }
     if desired[2] && !app.settings.screen_off {
         if let Err(e) = start_screen(app, screens) { app.fail(&format!("Screen: {e:#}")); }
     } else { stop_screen(app, screens, if app.settings.screen_off { "Seeing off" } else { "Screen Recording permission unavailable" }); }
@@ -747,6 +800,7 @@ pub(super) fn reconcile_listening(
         discovering.take();
     } else {
         if let Some(c)=capture.take() { c.retire(false); }
+        drop_starting_capture(app);
         while let Ok(e)=events.try_recv(){if let Err(e)=app.capture_event(e){app.errors+=1;eprintln!("Capture drain failed; continuing pause: {e:#}");}}
         app.stop_listening(listen_events)?;
         u.send(ui::UiUpdate::Listen(ui::ListenState::Paused));
@@ -837,6 +891,31 @@ pub(super) fn start_screen(
     adopt_screen(app, screens, SCREEN_START_WAIT)
 }
 /// Installs a stream that finished starting, waiting up to `wait` for it. A failed start is reported and returned.
+/// A capture start that finished (`CaptureRun::begin`): adopted while listening still wants it, else stopped off the
+/// loop.
+pub(super) fn adopt_capture(app: &mut pipeline::Pipeline, capture: &mut Option<CaptureRun>, tx: &crossbeam_channel::Sender<capture::CaptureEvent>, started: Result<(capture::Capture, capture::CaptureReceiver)>, wanted: bool) {
+    app.capture_starting = None;
+    match started {
+        Ok((c, rx)) if wanted && capture.is_none() => {
+            app.capture_started();
+            *capture = Some(CaptureRun::adopt(app, tx.clone(), c, rx));
+            // It started with the settings of 10-30 s ago: a microphone or app chosen meanwhile (saved, with no capture
+            // to tell) applies now (review 5 Nov: a USB mic picked during the start was lost).
+            apply_microphones(app, capture, &None);
+            apply_recorded_apps(app, capture, &None);
+        }
+        Ok(unwanted) => { std::thread::spawn(move || drop(unwanted)); }
+        Err(e) => app.fail(&format!("Capture: {e:#}")),
+    }
+}
+
+/// Listening went off while capture was starting: whatever it starts is stopped on its own thread.
+fn drop_starting_capture(app: &mut pipeline::Pipeline) {
+    if let Some(rx) = app.capture_starting.take() {
+        std::thread::spawn(move || { if let Ok(Ok(started)) = rx.recv() { drop(started); } });
+    }
+}
+
 pub(super) fn adopt_screen(app: &mut pipeline::Pipeline, screens: &mut Option<screen::ScreenCapture>, wait: Duration) -> Result<()> {
     let Some((rx, _, _)) = &app.screen_starting else { return Ok(()) };
     let started = match rx.recv_timeout(wait) {
@@ -868,5 +947,23 @@ pub(super) fn adopt_screen(app: &mut pipeline::Pipeline, screens: &mut Option<sc
 pub(super) fn drain_vella(app: &mut pipeline::Pipeline, rx: &crossbeam_channel::Receiver<crate::vella::Heard>) {
     while let Ok(heard) = rx.try_recv() {
         app.vella_notice(heard);
+    }
+}
+
+#[cfg(test)]
+mod off_loop_tests {
+    use super::*;
+
+    /// VM run 5 Nov: capture's HAL discovery waited 10-30 s on the live loop and the watchdog relaunched Heimdall
+    /// mid-Setup. A start handed to `off_loop` returns at once; its result arrives later on the channel.
+    #[test]
+    fn a_slow_start_never_holds_the_caller() {
+        let started = Instant::now();
+        let rx = off_loop("slow-start", || { std::thread::sleep(Duration::from_millis(600)); Ok(7) });
+        assert!(started.elapsed() < Duration::from_millis(100), "{:?}", started.elapsed());
+        assert!(rx.try_recv().is_err(), "not yet");
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap(), 7);
+        let failed = off_loop("failing-start", || Err::<(), _>(anyhow::anyhow!("HAL discovery startup failed")));
+        assert!(failed.recv_timeout(Duration::from_secs(5)).unwrap().is_err());
     }
 }

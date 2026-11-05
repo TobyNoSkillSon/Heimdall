@@ -288,7 +288,13 @@ pub fn all() -> Vec<Card> {
         vec![(1.0, "Build green")],
     ));
     // Voice
-    v.push(card("speaking_words", "Speaking with words", "Voice", "Helmet and waveform in the ears, the sentence below; the bars flatten the frame the audio ends.", speak(0.1, "The build is green.", 2.0), 3.0, vec![(0.1, "Audio starts"), (2.1, "Audio ends")]));
+    v.push(card("speaking_words", "Speaking with words", "Voice", "Stop and waveform in the ears, the sentence below; the bars flatten the frame the audio ends.", speak(0.1, "The build is green.", 2.0), 3.0, vec![(0.1, "Audio starts"), (2.1, "Audio ends")]));
+    // Bug notes 2026-11-05T00-10-37 / 02-32-17: Stop in the left ear while the voice plays; a press cuts it at once.
+    let mut stop: Vec<(f64, Step)> = speak(0.1, "Dave pushed the audio fix an hour ago, and I kept the old build as the rollback.", 3.0).into_iter().filter(|(t, _)| *t < 1.6).collect();
+    stop.push((1.6, Step::Ev(Event::Click(Target::StopSpeech))));
+    stop.push(ev(1.65, Event::SpeechCut));
+    stop.push(ev(1.7, Event::Speaking(false)));
+    v.push(card("speaking_stop", "Stop while speaking", "Voice", "Stop in the left ear while the voice plays; a press cuts the voice and the words at once.", stop, 3.0, vec![(0.1, "Audio starts"), (1.6, "Stop")]));
     v.push(card(
         "speaking_long",
         "Speaking, a long sentence",

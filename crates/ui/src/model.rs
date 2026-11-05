@@ -274,6 +274,9 @@ pub struct DeciderStatus {
     /// Why the last swap or load failed (shown whole under the header).
     pub reason: Option<String>,
     pub state: DeciderState,
+    /// The public edition: a precision not on this Mac can still be chosen; choosing it downloads it
+    /// (`UiAction::SetDeciderPrecision`, app `model_store`).
+    pub downloadable: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1507,6 +1510,12 @@ pub enum UiUpdate {
     /// Setup ▸ Vella: whether Vella is installed (then it is connected), whether Homebrew can install it, and an
     /// install in progress.
     VellaSetup(VellaSetup),
+    /// Setup ▸ Arsenal: found, installing, and whether Heimdall uses it (public edition's step).
+    ArsenalSetup(ArsenalSetup),
+    /// Setup ▸ Getting ready: the first-run model downloads (public edition; empty: nothing to download).
+    ModelDownloads(ModelDownloads),
+    /// Setup ▸ Getting ready's other rows: the voice, listening, the decider, This Mac's model, the agent.
+    SetupReadiness(SetupReadiness),
     /// Setup ▸ Coding Agents: the harnesses found, which already never ask, and the deny list.
     HarnessSetup(HarnessSetup),
     /// The app finished shutting down after `UiAction::Quit`.
@@ -1675,6 +1684,8 @@ pub enum UiAction {
     KeepHome,
     /// Setup's Done on the last page: setup is finished (the app's first-run greeting, once per profile).
     SetupDone,
+    /// Setup shows this step now: the app keeps it until Setup is done, so a relaunch reopens Setup there.
+    SetupAt(SetupStep),
     /// Setup ▸ T3 Code ▸ Connect: the user allows Heimdall to connect to T3 Code (saved; the only way it connects
     /// in the public edition).
     ConnectT3,
@@ -1682,6 +1693,19 @@ pub enum UiAction {
     InstallT3,
     /// Setup ▸ Vella ▸ Install: `brew install --cask tobynoskillson/tap/vella`, only on this click.
     InstallVella,
+    /// Setup ▸ Arsenal ▸ Continue with Add Arsenal: Homebrew installs its cask; Heimdall uses it once it is here.
+    InstallArsenal,
+    /// Setup ▸ Arsenal: Heimdall's agent uses Arsenal's models as tools (its MCP bridge), or not.
+    SetArsenal(bool),
+    /// Setup left the listening page: the models it needs download (public edition; the app does nothing when they are
+    /// all here). The decider's precision is the one in settings by then.
+    StartModelDownloads,
+    /// Getting ready ▸ Retry: every failed download again, from where it stopped.
+    RetryModelDownloads,
+    /// Getting ready ▸ the agent's row: one real request to the agent's model again.
+    CheckAgent,
+    /// Getting ready ▸ the voice's row: learn the chosen voice again now (instead of after its wait).
+    RetryVoice,
     /// Setup ▸ Coding Agents: Set Up (true: every harness found works without asking, kept so at each start) or Leave
     /// as Is (false: nothing is touched). Saved.
     SetHarnessAutonomy(bool),
@@ -1699,6 +1723,9 @@ pub enum UiAction {
     ForceWake,
     /// ⌃⌘': a suggestion card now from the conversation, labelled "suggest" for the decider.
     ForceSuggest,
+    /// The island's Stop while Heimdall speaks: the voice stops at once (held lines go too), and the line that woke
+    /// the agent is labelled "not_for_heimdall" for the decider (pipeline/hotkeys.rs).
+    StopSpeaking,
     /// Show Islands on Streams: the island's windows shared with screen capture or not;
     /// persisted. The UI applies it to its windows at once.
     SetIslandsOnStreams(bool),
@@ -1768,30 +1795,47 @@ pub enum SetupStep {
     /// How should I sound? Phonon S and its voices.
     Voice,
     Permissions,
+    /// The microphone (required): the input in use, its live level, another to choose.
+    Microphone,
     Home,
     T3,
     /// The coding agents on this Mac set to work without asking (public edition only; docs/harness-autonomy.md).
     Harnesses,
     /// Vella, the optional dictation app.
     Vella,
+    /// Arsenal, the on-device models app Heimdall can call as tools (public edition only).
+    Arsenal,
+    /// Getting ready: the last step (public edition only): every model, the voice, listening, the decider and the
+    /// agent, one row each; Start waits until all are green.
+    Models,
     /// Customise me: the assistant's name and mark; the last step (Start Heimdall).
     Customise,
 }
 
 impl SetupStep {
-    pub const ALL: [SetupStep; 11] = [
+    pub const ALL: [SetupStep; 14] = [
         SetupStep::Welcome,
         SetupStep::Name,
         SetupStep::Providers,
         SetupStep::Decider,
         SetupStep::Voice,
         SetupStep::Permissions,
+        SetupStep::Microphone,
         SetupStep::Home,
         SetupStep::T3,
         SetupStep::Harnesses,
         SetupStep::Vella,
+        SetupStep::Arsenal,
         SetupStep::Customise,
+        SetupStep::Models,
     ];
+    /// Its name in settings files: "welcome", "models"…
+    pub fn key(self) -> String {
+        format!("{self:?}").to_lowercase()
+    }
+    pub fn from_key(key: &str) -> Option<SetupStep> {
+        SetupStep::ALL.into_iter().find(|s| s.key() == key)
+    }
     /// The page's title (`name`: the assistant's).
     pub fn title(self, name: &str) -> String {
         match self {
@@ -1801,10 +1845,13 @@ impl SetupStep {
             SetupStep::Decider => "How should I listen?".into(),
             SetupStep::Voice => "How should I sound?".into(),
             SetupStep::Permissions => format!("Allow {name}"),
+            SetupStep::Microphone => "Can you hear me?".into(),
             SetupStep::Home => "Where should I keep my files?".into(),
             SetupStep::T3 => "Setting up T3 Code".into(),
             SetupStep::Harnesses => "Let coding agents work without asking?".into(),
             SetupStep::Vella => "Do you want dictation with Vella?".into(),
+            SetupStep::Arsenal => "Do you want Arsenal?".into(),
+            SetupStep::Models => "Getting ready".into(),
             SetupStep::Customise => "Customise me".into(),
         }
     }
@@ -1839,14 +1886,17 @@ pub struct HomeMove {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ProviderChoice {
     SplashEngine,
+    /// An OpenAI- or Anthropic-compatible server of the user's own: its URL and an optional key.
+    Custom,
     OpenCodeGo,
     ClaudeViaT3,
     ChatGpt,
 }
 
 impl ProviderChoice {
-    pub const ALL: [ProviderChoice; 4] = [
+    pub const ALL: [ProviderChoice; 5] = [
         ProviderChoice::SplashEngine,
+        ProviderChoice::Custom,
         ProviderChoice::OpenCodeGo,
         ProviderChoice::ClaudeViaT3,
         ProviderChoice::ChatGpt,
@@ -1854,6 +1904,7 @@ impl ProviderChoice {
     pub fn title(self) -> &'static str {
         match self {
             ProviderChoice::SplashEngine => LOCAL_ENGINE_TITLE,
+            ProviderChoice::Custom => "Custom API",
             ProviderChoice::OpenCodeGo => "OpenCode Go subscription",
             ProviderChoice::ClaudeViaT3 => RELAY_TITLE,
             ProviderChoice::ChatGpt => "Codex subscription",
@@ -1863,6 +1914,7 @@ impl ProviderChoice {
     pub fn mark(self) -> &'static str {
         match self {
             ProviderChoice::SplashEngine => "laptopcomputer",
+            ProviderChoice::Custom => "server.rack",
             ProviderChoice::OpenCodeGo => "opencode",
             ProviderChoice::ClaudeViaT3 => "anthropic",
             ProviderChoice::ChatGpt => "openai",
@@ -1872,6 +1924,7 @@ impl ProviderChoice {
     pub fn menu_action(self) -> ProviderAction {
         match self {
             ProviderChoice::SplashEngine => ProviderAction::Engine,
+            ProviderChoice::Custom => ProviderAction::CustomKinds,
             ProviderChoice::OpenCodeGo => ProviderAction::Connect("opencode-go"),
             ProviderChoice::ClaudeViaT3 => ProviderAction::ClaudeViaT3,
             ProviderChoice::ChatGpt => ProviderAction::Connect("openai"),
@@ -1959,6 +2012,117 @@ pub enum T3Install {
     Failed(String),
 }
 
+/// Setup ▸ Getting ready: one row per model the public edition downloads, in download order.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ModelDownloads {
+    pub rows: Vec<ModelDownload>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ModelDownload {
+    /// "Parakeet", "Decider", "EmbeddingGemma 2".
+    pub title: String,
+    /// Quieter, after the name: "4-bit".
+    pub detail: Option<String>,
+    /// SF Symbol for the row.
+    pub symbol: String,
+    pub done: u64,
+    pub total: u64,
+    pub state: DownloadState,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum DownloadState {
+    #[default]
+    Waiting,
+    Downloading,
+    Done,
+    /// Why, in a few words; Retry resumes it.
+    Failed(String),
+}
+
+/// Getting ready's rows after the models (app `setup_ready`): each green, working, or red with why and its fix.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SetupReadiness {
+    pub rows: Vec<ReadyRow>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadyRow {
+    /// "voice", "listening", "decider", "engine", "agent".
+    pub key: String,
+    pub title: String,
+    /// Quieter, after the title: "Phonon S · Edwin", "Claude Haiku 5.5 · OpenCode Go".
+    pub detail: Option<String>,
+    pub symbol: String,
+    pub state: ReadyState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReadyState {
+    Ready,
+    /// On its way, in a few words ("Loading…", "Learning Edwin's voice…"); `progress` (done, total) draws a bar.
+    Working { words: String, progress: Option<(u64, u64)> },
+    /// Waiting on another row ("Waits for the microphone"): dimmed and still, no spinner, since nothing of its own
+    /// is moving (VM run 5 Nov: a spinner beside a red row promised progress that would not come).
+    Blocked { words: String },
+    /// Can't run on this Mac now, and isn't needed to start ("Needs 8 GB free memory": memory search, VM run 5 Nov
+    /// 05:43): its reason in grey, no fix, and Start doesn't wait for it.
+    Optional { why: String },
+    /// Not ready: why, and the fix the row offers.
+    Problem { why: String, fix: Option<ReadyFix> },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReadyFix {
+    /// The action that fixes it, sent as is ("Retry", "Download").
+    Action { title: String, action: Box<UiAction> },
+    /// A step of Setup to go back to ("Choose…", "Sign In…", "Allow…").
+    Step { title: String, step: SetupStep },
+}
+
+impl ReadyFix {
+    pub fn title(&self) -> &str {
+        match self { ReadyFix::Action { title, .. } | ReadyFix::Step { title, .. } => title }
+    }
+}
+
+impl SetupReadiness {
+    /// Every row green (none at all: nothing to wait for).
+    pub fn ready(&self) -> bool {
+        self.rows.iter().all(|r| matches!(r.state, ReadyState::Ready | ReadyState::Optional { .. }))
+    }
+}
+
+impl ModelDownloads {
+    /// Every row is in place (also: nothing to download).
+    /// Every model in. In the public edition an empty list is not: its downloads have not started (review 5 Nov: a
+    /// relaunch after the listening page left Getting ready empty, which read as done).
+    pub fn finished(&self) -> bool {
+        (!self.rows.is_empty() || !cfg!(feature = "public")) && self.rows.iter().all(|r| r.state == DownloadState::Done)
+    }
+    pub fn failed(&self) -> bool {
+        self.rows.iter().any(|r| matches!(r.state, DownloadState::Failed(_)))
+    }
+}
+
+/// Setup ▸ Arsenal.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ArsenalSetup {
+    pub found: Option<ArsenalApp>,
+    /// Homebrew is on this Mac: Add installs Arsenal's cask. Without it, Add opens Arsenal's page.
+    pub brew: bool,
+    pub install: T3Install,
+    /// Heimdall's agent uses it (`Settings::arsenal_mcp`).
+    pub on: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArsenalApp {
+    pub path: std::path::PathBuf,
+    pub version: String,
+}
+
 /// Setup ▸ Vella. Installed means connected: Vella announces itself to Heimdall on its own.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct VellaSetup {
@@ -2005,6 +2169,9 @@ impl HarnessSetup {
 /// Vella's page, for a Mac without Homebrew.
 pub const VELLA_PAGE: &str = "https://tobynoskillson.com/vella";
 
+/// Arsenal's page, for a Mac without Homebrew (it links the release and the installer).
+pub const ARSENAL_PAGE: &str = "https://tobynoskillson.com/arsenal";
+
 /// The page with T3 Code's releases, for an install that could not finish.
 pub const T3_DOWNLOAD_PAGE: &str = "https://github.com/pingdotgg/t3code/releases/latest";
 
@@ -2024,9 +2191,11 @@ pub struct RuntimeSettings {
     /// Setup's permission requests were made once (`Settings::setup_requested`): Setup's Allow page then never sends
     /// Allow All's actions on its own (`mac::setup::leaving_permissions`).
     pub setup_requested: bool,
+    /// The first Setup's Start was pressed (app `setup_wizard::setup_unfinished` is false): closing Setup no longer quits.
+    pub setup_done: bool,
 }
 impl Default for RuntimeSettings {
-    fn default() -> Self {Self{dry_run:true,archive_format:0,archive_choice_pending:false,retention_days:0,archive_status:None,screen:ScreenRecording::default(),seeing:true,pending_reload:vec![],setup_requested:false}}
+    fn default() -> Self {Self{dry_run:true,archive_format:0,archive_choice_pending:false,retention_days:0,archive_status:None,screen:ScreenRecording::default(),seeing:true,pending_reload:vec![],setup_requested:false,setup_done:true}}
 }
 
 /// The switches at the top of the menu, in order: the passive ones (what Heimdall takes in) on the top row, the

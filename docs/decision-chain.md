@@ -204,17 +204,24 @@ the menu's Shortcuts) label lines for decider training. Code: `crates/app/src/pi
   card makes way. The latest decided line is labelled `suggest` = yes, with the decider's suggest question asked once more on the
   exact snapshot it saw for that line.
 
+- **The island's Stop (5 Nov).** While Heimdall speaks the notch's left ear is a stop glyph; a press cuts the voice
+  at once (lines held for after a call go too) and labels the line V5 woke the speaking run for (`outcome` `send`)
+  `not_for_heimdall`, source `owner-stop` ("this moment wasn't for Heimdall"). Only while speech plays at the press,
+  only for the run whose reply was cut (a reply a T3 result or notice woke, a typed message, a wake key or a relaunch
+  labels nothing), and once per line however often Stop is pressed. The turn goes on, but the rest of that run's
+  replies are shown on the island unsaid until the user's own words reach the agent again.
+
 A line still being decided when a key is pressed is labelled when its decision lands. Each press is also a `hotkey`
-evidence record (`key`, and for wake `woke`, `through`, `lines`).
+evidence record (`key`, and for wake `woke`, `through`, `lines`; for stop `speaking`, `labelled`).
 
 Labels are JSON lines appended to `decider-v6-labels.jsonl` in the archive store (beside the index, normally
 `~/Library/Application Support/Heimdall/archive/decider-v6-labels.jsonl`), schema 1:
 
 | field | meaning |
 |---|---|
-| `task` | `send` (⌃⌘\) or `suggest` (⌃⌘') |
-| `label` | `send` or `yes` |
-| `source` | `toby-hotkey` |
+| `task` | `send` (⌃⌘\, Stop) or `suggest` (⌃⌘') |
+| `label` | `send`, `yes`, or `not_for_heimdall` (Stop) |
+| `source` | `owner-hotkey`, or `owner-stop` (with `speaking`: whether audio played at the press) |
 | `at_ms` | Unix ms of the label |
 | `utterance_id`, `speaker`, `text`, `line_source` | the labelled line (the observation id the archive uses) |
 | `decider_input` | the exact decider request for that line: the send decision's `prompt`, or the suggest request |
@@ -233,3 +240,13 @@ and the speech hold (`speech_policy::in_conversation`) use the goodbyes. The spe
 (it once held three replies after the call): 45 s after the last call line
 (`speech_policy::CONVERSATION_NS`), or while a call source's voice is open, and over 3 s after the last call source
 stops. A reply held in a call is said, newest only, as soon as the user's own words reach the agent after it.
+
+## The name as an address (5 Nov)
+
+`decide::send::addressed_by_name` reads the name as an address when it opens a sentence (after interjections) or is set
+off by a comma. The name as the subject of a statement is a mention: no punctuation after it and a third-person verb
+next ("Yeah, Heimdall is searching already.", "Heimdall was down all night"); an inverted question ("Heimdall is it
+done?", "Heimdall did you see that") and modals ("Heimdall can you…") stay addresses. In a call a mention waits for d1
+(`call_trigger_waits`). Bug 2026-11-05T02-32-17: at 00:13:07 the user's "Yeah, Heimdall is searching already." to the
+other person in the call woke the agent at once though d1 said not_for_heimdall 0.99. In a call, the user's lines that
+d1 sends and the call gate holds feed the suggester instead (`docs/suggester.md`).

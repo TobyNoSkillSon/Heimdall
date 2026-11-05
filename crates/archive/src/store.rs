@@ -157,11 +157,15 @@ fn watch_commits(db: &Connection) -> Result<()> {
     }))?;
     Ok(())
 }
-/// The index, created on first use. Every writer shares it: keep transactions short.
+/// The index, created on first use. Every writer shares it: keep transactions short. Its read transactions are
+/// watched under the caller's name (`readers`).
+#[track_caller]
 pub fn open(root: &Path) -> Result<Connection> {
+    let site = std::panic::Location::caller();
     private_dir(root)?;
     let path = root.join(INDEX);
     let db = Connection::open(&path)?;
+    crate::readers::watch(&db, site)?;
     watch_interrupt(&db)?;
     watch_commits(&db)?;
     db.busy_timeout(BUSY)?;
@@ -187,8 +191,11 @@ pub fn open(root: &Path) -> Result<Connection> {
 }
 /// Index-only reader. Caller holds a lifetime lock while resolving pack blobs.
 /// No WAL mode/full-sync/schema writes on a screenshot lookup.
+#[track_caller]
 pub fn read_index(root:&Path)->Result<Connection> {
+    let site = std::panic::Location::caller();
     let db=Connection::open_with_flags(root.join(INDEX),rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    crate::readers::watch(&db, site)?;
     watch_interrupt(&db)?;
     db.busy_timeout(BUSY)?;db.execute_batch("PRAGMA query_only=ON; PRAGMA temp_store=FILE;")?;Ok(db)
 }
@@ -573,6 +580,11 @@ fn delete_unreferenced(db: &Connection, root: &Path, pack: &str, keys: &[String]
         }
     }
     if !doomed.is_empty() && pack_path(root, pack)?.is_file() {
+        // In the same index transaction: a publisher that read the count before writing its blobs sees it change.
+        db.execute(
+            "INSERT INTO store_meta VALUES('collections','1') ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER)+1",
+            [],
+        )?;
         with_pack(root, pack, |p| {
             let tx = p.unchecked_transaction()?;
             for key in &doomed {
@@ -583,6 +595,15 @@ fn delete_unreferenced(db: &Connection, root: &Path, pack: &str, keys: &[String]
         })?;
     }
     Ok(doomed.len())
+}
+/// Collection steps that removed blobs from a pack, store-wide (`store_meta`), counted in the transaction that removed
+/// them. A publisher that reads it before committing its blobs and finds it unchanged under the write lock knows those
+/// blobs are still there (`audio::publish_put`).
+pub fn collections(db: &Connection) -> Result<i64> {
+    Ok(db
+        .query_row("SELECT CAST(value AS INTEGER) FROM store_meta WHERE key='collections'", [], |r| r.get(0))
+        .optional()?
+        .unwrap_or(0))
 }
 /// Queued blobs one collection step removes at most.
 pub const COLLECT_KEYS: usize = 256;

@@ -1447,7 +1447,9 @@ fn tool_digests() -> std::collections::BTreeMap<String, String> {
 /// before this field) is told every definition may be old.
 pub(crate) fn tools_note(learned: &std::collections::BTreeMap<String, String>, now: &std::collections::BTreeMap<String, String>) -> Option<String> {
     let reload = "Any definition of them earlier in this conversation is out of date: load them again before you use them (in Claude Code, ToolSearch with select:";
-    let other = " Without ToolSearch, list Heimdall's tools again (the CLI's tools) and follow a tool's error when it names a field.";
+    // Bug note 2026-11-04T23-37-22: the relay reloaded `ask` with ToolSearch after the 4 Nov update and still had the
+    // definition Claude Code loaded on 3 Nov (no `grant`). The CLI reads the server's list as it is now.
+    let other = " Without ToolSearch, or when the definition you load still lacks a field a note, error or Heimdall's docs name (Claude Code can keep the one it loaded when this thread began), use his CLI: its `tools` lists the current definitions and `call <tool> '<json>'` runs one, checked by Heimdall's server itself.";
     if learned.is_empty() {
         return Some(format!("{TOOLS_NOTE} Its tools may have changed since you loaded them. {reload}mcp__heimdall__<name>, or a keyword search).{other}"));
     }
@@ -1504,6 +1506,8 @@ impl ScopedTools for Own {
             _ => None,
         }
     }
+    /// The relay's calls go to the same tools.log as Pi's (bug note 2026-11-05T02-53-27-4).
+    fn tool_log(&self) -> Option<std::path::PathBuf> { Some(agent::tool_log::path(&self.em.data)) }
     fn record(&self, name: &str, args: &Value, result: &std::result::Result<String, String>) {
         self.em.last_call_ms.store(agent::now_ms(), Ordering::Release);
         if matches!(name, "emergency_status" | "emergency_end") { return; }

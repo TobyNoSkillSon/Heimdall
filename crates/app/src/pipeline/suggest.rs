@@ -67,6 +67,23 @@ pub(super) struct Snapshot {
 /// What the pass is told when the user asked for a card himself.
 const FORCED: &str = "\n\nOwner pressed the suggestion key: he wants one card now from this conversation. Show the most useful card you can; stay silent only if the transcript is empty.";
 
+/// What starts a pass.
+pub(super) enum Pass {
+    /// Decider V5's suggest yes, within the pacing.
+    Paced,
+    /// ⌃⌘' (hotkeys.rs): past the pacing and the addressing hold.
+    Hotkey,
+    /// The user's line in a call that d1 sent and the call gate held (`held_in_call`, `decide::send::D1Gate::InCall`): past
+    /// V5 and the minute's call gap; its card shows past the pacing.
+    HeldInCall(String),
+}
+
+/// What the pass is told about a line of the user's that the call gate held (bug 2026-11-05T02-32-17).
+fn held_note(line: &str) -> String {
+    let line: String = line.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(600).collect();
+    format!("\n\nIn this call User just said this, and the decider read it as meant for Heimdall, but in calls Heimdall does not wake without its name: \"{line}\". If it asks Heimdall for something, show the card that offers to do it, with his request in the handoff. Stay silent only if it was plainly said to the people on the call.")
+}
+
 impl Pipeline {
     fn suggest_paths(&self) -> sg::Paths {
         sg::Paths {
@@ -116,6 +133,13 @@ impl Pipeline {
         let Some(line) = snapshot.pending.iter().find(|t| t.seq == snapshot.through) else { return };
         let owner = self.owner(source) && line.speaker == "User";
         let outcome = record["outcome"].as_str().unwrap_or("");
+        // Bug 2026-11-05T02-32-17: in a call, a line of the user's that d1 sent but the call gate held (23:30-23:34, six
+        // lines at send 0.76-0.96, until they pressed ⌃⌘\ at 23:35:01) reaches nobody. It no longer counts as talking to
+        // Heimdall (which held every card for 20 s); it starts a pass at once, so a card can offer what they asked.
+        if owner && outcome == "held_in_call" {
+            self.suggest_held(&line.text, line.observation.as_ref().and_then(|o| o["id"].as_str()).unwrap_or_default());
+            return;
+        }
         if owner && (outcome == "send" || record["choice"] == "wait" || record["choice"] == "send") {
             self.suggest.addressing_until = now + ADDRESSING_MS;
         }
@@ -181,7 +205,23 @@ impl Pipeline {
         if self.suggest.card.is_some() || self.suggest.running.load(Ordering::Acquire) || !self.suggest.pacer.may_call(now) {
             return;
         }
-        self.suggest_start(now, false);
+        self.suggest_start(now, Pass::Paced);
+    }
+    /// A line of the user's held by the call gate: a pass now, without V5's question or the minute's call gap, unless a pass
+    /// is already running or a card is up (a run of held lines makes one card, not one each). Journalled as a
+    /// `suggest_decision` with outcome `held_in_call_pass` (or `held_in_call_busy`).
+    fn suggest_held(&mut self, text: &str, id: &str) {
+        if text.trim().is_empty() || !self.suggest_allowed() {
+            return;
+        }
+        let busy = self.suggest.card.is_some() || self.suggest.running.load(Ordering::Acquire);
+        let evidence = json!({"schema":1,"speaker":"User","outcome":if busy {"held_in_call_busy"} else {"held_in_call_pass"}});
+        if let Err(e) = self.index.evidence.event("suggest_decision", "heimdall", &[id.to_owned()], capture::host_now_ns(), evidence) {
+            eprintln!("Suggest decision failed: {e:#}");
+        }
+        if !busy {
+            self.suggest_start(agent::now_ms(), Pass::HeldInCall(text.to_owned()));
+        }
     }
     /// ⌃⌘': a pass now, whatever the pacing; an open card makes way for the new one.
     pub(super) fn suggest_now(&mut self) {
@@ -198,19 +238,32 @@ impl Pipeline {
             self.ui(ui::UiUpdate::DismissAgentNotice(c.id.clone()));
             self.log_suggest(json!({"id": c.id, "event": "replaced", "at": agent::now_ms()}));
         }
-        self.suggest_start(agent::now_ms(), true);
+        self.suggest_start(agent::now_ms(), Pass::Hotkey);
     }
-    fn suggest_start(&mut self, now: u64, forced: bool) {
+    fn suggest_start(&mut self, now: u64, pass: Pass) {
+        let forced = !matches!(pass, Pass::Paced);
+        let hotkey = matches!(pass, Pass::Hotkey);
         // The endpoint is resolved on the pass's own thread: a ChatGPT sign-in may wait on the Keychain or a token
         // refresh, and this is the pipeline's thread (review 27 Oct).
         self.suggest.pacer.called(now);
         let known: Vec<String> = EnrollmentStore::load(&self.data.join("speakers.json")).map(|s| s.names.keys().cloned().collect()).unwrap_or_default();
         let mut prompt = sg::prompt(&self.suggest.window, now, &known);
-        if forced { prompt.push(FORCED); }
+        match &pass {
+            Pass::Paced => {}
+            Pass::Hotkey => { prompt.push(FORCED); }
+            Pass::HeldInCall(line) => { prompt.push(held_note(line)); }
+        }
         let snap = Snapshot { now, excerpt: self.suggest.window.transcript(), during_call: self.suggest_call_open(), forced };
         let paths = self.suggest_paths();
         let running = self.suggest.running.clone();
         let tx = self.internal.0.clone();
+        // Tests never reach a background model (no inference in the default suite): the pass ends here.
+        #[cfg(test)]
+        {
+            let _ = (snap, paths, tx, hotkey);
+            return;
+        }
+        #[allow(unreachable_code)]
         running.store(true, Ordering::Release);
         let guard = Running(running);
         std::thread::spawn(move || {
@@ -218,7 +271,7 @@ impl Pipeline {
             // Its own model (Background Tasks ▸ Suggestions), else the shared one; a fallback while that one is spent.
             let endpoint = crate::background_model::task_endpoint(crate::background_model::Task::Suggestions);
             if endpoint.key.is_none() {
-                if forced { eprintln!("hotkey: suggest pressed, but no background model is signed in; no card"); }
+                if hotkey { eprintln!("hotkey: suggest pressed, but no background model is signed in; no card"); }
                 return;
             }
             let result = sg::ask(&endpoint, prompt, &paths);
@@ -402,6 +455,38 @@ mod tests {
         assert_eq!(cards(&a).len(), 1, "his key: the card shows");
     }
 
+    /// Bug 2026-11-05T02-32-17: in a call, the user's line that d1 sent and the call gate held (23:34:33, "look at some
+    /// other well-made profiles on LinkedIn…", send 0.93, `held_in_call`) used to open the 20-s "talking to Heimdall"
+    /// hold and reach nobody. It now starts a pass at once, without V5's question and past the minute's call gap, and
+    /// opens no hold; a second held line while that pass runs starts nothing more.
+    #[test]
+    fn a_line_held_in_a_call_starts_a_pass_instead_of_holding_cards() {
+        let (_t, mut a) = app();
+        a.hooks.suggest_allowed = true;
+        let mic = crate::fake_source("mic", 0, 1);
+        let id = mic.id.0.clone();
+        a.source(mic);
+        let now = agent::now_ms();
+        a.suggest.pacer.called(now); // a pass a moment ago: the minute's gap would hold a V5 pass
+        let held = json!({"choice":"send","outcome":"held_in_call","d1_gate":{"gate":"in_call"}});
+        a.suggest_ask(&id, &line("User", "Look at some other well-made profiles on LinkedIn and update it"), &held);
+        assert_eq!(a.suggest.addressing_until, 0, "a held line is not talking to Heimdall");
+        let d = decisions(&a);
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0]["outcome"], "held_in_call_pass");
+        assert!(a.hooks.suggest.is_empty(), "V5 was not asked");
+        assert!(!a.suggest.pacer.may_call(agent::now_ms()), "the held pass took the call");
+        // The card a held pass returns shows past the pacing (a card on the same topic a moment ago), like his key's.
+        a.suggest.pacer.shown(now, "LinkedIn profile");
+        a.suggest_done(Ok(card_verdict("LinkedIn profile")), Snapshot { forced: true, ..snap(now) }).unwrap();
+        assert_eq!(cards(&a).len(), 1);
+        // With that card up, the next held line starts nothing: one card for a run of held lines.
+        a.suggest_ask(&id, &line("User", "and make it nice"), &held);
+        assert_eq!(decisions(&a)[1]["outcome"], "held_in_call_busy");
+        assert_eq!(cards(&a).len(), 1);
+        assert!(held_note("Look at it").contains("\"Look at it\""));
+    }
+
     /// Below the bar (0.7) V5's answer is journalled and nothing starts.
     #[test]
     fn below_the_bar_nothing_starts() {
@@ -469,6 +554,23 @@ mod tests {
         assert_eq!(events.last().unwrap()["event"], "dismissed");
         // The agent was never asked: no notice was made (the agent is not running in this harness).
         assert!(!events.iter().any(|e| e["event"] == "error"));
+    }
+
+    /// Bug note 2026-11-05T02-53-27: the island's answer goes through main.rs's `ui_action_callback`, which sent every
+    /// card to the agent's question path (ASK_NOT_FOUND), so no card was ever picked. Through the real callback, the
+    /// answer now reaches the live loop's channel and the card's handler here.
+    #[test]
+    fn an_island_answer_reaches_the_card_through_the_apps_callback() {
+        let (_t, mut a) = app();
+        a.suggest_done(Ok(card_verdict("CAD file")), snap(agent::now_ms())).unwrap();
+        let id = cards(&a)[0].id.clone();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let callback = crate::ui_action_callback(a.tools.clone(), tx, ui::Ui::handle());
+        callback(ui::UiAction::AgentNotice(ui::agent_notice::AgentNoticeAction::Answer { request_id: id.clone(), answers: answer(&["Not now"], None), by_hand: vec![] }));
+        let forwarded = rx.try_recv().expect("the app's own card goes to the live loop, not the agent");
+        a.action(forwarded).unwrap();
+        assert!(dismissals(&a).contains(&id), "the card leaves the island");
+        assert_eq!(log(&a).last().unwrap()["event"], "dismissed");
     }
 
     #[test]

@@ -22,7 +22,7 @@ drawn again only when its HTML or width changes.
   `javascript:`; images only from local absolute paths that exist (and, for the agent, the island's fresh latest
   picture or the status file's). Limits: 24 KB, 600 elements, depth 24, 4 images, 440 pt tall, two `html` parts per
   island. Over a limit, the part is refused and its `fallback` (the usual slots) is drawn.
-- **Chart tags** (`model/html_charts.rs`): `<x-line>`, `<x-bars>`, `<x-ring>`, `<x-dots>`, `<x-spark>` expand into SVG
+- **Chart tags** (`model/html_charts.rs`): `<x-line>`, `<x-bars>`, `<x-ring>`, `<x-dots>`, `<x-spark>`, `<x-steps>` (a row of state pills, one lit) expand into SVG
   before drawing. The model gives the data; the gate computes the geometry, which a small model gets wrong by hand.
   They draw in neutrals unless an accent is named: a line's series are solid white, dashed grey, then faint, each
   named at its end (`names`), so two judges need no legend and no second colour.
@@ -44,6 +44,22 @@ drawn again only when its HTML or width changes.
   answer, checked by the same gate (nothing may be stripped), every number it shows in the signals (its text, the
   chart tags' data as the gate parsed it, percentages in its styles; shares of a status file's progress count), no
   bookkeeping counter, its `parts` written as the fallback. The frozen design prompt stays as it was.
+
+## The body leads (4 Nov)
+
+On 4 Nov three job islands showed only the stage bar and "open turn, N helpers", and the instructions behind them
+looked stale. They were: the island agent's frozen
+round-3 prompt told it to draw nothing while reading, during sub-agents and in review, and the HTML addendum to leave
+`html` out without a number, so most moments got no body; the now line had no place on the island since 3 Nov.
+
+- A job island shows its header, the agent's body (`html`, a picture, a chart), and one bottom row: the agent's now
+  line (13 pt, 12 pt when long) and the clock. The stage band folds behind that row (`mac/parts.rs` `job_shows_band`):
+  a click on the row toggles the island's `details`, a small chevron says which; with no body, the band is the body.
+- The addendum (`prompt/island-agent-html.md`) now overrides the round-3 rules it contradicts and names the one telling
+  thing per kind of job (climb curve, training ring and loss, a night pass's branches as pills, the picture of visual
+  work, rings for counts), with seven drawn bodies.
+- The signals add `merged`: the branches `git merge` brought in this run (`stages::merged_in`).
+- Long jobs keep `island-status.json` (Heimdall's `writing-briefs` skill, `docs/nightly-build.md`, `hill-climb`).
 
 ## The status file
 

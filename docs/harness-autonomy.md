@@ -10,15 +10,18 @@ start. One short deny list is all that is refused, and a refusal is an immediate
 
 Written once, in `crates/emergency-cli/src/deny.rs`. Everything not on it is approved.
 
-1. **Deleting outside the workspace and scratch.** `rm`, `rmdir`, `unlink`, `srm`, `find -delete`, `find -exec rm`,
-   `rsync --delete` whose target is outside the home folder chosen in Setup (two folders deep, so `<home>/Projects/X` but never `<home>/Projects`),
+1. **Deleting outside the workspace and scratch.** `rm`, `rmdir`, `unlink`, `srm`, `trash`, `find -delete`, `find -exec`
+   (or `-execdir`, `-ok`) with one of those or a move into scratch, the same fed through `| xargs`, Finder's `delete`
+   through `osascript`, and `rsync --delete` whose target is outside the home folder chosen in Setup (two folders deep, so `<home>/Projects/X` but never `<home>/Projects`),
    the temporary folders (`/tmp`, `/private/tmp`, `/var/folders`, `$TMPDIR`) or the build caches (Xcode DerivedData,
    `~/Library/Caches`, `~/.cache`, `~/.t3/worktrees`, `~/.t3/scratch`). A target that would become the root if a
    variable were empty (`"$D"/*`) is refused with how to guard it (`"${D:?}"`). A `mv` of something outside those
-   areas into a temporary folder counts as a delete.
+   areas into a temporary folder or `~/.Trash` counts as a delete, and so does deleting, later in the same command
+   line, what such a `mv` moved. Moving it into the home folder alone passes.
 2. **Disk formatting.** `diskutil` erase, partition and zero verbs, `diskutil apfs deleteVolume`, `newfs*`, `fdisk`,
    `gpt`, `asr`, and `dd` or a redirect onto `/dev/disk*`.
-3. **The Keychain.** Any `security` verb but the read-only certificate ones, and any tool on `~/Library/Keychains`.
+3. **The Keychain.** Any `security` verb but the read-only certificate ones (never `list-keychains -s`, nor `-i` or
+   `-p` before the verb, which run commands from input), and any tool on `~/Library/Keychains`.
 4. **System settings.** `sudo`, `systemsetup`, `csrutil`, `nvram`, `fdesetup`, `spctl`, `tccutil`, `pmset` writes,
    `scutil --set`, `networksetup` changes, `defaults write` to Apple or global domains, `launchctl` changes, software
    updates, profiles, login-item changes, and writes into `LaunchAgents`, `LaunchDaemons`, `/etc`, `/System`,
@@ -31,10 +34,18 @@ Deleting model weights under `~/.cache/huggingface` is refused too (they need th
 path (`~/$X`, `/tmp/$X`) is judged by the folder before it, so an unguarded one outside the allowed areas is refused
 with how to guard it.
 
-It is a guard against an agent's mistake, not a security boundary: a Python script can still delete anything, a `mv`
-is checked only into the temporary folders, and an agent could still edit the harness settings that install the hook.
+The command reader follows the shell's quoting, ANSI-C `$'…'` strings included and decoded as the shell does (a 5 Nov
+review hid a `security dump-keychain` between two `$'\''`; a second spelled `/` and `rm` in escapes). A word spelled
+with them is never a grantable literal. It is a guard against an agent's mistake, not a security boundary: a Python script can still delete anything, a `mv`
+into the home folder followed by an `rm` in a later command passes, and an agent could still edit the harness settings that
+install the hook.
 It guards Claude Code only: Codex, OpenCode and Grok run allow-all with no
 Heimdall hook, so for them the deny list is not enforced (Heimdall starts only Claude agents for the user's work).
+
+Claude's own safety checks ("Dangerous rm operation on possibly-empty variable path", bug note 2026-11-04T17-57-58)
+reach the `PermissionRequest` hook too: on 4 Nov 17:55:23 it allowed that task's in-workspace `rm -f $S/…` at once (the
+transcript records source hook, `safetyCheck`, `dangerousRemoval`) and the task ran on. T3's "Waiting for approval"
+card was a request T3 raised beside the hook's answer and never cleared; that is T3's state, not a wait.
 
 ## What each harness gets
 

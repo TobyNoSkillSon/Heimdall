@@ -81,7 +81,7 @@ fn speaking_ends_when_the_audio_ends() {
     assert!(voice_slots(&i.frame(1.9)) == 2);
     i.apply(Event::Speaking(false), 2.0);
     let f = i.frame(2.0);
-    let wave = f.slots.iter().find(|s| &*s.id == "voice.wave").expect("waveform");
+    let wave = f.slots.iter().find(|s| &*s.id == "voice.wave").unwrap_or_else(|| panic!("waveform: {:?}", f.slots.iter().map(|s| (&*s.id, s.opacity)).collect::<Vec<_>>()));
     assert!(matches!(&*wave.content, Content::Waveform { flat: true, level: 0 }), "flat the frame the audio stops: {:?}", wave.content);
     // Gone after the grace and one retraction.
     let mut t = 2.0;

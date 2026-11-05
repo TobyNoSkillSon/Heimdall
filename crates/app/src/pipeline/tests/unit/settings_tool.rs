@@ -13,7 +13,7 @@
 
     fn rig() -> Rig {
         let (t, mut a) = app();
-        let dev = |uid: &str, name: &str, built_in: bool| capture::InputDevice { uid: uid.into(), name: name.into(), built_in };
+        let dev = |uid: &str, name: &str, built_in: bool| capture::InputDevice { uid: uid.into(), name: name.into(), built_in, default: false };
         let seen = capture::MicrophoneState {
             devices: vec![dev("BuiltIn", "MacBook Pro Microphone", true), dev("usb-1", "Shure MV7", false)],
             in_use: Some("BuiltIn".into()),

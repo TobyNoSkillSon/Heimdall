@@ -88,3 +88,38 @@ async fn the_cover_token_reaches_only_the_cover_tools_and_dies_with_its_server()
     assert_eq!(host.0.lock().unwrap().len(), 1);
     main.shutdown().await;
 }
+
+/// Bug note 2026-11-05T02-53-27-4: since the T3 relay took over (30 Oct) no tool call reached tools.log, which only Pi's
+/// events wrote. Every call on the scoped server (a host tool, an own tool, an invalid or refused one) is one line in
+/// the scope's log, masked and short.
+#[tokio::test]
+async fn every_call_on_the_relay_s_server_is_one_line_in_tools_log() {
+    struct Logged(std::path::PathBuf);
+    #[async_trait]
+    impl ScopedTools for Logged {
+        fn definitions(&self) -> Vec<Value> { Own::default().definitions() }
+        async fn call(&self, name: &str, args: &Value, p: &DeliveryPermit) -> Option<Result<String>> { Own::default().call(name, args, p).await }
+        fn record(&self, _: &str, _: &Value, _: &std::result::Result<String, String>) {}
+        fn tool_log(&self) -> Option<std::path::PathBuf> { Some(self.0.clone()) }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let log = agent::tool_log::path(dir.path());
+    let host = Arc::new(Host::default());
+    let gate = Arc::new(agent::delivery::DeliveryGate::new(true));
+    let token = agent::emergency::new_token();
+    let scoped = McpServer::start_scoped(host.clone(), Arc::new(UnavailableArchive), gate.clone(),
+        Scope { token: token.clone(), allow: agent::mcp::Allow::All, own: Arc::new(Logged(log.clone())) }).await.unwrap();
+    rpc(&scoped.url, &token, call("speak", json!({"text":"Done. password: hunter22hunter"}))).await;
+    rpc(&scoped.url, &token, call("emergency_status", json!({}))).await;
+    rpc(&scoped.url, &token, call("speak", json!({"text":""}))).await;
+    rpc(&scoped.url, &token, call("no_such_tool", json!({"x":"y".repeat(4_000)}))).await;
+    let text = std::fs::read_to_string(&log).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 4, "{text}");
+    assert!(lines[0].contains("  speak  ok  ") && lines[0].ends_with("->  Speech queued: 7."), "{}", lines[0]);
+    assert!(lines[0].contains("password: [redacted]") && !text.contains("hunter22hunter"), "{}", lines[0]);
+    assert!(lines[1].contains("  emergency_status  ok  ") && lines[1].ends_with("->  Emergency mode on: quota."), "{}", lines[1]);
+    assert!(lines[2].contains("  speak  ERROR  ") && lines[2].contains("INVALID_ARGUMENT"), "{}", lines[2]);
+    assert!(lines[3].contains("  no_such_tool  ERROR  ") && lines[3].contains("not available to this agent") && lines[3].chars().count() < 1_000, "{}", lines[3]);
+    scoped.shutdown().await;
+}

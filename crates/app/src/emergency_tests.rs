@@ -424,6 +424,8 @@ fn the_tools_note_names_what_changed_and_says_nothing_otherwise() {
     assert!(note.contains("These tools changed: plan_edit, taste_note.") && note.contains("select:mcp__heimdall__plan_edit,mcp__heimdall__taste_note)"), "{note}");
     assert!(super::tools_note(&Default::default(), &now).unwrap().contains("may have changed"));
     assert!(note.contains("Without ToolSearch"), "a non-Claude relay can act on it too: {note}");
+    // Bug note 2026-11-04T23-37-22: a reloaded definition can still be the old one; the CLI reads the live list.
+    assert!(note.contains("still lacks a field") && note.contains("call <tool> '<json>'"), "{note}");
 }
 
 /// Fresh review, 3 Nov: a thread reused within REUSE_MS keeps the tools it learned, so an update between its stand-down

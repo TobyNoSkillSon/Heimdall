@@ -2,8 +2,9 @@
 //! possible, so they literally don't ask you anything"; docs/harness-autonomy.md). Everything else is approved.
 //!
 //! The deny list, short on purpose:
-//! 1. **Deleting outside the Vault and scratch.** `rm`, `rmdir`, `unlink`, `srm`, `find … -delete` / `-exec rm`, and
-//!    `rsync --delete` whose target is not inside the Vault (two folders deep: `<Vault>/Projects/X`, never `Projects`
+//! 1. **Deleting outside the Vault and scratch.** `rm`, `rmdir`, `unlink`, `srm`, `trash`, `find … -delete` / `-exec rm`
+//!    (or trash, or a move into scratch), the same fed through `| xargs`, Finder's `delete`, and `rsync --delete` whose
+//!    target is not inside the Vault (two folders deep: `<Vault>/Projects/X`, never `Projects`
 //!    itself), a temporary folder (`/tmp`, `/private/tmp`, `/var/folders`, `$TMPDIR`) or a build cache
 //!    (`~/Library/Developer/Xcode/DerivedData`, `~/Library/Caches`, `~/.cache`, `~/.t3/worktrees`, `~/.t3/scratch`),
 //!    one folder below it. A glob deletes inside its folder, so that folder itself must be deletable. A target the
@@ -47,9 +48,13 @@ pub fn refuse(tool: &str, input: &Value, vault: &Path, user: &Path, cwd: Option<
 /// `refuse`, with `granted` saying whether the user's click covers one scope: an exact delete target or a login item's
 /// removal it would refuse otherwise. Everything else on the list is refused as before.
 pub fn refuse_with(tool: &str, input: &Value, vault: &Path, user: &Path, cwd: Option<&Path>, granted: &dyn Fn(&Scope) -> bool) -> Option<String> {
-    let ctx = Ctx { vault, user, granted };
+    let ctx = Ctx { vault, user, granted, moved: Default::default(), keychain_used: Default::default(), other_security: Default::default() };
     match tool {
-        "Bash" => input["command"].as_str().and_then(|c| ctx.command(c, cwd.map(Path::to_path_buf), 0)),
+        "Bash" => input["command"].as_str().and_then(|c| ctx.command(c, cwd.map(Path::to_path_buf), 0)).or_else(|| {
+            // A command the user's keychain grant let through runs no other `security` call (no find, dump, export or
+            // unlock of another keychain beside it).
+            (ctx.keychain_used.get() && ctx.other_security.get()).then(|| KEYCHAIN.into())
+        }),
         "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => {
             let path = input["file_path"].as_str().or(input["notebook_path"].as_str())?;
             let path = ctx.absolute(path, cwd)?;
@@ -64,7 +69,9 @@ pub fn refuse_with(tool: &str, input: &Value, vault: &Path, user: &Path, cwd: Op
 }
 
 const DELETE: &str = "Heimdall's deny list (docs/harness-autonomy.md): this deletes outside the Vault, the temporary \
-folders and the build caches. If it really must go, ask User in your final reply, naming each exact path.";
+folders and the build caches. If it really must go, ask User in your final reply, naming each exact path. (Heimdall's \
+relay can ask on a card instead: an option with grant.delete naming the exact paths; after his click, delete each with \
+one plain rm of its absolute path from /.)";
 const GUARD: &str = "Heimdall's deny list: if the variable were empty this would delete the root or a folder outside \
 the Vault and scratch. Guard it as \"${NAME:?}\" or use the literal path, then run it again.";
 const WEIGHTS: &str = "Heimdall's deny list: this deletes model weights, which needs User's yes. Ask in your final reply.";
@@ -80,18 +87,32 @@ const BTM: &str = "Heimdall's deny list: sfltool dumpbtm asks for an admin passw
 with osascript -e 'tell application \"System Events\" to get the name of every login item', launchctl list or \
 ls ~/Library/LaunchAgents instead; those need no yes.";
 
-struct Ctx<'a> { vault: &'a Path, user: &'a Path, granted: &'a dyn Fn(&Scope) -> bool }
+struct Ctx<'a> {
+    vault: &'a Path,
+    user: &'a Path,
+    granted: &'a dyn Fn(&Scope) -> bool,
+    /// Where this command line moved something from outside the allowed areas (the destination, and the moved
+    /// thing's new path): a later delete of it in the same line is a delete of the original (bug note 2026-11-03T18-04-11).
+    moved: std::cell::RefCell<Vec<PathBuf>>,
+    /// A `security` call the user's keychain grant covered, and any other `security` call in the same line.
+    keychain_used: std::cell::Cell<bool>,
+    other_security: std::cell::Cell<bool>,
+}
 
 /// One simple command: its words (quotes removed) and whether each word had an expansion (`$`, backticks) outside
 /// single quotes.
+/// `after_pipe`: it reads the output of the command before it (`a | b`); `via_xargs`: `xargs` ran it, so more operands
+/// come from its input.
 #[derive(Debug, Default, Clone)]
-struct Simple { words: Vec<String>, expands: Vec<bool>, redirects: Vec<String> }
+struct Simple { words: Vec<String>, expands: Vec<bool>, redirects: Vec<String>, after_pipe: bool, via_xargs: bool }
 
 impl Ctx<'_> {
     fn command(&self, command: &str, mut cwd: Option<PathBuf>, depth: usize) -> Option<String> {
         if depth > 4 { return None; }
+        let mut last: Option<Simple> = None;
         for simple in split(command) {
             let simple = strip_wrappers(simple);
+            let prev = std::mem::replace(&mut last, Some(simple.clone()));
             let Some(program) = simple.words.first() else { continue };
             let name = program.rsplit('/').next().unwrap_or(program).to_owned();
             let args = &simple.words[1..];
@@ -130,11 +151,24 @@ impl Ctx<'_> {
             }
             if name == "sfltool" && args.first().is_some_and(|a| a == "dumpbtm") { return Some(BTM.into()); }
             if name == "cliclick" || (name == "osascript" && presses(&osascript_script(args))) { return Some(PRESS.into()); }
-            if name == "mv" { if let Some(r) = self.moves_to_scratch(args, cwd.as_deref(), command.contains("mktemp")) { return Some(r); } }
+            if name == "mv" {
+                if let Some(r) = self.moves_to_scratch(args, cwd.as_deref(), command.contains("mktemp")) { return Some(r); }
+                // `… | xargs mv {} ~/.Trash/`: what it moves comes from its input; into the Trash or a temporary folder
+                // that is a delete of each.
+                if simple.via_xargs && self.moves_into_scratch(args, cwd.as_deref()) {
+                    let fed: Vec<(String, bool)> = fed(&simple, prev.as_ref()).into_iter().map(|w| (w, false)).collect();
+                    if let Some(r) = self.judge_deletes("mv", &simple.words, &fed, cwd.as_deref()) { return Some(r); }
+                }
+            }
+            if name == "osascript" { if let Some(r) = self.finder_deletes(&osascript_script(args), cwd.as_deref()) { return Some(r); } }
+            if name == "security" {
+                if self.keychain_grant(&simple) { self.keychain_used.set(true); continue; }
+                self.other_security.set(true);
+            }
             if let Some(r) = self.disk(&name, args).or_else(|| self.security(&name, args)).or_else(|| self.system(&name, args)) {
                 return Some(r);
             }
-            if let Some(r) = self.deletes(&name, &simple, cwd.as_deref()) { return Some(r); }
+            if let Some(r) = self.deletes(&name, &simple, cwd.as_deref(), prev.as_ref()) { return Some(r); }
             // Any other program handed a Keychain file.
             for a in args {
                 if let Some(p) = self.absolute(a, cwd.as_deref()) {
@@ -178,8 +212,73 @@ impl Ctx<'_> {
     fn security(&self, name: &str, args: &[String]) -> Option<String> {
         if name != "security" { return None; }
         const READ_ONLY: [&str; 8] = ["find-identity", "find-certificate", "list-keychains", "show-keychain-info", "verify-cert", "cms", "error", "help"];
+        // Only -q, -v and -h may come before the verb: -i reads commands from its input and -p prompts for them
+        // (`echo delete-keychain … | security -i` would pass as `help`).
+        let global: Vec<&String> = args.iter().take_while(|a| a.starts_with('-')).collect();
+        if global.iter().any(|g| !g[1..].chars().all(|c| matches!(c, 'q' | 'v' | 'h')) || g.len() < 2) { return Some(KEYCHAIN.into()); }
         let verb = args.iter().find(|a| !a.starts_with('-')).map(String::as_str).unwrap_or("help");
-        (!READ_ONLY.contains(&verb)).then(|| KEYCHAIN.into())
+        // `list-keychains -s` sets the search list.
+        let sets = verb == "list-keychains" && args.iter().any(|a| a == "-s" || a.starts_with("-s"));
+        (!READ_ONLY.contains(&verb) || sets).then(|| KEYCHAIN.into())
+    }
+
+    /// Whether one `security` call is covered by the user's keychain grant (bug note 2026-11-04T23-01-22): the verb is
+    /// create-keychain, set-keychain-settings, unlock-keychain, import or set-key-partition-list (or the read-only
+    /// find-identity and show-keychain-info), no global option comes before it, every option is one that verb
+    /// knows and none prompts on the user's screen (`-P`), and the call names exactly one keychain: the granted file,
+    /// written as one absolute literal path from `/` with no symlinked folder on the way (import's `-k`, the others'
+    /// last word). create-keychain needs the file not to exist yet; the grant itself needs it new since the click.
+    fn keychain_grant(&self, s: &Simple) -> bool {
+        let (words, expands) = (&s.words, &s.expands);
+        let Some(verb) = words.get(1) else { return false };
+        // Per verb: options that take no value, options that take one, options that take two.
+        let (flags, one, two): (&[&str], &[&str], &[&str]) = match verb.as_str() {
+            "create-keychain" | "unlock-keychain" => (&[], &["-p"], &[]),
+            "set-keychain-settings" => (&["-l", "-u", "-lu", "-ul"], &["-t"], &[]),
+            "import" => (&["-w", "-x", "-A"], &["-k", "-t", "-f", "-T"], &["-a"]),
+            "set-key-partition-list" => (&["-s"], &["-S", "-k", "-D", "-a", "-c", "-j", "-l", "-t"], &[]),
+            "find-identity" => (&["-v"], &["-p", "-s"], &[]),
+            "show-keychain-info" => (&[], &[], &[]),
+            _ => return false,
+        };
+        let mut positional: Vec<usize> = vec![];
+        let mut keychain_option: Vec<usize> = vec![];
+        let mut i = 2;
+        while i < words.len() {
+            let w = &words[i];
+            if w.starts_with('-') && w.len() > 1 {
+                // `security` stops reading options at its first other word (getopt), so an option after it would be
+                // read as one more keychain name (review 5 Nov): refused. import alone takes its file first, then options.
+                if !positional.is_empty() && !(verb == "import" && positional == [2]) { return false; }
+                if flags.contains(&w.as_str()) { i += 1; }
+                else if one.contains(&w.as_str()) {
+                    if w == "-k" && verb == "import" { keychain_option.push(i + 1); }
+                    i += 2;
+                } else if two.contains(&w.as_str()) { i += 3; }
+                else { return false; }
+                if i > words.len() { return false; }
+            } else { positional.push(i); i += 1; }
+        }
+        let keychain_at = if verb == "import" {
+            // The file imported (one, never a keychain) and `-k` the granted keychain, once.
+            // The file is the first word after the verb, before any option.
+            let [input] = positional[..] else { return false };
+            if input != 2 { return false; }
+            let raw = &words[input];
+            if expands[input] || raw.ends_with(".keychain") || raw.ends_with(".keychain-db") { return false; }
+            if self.absolute(raw, None).is_some_and(|p| self.keychain(&p).is_some()) { return false; }
+            let [k] = keychain_option[..] else { return false };
+            k
+        } else {
+            let [k] = positional[..] else { return false };
+            k
+        };
+        let Some(raw) = words.get(keychain_at) else { return false };
+        if expands[keychain_at] || !raw.starts_with('/') || !exact(raw) || raw[1..].split('/').any(|c| c.is_empty() || c == "." || c == "..") { return false; }
+        let path = PathBuf::from(raw);
+        if resolved(&path) != path { return false; }
+        if verb == "create-keychain" && std::fs::symlink_metadata(&path).is_ok() { return false; }
+        (self.granted)(&Scope::Keychain(path))
     }
 
     fn system(&self, name: &str, args: &[String]) -> Option<String> {
@@ -207,30 +306,38 @@ impl Ctx<'_> {
         refused.then(|| SYSTEM.into())
     }
 
-    /// A delete's targets, each judged by `deletable`.
-    fn deletes(&self, name: &str, simple: &Simple, cwd: Option<&Path>) -> Option<String> {
+    /// A delete's targets, each judged by `deletable`. `prev`: the command before it in the line, which feeds it when it
+    /// reads a pipe through `xargs`.
+    fn deletes(&self, name: &str, simple: &Simple, cwd: Option<&Path>, prev: Option<&Simple>) -> Option<String> {
         let words = &simple.words;
-        let targets: Vec<usize> = match name {
-            "rm" | "rmdir" | "unlink" | "srm" => {
+        // Each target as written, and whether the user's grant may cover it (only a word of this command, never one an
+        // expansion spelled).
+        let own = |i: usize| (words[i].clone(), !simple.expands.get(i).copied().unwrap_or(true));
+        let mut targets: Vec<(String, bool)> = match name {
+            // `trash` moves into the Trash: a delete (second review 5 Nov; /usr/bin/trash ships with macOS).
+            n if DELETERS.contains(&n) => {
                 let mut options = true;
                 (1..words.len()).filter(|&i| {
                     let w = &words[i];
                     if options && w == "--" { options = false; return false; }
                     !(options && w.starts_with('-') && w.len() > 1)
-                }).collect()
+                }).map(own).collect()
             }
-            "find" if words.iter().any(|w| w == "-delete") || words.windows(2).any(|w| w[0] == "-exec" || w[0] == "-execdir") && words.iter().any(|w| matches!(w.as_str(), "rm" | "/bin/rm" | "rmdir")) => {
-                // The start points: the words after `find`'s own options and before the first expression.
-                (1..words.len()).skip_while(|&i| matches!(words[i].as_str(), "-H" | "-L" | "-P" | "-E" | "-X" | "-d" | "-s" | "-x"))
-                    .take_while(|&i| !words[i].starts_with('-') && !matches!(words[i].as_str(), "(" | "!")).collect()
-            }
+            "find" if self.find_deletes(words, cwd) => find_starts(words).into_iter().map(|w| (w, false)).collect(),
             "rsync" if words.iter().any(|w| w.starts_with("--delete") || w == "--remove-source-files") => {
-                words.iter().rposition(|w| !w.starts_with('-')).filter(|&i| i > 0).into_iter().collect()
+                words.iter().rposition(|w| !w.starts_with('-')).filter(|&i| i > 0).into_iter().map(own).collect()
             }
             _ => return None,
         };
-        for i in targets {
-            let raw = &words[i];
+        // `… | xargs rm`: the paths come from the command before it (`fed`).
+        if simple.via_xargs { targets.extend(fed(simple, prev).into_iter().map(|w| (w, false))); }
+        self.judge_deletes(name, words, &targets, cwd)
+    }
+
+    /// Each delete target judged by `deletable`; a refused one passes only on the user's grant for exactly that path.
+    fn judge_deletes(&self, name: &str, words: &[String], targets: &[(String, bool)], cwd: Option<&Path>) -> Option<String> {
+        for (raw, may_grant) in targets {
+            if self.deletes_moved(raw, self.absolute(&cut(raw).0, cwd).as_deref()) { return Some(DELETE.into()); }
             let home = raw.starts_with("$HOME") || raw.starts_with("${HOME}");
             if (raw.starts_with('$') || raw.starts_with('`')) && !home {
                 // Unknowable until the shell runs it; refuse only the form that becomes the root when it is empty.
@@ -247,30 +354,114 @@ impl Ctx<'_> {
             // The user's click covers exactly the path he was shown, and only for a plain delete (review 4 Nov: `find -L` and
             // `rsync` reach past it): one absolute literal target, never a glob, a variable, a path from the working
             // folder, a trailing slash (through a symlink it deletes the target) or a symlinked folder on the way.
-            if grantable_target(name, words, raw, &path) && prefix == *raw && (self.granted)(&Scope::Delete(path)) { continue; }
+            if *may_grant && grantable_target(name, words, raw, &path) && prefix == *raw && (self.granted)(&Scope::Delete(path)) { continue; }
             return Some(refusal.into());
         }
         None
     }
 
-    /// `mv` of something outside the allowed areas into a temporary folder: a delete in two steps.
+    /// Whether a `find` deletes what it finds: `-delete`, or an `-exec`/`-execdir`/`-ok`/`-okdir` command that deletes
+    /// (`rm`, `rmdir`, `unlink`, `srm`, `trash`, a move into a temporary folder or the Trash, or a shell's `-c` script
+    /// doing one of those).
+    fn find_deletes(&self, words: &[String], cwd: Option<&Path>) -> bool {
+        if words.iter().any(|w| w == "-delete") { return true; }
+        let mut i = 0;
+        while i < words.len() {
+            if matches!(words[i].as_str(), "-exec" | "-execdir" | "-ok" | "-okdir") {
+                let end = words[i + 1..].iter().position(|w| w == ";" || w == "+").map_or(words.len(), |p| i + 1 + p);
+                let exec = Simple { words: words[i + 1..end].to_vec(), expands: vec![false; end - i - 1], ..Default::default() };
+                if self.exec_deletes(strip_wrappers(exec), cwd, 0) { return true; }
+                i = end;
+            }
+            i += 1;
+        }
+        false
+    }
+
+    /// Whether one command `find -exec` or `xargs` runs on each path deletes it.
+    fn exec_deletes(&self, exec: Simple, cwd: Option<&Path>, depth: usize) -> bool {
+        let Some(program) = exec.words.first() else { return false };
+        let name = program.rsplit('/').next().unwrap_or(program);
+        if DELETERS.contains(&name) { return true; }
+        if name == "mv" { return self.moves_into_scratch(&exec.words[1..], cwd); }
+        if matches!(name, "sh" | "bash" | "zsh" | "dash" | "ksh") && depth < 2 {
+            let script = exec.words.iter().position(|a| a == "-c" || (a.starts_with('-') && !a.starts_with("--") && a.ends_with('c'))).and_then(|i| exec.words.get(i + 1));
+            return script.is_some_and(|s| split(s).into_iter().map(strip_wrappers).any(|e| self.exec_deletes(e, cwd, depth + 1)));
+        }
+        false
+    }
+
+    /// Whether `mv`'s destination (its last operand) is a temporary folder or the Trash.
+    fn moves_into_scratch(&self, args: &[String], cwd: Option<&Path>) -> bool {
+        let operands: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
+        operands.last().is_some_and(|d| self.scratch(d, cwd, false))
+    }
+
+    /// Whether `dest_word` is in a temporary folder or the Trash. `mktemp`: the command makes a temporary folder, so a
+    /// substitution as the destination is one.
+    fn scratch(&self, dest_word: &str, cwd: Option<&Path>, mktemp: bool) -> bool {
+        let temp_word = dest_word.starts_with("$TMPDIR") || dest_word.starts_with("${TMPDIR") || (mktemp && dest_word.starts_with("$("));
+        let dest = if temp_word { Some(PathBuf::from("/tmp/x")) } else { self.absolute(dest_word, cwd) };
+        // Only the temporary folders and the Trash: a move into a build cache (`~/.cache/huggingface`) is ordinary work.
+        let mut temps: Vec<PathBuf> = ["/tmp", "/private/tmp", "/var/folders", "/private/var/folders"].iter().map(PathBuf::from).collect();
+        if let Some(t) = std::env::var_os("TMPDIR").filter(|t| !t.is_empty()) { temps.push(lexical(Path::new(&t))); }
+        temps.push(self.user.join(".Trash"));
+        // Compared without case, as APFS does (`~/.TRASH`, `/TMP`).
+        let fold = |p: &Path| PathBuf::from(lexical(p).to_string_lossy().to_lowercase());
+        dest.as_ref().is_some_and(|d| temps.iter().any(|t| fold(d).starts_with(fold(t))))
+    }
+
+    /// A Finder script that deletes, moves to the Trash or empties it (`tell application "Finder" to delete POSIX file
+    /// "/x"`): allowed only when every path it names is a literal absolute path inside the allowed areas and it names
+    /// nothing else (no `home`, `folder`, `every …`, a variable); emptying the Trash is always a delete.
+    fn finder_deletes(&self, script: &str, cwd: Option<&Path>) -> Option<String> {
+        let words = script_words(script);
+        let has = |w: &str| words.iter().any(|x| x == w);
+        // The application's name is a string (`application "Finder"`), JXA's too (`Application("Finder")`).
+        if !script.to_lowercase().contains("finder") || !(has("delete") || has("trash") || has("erase")) { return None; }
+        if has("empty") || has("erase") { return Some(DELETE.into()); }
+        let vague = ["home", "desktop", "folder", "disk", "every", "whose", "items", "item", "selection", "startup", "set", "repeat", "my", "of", "it"];
+        if words.iter().any(|w| vague.contains(&w.as_str())) || script.contains('$') { return Some(DELETE.into()); }
+        let paths: Vec<String> = script.split('"').skip(1).step_by(2).filter(|q| !q.eq_ignore_ascii_case("finder")).map(str::to_owned).collect();
+        if paths.is_empty() || paths.iter().any(|p| !p.starts_with('/')) { return Some(DELETE.into()); }
+        let targets: Vec<(String, bool)> = paths.into_iter().map(|p| (p, false)).collect();
+        self.judge_deletes("osascript", &[], &targets, cwd)
+    }
+
+    /// `mv` of something outside the allowed areas into a temporary folder or the Trash: a delete in two steps. Into
+    /// anywhere else it is ordinary work, but the destination is remembered (`moved`), so deleting it later in the same
+    /// command line is refused like deleting the original (bug note 2026-11-03T18-04-11: mv, then rm).
     /// `mktemp`: the command makes a temporary folder, so a substitution as the destination is one.
     fn moves_to_scratch(&self, args: &[String], cwd: Option<&Path>, mktemp: bool) -> Option<String> {
         let operands: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
-        let (dest, sources) = operands.split_last()?;
-        let temp_word = dest.starts_with("$TMPDIR") || dest.starts_with("${TMPDIR") || (mktemp && dest.starts_with("$("));
-        let dest = if temp_word { PathBuf::from("/tmp/x") } else { self.absolute(dest, cwd)? };
-        // Only the temporary folders: a move into a build cache (`~/.cache/huggingface`) is ordinary work.
-        let mut temps: Vec<PathBuf> = ["/tmp", "/private/tmp", "/var/folders", "/private/var/folders"].iter().map(PathBuf::from).collect();
-        if let Some(t) = std::env::var_os("TMPDIR").filter(|t| !t.is_empty()) { temps.push(lexical(Path::new(&t))); }
-        let scratch = temps.iter().any(|t| lexical(&dest).starts_with(t));
-        if !scratch { return None; }
+        let (dest_word, sources) = operands.split_last()?;
+        let temp_word = dest_word.starts_with("$TMPDIR") || dest_word.starts_with("${TMPDIR") || (mktemp && dest_word.starts_with("$("));
+        let dest = if temp_word { Some(PathBuf::from("/tmp/x")) } else { self.absolute(dest_word, cwd) };
+        let scratch = self.scratch(dest_word, cwd, mktemp);
         for s in sources {
             let (prefix, _) = cut(s);
             let Some(path) = self.absolute(&prefix, cwd) else { continue };
-            if !self.deletable(&path) { return Some(DELETE.into()); }
+            // Moved here from outside earlier in the line, it is still the original.
+            if self.deletable(&path) && !self.deletes_moved(s, Some(&path)) { continue; }
+            if scratch { return Some(DELETE.into()); }
+            // An unknowable destination (`mv ~/x "$D"`) cannot be followed: refuse a later delete of any variable.
+            let Some(dest) = &dest else { self.moved.borrow_mut().push(PathBuf::from("$")); continue };
+            // Into a folder (one that exists, or written with a trailing slash) it keeps its name; else it is renamed.
+            let into = dest_word.ends_with('/') || dest.is_dir() || sources.len() > 1;
+            let landed = match path.file_name() { Some(name) if into => dest.join(name), _ => dest.clone() };
+            self.moved.borrow_mut().push(landed);
         }
         None
+    }
+
+    /// Whether a delete target in this command line reaches something it moved here from outside the allowed areas: the
+    /// moved thing, inside it, or a folder holding it.
+    fn deletes_moved(&self, raw: &str, path: Option<&Path>) -> bool {
+        let moved = self.moved.borrow();
+        if moved.is_empty() { return false; }
+        if raw.contains('$') && moved.iter().any(|m| m.as_os_str() == "$") { return true; }
+        let Some(path) = path.map(lexical) else { return false };
+        moved.iter().any(|m| m.starts_with(&path) || path.starts_with(m))
     }
 
     /// Inside an allowed area, deep enough, as written and with its folders' symlinks resolved.
@@ -315,6 +506,56 @@ impl Ctx<'_> {
             else if word.is_empty() || word.starts_with('~') || word.contains('$') { return None }
             else { cwd?.join(word) };
         Some(normalize(&path))
+    }
+}
+
+/// Programs that delete their operands. `trash` moves them into the Trash, which counts as a delete.
+const DELETERS: [&str; 5] = ["rm", "rmdir", "unlink", "srm", "trash"];
+
+/// A `find`'s start points: the words after its own options and before the first expression.
+fn find_starts(words: &[String]) -> Vec<String> {
+    (1..words.len()).skip_while(|&i| matches!(words[i].as_str(), "-H" | "-L" | "-P" | "-E" | "-X" | "-d" | "-s" | "-x"))
+        .take_while(|&i| !words[i].starts_with('-') && !matches!(words[i].as_str(), "(" | "!")).map(|i| words[i].clone()).collect()
+}
+
+/// The paths `xargs` hands a command from its input: a piped `find`'s start points (or `.` when it has none), the
+/// words a piped `echo` or `printf` prints, the folders a piped `ls` lists (`.` when none), the working folder for
+/// `git`'s file lists; else the home folder, which refuses the delete.
+/// Review 5 Nov: anything else fed in went as the working folder, so `mdfind -name x | xargs rm`, `cat list | xargs
+/// rm` and `echo ~/x | tr … | xargs trash` passed from the Vault. Input that cannot be known is judged as home.
+fn fed(simple: &Simple, prev: Option<&Simple>) -> Vec<String> {
+    let program = |p: &Simple| p.words.first().map(|w| w.rsplit('/').next().unwrap_or(w).to_owned()).unwrap_or_default();
+    let operands = |p: &Simple| p.words[1..].iter().filter(|w| !w.starts_with('-')).cloned().collect::<Vec<_>>();
+    match prev.filter(|_| simple.after_pipe) {
+        Some(p) if program(p) == "find" => {
+            let starts = find_starts(&p.words);
+            if starts.is_empty() { vec![".".into()] } else { starts }
+        }
+        // `echo /x | xargs rm`: the words it prints, and the working folder for anything else in them.
+        Some(p) if matches!(program(p).as_str(), "echo" | "printf") => operands(p).into_iter().chain([".".to_owned()]).collect(),
+        // `ls | xargs trash` lists the working folder; `ls -d ~/x | xargs rm` the folders it names.
+        Some(p) if program(p) == "ls" => {
+            let named = operands(p);
+            if named.is_empty() { vec![".".into()] } else { named }
+        }
+        // `git ls-files -d | xargs rm`, `git diff --name-only`: paths inside the repository, relative to the working
+        // folder. Other git commands print absolute paths (`rev-parse --git-common-dir`, `worktree list`): unknown.
+        Some(p) if program(p) == "git" && git_lists_relative_files(&p.words) => vec![".".into()],
+        _ => vec!["~".into()],
+    }
+}
+
+/// Whether a piped `git` prints file paths relative to the working folder: `ls-files`, or `diff`/`show`/`log` with
+/// `--name-only`, `status` with `--porcelain`/`--short`, without `-C`, `--git-dir`, `--work-tree` or an absolute word.
+fn git_lists_relative_files(words: &[String]) -> bool {
+    let moved = words.iter().any(|w| w == "-C" || w.starts_with("--git-dir") || w.starts_with("--work-tree") || w.starts_with('/') || w.starts_with('~') || w.starts_with('$'));
+    let has = |f: &str| words.iter().any(|w| w == f);
+    let sub = words.iter().skip(1).find(|w| !w.starts_with('-')).map(String::as_str);
+    !moved && match sub {
+        Some("ls-files") => true,
+        Some("diff" | "show" | "log") => has("--name-only"),
+        Some("status") => has("--porcelain") || has("--short") || has("-s"),
+        _ => false,
     }
 }
 
@@ -365,13 +606,13 @@ fn login_item_writes(script: &str) -> bool {
     script.contains('\u{ab}') || (lower.contains("loginitem") && lower.contains('='))
 }
 
-/// Whether a refused delete target can be one of the user's grants (review 4 Nov): only a plain `rm`, `unlink` or `rmdir`
+/// Whether a refused delete target can be one of the user's grants (review 4 Nov): only a plain `rm`, `unlink`, `rmdir` or `trash`
 /// (never `rmdir -p`, `find` or `rsync`, which reach past it), written as one absolute literal path from `/` (never
 /// `~`, `$HOME`, the working folder, a glob or a variable), with no `.`, `..` or empty component, no trailing slash
 /// (through a symlink it deletes the target) and no symlinked folder on the way.
 fn grantable_target(name: &str, words: &[String], raw: &str, path: &Path) -> bool {
     let parents = name == "rmdir" && words.iter().any(|w| w == "--parents" || (w.starts_with('-') && !w.starts_with("--") && w.contains('p')));
-    matches!(name, "rm" | "rmdir" | "unlink") && !parents
+    matches!(name, "rm" | "rmdir" | "unlink" | "trash") && !parents
         && raw.starts_with('/') && exact(raw)
         && !raw[1..].split('/').any(|c| c.is_empty() || c == "." || c == "..")
         && resolved(path) == path
@@ -490,11 +731,19 @@ fn strip_wrappers(mut s: Simple) -> Simple {
                         }
                         n
                     }
-                    "xargs" => 1 + s.words[1..].iter().take_while(|w| w.starts_with('-')).count(),
+                    "xargs" => {
+                        // Options, and the value of those that take one as the next word (`xargs -I {} mv {} …`).
+                        let mut n = 1;
+                        while let Some(w) = s.words.get(n).filter(|w| w.starts_with('-')) {
+                            n += if matches!(w.as_str(), "-I" | "-J" | "-L" | "-n" | "-P" | "-s" | "-E" | "-R" | "-S" | "-a" | "-d") { 2 } else { 1 };
+                        }
+                        n
+                    }
                     _ => 0,
                 }
             };
         if drop == 0 || drop > s.words.len() { return s; }
+        if first == "xargs" { s.via_xargs = true; }
         s.words.drain(..drop);
         s.expands.drain(..drop);
     }
@@ -542,6 +791,16 @@ fn split(command: &str) -> Vec<Simple> {
                 started = true;
                 i = end;
             }
+            (None, '$') if chars.get(i + 1) == Some(&'\'') => {
+                // ANSI-C quoting (`$'…'`): a backslash escapes, `\'` included, so the string ends only at an unescaped
+                // quote (review 5 Nov: `echo $'\''; security dump-keychain; echo $'\''` hid the middle command). Its
+                // escapes are decoded as the shell does (`ansi_c`, second review 5 Nov: `$'\057Users/t/Documents'` read
+                // as a relative path and `$'\x72m'` was not rm). They can spell any character, so the word counts as an
+                // expansion: never a grantable literal.
+                i = ansi_c(&chars, i + 2, &mut word);
+                expands = true;
+                started = true;
+            }
             (None, '#') if !started => {
                 while i + 1 < chars.len() && chars[i + 1] != '\n' { i += 1; }
             }
@@ -553,6 +812,12 @@ fn split(command: &str) -> Vec<Simple> {
             (None, '\\') if i + 1 < chars.len() => { i += 1; if chars[i] != '\n' { word.push(chars[i]); started = true; } }
             (None, '\'' | '"') => { quote = Some(c); started = true; }
             (None, '`') => { end_simple!(); }
+            // `{` and `}` group commands only as words of their own; `{}` (find's and xargs' placeholder) and `a{b,c}`
+            // are words.
+            (None, '{' | '}') if started || !chars.get(i + 1).is_none_or(|n| n.is_whitespace() || matches!(n, ';' | '&' | '|' | ')')) => {
+                word.push(c);
+                started = true;
+            }
             (None, ';' | '|' | '&' | '(' | ')' | '{' | '}') => {
                 // `2>&1`, `>&2`: a redirect, not a separator.
                 if c == '&' && chars.get(i.wrapping_sub(1)) == Some(&'>') {
@@ -562,6 +827,8 @@ fn split(command: &str) -> Vec<Simple> {
                     continue;
                 }
                 end_simple!();
+                // `a | b` (not `a || b`): b reads a's output.
+                cur.after_pipe = c == '|' && chars.get(i + 1) != Some(&'|') && chars.get(i.wrapping_sub(1)) != Some(&'|');
             }
             (None, '\n') => {
                 end_simple!();
@@ -615,6 +882,59 @@ fn split(command: &str) -> Vec<Simple> {
     out
 }
 
+/// Decodes the body of an ANSI-C quoted string (`$'…'`) starting at `start` into `word`, as bash does: `\a \b \e \E \f \n \r
+/// \t \v \\ \' \" \?`, octal `\nnn`, `\xHH`, `\uHHHH`, `\UHHHHHHHH` and control `\cX`; any other backslash stays. A NUL ends
+/// the string there (the shell's C string stops at it; the rest up to the quote is dropped). Returns the index of
+/// the closing quote (or the end).
+fn ansi_c(chars: &[char], start: usize, word: &mut String) -> usize {
+    let mut i = start;
+    let mut ended = false;
+    let digits = |i: usize, max: usize, radix: u32| -> (u32, usize) {
+        let mut value = 0u32;
+        let mut n = 0;
+        while n < max && chars.get(i + n).is_some_and(|c| c.is_digit(radix)) {
+            value = value.saturating_mul(radix).saturating_add(chars[i + n].to_digit(radix).unwrap());
+            n += 1;
+        }
+        (value, n)
+    };
+    while i < chars.len() && chars[i] != '\'' {
+        let mut out: Option<char> = Some(chars[i]);
+        if chars[i] == '\\' && i + 1 < chars.len() {
+            i += 1;
+            let e = chars[i];
+            out = match e {
+                'a' => Some('\u{7}'), 'b' => Some('\u{8}'), 'e' | 'E' => Some('\u{1b}'), 'f' => Some('\u{c}'), 'n' => Some('\n'),
+                'r' => Some('\r'), 't' => Some('\t'), 'v' => Some('\u{b}'), '\\' | '\'' | '"' | '?' => Some(e),
+                '0'..='7' => {
+                    let (v, n) = digits(i, 3, 8);
+                    i += n - 1;
+                    Some(char::from((v & 0xff) as u8))
+                }
+                'x' | 'u' | 'U' => {
+                    let (v, n) = digits(i + 1, match e { 'x' => 2, 'u' => 4, _ => 8 }, 16);
+                    if n == 0 { word.push('\\'); Some(e) }
+                    else {
+                        i += n;
+                        // An invalid code point is not a character the program could be named with: kept visible.
+                        Some(if e == 'x' { char::from(v as u8) } else { char::from_u32(v).unwrap_or('\u{fffd}') })
+                    }
+                }
+                'c' if i + 1 < chars.len() => {
+                    i += 1;
+                    let c = chars[i];
+                    if c.is_ascii() { Some(char::from((c as u8) & 0x1f)) } else { word.push_str("\\c"); Some(c) }
+                }
+                _ => { word.push('\\'); Some(e) }
+            };
+        }
+        if out == Some('\0') { ended = true; }
+        if !ended { if let Some(c) = out { word.push(c); } }
+        i += 1;
+    }
+    i
+}
+
 /// The index of the `)` closing the substitution whose `(` is at `open`, past quotes, nesting and here-documents.
 fn subst_end(chars: &[char], open: usize) -> usize {
     let mut depth = 0usize;
@@ -627,6 +947,10 @@ fn subst_end(chars: &[char], open: usize) -> usize {
             (Some('\''), '\'') | (Some('"'), '"') => quote = None,
             (Some('"'), '\\') | (None, '\\') => i += 1,
             (Some(_), _) => {}
+            (None, '$') if chars.get(i + 1) == Some(&'\'') => {
+                i += 2;
+                while i < chars.len() && chars[i] != '\'' { if chars[i] == '\\' { i += 1; } i += 1; }
+            }
             (None, '\'' | '"') => quote = Some(c),
             (None, '(') => depth += 1,
             (None, ')') => { depth -= 1; if depth == 0 { return i; } }
@@ -829,6 +1153,104 @@ mod tests {
         assert_eq!(programs("du -sh /a && nice -n 19 rm -rf /a; ls | wc -l"), ["du", "rm", "ls", "wc"]);
     }
 
+    /// Bug note 2026-11-03T18-04-11, second half: moving something out of a protected folder and deleting it in the
+    /// same line is a delete of the original; a move into the Trash is a delete. Ordinary moves and deletes pass.
+    #[test]
+    fn moving_out_then_deleting_in_one_line_is_a_delete() {
+        for c in [
+            "mv ~/Backups/old ~/.Trash/", "mv /Users/t/Documents/x /Users/t/.Trash/x",
+            "mv ~/Backups/old /Users/t/Work/Assistant/Temp/old && rm -rf /Users/t/Work/Assistant/Temp/old",
+            "mv ~/Backups/old /Users/t/Work/Assistant/Temp/ && rm -rf /Users/t/Work/Assistant/Temp/old",
+            "mv ~/Backups/old /Users/t/Work/Projects/X/old; rm -rf /Users/t/Work/Projects/X",
+            "mv ~/Backups/old /Users/t/Work/Projects/X/old && find /Users/t/Work/Projects/X/old -delete",
+            "mv ~/Backups/old \"$D\" && rm -rf \"$D\"",
+            "cd /Users/t/Work/Assistant/Temp && mv ~/Backups/old gone && rm -rf gone",
+            // Review 5 Nov: a second move of the moved thing into the Trash, and the Trash or /tmp in other case.
+            "mv ~/Backups/old /Users/t/Work/Assistant/Temp/old && mv /Users/t/Work/Assistant/Temp/old ~/.Trash/",
+            "mv ~/Documents/x ~/.TRASH/", "mv ~/Documents/x /TMP/x",
+        ] {
+            assert!(bash(c).is_some_and(|m| m.contains("deletes outside")), "{c}");
+        }
+        for c in [
+            "mv ~/Downloads/report.pdf /Users/t/Work/Assistant/Research/ && rm -rf /Users/t/Work/Assistant/Temp/scratch",
+            "mv /Users/t/Work/Assistant/Temp/a /Users/t/Work/Assistant/Temp/b && rm -rf /Users/t/Work/Assistant/Temp/b",
+            "mv ~/Downloads/x.zip /Users/t/Work/Projects/X/x.zip && rm -rf /Users/t/Work/Projects/X/build",
+            "mv /Users/t/Work/Projects/X/a ~/.Trash/",
+        ] {
+            assert_eq!(bash(c), None, "{c}");
+        }
+    }
+
+    /// The Keychain guard reads `security`'s own options: -i and -p before the verb run commands from input, and
+    /// `list-keychains -s` sets the search list.
+    #[test]
+    fn security_interactive_mode_and_search_list_changes_are_refused() {
+        for c in ["security -i", "echo 'delete-keychain login.keychain' | security -i", "security -p 'k> '", "security -iq",
+            "security list-keychains -s ~/Library/Keychains/x.keychain-db", "security list-keychains -d user -s /tmp/x.keychain-db",
+            "security default-keychain -s /tmp/x.keychain-db", "security -q dump-keychain"] {
+            assert!(bash(c).is_some_and(|m| m.contains("Keychain")), "{c}");
+        }
+        for c in ["security list-keychains", "security list-keychains -d user", "security -v find-identity -p codesigning", "security -h"] {
+            assert_eq!(bash(c), None, "{c}");
+        }
+        // Review 5 Nov: ANSI-C quotes end only at an unescaped quote, so a command between two of them is still seen.
+        for c in ["echo $'\\''; security dump-keychain -d; echo $'\\''", "echo $'\\''; rm -rf ~/Documents; echo $'\\''",
+            "X=$(echo $'\\)'; security find-generic-password -s x -w)"] {
+            assert!(bash(c).is_some_and(|m| m.contains("deny list")), "{c}");
+        }
+        assert_eq!(bash("printf $'a\\tb\\n' && echo $'it\\'s fine' | wc -c"), None);
+    }
+
+    /// Bug note 2026-11-04T23-01-22: the user's grant for one new keychain file lets exactly the signing setup on that file
+    /// through, and nothing else in the Keychain: not the login or default keychain, another file, a variable, a
+    /// prompt, a read or unlock of another keychain beside it, or a file that already exists.
+    #[test]
+    fn a_keychain_grant_covers_its_one_new_file_only() {
+        let k = "/Users/t/Library/Keychains/heimdall-release-signing.keychain-db";
+        let granted = |s: &Scope| *s == Scope::Keychain(PathBuf::from(k));
+        let r = |c: &str| refuse_with("Bash", &json!({"command": c}), &vault(), &user(), Some(Path::new("/Users/t/Work/Projects/P/keys")), &granted);
+        let setup = format!("security create-keychain -p \"$(cat keychain-password)\" {k} && security set-keychain-settings {k} && \
+            security unlock-keychain -p \"$(cat keychain-password)\" {k} && security import key.pem -k {k} -T /usr/bin/codesign >/dev/null && \
+            security import cert.pem -k {k} >/dev/null && security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k \"$(cat keychain-password)\" {k} >/dev/null && \
+            security find-identity -p codesigning {k}");
+        assert_eq!(r(&setup), None, "the whole setup on the granted file");
+        assert!(bash(&setup).is_some(), "no grant, no keychain");
+        let login = "/Users/t/Library/Keychains/login.keychain-db";
+        for c in [
+            format!("security import key.pem -k {login}"), "security import key.pem".into(), format!("security import key.pem -k {k} -k {login}"),
+            "security unlock-keychain -p x".into(), format!("security unlock-keychain -p x {login}"), "security set-key-partition-list -S apple: -s -k pw".into(),
+            "security set-keychain-settings".into(), "security create-keychain -p x /Users/t/Library/Keychains/other.keychain-db".into(),
+            // Review 5 Nov: `security` reads no option after its first other word, so these would name more keychains.
+            format!("security set-key-partition-list -S apple: -s -k pw {k} -l login.keychain-db"), format!("security import -x key.pem -k {k}"),
+            format!("security unlock-keychain {k} -p x"),
+            "security import key.pem -k \"$KC\"".into(), "security import key.pem -k $HOME/Library/Keychains/heimdall-release-signing.keychain-db".into(),
+            "security import key.pem -k ~/Library/Keychains/heimdall-release-signing.keychain-db".into(),
+            format!("security create-keychain -P {k}"), format!("security import key.pem -P -k {k}"), format!("security -q create-keychain -p x {k}"),
+            format!("security create-keychain -p x {k} {login}"), format!("security import {login} -k {k}"), format!("security import ~/Library/Keychains/login.keychain-db -k {k}"),
+            format!("security create-keychain -p x {k} && security unlock-keychain -p y {login}"),
+            format!("security create-keychain -p x {k}; security find-generic-password -s Heimdall -w"),
+            format!("security create-keychain -p x {k}; security find-identity -v"), format!("security create-keychain -p x {k}; security find-certificate -a -p"),
+            format!("security create-keychain -p x {k}; security dump-keychain {k}"), format!("security export -k {k} -o /tmp/x.p12"),
+            format!("security delete-keychain {k}"), format!("security default-keychain -s {k}"), format!("security list-keychains -s {k}"),
+            format!("security create-keychain -p x {k}; security -i"), format!("security create-keychain -p x {k} && cp {login} /tmp/x"),
+            format!("security set-key-partition-list -S apple: -s -k pw -X {k}"),
+        ] {
+            assert!(r(&c).is_some_and(|m| m.contains("Keychain")), "{c}");
+        }
+        // A file that exists already is never made again, and a symlinked folder on the way is refused.
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let old = root.join("old.keychain-db");
+        std::fs::write(&old, b"x").unwrap();
+        std::os::unix::fs::symlink(&root, root.join("link")).unwrap();
+        let through = root.join("link/new.keychain-db");
+        let any = |_: &Scope| true;
+        let r2 = |c: String| refuse_with("Bash", &json!({"command": c}), &vault(), &user(), None, &any);
+        assert!(r2(format!("security create-keychain -p x {}", old.display())).is_some(), "exists already");
+        assert!(r2(format!("security create-keychain -p x {}", through.display())).is_some(), "through a symlinked folder");
+        assert_eq!(r2(format!("security create-keychain -p x {}", root.join("new.keychain-db").display())), None);
+    }
+
     /// Review: relative targets are judged from the session's folder and the `cd`s before them; unknown folders pass.
     #[test]
     fn relative_targets_follow_the_working_folder() {
@@ -850,5 +1272,91 @@ mod tests {
         assert!(r(format!("rm -rf {}/work", link.display())).is_some(), "through the link");
         assert_eq!(r(format!("rm {}", link.display())), None, "the link itself stays in scratch");
         assert_eq!(r(format!("rm -rf {}/own", scratch.path().display())), None);
+    }
+
+    /// Second review, 5 Nov (HIGH): `trash` and `find … -exec mv {} ~/.Trash \;` went round the "moving into the Trash
+    /// is a delete" rule. `trash`, every `find` that deletes or trashes what it finds (`-delete`, `-exec`/`-execdir`/
+    /// `-ok` with rm, trash or a move into scratch, also inside `sh -c`), `xargs` fed from a pipe and Finder's delete are
+    /// judged like `rm`: inside the Vault, scratch and caches they pass, elsewhere they are refused unless the user granted
+    /// exactly that path.
+    #[test]
+    fn trash_find_exec_xargs_and_finder_deletes_follow_the_delete_rules() {
+        for c in [
+            "trash ~/Documents/old", "trash /Users/t/Desktop/x.png", "/usr/bin/trash -v ~/Backups", "nice -n 19 trash ~/Music",
+            "trash -- ~/Movies", "cd ~ && trash Documents",
+            "find ~/Documents -name '*.bak' -exec mv {} ~/.Trash \\;", "find ~/Documents -exec mv {} /tmp/ +",
+            "find ~/Documents -execdir trash {} \\;", "find ~/Documents -ok rm {} \\;", "find ~/Documents -exec /bin/rm -f {} +",
+            "find ~/Documents -exec sh -c 'mv \"$1\" ~/.Trash/' _ {} \\;", "find ~/Documents -exec nice -n 19 trash {} +",
+            "find ~/Documents -name x | xargs trash", "find ~/Documents | xargs rm -rf", "find ~/Documents -print0 | xargs -0 -I {} mv {} ~/.Trash/",
+            "find ~/Documents | xargs -I{} mv {} /tmp/", "find ~/Documents -exec trash {} \\; ; echo done", "{ trash ~/Documents; }",
+            "osascript -e 'tell application \"Finder\" to delete POSIX file \"/Users/t/Documents/old\"'",
+            "osascript -e 'tell application \"Finder\" to delete (POSIX file \"/Users/t/Work/Projects/X/a\") & file \"b\" of home'",
+            "osascript -e 'tell application \"Finder\" to delete every item of folder \"Documents\" of home'",
+            "osascript -e 'tell application \"Finder\" to empty trash'",
+            "osascript -e 'tell application \"Finder\" to move POSIX file \"/Users/t/Documents/x\" to trash'",
+            "osascript -l JavaScript -e 'Application(\"Finder\").delete(Path(\"/Users/t/Documents/x\"))'",
+        ] {
+            assert!(bash_in(c, "/Users/t/Work/Projects/Heimdall").is_some_and(|m| m.contains("deny list")), "{c}");
+        }
+        assert!(bash_in("ls | xargs trash", "/Users/t").is_some(), "fed from the home folder");
+        // Review 5 Nov: input from any other program, or a list file, is not known to stay in the working folder.
+        for c in [
+            "mdfind -name '*.dmg' | xargs rm", "ls -d ~/Documents/old | xargs rm -rf", "echo ~/x | tr ' ' '\\n' | xargs trash",
+            "cat list.txt | xargs rm", "xargs rm < list.txt", "git -C ~/Documents ls-files | xargs rm",
+            "git rev-parse --git-common-dir | xargs rm -rf", "git rev-parse --show-toplevel | xargs rm -rf",
+            "git worktree list --porcelain | xargs rm -rf",
+        ] {
+            assert!(bash_in(c, "/Users/t/Work/Projects/Heimdall").is_some_and(|m| m.contains("deny list")), "{c}");
+        }
+        for c in ["ls build | xargs rm", "git diff --name-only | xargs rm", "git status --porcelain | xargs rm -f"] {
+            assert_eq!(bash_in(c, "/Users/t/Work/Projects/Heimdall"), None, "{c}");
+        }
+        for c in [
+            "trash /Users/t/Work/Assistant/Temp/old", "trash build/out", "trash /tmp/x",
+            "find /Users/t/Work/Projects/X/target -name '*.o' -exec trash {} +",
+            "find /Users/t/Work/Assistant/Temp/x -exec mv {} ~/.Trash/ \\;", "find . -name '*.tmp' | xargs trash",
+            "find /Users/t/Work/Projects/X -name '*.log' | xargs rm -f", "ls | xargs trash", "git ls-files -d | xargs rm",
+            "find ~/Documents -name '*.pdf' -exec cp {} /Users/t/Work/Assistant/Research/ \\;", "find ~/Documents -exec mv {} /Users/t/Work/Assistant/Temp/ \\;",
+            "find ~/Documents -name x | xargs grep -l foo", "find ~ -name x -exec ls -l {} +",
+            "osascript -e 'tell application \"Finder\" to delete POSIX file \"/Users/t/Work/Assistant/Temp/x\"'",
+            "osascript -e 'tell application \"Finder\" to open POSIX file \"/Users/t/Documents\"'",
+        ] {
+            assert_eq!(bash_in(c, "/Users/t/Work/Projects/Heimdall"), None, "{c}");
+        }
+        // The user's grant covers a plain `trash` of the exact path, never `find`, `xargs` or Finder.
+        let granted = |s: &Scope| *s == Scope::Delete(PathBuf::from("/Users/t/Documents/old"));
+        let r = |c: &str| refuse_with("Bash", &json!({"command": c}), &vault(), &user(), None, &granted);
+        assert_eq!(r("trash /Users/t/Documents/old"), None);
+        assert!(r("trash /Users/t/Documents/other").is_some());
+        assert!(r("find /Users/t/Documents/old -exec trash {} +").is_some());
+        assert!(r("echo /Users/t/Documents/old | xargs trash").is_some());
+    }
+
+    /// Second review, 5 Nov (HIGH): ANSI-C quotes are decoded as the shell does, so an escaped slash, a program name
+    /// spelled in escapes or a NUL cannot hide a delete; a word spelled with them is never a grantable literal.
+    #[test]
+    fn ansi_c_escapes_are_decoded_before_judging() {
+        for c in [
+            "rm -rf $'\\057Users/t/Documents'", "rm -rf $'\\x2fUsers/t/Documents'", "rm -rf $'\\u002fUsers/t/Documents'",
+            "rm -rf $'\\U0000002fUsers/t/Documents'", "$'\\x72m' -rf ~/x", "$'\\162\\155' -rf /Users/t/Documents", "$'\\x2fbin\\x2frm' -rf ~/Documents",
+            "$'tr\\x61sh' ~/Documents", "mv ~/Documents/x $'/Users/t/.Tr\\x61sh/'", "rm -rf $'/Users/t/Docu\\x6dents\\0/../Work/Projects/X'",
+            "$'\\163\\145\\143\\165\\162\\151\\164\\171' dump-keychain", "rm -rf /Users/t/$'Documents'",
+        ] {
+            assert!(bash(c).is_some_and(|m| m.contains("deny list")), "{c}");
+        }
+        // NUL ends the string as in the shell: what is left is what is deleted.
+        assert_eq!(bash("rm -rf $'/Users/t/Work/Projects/X/a\\0/../../../../Documents'"), None);
+        assert_eq!(bash("rm -rf $'/tmp/a\\tb' $'\\x2ftmp/x'"), None);
+        let mut w = String::new();
+        let chars: Vec<char> = "a\\x41\\101\\u00e9\\cA\\e\\q\\x\\'z'".chars().collect();
+        let end = ansi_c(&chars, 0, &mut w);
+        assert_eq!((w.as_str(), chars[end]), ("aAA\u{e9}\u{1}\u{1b}\\q\\x'z", '\''));
+        // A grant names one literal path; the same path spelled in escapes is not it.
+        let granted = |s: &Scope| *s == Scope::Delete(PathBuf::from("/Users/t/Documents/old"));
+        let r = |c: &str| refuse_with("Bash", &json!({"command": c}), &vault(), &user(), None, &granted);
+        assert_eq!(r("rm -rf /Users/t/Documents/old"), None);
+        assert!(r("rm -rf $'/Users/t/Documents/old'").is_some());
+        assert!(r("rm -rf $'/Users/t/Documents/old\\0/../../Desktop'").is_some(), "the escaped NUL");
+        assert!(r("rm -rf $'\\x2fUsers/t/Documents/old'").is_some());
     }
 }

@@ -81,7 +81,7 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{define_class, msg_send, sel, MainThreadOnly, Message};
 use objc2_app_kit::{
     NSAppearance, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationPolicy, NSButton, NSMenu,
-    NSMenuDelegate, NSMenuItem, NSStatusBar, NSStatusItem, NSTextField,
+    NSMenuDelegate, NSMenuItem, NSStatusBar, NSStatusItem, NSTextField, NSWindowDelegate,
     NSVariableStatusItemLength, NSWindow, NSAlertSecondButtonReturn, NSModalResponse,
 };
 use objc2_foundation::{MainThreadMarker, NSObject, NSObjectProtocol, NSTimer};
@@ -228,6 +228,16 @@ pub(crate) struct State {
     setup_home: HomeState,
     setup_t3: T3Setup,
     setup_vella: VellaSetup,
+    /// Setup ▸ Getting ready (`UiUpdate::ModelDownloads`).
+    setup_downloads: ModelDownloads,
+    /// Setup ▸ Arsenal (`UiUpdate::ArsenalSetup`).
+    setup_arsenal: ArsenalSetup,
+    /// The step last told to the app (`UiAction::SetupAt`).
+    setup_reported: Option<SetupStep>,
+    /// Setup ▸ Getting ready's readiness rows (`UiUpdate::SetupReadiness`).
+    setup_readiness: SetupReadiness,
+    /// Claude Code's tile was chosen while T3 Code was missing: it connects once its install lands.
+    claude_waits_for_t3: bool,
     setup_harnesses: HarnessSetup,
     /// The updater's menu row, shown above Support the Developer (public edition; the app sends it).
     pub(crate) update_row: Option<UpdateRow>,
@@ -391,8 +401,16 @@ pub(crate) fn run(options: Options, on_action: Box<dyn Fn(UiAction)>) -> ! {
     let render_dir = options.render_dir.clone();
     let checks_only = options.render_checks_only;
     let center = objc2_app_kit::NSWorkspace::sharedWorkspace().notificationCenter();
-    let callback = block2::RcBlock::new(|_: std::ptr::NonNull<objc2_foundation::NSNotification>| {
-        DispatchQueue::main().exec_async(|| with_state(|s| { if !s.options.fake_permissions { s.poll_permissions(); } }));
+    let callback = block2::RcBlock::new(|note: std::ptr::NonNull<objc2_foundation::NSNotification>| {
+        // Which app became active, for Setup's refocus after a permission prompt.
+        let app = unsafe { note.as_ref() }.userInfo().and_then(|info| info.objectForKey(unsafe { objc2_app_kit::NSWorkspaceApplicationKey }))
+            .and_then(|a| a.downcast::<objc2_app_kit::NSRunningApplication>().ok());
+        let own = app.as_ref().is_some_and(|a| a.processIdentifier() == std::process::id() as i32);
+        let bundle = app.and_then(|a| a.bundleIdentifier()).map(|b| b.to_string());
+        DispatchQueue::main().exec_async(move || with_state(move |s| {
+            if !s.options.fake_permissions { s.poll_permissions(); }
+            if s.options.render_dir.is_none() { if let Some(w) = s.setup.as_mut() { w.app_activated(bundle, own); } }
+        }));
     });
     let observer = unsafe { center.addObserverForName_object_queue_usingBlock(
         Some(objc2_app_kit::NSWorkspaceDidActivateApplicationNotification), None, None, &callback) };
@@ -541,6 +559,11 @@ impl State {
             setup_home: HomeState::default(),
             setup_t3: T3Setup::default(),
             setup_vella: VellaSetup::default(),
+            setup_downloads: ModelDownloads::default(),
+            setup_arsenal: ArsenalSetup::default(),
+            setup_reported: None,
+            setup_readiness: SetupReadiness::default(),
+            claude_waits_for_t3: false,
             setup_harnesses: HarnessSetup::default(),
             update_row: None,
             speakers: None,
@@ -837,9 +860,15 @@ impl State {
             }
             UiUpdate::RuntimeSettings(settings) => {
                 if self.runtime_settings == settings { return; }
+                // Setup finished elsewhere (`Heimdall setup --finish`): its window closes as Start closes it.
+                let finished = settings.setup_done && !self.runtime_settings.setup_done;
                 self.runtime_settings=settings; self.sync_switches(None); self.refresh_menu();
+                if finished {
+                    if let Some(w) = self.setup.as_mut().filter(|w| w.is_visible()) { w.close(); w.go_to(SetupStep::Permissions); }
+                }
             },
             UiUpdate::Microphones(microphones) => {
+                if let Some(w) = self.setup.as_mut() { w.set_microphones(&microphones); }
                 if self.microphones == microphones { return; }
                 self.microphones = microphones;
                 self.refresh_menu();
@@ -880,11 +909,30 @@ impl State {
             }
             UiUpdate::T3Setup(t3) => {
                 if let Some(w) = self.setup.as_mut() { w.set_t3(&t3); }
+                // Claude Code chosen: T3 Code, once installed, is connected (that tile's click was the consent).
+                if self.claude_waits_for_t3 && t3.ready() {
+                    self.claude_waits_for_t3 = false;
+                    if !t3.connect_allowed { self.emit(UiAction::ConnectT3); }
+                }
                 self.setup_t3 = t3;
             }
             UiUpdate::VellaSetup(vella) => {
                 if let Some(w) = self.setup.as_mut() { w.set_vella(&vella); }
                 self.setup_vella = vella;
+            }
+            UiUpdate::ArsenalSetup(arsenal) => {
+                // An install Continue waited for has landed: Heimdall uses Arsenal now.
+                let landed = self.setup.as_mut().is_some_and(|w| w.set_arsenal(&arsenal));
+                self.setup_arsenal = arsenal;
+                if landed { self.emit(UiAction::SetArsenal(true)); }
+            }
+            UiUpdate::SetupReadiness(readiness) => {
+                if let Some(w) = self.setup.as_mut() { w.set_readiness(&readiness); }
+                self.setup_readiness = readiness;
+            }
+            UiUpdate::ModelDownloads(downloads) => {
+                if let Some(w) = self.setup.as_mut() { w.set_downloads(&downloads); }
+                self.setup_downloads = downloads;
             }
             UiUpdate::HarnessSetup(harnesses) => {
                 if let Some(w) = self.setup.as_mut() { w.set_harnesses(&harnesses); }
@@ -1350,7 +1398,7 @@ impl State {
     pub(crate) fn agent_reload(&mut self) {
         if self.agent_window.as_ref().is_some_and(|w| w.can_reload()) {
             self.emit(UiAction::AgentWindow(AgentWindowAction::Reload {
-                reason: format!("User reloaded the agent from the Agent window at {}", clock_now()),
+                reason: format!("{} reloaded the agent from the Agent window at {}", crate::identity::USER_SUBJECT, clock_now()),
                 abort: false,
             }));
         }
@@ -1361,7 +1409,7 @@ impl State {
         let pending = self.agent_view.state.as_ref().is_some_and(|s| s.can_reload && s.reload.is_some());
         if pending {
             self.emit(UiAction::AgentWindow(AgentWindowAction::Reload {
-                reason: format!("User reloaded the agent now from the Debug Agent window at {}", clock_now()),
+                reason: format!("{} reloaded the agent now from the Debug Agent window at {}", crate::identity::USER_SUBJECT, clock_now()),
                 abort: true,
             }));
         }
@@ -1485,15 +1533,27 @@ impl State {
                 UiAction::Identity(change) => personalise::apply(self, change),
                 // Vella's install: Homebrew runs it; without Homebrew, Vella's page.
                 UiAction::InstallVella if !self.setup_vella.brew => self.open_url(VELLA_PAGE),
+                // Arsenal without Homebrew: its page (releases and the installer).
+                UiAction::InstallArsenal if !self.setup_arsenal.brew => self.open_url(ARSENAL_PAGE),
                 other => self.emit(other),
             }
         }
         self.sync_setup();
+        self.report_setup_step();
         if close {
             // Opened again later (the status line's Set Up… for a permission taken away): the permissions, not the tour.
             if let Some(w) = self.setup.as_mut() { w.close(); w.go_to(SetupStep::Permissions); }
             self.emit(UiAction::SetupDone);
         }
+    }
+
+    /// The app keeps Setup's current step until it is done (`UiAction::SetupAt`): a relaunch reopens it there.
+    fn report_setup_step(&mut self) {
+        let Some(w) = self.setup.as_ref().filter(|w| w.is_visible()) else { return };
+        let setup::PageKind::Builtin(step) = w.current() else { return };
+        if self.setup_reported == Some(step) { return; }
+        self.setup_reported = Some(step);
+        self.emit(UiAction::SetupAt(step));
     }
 
     /// Setup at `step` (the menu's Home Folder…, a public first launch), or where it was (first: Welcome).
@@ -1503,10 +1563,16 @@ impl State {
         let (mtm, target) = (self.mtm, self.target());
         let created = self.setup.is_none();
         let setup = self.setup.get_or_insert_with(|| setup::SetupWindow::new(&target, mtm));
+        // On the visible screen every time it shows: centred when new, else kept where the user put it if on screen.
+        setup.place(created);
         if created {
             setup.set_home(&self.setup_home);
             setup.set_t3(&self.setup_t3);
             setup.set_vella(&self.setup_vella);
+            setup.set_downloads(&self.setup_downloads);
+            setup.set_readiness(&self.setup_readiness);
+            setup.set_microphones(&self.microphones);
+            setup.set_arsenal(&self.setup_arsenal);
             setup.set_harnesses(&self.setup_harnesses);
             setup.set_decider(&self.decider);
         }
@@ -1518,6 +1584,9 @@ impl State {
         }
         let window = setup.window.clone();
         self.present(&window);
+        // Heimdall's own menu bar while Setup shows (renders stay offscreen and change nothing).
+        if self.options.render_dir.is_none() { setup::enter_app_mode(self.mtm, &self.target()); }
+        self.report_setup_step();
         self.emit(UiAction::SetupOpened);
         self.start_setup_polling();
     }
@@ -1590,6 +1659,27 @@ define_class!(
     pub(crate) struct Controller;
 
     unsafe impl NSObjectProtocol for Controller {}
+
+    /// The Setup window's delegate (only it): closed before the first Setup is finished, Heimdall asks to quit, since
+    /// a half-set-up Heimdall is no state to leave. Cancel keeps Setup open.
+    unsafe impl NSWindowDelegate for Controller {
+        #[unsafe(method(windowShouldClose:))]
+        fn window_should_close(&self, _sender: &NSWindow) -> objc2::runtime::Bool {
+            let unfinished = with_state_now(|s| !s.runtime_settings.setup_done).unwrap_or(false);
+            if !unfinished { return objc2::runtime::Bool::YES; }
+            let quit = with_state_now(|s| s.mtm).is_some_and(|mtm| setup::confirm_quit(mtm));
+            if quit { with_state(|s| { if let Some(w) = s.setup.as_mut() { w.stop_meter(); } s.quit(); }); }
+            objc2::runtime::Bool::NO
+        }
+
+        /// Setup closed by its own button (finished): back to a menu-bar app.
+        #[unsafe(method(windowWillClose:))]
+        fn window_will_close(&self, _note: &objc2_foundation::NSNotification) {
+            if let Some(mtm) = MainThreadMarker::new() { setup::leave_app_mode(mtm) }
+            // Its level meter's input stream goes with it.
+            with_state(|s| if let Some(w) = s.setup.as_mut() { w.stop_meter() });
+        }
+    }
 
     unsafe impl NSMenuDelegate for Controller {
         #[unsafe(method(menuNeedsUpdate:))]
@@ -2253,7 +2343,7 @@ define_class!(
 
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: &AnyObject) {
-            with_state(|s| s.quit());
+            with_state(|s| { if let Some(w) = s.setup.as_mut() { w.stop_meter(); } s.quit(); });
         }
 
         /// The updater's row (public edition): Check for Updates…, or Update to X… once one is offered.
@@ -2511,6 +2601,7 @@ define_class!(
         fn setup_voice(&self, sender: &NSButton) {
             let index = sender.tag() as usize;
             with_state(move |s| {
+                if let Some(w) = s.setup.as_mut() { w.voice_clicked(); }
                 let Some(action) = s.setup.as_ref().and_then(|w| w.voice_action(index)) else { return };
                 speaking_menu::choose(s, action);
                 let voice = s.speech_voice.clone();
@@ -2518,13 +2609,20 @@ define_class!(
             });
         }
 
-        /// Setup ▸ Customise me ▸ a mark: applied at once, as Personalise's grid applies it.
+        /// Setup ▸ Customise me ▸ a mark: the mark, and the name and voice that follow it (`setup::mark_choice`), applied
+        /// at once as Personalise's grid and Speaking's menu apply them.
         #[unsafe(method(setupMark:))]
         fn setup_mark(&self, sender: &NSButton) {
             let index = sender.tag() as usize;
             with_state(move |s| {
-                let Some(UiAction::Identity(action)) = s.setup.as_ref().and_then(|w| w.mark_action(index)) else { return };
-                personalise::apply(s, action);
+                let actions = s.setup.as_mut().map(|w| w.choose_mark(index)).unwrap_or_default();
+                for action in actions {
+                    match action {
+                        UiAction::Identity(change) => personalise::apply(s, change),
+                        UiAction::SpeechVoice(change) => speaking_menu::choose(s, change),
+                        other => s.emit(other),
+                    }
+                }
                 s.sync_setup();
             });
         }
@@ -2548,7 +2646,7 @@ define_class!(
 
         #[unsafe(method(setupBack:))]
         fn setup_back(&self, _sender: &AnyObject) {
-            with_state(|s| if let Some(w) = s.setup.as_mut() { w.back() });
+            with_state(|s| { if let Some(w) = s.setup.as_mut() { w.back() } s.report_setup_step(); });
         }
 
         /// Home ▸ Choose…: a folder picker on the Setup window (folders only; New Folder allowed).
@@ -2590,8 +2688,24 @@ define_class!(
             let kinds = with_state_now(move |s| {
                 if let Some(w) = s.setup.as_mut() { w.choose_provider(choice); }
                 match choice.menu_action() {
-                    ProviderAction::Engine => s.emit(UiAction::SetEngine(true)),
-                    ProviderAction::ClaudeViaT3 => s.emit(UiAction::ClaudeViaT3),
+                    // This Mac: the engine, and its model downloaded and then the agent's when it is not here yet
+                    // (its progress is a Getting ready row).
+                    ProviderAction::Engine => {
+                        s.emit(UiAction::SetEngine(true));
+                        if let Some(m) = s.engine.models.first().filter(|m| !m.ready() && m.download.is_none()) {
+                            s.emit(UiAction::DownloadEngineModel { id: m.id.clone(), quant: m.quant.clone(), then_select: true });
+                        }
+                    }
+                    // Claude Code: the relay, with T3 Code installed when missing and connected (the click is the consent).
+                    ProviderAction::ClaudeViaT3 => {
+                        s.emit(UiAction::ClaudeViaT3);
+                        if !s.setup_t3.ready() {
+                            s.claude_waits_for_t3 = true;
+                            if !matches!(s.setup_t3.install, T3Install::Working(_)) { s.emit(UiAction::InstallT3); }
+                        } else if !s.setup_t3.connect_allowed {
+                            s.emit(UiAction::ConnectT3);
+                        }
+                    }
                     ProviderAction::Connect(id) => {
                         if let Some(index) = s.api.providers.iter().position(|p| p.id == id) { s.show_sign_in_panel(index) }
                     }
@@ -2623,6 +2737,51 @@ define_class!(
                     s.emit(UiAction::InstallT3);
                 }
             });
+        }
+
+        /// Arsenal's tiles: Add Arsenal or Use it (tag 0), Not now (1); Continue acts on the choice.
+        #[unsafe(method(setupArsenal:))]
+        fn setup_arsenal(&self, sender: &NSButton) {
+            let add = sender.tag() == 0;
+            with_state(move |s| {
+                if let Some(w) = s.setup.as_mut() { w.choose_arsenal(add) }
+            });
+        }
+
+        /// Setup ▸ Microphone ▸ the pop-up: the input chosen, as the menu's Microphone choice applies it.
+        #[unsafe(method(setupMicrophone:))]
+        fn setup_microphone(&self, _sender: &AnyObject) {
+            with_state(|s| {
+                if let Some(id) = s.setup.as_ref().and_then(|w| w.picked_microphone()) { s.emit(UiAction::SelectMicrophone { id }) }
+            });
+        }
+
+        /// Welcome ▸ Let my agent set it up: the line to paste into a coding agent.
+        #[unsafe(method(setupLetAgent:))]
+        fn setup_let_agent(&self, _sender: &AnyObject) {
+            if let Some(mtm) = MainThreadMarker::new() { setup::show_agent_line(mtm) }
+        }
+
+        /// Getting ready ▸ a row's fix: its action (Retry, Download, Check Again) or the step to go back to.
+        #[unsafe(method(setupReadyFix:))]
+        fn setup_ready_fix(&self, sender: &NSButton) {
+            let index = sender.tag() as usize;
+            with_state(move |s| {
+                let Some(fix) = s.setup.as_ref().and_then(|w| w.fix_at(index)) else { return };
+                match fix {
+                    ReadyFix::Action { action, .. } => s.emit(*action),
+                    ReadyFix::Step { step, .. } => {
+                        if let Some(w) = s.setup.as_mut() { w.go_to(step); }
+                        s.report_setup_step();
+                    }
+                }
+            });
+        }
+
+        /// Getting ready ▸ Retry: the failed downloads again, from where they stopped.
+        #[unsafe(method(setupRetryDownloads:))]
+        fn setup_retry_downloads(&self, _sender: &AnyObject) {
+            with_state(|s| s.emit(UiAction::RetryModelDownloads));
         }
 
         /// Vella's tiles: Add Vella (the default) or Not now; Continue acts on the choice.

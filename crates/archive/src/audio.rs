@@ -88,8 +88,30 @@ pub fn publish(db: &Connection, root: &Path, pack: &str, objects: &[Encoded]) ->
             continue;
         }
         store::ensure_blob(root, pack, &store::audio_key(&o.id), &o.bytes)?;
-        db.prepare_cached("INSERT INTO main.audio_objects(id,rate,channels,frames,codec,pack,stored_sha256) VALUES(?1,?2,?3,?4,?5,?6,?7)")?
-            .execute(params![o.id, o.rate, o.channels, o.frames, o.codec, pack, o.stored_sha256])?;
+        insert_object(db, pack, o)?;
+    }
+    Ok(())
+}
+fn insert_object(db: &Connection, pack: &str, o: &Encoded) -> Result<()> {
+    db.prepare_cached("INSERT INTO main.audio_objects(id,rate,channels,frames,codec,pack,stored_sha256) VALUES(?1,?2,?3,?4,?5,?6,?7)")?
+        .execute(params![o.id, o.rate, o.channels, o.frames, o.codec, pack, o.stored_sha256])?;
+    Ok(())
+}
+/// `publish` for objects whose blobs the caller committed to `pack` after reading `collections`
+/// (`store::collections`), inside the writer's transaction. While no collection has removed a blob since, they are
+/// still there and are catalogued without reading the pack under the write lock, where the read can wait for a pooled
+/// pack connection and the pack's own full-sync commits and checkpoints while every index write waits behind it
+/// (capture's flush, `crates/capture/src/archive.rs:297`, held the writer 2-5 s at a time on 4 Nov 22:00-22:15 and 5
+/// Nov 00:10-00:13). Otherwise it is `publish`.
+pub fn publish_put(db: &Connection, root: &Path, pack: &str, objects: &[Encoded], collections: i64) -> Result<()> {
+    if db.is_autocommit() || store::collections(db)? != collections {
+        return publish(db, root, pack, objects);
+    }
+    for o in objects {
+        if catalogued(db, &o.id)? {
+            continue;
+        }
+        insert_object(db, pack, o)?;
     }
     Ok(())
 }
@@ -397,4 +419,79 @@ pub fn decode_flac(bytes: &[u8], samples: usize) -> Result<Vec<f32>> {
         .collect::<std::result::Result<Vec<_>, _>>()?;
     ensure!(values.len() == samples.max(16), "cold FLAC length mismatch");
     Ok(values[..samples].to_vec())
+}
+
+#[cfg(test)]
+mod publish_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// Capture's flush (`crates/capture/src/archive.rs:297`) held the writer 2-5 s at a time (4 Nov 22:00-22:15, 5 Nov
+    /// 00:10-00:13) while every index write waited. Its blobs are committed before its job, so under the write lock it
+    /// no longer reads the hot pack: with every pooled hot-pack connection lent out (a pack commit or checkpoint
+    /// running), the job still commits at once.
+    #[test]
+    fn publishing_blobs_written_beforehand_never_waits_for_the_pack() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("archive");
+        let queue = crate::live::Queue::shared(&root).unwrap();
+        let pcm: Vec<f32> = (0..16_000).map(|i| (i as f32 * 0.02).sin() * 0.2).collect();
+        let object = encode_lossless(16_000, 1, &pcm).unwrap();
+        let collections = store::collections(&store::open(&root).unwrap()).unwrap();
+        store::put(&root, store::HOT, &[(store::audio_key(&object.id), &object.bytes)]).unwrap();
+
+        let (lent, release) = (std::sync::mpsc::channel::<()>(), std::sync::mpsc::channel::<()>());
+        let pack_root = root.clone();
+        let holder = std::thread::spawn(move || {
+            fn hold(root: &Path, left: usize, lent: &std::sync::mpsc::Sender<()>, release: &std::sync::mpsc::Receiver<()>) -> Result<()> {
+                if left == 0 {
+                    lent.send(()).unwrap();
+                    release.recv().unwrap();
+                    return Ok(());
+                }
+                store::with_pack(root, store::HOT, |_| hold(root, left - 1, lent, release))
+            }
+            hold(&pack_root, store::PACK_CONNECTIONS, &lent.0, &release.1).unwrap();
+        });
+        lent.1.recv().unwrap();
+        let started = Instant::now();
+        let (r, o) = (root.clone(), object.clone());
+        let done = std::thread::spawn(move || queue.call(move |db| publish_put(db, &r, store::HOT, std::slice::from_ref(&o), collections)));
+        while !done.is_finished() && started.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let waited = started.elapsed();
+        release.0.send(()).unwrap();
+        holder.join().unwrap();
+        done.join().unwrap().unwrap();
+        assert!(waited < Duration::from_secs(1), "the publishing job waited {waited:?} for the hot pack");
+        assert!(catalogued(&store::open(&root).unwrap(), &object.id).unwrap());
+    }
+
+    /// A collection between writing the blob and publishing it (identical audio returning while its old blob is
+    /// collected) changes the count: the blob is checked under the write lock and written again.
+    #[test]
+    fn a_collection_in_between_rewrites_the_blob() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("archive");
+        let queue = crate::live::Queue::shared(&root).unwrap();
+        let pcm: Vec<f32> = (0..16_000).map(|i| (i as f32 * 0.03).cos() * 0.2).collect();
+        let object = encode_lossless(16_000, 1, &pcm).unwrap();
+        let key = store::audio_key(&object.id);
+        let collections = store::collections(&store::open(&root).unwrap()).unwrap();
+        store::put(&root, store::HOT, &[(key.clone(), &object.bytes)]).unwrap();
+        let (r, k) = (root.clone(), key.clone());
+        let removed = queue
+            .call(move |db| {
+                store::queue_gc(db, store::HOT, &k)?;
+                store::collect(db, &r, store::COLLECT_KEYS)
+            })
+            .unwrap();
+        assert_eq!(removed, 1);
+        assert!(!store::has(&root, store::HOT, &key).unwrap());
+        let (r, o) = (root.clone(), object.clone());
+        queue.call(move |db| publish_put(db, &r, store::HOT, std::slice::from_ref(&o), collections)).unwrap();
+        assert!(store::has(&root, store::HOT, &key).unwrap(), "rewritten");
+        assert_eq!(store::collections(&store::open(&root).unwrap()).unwrap(), collections + 1);
+    }
 }

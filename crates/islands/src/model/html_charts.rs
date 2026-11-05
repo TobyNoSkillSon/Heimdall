@@ -99,6 +99,7 @@ pub fn expand(name: &str, attrs: &[(String, String)]) -> Option<String> {
         "spark" => Some(spark(attrs)),
         "ring" => Some(ring(attrs)),
         "dots" => Some(dots(attrs)),
+        "steps" => Some(steps(attrs)),
         _ => None,
     }
 }
@@ -142,7 +143,7 @@ fn line(a: &[(String, String)]) -> String {
     // Room on the right for end values, at the bottom for x labels.
     // A name at the end of its line ("Sol 6.38") takes about 6 pt a character at 10.5 px.
     let end_w = |k: usize, v: f64| (names.get(k).map_or(0, |n| n.chars().count() + 1) + fmt(v).len()) as f64 * 6.0 + 6.0;
-    let right = if ends { series.iter().enumerate().map(|(k, p)| end_w(k, *p.last().unwrap_or(&0.0))).fold(38.0, f64::max).min(w * 0.4) } else { 5.0 };
+    let right = if ends { series.iter().enumerate().map(|(k, p)| end_w(k, *p.last().unwrap_or(&0.0)) + 4.0).fold(42.0, f64::max).min(w * 0.42) } else { 5.0 };
     let bottom = if labels.is_empty() { 4.0 } else { 15.0 };
     let (pw, ph, top) = (w - right - 4.0, h - bottom - 5.0, 5.0);
     let x = |i: usize| 4.0 + pw * i as f64 / (n_max - 1) as f64;
@@ -179,8 +180,16 @@ fn line(a: &[(String, String)]) -> String {
     }
     if ends {
         // End values, nudged apart when they would overlap.
-        let mut tags: Vec<(f64, String, String, String)> = series.iter().enumerate()
-            .map(|(k, p)| (y(*p.last().unwrap_or(&lo)) + 3.5, fmt(*p.last().unwrap_or(&lo)), colours[k].clone(), names.get(k).cloned().unwrap_or_default())).collect();
+        // A series that ends early (a judge not in yet) is named beside its own last point, not in the end column,
+        // so its label never sits away from its dot (review, 4 Nov).
+        let full = series.iter().map(Vec::len).max().unwrap_or(0);
+        let tag = |k: usize, p: &Vec<f64>| (y(*p.last().unwrap_or(&lo)) + 3.5, fmt(*p.last().unwrap_or(&lo)), colours[k].clone(), names.get(k).cloned().unwrap_or_default());
+        for (k, p) in series.iter().enumerate().filter(|(_, p)| !p.is_empty() && p.len() < full) {
+            let (ty, v, c, n) = tag(k, p);
+            let name = if n.is_empty() { n } else { format!("<tspan style=\"fill:{INK2};font-weight:500\">{n} </tspan>") };
+            s.push_str(&format!("<text x=\"{:.1}\" y=\"{ty:.1}\" style=\"fill:{c};font-size:10.5px;font-weight:600\">{name}{v}</text>", x(p.len() - 1) + 7.0));
+        }
+        let mut tags: Vec<(f64, String, String, String)> = series.iter().enumerate().filter(|(_, p)| p.len() == full).map(|(k, p)| tag(k, p)).collect();
         tags.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         for i in 1..tags.len() {
             if tags[i].0 - tags[i - 1].0 < 11.0 {
@@ -190,7 +199,7 @@ fn line(a: &[(String, String)]) -> String {
         for (ty, v, c, n) in tags {
             // The name in secondary grey, the value in its line's colour: the label is the legend.
             let name = if n.is_empty() { n } else { format!("<tspan style=\"fill:{INK2};font-weight:500\">{n} </tspan>") };
-            s.push_str(&format!("<text x=\"{:.1}\" y=\"{ty:.1}\" style=\"fill:{c};font-size:10.5px;font-weight:600\">{name}{v}</text>", w - right + 4.0));
+            s.push_str(&format!("<text x=\"{:.1}\" y=\"{ty:.1}\" style=\"fill:{c};font-size:10.5px;font-weight:600\">{name}{v}</text>", w - right + 8.0));
         }
     }
     if !labels.is_empty() {
@@ -296,6 +305,40 @@ fn dots(a: &[(String, String)]) -> String {
     s
 }
 
+/// `<x-steps items="Voice engine:done|Decider V6:now|Install:wait">`: the job's parts as one row of pills (4 Nov), each
+/// with its state: done a green tick, the first `now` the one blue dot (later ones white), wait faint, failed a red
+/// cross. At most 4 (3 with `size="l"`); the row never wraps: the lit one keeps its width, a long name elsewhere gives way
+/// with an ellipsis.
+fn steps(a: &[(String, String)]) -> String {
+    let mut lit = false;
+    // `size="l"`: the steps lead the body (a job with no measured number yet), a size up.
+    let large = text(a, "size") == Some("l");
+    let (fs, pad, gap, most) = if large { (13.0, "4px 10px", 7, 3) } else { (11.0, "2px 7px", 6, 4) };
+    let mut s = format!("<div style=\"display:flex;flex-wrap:nowrap;gap:{gap}px;overflow:hidden\">");
+    for it in split(text(a, "items")).into_iter().filter(|t| !t.is_empty()).take(most) {
+        let (label, state) = it.rsplit_once(':').map_or((it, "wait"), |(l, st)| (l.trim(), st.trim()));
+        let label: String = label.chars().take(18).collect();
+        let keep = state == "now" && !lit;
+        let (mark, bg, ink) = match state {
+            "done" => ("<span style=\"color:#30D158\">\u{2713}</span> ".to_owned(), "rgba(255,255,255,.07)", INK),
+            "failed" => ("<span style=\"color:#FF453A\">\u{2717}</span> ".to_owned(), "rgba(255,255,255,.07)", INK),
+            "now" if !lit => {
+                lit = true;
+                ("<span style=\"color:#0A84FF\">\u{25CF}</span> ".to_owned(), "rgba(255,255,255,.16)", INK)
+            }
+            "now" => ("\u{25CF} ".to_owned(), "rgba(255,255,255,.12)", INK),
+            _ => (String::new(), "rgba(255,255,255,.05)", INK3),
+        };
+        s.push_str(&format!("<span style=\"flex:0 {} auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:{pad};border-radius:12px;background:{bg};color:{ink};font-size:{fs}px;font-weight:500\">{mark}{}</span>", if keep { 0 } else { 1 }, esc(&label)));
+    }
+    // `note="target 8.5"`: one small grey fact at the row's end (a target before any score), never above it.
+    if let Some(n) = text(a, "note").filter(|n| !n.trim().is_empty()) {
+        s.push_str(&format!("<span style=\"margin-left:auto;flex:0 0 auto;align-self:center;padding-left:6px;color:{INK2};font-size:11px;font-weight:500;white-space:nowrap\">{}</span>", esc(&n.chars().take(24).collect::<String>())));
+    }
+    s.push_str("</div>");
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,6 +349,23 @@ mod tests {
         let s = expand("line", &at(&[("series", "0 10"), ("min", "0"), ("max", "10"), ("w", "104"), ("h", "50")])).unwrap();
         // x from 4 to 4 + (104 - 5 - 4) = 99; y from 5 + 41 = 46 (0) to 5 (10).
         assert!(s.contains("points=\"4.0,46.0 99.0,5.0\""), "{s}");
+    }
+
+    #[test]
+    fn steps_light_one_pill_and_never_wrap() {
+        let s = expand("steps", &at(&[("items", "Voice engine:done|Decider V6:now|Grants:now|Install:wait")])).unwrap();
+        assert_eq!(s.matches("#0A84FF").count(), 1, "{s}");
+        assert!(s.contains("nowrap") && s.contains('\u{2713}') && s.contains("Install"));
+        let lead = expand("steps", &at(&[("items", "Brief:done|Judges:now"), ("size", "l")])).unwrap();
+        assert!(lead.contains("font-size:13px") && s.contains("font-size:11px"));
+    }
+
+    #[test]
+    fn a_series_that_ends_early_is_named_at_its_own_point() {
+        let s = expand("line", &at(&[("series", "6.84 6.54|5.85"), ("names", "Opus|Sol"), ("ends", "1"), ("w", "200")])).unwrap();
+        let sol = s.split("<text").find(|t| t.contains("Sol")).unwrap();
+        let x: f64 = sol.split("x=\"").nth(1).unwrap().split('"').next().unwrap().parse().unwrap();
+        assert!(x < 30.0, "Sol is named beside its one point at the left: {sol}");
     }
 
     #[test]

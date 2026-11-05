@@ -94,6 +94,22 @@ impl Pipeline {
     pub(crate) fn engine_chosen(&self, config: &Config, id: &str) -> Option<crate::inference_engine::Quant> {
         config.model(id).ok().map(|m| m.chosen(self.settings.engine_quant_choice(id)).clone())
     }
+    /// Setup's This Mac row (setup_ready.rs): the engine's model as the menu shows it (its download, whether its weights
+    /// are here), and the engine's state now.
+    pub(crate) fn engine_for_setup(&self) -> (Option<ui::EngineModel>, ui::EngineState) {
+        let config = self.engine_config();
+        let em = &self.engine_models;
+        let id = if self.settings.engine_model.is_empty() { config.default_model.clone() } else { self.settings.engine_model.clone() };
+        let model = config.models.iter().find(|m| m.id == id).map(|m| {
+            let download = match &em.pending {
+                Some(p) if p.download.id == m.id => Some(ui::EngineDownload { quant: p.download.quant.clone(), done_bytes: p.done, total_bytes: p.total, error: None }),
+                _ => em.errors.get(&m.id).cloned(),
+            };
+            config.ui_model(m, self.settings.engine_quant_choice(&m.id), &|s| em.is_installed(s), download)
+        });
+        let state = match em.last.lock().unwrap().as_ref() { Some(ui::UiUpdate::Engine { state, .. }) => state.clone(), _ => ui::EngineState::Off };
+        (model, state)
+    }
     /// The engine's model at its chosen precision is on this Mac.
     pub(crate) fn engine_ready(&self, config: &Config) -> bool {
         self.engine_chosen(config, &self.settings.engine_model).is_some_and(|q| self.engine_models.is_installed(&q.source))

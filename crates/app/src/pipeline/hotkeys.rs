@@ -8,6 +8,10 @@
 //! - ⌃⌘' (`UiAction::ForceSuggest`): a suggestion pass starts now, past the pacing, and the latest decided line is
 //!   labelled `suggest` with V5's exact suggest input for it (asked once more on the snapshot V5 saw).
 //!
+//! - The island's Stop while Heimdall speaks (`UiAction::StopSpeaking`, 5 Nov: "a click-to-stop … A Stop press is also
+//!   training signal: this moment wasn't for Heimdall"): the voice stops at once, and the line whose `send` woke the
+//!   agent last is labelled `not_for_heimdall` (source `owner-stop`).
+//!
 //! Labels are JSON lines in the archive's `decider-v6-labels.jsonl` (`LABELS_FILE`; format in docs/decision-chain.md).
 //! A line whose send decision is still running when a key is pressed is labelled when it lands.
 use super::*;
@@ -17,6 +21,8 @@ use serde_json::{json, Value};
 pub(crate) const LABELS_FILE: &str = "decider-v6-labels.jsonl";
 /// The labelled source, as the training data names it.
 pub(crate) const LABEL_SOURCE: &str = "owner-hotkey";
+/// The island's Stop, as the training data names it.
+pub(crate) const STOP_SOURCE: &str = "owner-stop";
 /// Decided lines kept for a key press (a minute or two of talk).
 const KEPT: usize = 16;
 
@@ -39,6 +45,8 @@ pub(super) struct Hotkeys {
     wake_waits: VecDeque<(u64, bool, Vec<String>)>,
     /// Suggest labels waiting for their line's send decision.
     suggest_waits: VecDeque<u64>,
+    /// Lines a Stop already labelled `not_for_heimdall` (once per line, newest last, at most `KEPT`).
+    stop_labelled: VecDeque<String>,
 }
 
 impl Pipeline {
@@ -113,6 +121,38 @@ impl Pipeline {
                 label["decision"] = json!("unavailable: heard before this launch");
                 self.write_label(label);
             }
+        }
+        Ok(())
+    }
+    /// The island's Stop: the voice and what is queued stop now (lines held for after a call go too) through
+    /// `Tools::stop_pressed` (the agent's turn goes on: Stop cuts speech, it does not cancel work), and
+    /// the line the decider woke the speaking run for is labelled `not_for_heimdall`, the press's only decider-v6 line.
+    /// Labelled only when Heimdall was speaking at the press, only the line that woke or steered the run whose reply
+    /// was cut (no label for a reply a T3 result or notice woke, a typed message, a wake key or a relaunch since), and
+    /// once per line however often Stop is pressed (review 5 Nov: it labelled the newest kept send line however old,
+    /// with nothing playing, once per press).
+    pub(super) fn stop_press(&mut self) -> Result<()> {
+        let press = self.tools.stop_pressed();
+        let line = press.run.as_ref().and_then(|r| r.line.clone()).filter(|_| press.playing);
+        let fresh = line.as_ref().is_some_and(|l| !self.hotkeys.stop_labelled.contains(l));
+        let woke = line.filter(|_| fresh)
+            .and_then(|l| self.hotkeys.decided.iter().rev().find(|d| d.id == l && d.record["outcome"].as_str() == Some("send")).cloned());
+        let ids: Vec<String> = woke.iter().map(|d| d.id.clone()).collect();
+        self.index.evidence.event("hotkey", "heimdall", &ids, capture::host_now_ns(),
+            json!({"schema":1,"key":"stop","speaking":press.playing,"labelled":woke.is_some()}))?;
+        match woke {
+            Some(d) => {
+                self.hotkeys.stop_labelled.push_back(d.id.clone());
+                while self.hotkeys.stop_labelled.len() > KEPT { self.hotkeys.stop_labelled.pop_front(); }
+                let mut label = send_label(Some(&d), &d.text, &d.id, true, &[]);
+                label["label"] = json!("not_for_heimdall");
+                label["source"] = json!(STOP_SOURCE);
+                label["speaking"] = json!(true);
+                self.write_label(label);
+            }
+            None if !press.playing => eprintln!("hotkey: Stop pressed with nothing playing; nothing labelled"),
+            None if !fresh && press.run.as_ref().is_some_and(|r| r.line.is_some()) => eprintln!("hotkey: Stop pressed again on the same run; labelled once already"),
+            None => eprintln!("hotkey: Stop pressed; the speech cut was not an answer to a line the decider sent, nothing labelled"),
         }
         Ok(())
     }

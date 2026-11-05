@@ -12,7 +12,7 @@
 //! - Bounded: `MAX_BYTES` of input, `MAX_ELEMENTS` elements, `MAX_DEPTH` nesting; the renderer caps the height and the
 //!   render time. Over a limit is an error: the island draws its usual parts instead.
 //!
-//! Chart tags (`<x-line>`, `<x-bars>`, `<x-spark>`, `<x-ring>`, `<x-dots>`) expand into SVG here (`html_charts`).
+//! Chart tags (`<x-line>`, `<x-bars>`, `<x-spark>`, `<x-ring>`, `<x-dots>`, `<x-steps>`) expand into SVG here (`html_charts`).
 //!
 //! std only: Heimdall's app crate includes this file and `html_charts.rs` as they are (`#[path]`) to check the island
 //! agent's answers.
@@ -483,7 +483,7 @@ body{font:13px/1.35 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;color:
 #i{display:flow-root;width:100%}
 #i>:first-child{margin-top:0}#i>:last-child{margin-bottom:0}
 p{margin:0 0 6px}h1,h2,h3,h4{margin:0 0 6px;font-weight:600;letter-spacing:-.01em}h1{font-size:22px}h2{font-size:17px}h3{font-size:14px}h4{font-size:13px}
-img{max-width:100%;display:block;border-radius:8px}svg{display:block;overflow:visible}svg text{font-family:-apple-system,system-ui;fill:var(--ink2);font-size:10px}
+img{max-width:100%;max-height:180px;object-fit:cover;object-position:top;display:block;border-radius:8px}svg{display:block;overflow:visible}svg text{font-family:-apple-system,system-ui;fill:var(--ink2);font-size:10px}
 table{border-collapse:collapse;width:100%}th,td{padding:3px 0;text-align:left;vertical-align:baseline}th{color:var(--ink2);font-weight:500;font-size:11px}td+td,th+th{padding-left:10px}tr+tr td{border-top:.5px solid var(--line)}
 ul,ol{margin:0;padding-left:18px}li{margin:1px 0}hr{border:0;border-top:.5px solid var(--line);margin:8px 0}
 .row{display:flex;gap:12px;align-items:center}.col{flex:1;min-width:0}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}

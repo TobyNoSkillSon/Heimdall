@@ -113,6 +113,8 @@ struct Mics {
     /// App Audio keys to tap, and where the apps playing now are reported.
     recorded: Arc<std::sync::Mutex<HashSet<String>>>,
     playing: Option<crossbeam_channel::Sender<Vec<crate::AppIdentity>>>,
+    /// `CaptureConfig::system_default_input`.
+    system_default: bool,
 }
 /// Source generations across every capture run in this process (`mic:<uid>:<generation>`).
 static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -133,6 +135,7 @@ fn spawn(pipeline: Option<Pipeline>, initial_access: u32, config: &CaptureConfig
         report: config.microphones.clone(),
         recorded: recorded_apps.clone(),
         playing: config.playing_apps.clone(),
+        system_default: config.system_default_input,
     };
     let echo = Shared::new();
     let echo_worker = echo.clone();
@@ -373,6 +376,8 @@ fn run(
             let (chosen, extras) = mics.chosen.lock().map(|m| m.clone()).unwrap_or_default();
             let keep_failure: HashSet<String> =
                 chosen.iter().chain(&extras).map(|uid| format!("mic:{uid}")).collect();
+            // macOS's default input, read each pass (its change is a DISCOVERY event).
+            let default_input = hal::property::<u32>(kAudioObjectSystemObject as u32, kAudioHardwarePropertyDefaultInputDevice, kAudioObjectPropertyScopeGlobal).ok();
             let inputs = candidates
                 .iter()
                 .filter_map(|c| match &c.kind {
@@ -380,11 +385,12 @@ fn run(
                         uid: uid.clone(),
                         name: name.clone(),
                         built_in: c.built_in,
+                        default: matches!(c.target, hal::Target::Mic(id) if Some(id) == default_input),
                     }),
                     crate::SourceKind::Process { .. } => None,
                 })
                 .collect();
-            let mic_state = crate::MicrophoneState::new(inputs, chosen, extras, |d| {
+            let mic_state = crate::MicrophoneState::with_default(inputs, chosen, extras, mics.system_default, |d| {
                 mic_usable(failed.get(&format!("mic:{}", d.uid)), now)
             });
             let mic_keys: HashSet<String> =
@@ -969,8 +975,8 @@ mod fallback_tests {
     #[test]
     fn a_failing_chosen_mic_falls_back_to_built_in_between_retries() {
         let devices = vec![
-            InputDevice { uid: "BuiltIn".into(), name: "MacBook Pro Microphone".into(), built_in: true },
-            InputDevice { uid: "AirPods".into(), name: "AirPods Pro".into(), built_in: false },
+            InputDevice { uid: "BuiltIn".into(), name: "MacBook Pro Microphone".into(), built_in: true, default: false },
+            InputDevice { uid: "AirPods".into(), name: "AirPods Pro".into(), built_in: false, default: false },
         ];
         let state = |failure: Option<&Failure>, now: u64| {
             MicrophoneState::new(devices.clone(), Some("AirPods".into()), vec![], |d| {

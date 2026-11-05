@@ -34,6 +34,29 @@ fn emit_speaking(on: bool) {
         hook(on);
     }
 }
+/// Heimdall's voice level, a factor on every sample the speaker plays (1.0 full; f32 bits). Bug note
+/// 2026-11-05T00-10-37 (00:10 on a Discord call): the voice was too loud. The app lowers it while the user is on a call
+/// (`set_voice_gain`); read once per sample on the render thread, so a change applies at once, mid-sentence too.
+static VOICE_GAIN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
+#[cfg(test)]
+std::thread_local! {
+    /// Tests: each thread its own level, so a test that lowers it never changes another test's samples.
+    static TEST_GAIN: std::cell::Cell<f32> = const { std::cell::Cell::new(1.) };
+}
+/// Sets Heimdall's voice level (clamped to 0..=1).
+pub fn set_voice_gain(gain: f32) {
+    #[cfg(test)]
+    return TEST_GAIN.with(|g| g.set(gain.clamp(0., 1.)));
+    #[cfg(not(test))]
+    VOICE_GAIN.store(gain.clamp(0., 1.).to_bits(), Ordering::Relaxed);
+}
+/// Heimdall's voice level now.
+pub fn voice_gain() -> f32 {
+    #[cfg(test)]
+    return TEST_GAIN.with(|g| g.get());
+    #[cfg(not(test))]
+    f32::from_bits(VOICE_GAIN.load(Ordering::Relaxed))
+}
 /// How long the speaking flag outlives the last sample of a reply's last job.
 pub(crate) const SPEAKING_LINGER: std::time::Duration = std::time::Duration::from_millis(150);
 /// While jobs are still synthesizing, the claim is released once nothing has played for this long (the island falls
@@ -934,7 +957,7 @@ impl PlaybackCursor {
             self.fade_in -= 1;
         }
         self.gain = gain;
-        (x + (y - x) * fraction) * gain
+        (x + (y - x) * fraction) * gain * voice_gain()
     }
 }
 /// Fills one device buffer from the cursor: one sample per frame, silence once cancelled (the cursor does not
@@ -1594,6 +1617,27 @@ mod tests {
         assert!(announced.lock().unwrap().is_none(), "the next sentence is queued, not playing");
         assert_eq!(cursor.next(), 0.2);
         assert_eq!(announced.lock().unwrap().take().as_deref(), Some("Second, with a comma."));
+    }
+    /// Bug note 2026-11-05T00-10-37 ("you're loud", on a call): the voice level scales every sample the speaker plays,
+    /// at once, and back to full.
+    #[test]
+    fn the_voice_level_scales_every_sample_and_comes_back() {
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let audio = Audio { samples: vec![0.4; 4], sample_rate: 44100, first_audio_ms: 0., synthesis_ms: 0. };
+        let mut cursor = PlaybackCursor::new(
+            crate::PlaybackStream::new(rx, Arc::new(std::sync::atomic::AtomicU64::new(0))),
+            crate::PlaybackChunk { audio, generation: 0, label: None },
+            1.,
+        );
+        assert_eq!(cursor.next(), 0.4);
+        set_voice_gain(0.5);
+        assert_eq!(voice_gain(), 0.5);
+        assert_eq!(cursor.next(), 0.2, "mid-sentence, at once");
+        set_voice_gain(3.);
+        assert_eq!(cursor.next(), 0.4, "never louder than full");
+        set_voice_gain(0.5);
+        assert_eq!(VOICE_GAIN.load(Ordering::Relaxed), 1f32.to_bits(), "tests never touch the app-wide level");
+        set_voice_gain(1.);
     }
     /// Bug note 2026-10-31T23-37-26: a device that stops calling back fails the stream after `OUTPUT_STALL`; a
     /// running device, and any time paused while idle, never do.

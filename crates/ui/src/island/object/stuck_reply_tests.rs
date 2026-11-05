@@ -123,3 +123,44 @@ fn a_click_puts_the_spoken_words_away_until_the_next_reply() {
     advance(&mut i, t + 20.5);
     assert!(speaking(&i), "{:?}", i.scene());
 }
+
+/// Bug notes 2026-11-05T00-10-37 and 2026-11-05T02-32-17 (item 4): while Heimdall speaks, the left ear is a Stop glyph;
+/// a press ends the speaking look at once and asks the app to cut the voice. Once quiet the helmet is back and Stop
+/// is gone; the glyph is still (only the waveform moves).
+#[test]
+fn stop_in_the_ear_cuts_the_voice_at_once() {
+    let mut i = island();
+    let t = spoken_reply(&mut i);
+    advance(&mut i, t + 0.6);
+    assert!(speaking(&i));
+    let (target, r) = i.targets().iter().find(|(x, _)| *x == Target::StopSpeech).cloned().unwrap_or_else(|| panic!("no Stop among {:?}", i.targets()));
+    assert!(r.mid_x() < 0.0, "Stop is in the left ear: {r:?}");
+    assert_eq!(i.hit(t + 0.6, r.center()), Some(target.clone()), "Stop wins over Hush in its ear");
+    let ear = i.frame(t + 0.6).slots.into_iter().find(|s| &*s.id == "voice.helmet").expect("left ear");
+    assert!(matches!(&*ear.content, Content::Symbol { name, .. } if name == layout::STOP), "{:?}", ear.content);
+    i.apply(Event::Click(target), t + 0.6);
+    assert_eq!(i.take_outputs(), vec![Output::StopSpeech]);
+    advance(&mut i, t + 0.7);
+    assert!(!speaking(&i), "the look ends at once: {:?}", i.scene());
+    assert!(!i.targets().iter().any(|(x, _)| *x == Target::StopSpeech));
+    // The app's cut comes back: nothing more to do.
+    i.apply(Event::SpeechCut, t + 0.75);
+    i.apply(Event::Speaking(false), t + 0.8);
+    advance(&mut i, t + 5.0);
+    assert!(i.take_outputs().is_empty());
+}
+
+/// In the grace after the audio ended (bars flat) Stop stays in its slot, dimmed, with nothing to press (the ears do
+/// not swap as a pair for the grace).
+#[test]
+fn a_quiet_voice_dims_stop_with_nothing_to_press() {
+    let mut i = island();
+    let t = spoken_reply(&mut i);
+    i.apply(Event::Speaking(false), t + 0.1);
+    advance(&mut i, t + 0.2);
+    assert!(matches!(i.scene(), Scene::Speaking { stopped: true, .. }), "{:?}", i.scene());
+    assert!(!i.targets().iter().any(|(x, _)| *x == Target::StopSpeech));
+    let ear = i.frame(t + 0.2).slots.into_iter().find(|s| &*s.id == "voice.helmet").expect("left ear, the same slot");
+    assert!(matches!(&*ear.content, Content::Symbol { name, .. } if name == layout::STOP), "{:?}", ear.content);
+    assert!(ear.opacity < 0.9, "dimming: {}", ear.opacity);
+}

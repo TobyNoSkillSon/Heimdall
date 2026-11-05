@@ -26,6 +26,7 @@ const HISTORY_REPAIR: &str = include_str!("../runtime/history-repair.mjs");
 const SERVICE_TIER: &str = include_str!("../runtime/service-tier.mjs");
 const QUOTA: &str = include_str!("../runtime/quota.mjs");
 const COMPACTION_FALLBACK: &str = include_str!("../runtime/compaction-fallback.mjs");
+const ARSENAL: &str = include_str!("../runtime/arsenal.mjs");
 const EXTENSION: &str = include_str!("../runtime/heimdall.ts");
 /// Heimdall's own files at the runtime root, beside `node/` and `node_modules/`.
 pub const FILES: &[(&str, &str)] = &[
@@ -38,6 +39,7 @@ pub const FILES: &[(&str, &str)] = &[
     ("quota.mjs", QUOTA),
     ("history-repair.mjs", HISTORY_REPAIR),
     ("compaction-fallback.mjs", COMPACTION_FALLBACK),
+    ("arsenal.mjs", ARSENAL),
     ("loop-guard.mjs", LOOP_GUARD),
     ("loop-guard.json", LOOP_POLICY),
     ("tool-owner.cjs", TOOL_OWNER),
@@ -70,7 +72,7 @@ fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 pub fn pin() -> String {
-    hash(format!("{PACKAGE}{LOCK}{NODE}{EXTENSION}{TOOL_OWNER}{LOOP_GUARD}{LOOP_POLICY}{PROVIDER_RETRY}{THINKING_POLICY}{HISTORY_REPAIR}{SERVICE_TIER}{QUOTA}{COMPACTION_FALLBACK}").as_bytes())
+    hash(format!("{PACKAGE}{LOCK}{NODE}{EXTENSION}{TOOL_OWNER}{LOOP_GUARD}{LOOP_POLICY}{PROVIDER_RETRY}{THINKING_POLICY}{HISTORY_REPAIR}{SERVICE_TIER}{QUOTA}{COMPACTION_FALLBACK}{ARSENAL}").as_bytes())
 }
 /// Where `heimdall-agent-runtime build` keeps its verified runtime for development and test binaries.
 pub fn dev_cache() -> PathBuf {
@@ -691,6 +693,12 @@ mod tests {
     #[test]
     fn plan_usage_limits_are_said_once_per_window_with_the_reset_openai_sent() {
         let output=Command::new("node").arg("--test").arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime/quota.test.mjs")).output().unwrap();
+        assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stdout));
+    }
+    /// Setup ▸ Arsenal ▸ Use it: the extension registers Arsenal's own bridge from the setting, and nothing else.
+    #[test]
+    fn arsenal_s_bridge_is_registered_only_from_the_setting() {
+        let output=Command::new("node").arg("--test").arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("runtime/arsenal.test.mjs")).output().unwrap();
         assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stdout));
     }
     /// Bug note 2026-10-28T19-41-00: the extension's half of the compaction fallback (source, supply, last-resort cut).

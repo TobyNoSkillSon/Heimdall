@@ -28,7 +28,7 @@
     fn api_selection_leaves_the_engine_alone_and_the_picker_edits_the_list() {
         use agent::provider::{AgentModel, ApiModel};
         let (_temp,mut a)=app();
-        let p=agent::provider::provider(agent::provider::OPENCODE_GO).unwrap();
+        let p=agent::provider::provider(agent::provider::OPENCODE_GO).unwrap();let _key=crate::api_providers::OPENCODE_KEY.lock().unwrap_or_else(|e| e.into_inner());
         if std::env::var_os(p.key_env).is_some() { return; }
         // The engine on its own (the Engine section), then the agent on it: neither touches the other.
         let quant=crate::inference_engine::Config::bundled().model("qwen3.8-27b").unwrap().quant.clone();
@@ -219,9 +219,11 @@
     fn anthropic_connection_adds_opus_without_switching_and_the_slider_and_credit_persist() {
         use agent::provider::{AgentModel, ApiModel, ANTHROPIC, OPUS};
         let (_temp,mut a)=app();
-        let p=agent::provider::provider(ANTHROPIC).unwrap();
+        let p=agent::provider::provider(ANTHROPIC).unwrap();let _key=crate::api_providers::ANTHROPIC_KEY.lock().unwrap_or_else(|e| e.into_inner());
         if std::env::var_os(p.key_env).is_some() { return; }
         agent::provider::forget_key(p).unwrap();
+        // The public edition starts with nothing chosen, where the first connection becomes the agent (tested below).
+        if !a.settings.agent_model.is_chosen() { a.action(ui::UiAction::SelectLocalAgent).unwrap(); }
         let before=a.settings.agent_model.clone();
         // Without a key nothing is added.
         let mut next=a.settings.clone();next.api_models.retain(|m|m.id!=OPUS);a.apply_menu_settings(next).unwrap();
@@ -401,12 +403,86 @@
         a.action(ui::UiAction::SelectRelayRoute { model: None, account: "codex".into() }).unwrap();
         assert_eq!((a.settings.agent_relay_account.as_deref(), a.settings.agent_relay_model.as_deref()), (Some("codex"), Some("claude-opus-5-5")));
     }
+    /// VM run 5 Nov: the voice list reaches the UI at launch, before any agent start (Setup's Voice step comes first).
+    #[test]
+    fn the_voices_are_published_at_launch_before_the_agent_starts() {
+        let (_temp,mut a)=app();
+        a.hooks.ui.lock().unwrap().clear();
+        a.initial_ui();
+        assert!(a.agent.is_none());
+        assert!(a.hooks.ui.lock().unwrap().iter().any(|u| matches!(u, ui::UiUpdate::SpeechVoice(_))), "the voices went out with the first UI");
+    }
+    /// Agent-selection audit (4 Nov): on a blank start (nothing chosen, the public edition's), the first provider
+    /// connected becomes the agent: its default model added and selected, also when the catalog loads after the
+    /// connection. A second connection only adds its row; an agent that has a model is never switched.
+    #[test]
+    fn the_first_connection_on_a_blank_start_becomes_the_agent_and_never_switches_one_chosen() {
+        use agent::provider::{AgentModel, ApiModel, HAIKU, OPENCODE_GO};
+        let p=agent::provider::provider(OPENCODE_GO).unwrap();let _key=crate::api_providers::OPENCODE_KEY.lock().unwrap_or_else(|e| e.into_inner());
+        if std::env::var_os(p.key_env).is_some() { return; }
+        let (_temp,mut a)=app();
+        let mut next=a.settings.clone();next.agent_model=AgentModel::Unchosen;next.api_models=vec![];next.agent_relay=false;a.apply_menu_settings(next).unwrap();
+        let offer=ui::UiAction::AddProviderDefault{provider:OPENCODE_GO.into()};
+        agent::provider::save_key(p,"sk-lab-fake-0123456789abcdefghij",None).unwrap();
+        // The catalog has not loaded yet: nothing is added, nothing chosen (the hub sends the offer again on its load).
+        a.tools.api.default_taken(OPENCODE_GO);
+        a.action(offer.clone()).unwrap();
+        assert!(a.settings.api_models.is_empty() && a.settings.agent_model==AgentModel::Unchosen);
+        // Loaded: Haiku on OpenCode Go joins the list and is the agent's model.
+        a.tools.api.set_catalog(OPENCODE_GO,vec![ApiModel::haiku()]);
+        agent::provider::save_key(p,"sk-lab-fake-0123456789abcdefghij",None).unwrap();
+        a.action(offer.clone()).unwrap();
+        assert_eq!(a.settings.agent_model,AgentModel::Api{provider:OPENCODE_GO.into(),id:HAIKU.into()});
+        assert_eq!(a.settings.api_models,[ApiModel::haiku()]);
+        // Chosen now: another offer (a second sign-in, the catalog's resend) changes nothing; the relay tile adds the
+        // relay without making it the agent.
+        a.action(offer).unwrap();
+        a.action(ui::UiAction::ClaudeViaT3).unwrap();
+        assert!(a.settings.relay_added && !a.settings.agent_relay && a.settings.agent_model.api()==Some((OPENCODE_GO,HAIKU)));
+        agent::provider::forget_key(p).unwrap();
+    }
+    /// The Claude Code tile on a blank start: the relay is added and is the agent. A provider connected afterwards only
+    /// adds its row (the relay is the agent).
+    #[test]
+    fn the_claude_code_tile_on_a_blank_start_makes_the_relay_the_agent() {
+        use agent::provider::{AgentModel, ApiModel, OPENCODE_GO};
+        let p=agent::provider::provider(OPENCODE_GO).unwrap();let _key=crate::api_providers::OPENCODE_KEY.lock().unwrap_or_else(|e| e.into_inner());
+        if std::env::var_os(p.key_env).is_some() { return; }
+        let (_temp,mut a)=app();
+        let mut next=a.settings.clone();next.agent_model=AgentModel::Unchosen;next.api_models=vec![];next.relay_added=true;a.apply_menu_settings(next).unwrap();
+        // Added earlier (the menu) but nothing chosen: the tile still makes it the agent.
+        a.action(ui::UiAction::ClaudeViaT3).unwrap();
+        assert!(a.settings.relay_added && a.settings.agent_relay && a.settings.agent_model==AgentModel::Unchosen);
+        a.tools.api.set_catalog(OPENCODE_GO,vec![ApiModel::haiku()]);
+        agent::provider::save_key(p,"sk-lab-fake-0123456789abcdefghij",None).unwrap();
+        a.action(ui::UiAction::AddProviderDefault{provider:OPENCODE_GO.into()}).unwrap();
+        assert!(a.settings.agent_relay && a.settings.agent_model==AgentModel::Unchosen, "the relay stays the agent");
+        assert_eq!(a.settings.api_models,[ApiModel::haiku()], "the connection's row is added");
+    }
+    /// The model a connection offers: the added row, the catalog's, Anthropic's offline row, else the loaded catalog's
+    /// first runnable model; nothing before the catalog loads.
+    #[test]
+    fn a_connections_default_model_comes_from_the_list_the_catalog_or_its_first_row() {
+        use crate::pipeline::actions::connection_default;
+        use agent::provider::{provider, ApiModel, ANTHROPIC, HAIKU, OPENCODE_GO, OPUS};
+        let go=provider(OPENCODE_GO).unwrap();
+        let none=|_: &str| None;
+        assert_eq!(connection_default(&[], go, Some(HAIKU), none, None), None, "the catalog has not loaded");
+        assert_eq!(connection_default(&[ApiModel::haiku()], go, Some(HAIKU), none, None), Some(ApiModel::haiku()));
+        assert_eq!(connection_default(&[], go, Some(HAIKU), |id: &str| (id==HAIKU).then(ApiModel::haiku), None), Some(ApiModel::haiku()));
+        let other=ApiModel{id:"glm-5".into(),..ApiModel::haiku()};
+        assert_eq!(connection_default(&[], go, Some(HAIKU), none, Some(vec![other.clone()])), Some(other), "the catalog lacks Haiku: its first model");
+        let anthropic=provider(ANTHROPIC).unwrap();
+        assert_eq!(connection_default(&[], anthropic, Some(OPUS), none, None), ApiModel::anthropic(OPUS), "Anthropic's row is known offline");
+    }
     /// Part 0 (listed in Cloud and in Add Provider at once): Add Provider's and Setup's "Claude Code
     /// subscription" adds the relay as a provider (kept across launches) and never makes it the agent; Remove puts it
     /// back, refused while it is the agent; picking it in the picker adds it too.
     #[test]
     fn the_claude_subscription_provider_row_adds_the_relay_without_switching() {
         let (temp,mut a)=app();
+        // The public edition starts with nothing chosen, where the tile makes the relay the agent (tested below).
+        if !a.settings.agent_model.is_chosen() { a.action(ui::UiAction::SelectLocalAgent).unwrap(); }
         let model=a.settings.agent_model.clone();
         assert!(!a.settings.relay_added && !a.ui_settings_value().relay_added);
         a.action(ui::UiAction::ClaudeViaT3).unwrap();

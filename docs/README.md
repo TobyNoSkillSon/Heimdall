@@ -13,6 +13,7 @@ pointer rather than another doc's summary.
 - What fails, how it is noticed and recovered, what the user sees → `resilience.md`
 - What the public and personal editions bundle and run → `editions.md`
 - Where Heimdall's files and the home folder are, and how home moves → `home.md`
+- Every Setup step, what it downloads, what only the user can click, and `Heimdall setup` for coding agents → `setup.md`
 - What Setup configures on a new Mac: the coding agents (Claude Code, T3, Codex, OpenCode, Grok) set to work without
   asking, the deny list that still guards them, and the public edition's Set Up or Leave as Is → `harness-autonomy.md`
 - How bugs are reported → `bugs.md`

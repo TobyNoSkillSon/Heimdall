@@ -244,7 +244,7 @@ mod tests {
     use super::*;
 
     fn dev(uid: &str, name: &str, built_in: bool) -> capture::InputDevice {
-        capture::InputDevice { uid: uid.into(), name: name.into(), built_in }
+        capture::InputDevice { uid: uid.into(), name: name.into(), built_in, default: false }
     }
     fn state(devices: Vec<capture::InputDevice>, chosen: Option<&str>, in_use: Option<&str>) -> capture::MicrophoneState {
         capture::MicrophoneState {

@@ -40,9 +40,19 @@ pub(crate) struct OpenQuestion {
     /// The user's picks so far, one per question he has answered (a Pick from the card, or a spoken choice).
     pub(super) picks: Vec<agent::actions::AskAnswer>,
 }
+/// What the island's Stop cut (`Tools::stop_pressed`): `playing`, Heimdall was speaking at the press (not merely a
+/// line held for the user); `run`, the run whose reply was cut, if a run's reply was.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct StopPress {
+    pub(crate) playing: bool,
+    pub(crate) run: Option<super::speech_policy::RunTag>,
+}
 pub struct Tools {
     pub(crate) send_context: Mutex<decide::send::Conversation>,
     pub(super) speech_text: Mutex<HashMap<u64,String>>,
+    /// The run each queued reply belongs to (`run_speech`): the island's Stop labels its waking line and silences the
+    /// rest of that run. Speech that is no run's reply (a quota line, emergency mode) has none.
+    pub(super) speech_runs: Mutex<HashMap<u64,super::speech_policy::RunTag>>,
     /// Agent speech jobs stopped because Speaking went off (not because the user talked): shown as text when their
     /// cancellation arrives.
     pub(super) unheard_by_mode: Mutex<std::collections::HashSet<u64>>,
@@ -135,6 +145,22 @@ pub struct Tools {
     pub(super) skipped: Mutex<Vec<String>>,
     /// The once-only wake that answers a skipped reply when no wake of the user's carried its note (night 1022 review 1).
     pub(super) skip_retry: Arc<Mutex<SkipRetry>>,
+    /// Speech jobs queued in a run the user's address by name woke (`SpeechPolicy::addressed_now` at `speak`).
+    pub(super) addressed_jobs: Mutex<HashSet<u64>>,
+    /// A line of the skipped reply was his answer: its retry may be spoken in a call (bug notes 2026-11-04T20-52-24,
+    /// 2026-11-05T00-14-40: the retry's fresh answer was held for minutes because the run's address had settled).
+    pub(super) skipped_addressed: AtomicBool,
+    /// The island line showing the skipped reply's lines as they are skipped (bug note 2026-11-05T02-32-37): its notice
+    /// id and text, updated as more lines are skipped, until the reply is over.
+    pub(crate) skipped_notice: Mutex<Option<(String, String)>>,
+    /// The lines cut now were cut by a guest on the call talking, not the user (`guest_talked_over`): the note says so.
+    pub(super) cut_by_guest: AtomicBool,
+    /// Tests: Heimdall's voice counts as audible (the speaking hook is not installed in unit tests).
+    #[cfg(test)]
+    pub(crate) test_audible: AtomicBool,
+    /// Tests: each voice level `apply_call_level` chose, oldest first (the speak crate's level is one for the process).
+    #[cfg(test)]
+    pub(crate) test_levels: Mutex<Vec<f32>>,
     /// The last final reply sent to the island's pull-down, with its speech jobs: withdrawn if they are dropped unheard
     /// for a wake of his (night 1022 review 4); one skipped at the speaker stays (bug note 2026-10-26T18-35-49).
     /// The third part is the replies the user had probably not read when it came, shown above it (`unread`): what the
@@ -166,6 +192,8 @@ pub(crate) struct SkipRetry {
     /// The skipped lines waiting for the user's pause to end; a wake carrying his words takes them first.
     pending: Option<Vec<String>>,
     spent: bool,
+    /// The skipped reply answered his address by name: the retry carries it (`after_skip`).
+    addressed: bool,
 }
 /// The id prefix of that wake (an `Event` notice: it starts a turn).
 pub(crate) const SKIPPED_RETRY: &str = "skipped-reply";
@@ -173,8 +201,9 @@ pub(crate) const SKIPPED_RETRY: &str = "skipped-reply";
 /// the decider sends them, carry the note first.
 const RETRY_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 /// The retry never waits longer than this for his pause: it then wakes anyway (its answer is skipped again if he is
-/// still talking, and told as context).
-const RETRY_LIMIT: std::time::Duration = std::time::Duration::from_secs(300);
+/// still talking, and told as context). Was 300 s; bug note 2026-11-05T02-32-37: an answer minutes
+/// later has no point, so it is a minute, as for a held line (`speech_policy::HELD_FOR`).
+const RETRY_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
 /// Failed spoken lines in a row before the menu says Heimdall can't speak (`Tools::speech_failed`).
 pub(crate) const SPEECH_FAILURES_SHOWN: u32 = 2;
 /// How long that line stays after the last failure without a new one.
@@ -377,6 +406,7 @@ impl Tools {
             api: crate::api_providers::Hub::new(None, data.into(), Default::default()),
             send_context: Mutex::new(Default::default()),
             speech_text: Mutex::new(HashMap::new()),
+            speech_runs: Mutex::new(HashMap::new()),
             unheard_by_mode: Mutex::new(Default::default()),
             replies: Mutex::new(Default::default()),
             reload_data: data.into(),
@@ -426,6 +456,14 @@ impl Tools {
             missed: Mutex::new(Vec::new()),
             skipped: Mutex::new(Vec::new()),
             skip_retry: Default::default(),
+            addressed_jobs: Default::default(),
+            skipped_addressed: AtomicBool::new(false),
+            skipped_notice: Mutex::new(None),
+            cut_by_guest: AtomicBool::new(false),
+            #[cfg(test)]
+            test_audible: AtomicBool::new(false),
+            #[cfg(test)]
+            test_levels: Mutex::new(Vec::new()),
             final_shown: Mutex::new(None),
             unread: Mutex::new(Default::default()),
             run_active: AtomicBool::new(false),
@@ -557,8 +595,9 @@ impl Tools {
         let Some(user) = std::env::var_os("HOME").map(std::path::PathBuf::from) else { return };
         let vault = heimdall_home::home_dir();
         for (question, label, g) in grants {
-            match heimdall_emergency::grants::write(&self.reload_data, &user, &vault, id, &question, &label, &g.delete, &g.login_items, agent::now_ms()) {
-                Ok(_) => eprintln!("Question {id}: User's click on {label:?} grants deleting {:?} and removing login items {:?} for 30 minutes", g.delete, g.login_items),
+            // Signed like the rest; a keychain grant (bug note 2026-11-04T23-01-22) is checked new again at the click.
+            match heimdall_emergency::grants::write_with(&self.reload_data, &user, &vault, id, &question, &label, &g.delete, &g.login_items, g.keychain.as_deref(), agent::now_ms()) {
+                Ok(_) => eprintln!("Question {id}: User's click on {label:?} grants deleting {:?}, removing login items {:?} and making keychain {:?} for 30 minutes", g.delete, g.login_items, g.keychain),
                 Err(e) => eprintln!("Question {id}: the grant on {label:?} was not written: {e}"),
             }
         }
@@ -939,6 +978,81 @@ impl Tools {
         self.cut_by_owner.lock().unwrap().extend(jobs);
         self.interrupt();
     }
+    /// The user's Stop (the island's Stop button while Heimdall speaks; bug notes 2026-11-05T00-10-37: a stop button to
+    /// stop Heimdall speaking, and 2026-11-05T02-32-17 item 4): speech stops at once as for any interrupt (what plays,
+    /// what is queued, held lines), and the press is a training signal: this moment wasn't for Heimdall. It is journalled as `speech_stopped` with the words that woke the run and what was being
+    /// said, for Decider V6's labels (docs/decision-chain.md), and the agent is told as context. The agent's turn goes
+    /// on (the agent window's Stop ends it).
+    ///
+    /// The rest of the run whose reply was cut is shown on the island unsaid (its final reply came out loud right after
+    /// the Stop, review 5 Nov), until the user's own words reach the agent again (`SpeechPolicy::stop_run`). The answer is
+    /// what was speaking at the press, for the label (`Pipeline::stop_press`).
+    pub(crate) fn stop_pressed(&self) -> StopPress {
+        let now=capture::host_now_ns();
+        let mut spoken:Vec<(u64,String)>=self.speech_text.lock().unwrap().iter().map(|(j,t)|(*j,t.clone())).collect();
+        spoken.sort_by_key(|(job,_)|*job);
+        // The oldest job left is the one playing (or about to).
+        let run=spoken.first().and_then(|(job,_)|self.speech_runs.lock().unwrap().get(job).cloned());
+        let spoken:Vec<String>=spoken.into_iter().map(|(_,t)|t).collect();
+        let playing=self.heimdall_speaking();
+        let speaking=playing || !spoken.is_empty();
+        self.interrupt();
+        if !speaking {return StopPress::default();}
+        if let Some(run)=&run {self.speech_policy.stop_run(run.run);}
+        eprintln!("Speech: User pressed Stop; Heimdall stopped talking (training signal: this moment wasn't for Heimdall)");
+        self.record_diagnostic("speech_stopped",json!({"reason":"stop_button","label":"not_for_heimdall","in_call":self.speech_policy.in_conversation(now),
+            "words":self.speech_policy.run_words(),"spoken":spoken}));
+        self.context_note("unheard-speech:stopped","User pressed Stop while you were talking: this moment was not for you. Do not say it again unless he asks; keep any result on the island.".into());
+        StopPress {playing,run}
+    }
+    /// The call state now sets how Heimdall sounds (bug note 2026-11-05T00-10-37): in a call his voice is quieter
+    /// (`speech_policy::voice_gain`) and queued lines wait for a gap (`hold`, `set_patient`); out of one, full level at
+    /// once. The one place both are set, read as speech is queued (`speak`), as a bank line or acknowledgement starts
+    /// (`voice_bank::play_line`) and as each sentence starts playing (the spoken-text hook). Review 5 Nov: they were set
+    /// only when the agent queued speech, so the in-call name ack played at full level and lines after the call stayed
+    /// quiet until the agent spoke again. Returns the level.
+    pub(crate) fn apply_call_level(&self) -> f32 {
+        let now = capture::host_now_ns();
+        let gain = self.speech_policy.voice_gain(now);
+        self.owner.set_patient(self.speech_policy.in_conversation(now));
+        // App-wide (unit tests never set it: the speak crate's level is one for the whole test process).
+        #[cfg(not(test))]
+        speak::set_voice_gain(gain);
+        #[cfg(test)]
+        self.test_levels.lock().unwrap().push(gain);
+        gain
+    }
+    /// Reply `job` was queued for the current run (`mcp_actions::Host::say_as`).
+    pub(crate) fn run_speech(&self,job:u64) {
+        let tag=self.speech_policy.run_tag();
+        let live:HashSet<u64>=self.speech_text.lock().unwrap().keys().copied().collect();
+        let mut runs=self.speech_runs.lock().unwrap();
+        runs.retain(|j,_|live.contains(j));
+        runs.insert(job,tag);
+    }
+    /// Bug note 2026-11-05T02-32-17 item 5 (listen to the call audio, speak only in a quiet gap, and stop as soon as
+    /// anyone talks, guests included): a guest's voice on call source `source`, begun at `at_ns` and still open
+    /// `speech_policy::GUEST_CUT_AFTER` later, while the user is in the call and Heimdall is audible, stops Heimdall as
+    /// the user's own voice does (`talked_over`), keeping lines held for later; the agent is told what was cut. The
+    /// user's turn is not claimed: the next line waits for the gap (`hold`).
+    pub(crate) fn guest_talked_over(&self,source:&str,at_ns:u64) {
+        // It ended (a click, a cough, a blip of echo) or a newer voice opened since.
+        if self.speech_policy.voice_open_since(source)!=Some(at_ns) {return;}
+        if !self.speech_policy.in_conversation(capture::host_now_ns()) || !self.heimdall_audible() {return;}
+        eprintln!("A guest on the call spoke while Heimdall talked: stopped (guest_voice, {source})");
+        self.record_diagnostic("speech_stopped",json!({"reason":"guest_voice","source":source}));
+        self.speech_status();
+        let jobs:Vec<u64>=self.speech_text.lock().unwrap().keys().copied().collect();
+        if !jobs.is_empty() {self.cut_by_guest.store(true,Ordering::Release);}
+        self.cut_by_owner.lock().unwrap().extend(jobs);
+        self.stop_speech();
+    }
+    /// Heimdall's voice is reaching the speaker now (agent speech or a bank line), not merely queued.
+    fn heimdall_audible(&self)->bool {
+        #[cfg(test)]
+        if self.test_audible.load(Ordering::Acquire) {return true;}
+        super::hold::audible() || self.voice_bank.line_playing()
+    }
     pub fn interrupt(&self) {
         // Lines held for after a call are not said once the user stopped or talked over Heimdall (review 4 Nov).
         self.speech_policy.drop_held("dropped: speech was stopped", capture::host_now_ns());
@@ -1012,6 +1126,7 @@ impl Tools {
     pub(super) fn speech_event(&self,event:speak::SpeechEvent) {
         match event {
             speak::SpeechEvent::Failed {job,error}=>{
+                let addressed=self.addressed_jobs.lock().unwrap().remove(&job);
                 self.unheard_by_mode.lock().unwrap().remove(&job);
                 self.cut_by_owner.lock().unwrap().remove(&job);
                 let unheard=self.speech_text.lock().unwrap().remove(&job);
@@ -1019,7 +1134,10 @@ impl Tools {
                     // The user was talking when it would have played (night pass 1022): not said; the reply stays in the
                     // pull-down, its lines show as one island line and the agent is told once for the reply, when it
                     // is over (`settle_notes`, bug note 2026-10-26T18-35-49). Speech itself is fine.
-                    if let Some(text)=unheard {self.skipped.lock().unwrap().push(text);}
+                    // His answer (an addressed run): the retry may speak in a call. Shown on the island at once, as
+                    // quiet text (bug note 2026-11-05T02-32-37: "held replies sometimes show nothing for minutes").
+                    if addressed {self.skipped_addressed.store(true,Ordering::Release);}
+                    if let Some(text)=unheard {self.skipped.lock().unwrap().push(text);self.show_skipped_live();}
                 } else {
                     eprintln!("Speech failed: {error}");
                     self.speech_failed();
@@ -1027,6 +1145,7 @@ impl Tools {
                 }
             },
             speak::SpeechEvent::Cancelled {job,heard}=>{
+                self.addressed_jobs.lock().unwrap().remove(&job);
                 let unheard=self.speech_text.lock().unwrap().remove(&job);
                 // Speaking switched off mid-line: the agent was told it was queued, so the user reads it instead.
                 // The user talking over it (barge-in) stops it on purpose and shows nothing; if he heard its start, the
@@ -1046,6 +1165,7 @@ impl Tools {
             speak::SpeechEvent::Complete {job,completed_at,..}=>{
                 // A line reached the user: a later skipped reply may wake the agent once again.
                 self.skip_retry.lock().unwrap().spent=false;
+                self.addressed_jobs.lock().unwrap().remove(&job);
                 self.unheard_by_mode.lock().unwrap().remove(&job);
                 self.cut_by_owner.lock().unwrap().remove(&job);
                 if let Some(text)=self.speech_text.lock().unwrap().remove(&job) {
@@ -1081,16 +1201,23 @@ impl Tools {
     /// after his pause ends, with the note, and answers fresh; what it says then follows the same speech rules. One
     /// retry per skipped reply: if that answer is skipped too, the agent is told as context only, until a line
     /// reaches the user or his words reach the agent.
+    ///
+    /// Bug notes 2026-11-04T20-52-24 and 2026-11-05T00-14-40 (23:44:09 name wake, 23:44:54 skipped, 23:45:16 retry,
+    /// 23:47:23 held, 23:57:23 dropped stale): the retry of a skipped answer to the user's address by name carries that
+    /// address (`SpeechPolicy::addressed_flag`), set as the retry wakes the agent, so its fresh answer may be spoken in
+    /// the call; the first run settling had cleared it.
     fn after_skip(&self,lines:Vec<String>) {
+        let addressed=self.skipped_addressed.swap(false,Ordering::AcqRel);
         if lines.is_empty() {return;}
         self.show_skipped(&lines);
         let mut retry=self.skip_retry.lock().unwrap();
-        if let Some(pending)=retry.pending.as_mut() {pending.extend(lines);return;}
+        if let Some(pending)=retry.pending.as_mut() {pending.extend(lines);retry.addressed|=addressed;return;}
         if retry.spent {drop(retry);self.context_note("unheard-speech:skipped",skipped_note(&lines));return;}
         retry.spent=true;
         retry.pending=Some(lines);
+        retry.addressed=addressed;
         drop(retry);
-        let (owner,retry,gate)=(self.owner.clone(),self.skip_retry.clone(),self.agent_enabled.clone());
+        let (owner,retry,gate,address)=(self.owner.clone(),self.skip_retry.clone(),self.agent_enabled.clone(),self.speech_policy.addressed_flag());
         let tx=self.agent_commands.lock().unwrap().clone();
         std::thread::spawn(move || {
             let begun=std::time::Instant::now();
@@ -1101,19 +1228,44 @@ impl Tools {
                 if owner.holds() {quiet=None;} else if quiet.get_or_insert_with(std::time::Instant::now).elapsed()>=RETRY_GRACE {break;}
                 if begun.elapsed()>=RETRY_LIMIT {break;}
             }
-            let Some(lines)=retry.lock().unwrap().pending.take() else {return};
+            let (lines,addressed)={let mut r=retry.lock().unwrap();let addressed=std::mem::take(&mut r.addressed);(r.pending.take(),addressed)};
+            let Some(lines)=lines else {return};
             let (Ok(permit),Some(tx))=(gate.permit(),tx) else {return};
             let (ack,_)=std::sync::mpsc::channel();
-            eprintln!("Hold: a skipped reply's note woke the agent after User's pause; it answers fresh");
+            if addressed {address.store(true,Ordering::Release);}
+            eprintln!("Hold: a skipped reply's note woke the agent after User's pause; it answers fresh{}",if addressed {", and may speak in the call (his address carried)"} else {""});
             if tx.send(Command::Notice{id:format!("{SKIPPED_RETRY}:{}",uuid::Uuid::new_v4()),text:skipped_note(&lines),permit,ack}).is_err() {eprintln!("Skipped reply not told to the agent: supervisor stopped");}
         });
     }
     /// A skipped reply's lines, never said, as one island line (bug note 2026-10-26T18-35-49: "I didn't hear anything
     /// and you didn't say it"): the path a line takes with Speaking off, so it also joins the decider's conversation.
+    /// Its lines were shown as they were skipped (`show_skipped_live`): that island line gets the reply's whole text
+    /// and nothing new is shown.
     fn show_skipped(&self,lines:&[String]) {
         if lines.is_empty() {return;}
         eprintln!("Hold: a reply skipped while User talked is shown on the island ({} line(s))",lines.len());
-        self.unheard_line(&lines.join(" "));
+        let text=lines.join(" ");
+        let Some((id,shown))=self.skipped_notice.lock().unwrap().take() else {return self.unheard_line(&text)};
+        if shown!=text {self.show_notice(&text,Some(&id));}
+        self.island_line_said(&text,capture::host_now_ns());
+    }
+    /// Bug note 2026-11-05T02-32-37: a reply that is not spoken must still appear on the island right away as a quiet
+    /// text island; skipped lines showed only once the reply was over, minutes later in a long turn.
+    /// Each skipped line shows at once: one island line for the reply, its text growing as more of it is skipped. It
+    /// joins the decider's conversation once, when the reply is over (`show_skipped`).
+    fn show_skipped_live(&self) {
+        let text=self.skipped.lock().unwrap().join(" ");
+        if text.trim().is_empty() {return;}
+        let id=self.skipped_notice.lock().unwrap().as_ref().map(|(id,_)|id.clone());
+        if let Some(id)=self.show_notice(&text,id.as_deref()) {*self.skipped_notice.lock().unwrap()=Some((id,text));}
+    }
+    /// An island line of `text`, or `update` of one already shown; its id.
+    fn show_notice(&self,text:&str,update:Option<&str>)->Option<String> {
+        let shown=self.agent_enabled.permit().and_then(|p| {
+            let actions=self.mcp_actions.actions.as_ref().map_err(|e|anyhow::anyhow!(e.clone()))?;
+            actions.notice(&format!("unheard-speech:{}",uuid::Uuid::new_v4()),text,"info",update,&p)
+        });
+        shown.map_err(|e|eprintln!("Skipped reply not shown: {e:#}")).ok()
     }
     /// The final reply's speech jobs among `jobs` never reached the user: it leaves the island's pull-down too.
     fn withdraw_final(&self,jobs:&[u64]) {
@@ -1193,7 +1345,8 @@ impl Tools {
         self.withdraw_final(&jobs);
         // His words reached the agent: they carry a skipped reply still waiting for its retry, and the next skipped
         // reply may retry again.
-        let mut skipped={let mut retry=self.skip_retry.lock().unwrap();retry.spent=false;retry.pending.take().unwrap_or_default()};
+        let mut skipped={let mut retry=self.skip_retry.lock().unwrap();retry.spent=false;retry.addressed=false;retry.pending.take().unwrap_or_default()};
+        self.skipped_addressed.store(false,Ordering::Release);
         // Lines skipped while he talked show now; the retry's were shown when it took them. The lines dropped here
         // never show (they are stale).
         let unshown=std::mem::take(&mut *self.skipped.lock().unwrap());
@@ -1233,7 +1386,9 @@ impl Tools {
             if let Some(shown)=&reply.shown {self.unread.lock().unwrap().shown_as_text(shown,std::time::Instant::now());}
             if let Some(say)=reply.say {
                 self.record_diagnostic("speech_skipped",json!({"event":"the rest of a reply skipped: User was talking"}));
+                if self.speech_policy.addressed_now() {self.skipped_addressed.store(true,Ordering::Release);}
                 self.skipped.lock().unwrap().push(say);
+                self.show_skipped_live();
             }
             self.speech_status();
             return Ok(());
@@ -1291,13 +1446,15 @@ impl Tools {
     /// turn, so it knows what he missed when he finishes. Not replayed by itself: what he said over it usually changes
     /// what is worth saying, so the agent decides with his words in hand (prompt: "Talked over"). The reply as written
     /// stays in the island's pull-down.
+    /// Cut by a guest on the call talking (`guest_talked_over`), the note says so.
     pub(super) fn missed_lines(&self,lines:&[(String,bool)]) {
         let started:Vec<&str>=lines.iter().filter(|(_,heard)|*heard).map(|(text,_)|text.as_str()).collect();
         let unheard:Vec<&str>=lines.iter().filter(|(_,heard)|!*heard).map(|(text,_)|text.as_str()).collect();
+        let who=if self.cut_by_guest.swap(false,Ordering::AcqRel) {"Someone on the call started talking, so you stopped"} else {"User talked over you"};
         let note=match (started.is_empty(),unheard.is_empty()) {
-            (false,true)=>format!("User talked over you; he heard only the start of: {}",started.join(" ")),
-            (true,false)=>format!("User talked over you before he heard: {}",unheard.join(" ")),
-            (false,false)=>format!("User talked over you; he heard only the start of: {} He did not hear: {}",started.join(" "),unheard.join(" ")),
+            (false,true)=>format!("{who}; he heard only the start of: {}",started.join(" ")),
+            (true,false)=>format!("{who} before he heard: {}",unheard.join(" ")),
+            (false,false)=>format!("{who}; he heard only the start of: {} He did not hear: {}",started.join(" "),unheard.join(" ")),
             (true,true)=>return,
         };
         self.context_note("unheard-speech:cut",note);
@@ -1475,7 +1632,12 @@ impl agent::mcp::ToolHost for Tools {
                 permit.clone(),
             ));
         }
+        // In a call (bug notes 2026-11-04T20-52-24, 2026-11-05T00-14-40, 2026-11-05T00-10-37): only his answers reach
+        // here then; they wait for a gap instead of being skipped while anyone talks (`hold`), and play quieter.
+        self.apply_call_level();
+        let addressed = self.speech_policy.addressed_now();
         let id = permit.with(|| queue.as_ref().unwrap().speak(text, lang))?;
+        if addressed { self.addressed_jobs.lock().unwrap().insert(id); }
         crate::latency::speak_queued(); // Latency map (lab/latency).
         self.note_spoken(text);
         self.speech_text.lock().unwrap().insert(id,text.into());

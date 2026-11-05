@@ -5,7 +5,8 @@
 //! process; its connection's busy wait only ever meets another process (the night pass, a CLI).
 //!
 //! Two lanes. Live jobs (journals, the transcript, listen evidence, capture, screen, images, logs) commit in groups:
-//! one transaction of up to `BATCH_JOBS` jobs or `BATCH_TIME`, each job a savepoint of it. Background jobs
+//! one transaction of up to `BATCH_JOBS` jobs (`BATCH_BEHIND` while a backlog drains) or `BATCH_TIME`, each job a
+//! savepoint of it. Background jobs
 //! (compaction publish steps, collection, embeddings) are each one bounded transaction and run when no live job waits,
 //! or at most once per `BACKGROUND_EVERY` between live groups; the caller prepares everything else on its own thread
 //! first. The thread runs at user-initiated
@@ -35,6 +36,10 @@ use std::{
 pub const COMMIT_WAIT: Duration = Duration::from_secs(1);
 /// Live jobs one transaction applies at most.
 pub const BATCH_JOBS: usize = 256;
+/// Live jobs one transaction applies at most while more than `BATCH_JOBS` wait (still at most `BATCH_TIME` of work).
+/// A backlog drained 256 jobs per full-sync commit plus a `YIELD`: 4 Nov 22:04-22:10 and 5 Nov 00:09-00:14 about 165
+/// jobs a second, barely above what arrives, so 40,000-50,000 queued writes took 250-320 s to catch up.
+pub const BATCH_BEHIND: usize = 2048;
 /// The longest one live transaction runs before it commits (at least one job runs).
 pub const BATCH_TIME: Duration = Duration::from_millis(200);
 /// Live jobs kept behind a held lock or a full disk; past it new jobs are dropped and counted.
@@ -50,6 +55,10 @@ pub const BACKGROUND_EVERY: Duration = Duration::from_millis(250);
 /// After a full group (a backlog draining) the lock stays free this long: longer than SQLite's longest busy-handler
 /// sleep (100 ms), so another process's writer gets in (31 Oct 22:20: back-to-back commits starved every other writer).
 pub const YIELD: Duration = Duration::from_millis(120);
+/// The WAL size past which the writer makes room for a restart (`restart_wal`): half of `WAL_CAP`, so the WAL stays
+/// under the cap. Restarting only past the cap left it rising past 64 MB and back every 8 s (4-5 Nov), two log lines
+/// each time.
+pub const RESTART_AT: u64 = WAL_CAP / 2;
 /// WAL pages after which the checkpointer runs (SQLite's own automatic checkpoint threshold).
 pub const CHECKPOINT_PAGES: i32 = 1000;
 /// A writer step (a job, its preparation, a commit, a background job) that takes this long is logged with the code
@@ -148,10 +157,12 @@ struct Shared {
     dropped: AtomicUsize,
     /// Commits since the checkpointer last ran.
     commits: (Mutex<u64>, Condvar),
+    /// Live transactions committed so far.
+    groups: AtomicU64,
     /// Set by the checkpointer: the WAL is past its cap and its checkpoint copied every frame it saw, so the writer
     /// copies the few frames committed meanwhile, between two groups, and its next write restarts the WAL (`restart_wal`).
     restart: AtomicBool,
-    /// WAL frames past which the checkpointer asks for a restart (`WAL_CAP` in pages), and the least time between two
+    /// WAL frames past which the checkpointer asks for a restart (`RESTART_AT` in pages), and the least time between two
     /// restarts in milliseconds (`RESTART_EVERY`); tests lower both.
     restart_frames: AtomicU64,
     restart_every_ms: AtomicU64,
@@ -280,8 +291,9 @@ impl Queue {
             stamps: Mutex::new(Default::default()),
             dropped: AtomicUsize::new(0),
             commits: (Mutex::new(0), Condvar::new()),
+            groups: AtomicU64::new(0),
             restart: AtomicBool::new(false),
-            restart_frames: AtomicU64::new(WAL_CAP / page_size(&db)),
+            restart_frames: AtomicU64::new(RESTART_AT / page_size(&db)),
             restart_every_ms: AtomicU64::new(RESTART_EVERY.as_millis() as u64),
             doing: Mutex::new(None),
             longest: Mutex::new(None),
@@ -443,6 +455,10 @@ impl Queue {
     pub fn pending(&self) -> usize {
         *self.inner.shared.pending.lock().unwrap()
     }
+    /// Live transactions (groups, and jobs run alone) committed so far.
+    pub fn groups(&self) -> u64 {
+        self.inner.shared.groups.load(Ordering::Relaxed)
+    }
     /// Notes queued and not yet committed.
     pub fn notes(&self) -> usize {
         self.inner.shared.notes.load(Ordering::Relaxed)
@@ -582,6 +598,7 @@ fn drain(db: &Connection, live: &crossbeam_channel::Receiver<Queued>, background
     let mut backoff = Duration::from_millis(50);
     let mut isolate = false;
     let mut failed = 0usize;
+    let mut catch_ups = CatchUps::default();
     let mut last_background = Instant::now();
     let mut last_restart: Option<Instant> = None;
     loop {
@@ -592,7 +609,7 @@ fn drain(db: &Connection, live: &crossbeam_channel::Receiver<Queued>, background
             }
             last_restart = Some(Instant::now());
         }
-        while jobs.len() < BATCH_JOBS {
+        while jobs.len() < BATCH_BEHIND {
             match live.try_recv() {
                 Ok(job) => jobs.push_back(job),
                 Err(_) => break,
@@ -637,7 +654,14 @@ fn drain(db: &Connection, live: &crossbeam_channel::Receiver<Queued>, background
             }
             continue;
         }
-        for q in jobs.iter_mut().take(BATCH_JOBS) {
+        // Behind, a group takes up to `BATCH_BEHIND` jobs; past the first `BATCH_JOBS` only those prepared within
+        // `BATCH_TIME` (a group stops at the first job still unprepared).
+        let cap = if jobs.len() > BATCH_JOBS { BATCH_BEHIND } else { BATCH_JOBS };
+        let preparing = Instant::now();
+        for (i, q) in jobs.iter_mut().take(cap).enumerate() {
+            if i >= BATCH_JOBS && preparing.elapsed() >= BATCH_TIME {
+                break;
+            }
             if let Some(prepare) = q.prepare.take() {
                 state.step("a write's preparation", Some(q.site), || {
                     let _ = guarded(|| {
@@ -649,10 +673,11 @@ fn drain(db: &Connection, live: &crossbeam_channel::Receiver<Queued>, background
         }
         behind.get_or_insert((Instant::now(), 0));
         let group_started = Instant::now();
-        let ran = if isolate { alone(db, &mut jobs, state) } else { group(db, &mut jobs, state) };
+        let ran = if isolate { alone(db, &mut jobs, state) } else { group(db, &mut jobs, cap, state) };
         let full = ran.finished.len() >= BATCH_JOBS || group_started.elapsed() >= BATCH_TIME;
         isolate = false;
         if !ran.finished.is_empty() {
+            state.groups.fetch_add(1, Ordering::Relaxed);
             state.committed();
         }
         for (q, outcome) in ran.finished {
@@ -680,11 +705,14 @@ fn drain(db: &Connection, live: &crossbeam_channel::Receiver<Queued>, background
             if state.done(1) == 0 {
                 let (at, n) = behind.take().unwrap_or((Instant::now(), 0));
                 let longest = state.longest.lock().unwrap().take();
-                if waiting.take().is_some() || at.elapsed() >= Duration::from_secs(1) {
+                let waited = waiting.take().is_some();
+                if waited || at.elapsed() >= Duration::from_secs(1) {
                     // The longest step names what held the writer (its own work; another process's lock shows as the
                     // "wait" line and as a long BEGIN).
                     let held = longest.filter(|l| l.took >= SLOW_STEP).map(|l| format!("; longest step {:.1} s: {}", l.took.as_secs_f64(), named(l.what, l.site))).unwrap_or_default();
-                    eprintln!("Archive live writes caught up: {n} queued, {:.1} s behind the held lock{held}", at.elapsed().as_secs_f64());
+                    if let Some(also) = catch_ups.said(at.elapsed(), waited, Instant::now()) {
+                        eprintln!("Archive live writes caught up: {n} queued, {:.1} s behind the held lock{held}{also}", at.elapsed().as_secs_f64());
+                    }
                 }
                 behind = None;
             }
@@ -738,7 +766,8 @@ fn end_open(db: &Connection) {
 
 /// Checkpoints the WAL (PASSIVE: never blocks a reader or the writer) once the writer's commits filled
 /// `CHECKPOINT_PAGES`, at most once a second.
-/// Every few seconds it also names a writer step that has run `HELD_REPORT` (`Shared::report_held`).
+/// Every few seconds it also names a writer step that has run `HELD_REPORT` (`Shared::report_held`) and a read
+/// transaction open `readers::LONG_READ` (`readers::report_long`).
 fn checkpointer(db: &Connection, state: &Weak<Shared>) {
     let mut seen = 0u64;
     let mut wal = WalWatch::default();
@@ -751,6 +780,7 @@ fn checkpointer(db: &Connection, state: &Weak<Shared>) {
         };
         shared.report_held();
         drop(shared);
+        crate::readers::report_long();
         if now == u64::MAX {
             return;
         }
@@ -773,8 +803,13 @@ fn checkpointer(db: &Connection, state: &Weak<Shared>) {
             }
             if let (Ok((log, copied)), Some(path)) = (pages, db.path().filter(|p| !p.is_empty())) {
                 let bytes = std::fs::metadata(format!("{path}-wal")).map_or(0, |m| m.len());
-                if let Some(line) = wal.look(bytes, log, copied) {
-                    eprintln!("{line}");
+                if let Some(line) = wal.look(bytes, log, copied, Instant::now()) {
+                    if (0..log).contains(&copied) {
+                        // A reader cut it short: name who may hold the old snapshot.
+                        eprintln!("{line} ({})", crate::readers::suspects(path));
+                    } else {
+                        eprintln!("{line}");
+                    }
                 }
             }
             seen = now;
@@ -783,25 +818,77 @@ fn checkpointer(db: &Connection, state: &Weak<Shared>) {
     }
 }
 
-/// The WAL past `WAL_CAP` (2 Nov 15:55: 991 MB against the 64 MB cap, nothing in the log said why). SQLite truncates
-/// it to the cap only when a checkpoint copied every page and the next write restarts it; a reader holding an old
-/// snapshot stops both, and one large transaction fills it at once. Said once per doubling, and once when it is back.
+/// A catch-up shorter than this, after no wait for another process, is counted rather than logged on its own.
+pub(crate) const SHORT_CATCH_UP: Duration = Duration::from_secs(5);
+/// The least time between two lines about short catch-ups alone.
+pub(crate) const CATCH_UP_REPEAT: Duration = Duration::from_secs(10 * 60);
+/// Which "caught up" lines are said. 3-5 Nov: 489 in two days, half of them under 1.8 s. A catch-up of
+/// `SHORT_CATCH_UP` or more, or after a wait for another process, is always said; a short one is said when none was
+/// for `CATCH_UP_REPEAT`, and otherwise counted into the next line said.
 #[derive(Default)]
-pub(crate) struct WalWatch {
-    said: u64,
+pub(crate) struct CatchUps {
+    last_line: Option<Instant>,
+    folded: u32,
+    folded_time: Duration,
 }
-impl WalWatch {
-    /// `bytes`: the WAL file's size; `log`, `copied`: the pages in it and the pages the checkpoint copied.
-    pub(crate) fn look(&mut self, bytes: u64, log: i64, copied: i64) -> Option<String> {
-        if bytes <= WAL_CAP {
-            let back = self.said > 0;
-            self.said = 0;
-            return back.then(|| format!("Archive WAL back under its cap: {} MB", bytes >> 20));
-        }
-        if self.said > 0 && bytes < self.said * 2 {
+impl CatchUps {
+    /// `Some(suffix)` when this catch-up is said: the short ones folded since the last line, if any.
+    pub(crate) fn said(&mut self, took: Duration, waited: bool, now: Instant) -> Option<String> {
+        let quiet = self.last_line.is_none_or(|t| now.duration_since(t) >= CATCH_UP_REPEAT);
+        if took < SHORT_CATCH_UP && !waited && !quiet {
+            self.folded += 1;
+            self.folded_time += took;
             return None;
         }
-        self.said = bytes;
+        self.last_line = Some(now);
+        let n = std::mem::take(&mut self.folded);
+        let time = std::mem::take(&mut self.folded_time);
+        Some(if n > 0 { format!(" (+{n} shorter catch-ups since the last line, {:.0} s in all)", time.as_secs_f64()) } else { String::new() })
+    }
+}
+
+/// The WAL past `WAL_CAP` (2 Nov 15:55: 991 MB against the 64 MB cap, nothing in the log said why). SQLite truncates
+/// it to the cap only when a checkpoint copied every page and the next write restarts it; a reader holding an old
+/// snapshot stops both, and one large transaction fills it at once. Said when it first passes the cap and once per
+/// doubling. It is back only after `WAL_SETTLE` under the cap: 3-5 Nov it rose to 65-68 MB and was cut back to 64 MB
+/// every 12 s, two lines each time (7,208 lines in two days, 40% of the log). Meanwhile each rise past the cap is
+/// counted and the count said at most once per `WAL_REPEAT`.
+#[derive(Default)]
+pub(crate) struct WalWatch {
+    /// The size last said past the cap; 0 while the WAL is (settled) under it.
+    said: u64,
+    /// The last look found it past the cap.
+    over: bool,
+    /// Under the cap since then, while `said` is set.
+    under_since: Option<Instant>,
+    /// When the last line was said.
+    last_line: Option<Instant>,
+    /// Rises past the cap since the last line.
+    crossings: u64,
+}
+/// How long the WAL stays under its cap before it is said to be back.
+pub(crate) const WAL_SETTLE: Duration = Duration::from_secs(10 * 60);
+/// The least time between two lines about a WAL that keeps crossing its cap.
+pub(crate) const WAL_REPEAT: Duration = Duration::from_secs(10 * 60);
+impl WalWatch {
+    /// `bytes`: the WAL file's size; `log`, `copied`: the pages in it and the pages the checkpoint copied.
+    pub(crate) fn look(&mut self, bytes: u64, log: i64, copied: i64, now: Instant) -> Option<String> {
+        if bytes <= WAL_CAP {
+            self.over = false;
+            if self.said == 0 {
+                return None;
+            }
+            let since = *self.under_since.get_or_insert(now);
+            if now.duration_since(since) < WAL_SETTLE {
+                return None;
+            }
+            let more = std::mem::take(&mut self.crossings);
+            *self = Self::default();
+            let more = if more > 0 { format!(" (it crossed the cap {more} more times after the last line)") } else { String::new() };
+            return Some(format!("Archive WAL back under its cap: {} MB{more}", bytes >> 20));
+        }
+        self.under_since = None;
+        let rose = !std::mem::replace(&mut self.over, true);
         let why = if log < 0 || copied < 0 {
             "the checkpoint could not run".to_string()
         } else if copied < log {
@@ -809,7 +896,21 @@ impl WalWatch {
         } else {
             format!("every page copied ({log}); it is truncated at the next write that finds no reader on it")
         };
-        Some(format!("Archive WAL at {} MB, past its {} MB cap: {why}", bytes >> 20, WAL_CAP >> 20))
+        if self.said == 0 || bytes >= self.said * 2 {
+            self.said = bytes;
+            self.last_line = Some(now);
+            self.crossings = 0;
+            return Some(format!("Archive WAL at {} MB, past its {} MB cap: {why}", bytes >> 20, WAL_CAP >> 20));
+        }
+        self.crossings += u64::from(rose);
+        let quiet = self.last_line.is_none_or(|t| now.duration_since(t) >= WAL_REPEAT);
+        if self.crossings == 0 || !quiet {
+            return None;
+        }
+        let minutes = self.last_line.map_or(0, |t| now.duration_since(t).as_secs() / 60);
+        let n = std::mem::take(&mut self.crossings);
+        self.last_line = Some(now);
+        Some(format!("Archive WAL crossed its {} MB cap {n} times in {minutes} min, now {} MB: {why}", WAL_CAP >> 20, bytes >> 20))
     }
 }
 
@@ -822,25 +923,25 @@ struct Ran {
 }
 
 /// One transaction over the front of `jobs`, at F_FULLFSYNC when any job it may take is durable.
-fn group(db: &Connection, jobs: &mut VecDeque<Queued>, state: &Shared) -> Ran {
-    let durable = jobs.iter().take(BATCH_JOBS).any(|q| q.durable);
+fn group(db: &Connection, jobs: &mut VecDeque<Queued>, cap: usize, state: &Shared) -> Ran {
+    let durable = jobs.iter().take(cap).any(|q| q.durable);
     if !durable && db.execute_batch("PRAGMA synchronous=NORMAL").is_err() {
         return alone(db, jobs, state);
     }
-    let ran = group_at(db, jobs, state);
+    let ran = group_at(db, jobs, cap, state);
     if !durable {
         let _ = db.execute_batch("PRAGMA synchronous=FULL");
     }
     ran
 }
 
-fn group_at(db: &Connection, jobs: &mut VecDeque<Queued>, state: &Shared) -> Ran {
+fn group_at(db: &Connection, jobs: &mut VecDeque<Queued>, cap: usize, state: &Shared) -> Ran {
     if let Err(e) = state.step("taking the write lock", None, || db.execute_batch("BEGIN IMMEDIATE")) {
         return Ran { finished: vec![], retry: Some(e.into()) };
     }
     let started = Instant::now();
     let (mut ran, mut failed, mut solo) = (0usize, vec![], false);
-    while ran < jobs.len() && ran < BATCH_JOBS && (ran == 0 || started.elapsed() < BATCH_TIME) {
+    while ran < jobs.len() && ran < cap && (ran == 0 || (started.elapsed() < BATCH_TIME && jobs[ran].prepare.is_none())) {
         if let Err(e) = db.execute_batch("SAVEPOINT live_job") {
             if !db.is_autocommit() {
                 let _ = db.execute_batch("ROLLBACK");
@@ -1027,6 +1128,7 @@ mod wal_tests {
         crate::Journal::open(&crate::store::session_path(&root, "session-wal")).unwrap();
         let queue = Queue::shared(&root).unwrap();
         // `HEIMDALL_WAL_TEST_UNFIXED=1`: the writer never asked to restart, as before the fix (measured 59 MB vs 10 MB).
+        assert_eq!(queue.inner.shared.restart_frames.load(Ordering::Relaxed), RESTART_AT / 4096, "a restart is asked for at half the cap");
         let before = std::env::var_os("HEIMDALL_WAL_TEST_UNFIXED").is_some();
         queue.inner.shared.restart_frames.store(if before { u64::MAX } else { 1000 }, Ordering::Relaxed);
         queue.inner.shared.restart_every_ms.store(100, Ordering::Relaxed);
@@ -1055,13 +1157,60 @@ mod wal_tests {
     /// whether a reader stopped the checkpoint, once per doubling, and once when it is back.
     #[test]
     fn a_wal_past_its_cap_is_explained_once_per_doubling() {
+        let t = Instant::now();
         let mut w = WalWatch::default();
-        assert_eq!(w.look(10 << 20, 100, 100), None, "under the cap: nothing");
-        let line = w.look(991 << 20, 250_000, 1_000).unwrap();
+        assert_eq!(w.look(10 << 20, 100, 100, t), None, "under the cap: nothing");
+        let line = w.look(991 << 20, 250_000, 1_000, t).unwrap();
         assert!(line.starts_with("Archive WAL at 991 MB, past its 64 MB cap") && line.contains("a reader holds an old snapshot"), "{line}");
-        assert_eq!(w.look(1500 << 20, 300_000, 1_000), None, "not again until it doubles");
-        assert!(w.look(2000 << 20, 500_000, 500_000).unwrap().contains("every page copied"));
-        assert_eq!(w.look(64 << 20, 0, 0).as_deref(), Some("Archive WAL back under its cap: 64 MB"));
-        assert_eq!(w.look(1 << 20, 0, 0), None);
+        assert_eq!(w.look(1500 << 20, 300_000, 1_000, t), None, "not again until it doubles");
+        assert!(w.look(2000 << 20, 500_000, 500_000, t).unwrap().contains("every page copied"));
+        assert_eq!(w.look(64 << 20, 0, 0, t), None, "not back until it settles");
+        assert_eq!(w.look(64 << 20, 0, 0, t + WAL_SETTLE).as_deref(), Some("Archive WAL back under its cap: 64 MB"));
+        assert_eq!(w.look(1 << 20, 0, 0, t + WAL_SETTLE * 2), None);
+    }
+    /// Bug 2026-11-05T02-53-27-3 (log sweep): short "caught up" lines are counted, long ones always said.
+    #[test]
+    fn short_catch_ups_are_counted_into_the_next_line() {
+        let t = Instant::now();
+        let mut c = CatchUps::default();
+        let s = Duration::from_secs;
+        assert_eq!(c.said(s(2), false, t).as_deref(), Some(""), "the first is said");
+        for i in 1..=30 {
+            assert_eq!(c.said(s(2), false, t + s(10 * i)), None, "short ones within the repeat are counted");
+        }
+        assert_eq!(c.said(s(1), true, t + s(301)).as_deref(), Some(" (+30 shorter catch-ups since the last line, 60 s in all)"), "a wait for another process is said");
+        assert_eq!(c.said(s(2), false, t + s(302)), None);
+        assert_eq!(c.said(s(41), false, t + s(303)).as_deref(), Some(" (+1 shorter catch-ups since the last line, 2 s in all)"), "a long one is said");
+        assert_eq!(c.said(s(3), false, t + s(303) + CATCH_UP_REPEAT).as_deref(), Some(""), "a short one after a quiet spell is said");
+    }
+    /// Bug 2026-11-05T02-53-27-3: 3-5 Nov the WAL rose to 65-68 MB and was cut back to 64 MB every 12 s, and each
+    /// crossing logged two lines. A WAL oscillating around the cap is said once, then its crossings counted at most
+    /// once per `WAL_REPEAT`, and it is back only after `WAL_SETTLE` under the cap.
+    #[test]
+    fn a_wal_oscillating_around_its_cap_is_said_once_then_counted() {
+        let t = Instant::now();
+        let mut w = WalWatch::default();
+        let mut lines = vec![];
+        // 9 minutes of a 12 s cycle: 1 s past the cap, 11 s back at it.
+        for i in 0..45u64 {
+            let at = t + Duration::from_secs(12 * i);
+            lines.extend(w.look(66 << 20, 16_900, 16_900, at));
+            lines.extend(w.look(64 << 20, 16_900, 16_900, at + Duration::from_secs(1)));
+        }
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].starts_with("Archive WAL at 66 MB, past its 64 MB cap"), "{lines:?}");
+        // Past `WAL_REPEAT` the crossings since are said once, with their count.
+        let mut later = vec![];
+        for i in 45..60u64 {
+            let at = t + Duration::from_secs(12 * i);
+            later.extend(w.look(67 << 20, 16_900, 16_900, at));
+            later.extend(w.look(64 << 20, 16_900, 16_900, at + Duration::from_secs(1)));
+        }
+        assert_eq!(later.len(), 1, "{later:?}");
+        assert!(later[0].starts_with("Archive WAL crossed its 64 MB cap 50 times in 10 min, now 67 MB"), "{later:?}");
+        // Settled under the cap: back, with the crossings not yet said.
+        let end = t + Duration::from_secs(12 * 60);
+        assert_eq!(w.look(64 << 20, 0, 0, end), None);
+        assert_eq!(w.look(64 << 20, 0, 0, end + WAL_SETTLE).as_deref(), Some("Archive WAL back under its cap: 64 MB (it crossed the cap 9 more times after the last line)"));
     }
 }

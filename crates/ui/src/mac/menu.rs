@@ -105,6 +105,8 @@ pub fn relay_caption(settings: &Settings, relay: &RelayIndicator, models: &[Rela
 /// provider as Agent ▸ Model names it, how it is reached included. A model whose
 /// thinking is off says so ("Thinking Off"); one with no known level leaves the middle out.
 pub fn agent_caption(api: &ApiProviders, engine_title: &str, engine_thinking: &str) -> String {
+    // Nothing chosen (the public edition's blank start): not the engine's name (VM run 5 Nov showed Local Splash Engine).
+    if api.unchosen { return NOT_CHOSEN.into(); }
     let level = |l: &str| match l {
         "" => None,
         "off" => Some("Thinking Off".to_string()),
@@ -152,9 +154,12 @@ pub fn local_problem(engine: &EngineStatus) -> Option<String> {
     }
 }
 
-/// The Agent line while no model is chosen: add a provider first, then choose one of its models.
+/// The Model row's value while nothing is chosen.
+pub const NOT_CHOSEN: &str = "Not chosen";
+
+/// The Agent line while no model is chosen: add a subscription first, then choose one of its models.
 fn agent_unchosen_line(api: &ApiProviders) -> &'static str {
-    if api.providers.iter().any(|p| p.auth != ProviderAuth::Missing) { "Choose a model" } else { "Add a provider" }
+    if api.providers.iter().any(|p| p.auth != ProviderAuth::Missing) { "Choose a model" } else { "Add a subscription in Model" }
 }
 
 /// "OpenCode Go: access rejected / no subscription" inside OpenCode Go's own rows: "access rejected / no subscription".
@@ -171,7 +176,9 @@ fn sync_session(item: &NSMenuItem, row: &controls::LabelRow, state: &State) {
         return;
     }
     // [menu lane] Listening off no longer stops the agent: only Agent off hides its caption.
-    item.setHidden(state.runtime_settings.dry_run);
+    // Nothing chosen says what to do even with Agent off (it can't start without a model).
+    let unchosen = state.api.unchosen && !state.settings_value.agent_relay;
+    item.setHidden(state.runtime_settings.dry_run && !unchosen);
     let model = agent_model_line(state);
     // In the menu's width the reason replaces the model's name; the tooltip keeps the model. A line read whole has no
     // tooltip; a cut one shows its whole text (`LabelRow`). The agent on this Mac waits for the engine: why, in short.
@@ -2695,6 +2702,13 @@ mod tests {
         assert_eq!(agent_caption(&api, "Qwen3.8 27B", "low"), "Qwen3.8 27B · Low · Local Splash Engine");
         assert_eq!(agent_caption(&api, "Qwen3.8 27B", "off"), "Qwen3.8 27B · Thinking Off · Local Splash Engine");
         assert_eq!(agent_caption(&api, "Qwen3.8 27B", ""), "Qwen3.8 27B · Local Splash Engine");
+        // VM run 5 Nov: nothing chosen is said as such, never as the engine; the line says what to do.
+        let blank = ApiProviders { unchosen: true, ..api.clone() };
+        assert_eq!(agent_caption(&blank, "", ""), NOT_CHOSEN);
+        let mut none = blank.clone();
+        for p in &mut none.providers { p.auth = ProviderAuth::Missing; }
+        assert_eq!(agent_model_problem(&none).as_deref(), Some("Add a subscription in Model"));
+        assert_eq!(agent_model_problem(&blank).as_deref(), Some("Choose a model"), "one connected: pick its model");
         // An API model: its own level and the provider as the pickers name it, API or subscription.
         api.selected = Some(("anthropic".into(), "claude-opus-5-5".into()));
         let opus = api.models.iter_mut().find(|m| m.provider == "anthropic" && m.id == "claude-opus-5-5").unwrap();

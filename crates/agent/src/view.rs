@@ -158,10 +158,7 @@ pub fn typed_text(text: &str) -> Option<&str> {
         .and_then(|_| text.split_once('\n').map(|(_, t)| t))
         .unwrap_or(text);
     let text = crate::clock::strip_now_line(text);
-    let instruction = text
-        .rsplit_once("\nOwner's wake instruction:\n")
-        .map(|(_, t)| t)
-        .unwrap_or(text);
+    let instruction = crate::identity::split_wake(text).map(|(_, t)| t).unwrap_or(text);
     instruction.strip_prefix("[Heimdall typed message]\n")
 }
 pub fn clean(s: &str) -> String {

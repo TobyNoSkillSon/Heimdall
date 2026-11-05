@@ -82,9 +82,9 @@ pub fn legacy_observation(line: &str) -> Option<Observation> {
     Some(Observation { id:id.into(), timestamp_ms:timestamp.parse().ok()?, source, speaker, language:language.into(), text:text.into() })
 }
 pub fn compact_transcript(text: &str) -> String {
-    let (data, instruction) = text.split_once("\nOwner's wake instruction:\n").map_or((text, None), |(data, instruction)| (data, Some(instruction)));
+    let (data, instruction) = crate::identity::split_wake(text).map_or((text, None), |(data, instruction)| (data, Some(instruction)));
     let mut compact = data.split('\n').map(|line| legacy_observation(line).map(|o|o.labelled()).unwrap_or_else(||line.into())).collect::<Vec<_>>().join("\n");
-    if let Some(instruction) = instruction { compact.push_str("\nOwner's wake instruction:\n"); compact.push_str(instruction); }
+    if let Some(instruction) = instruction { compact.push_str(crate::identity::WAKE_MARKER); compact.push_str(instruction); }
     compact
 }
 /// Observation ownership belongs to the durable envelope, outside model text.
@@ -94,7 +94,7 @@ pub fn observation_ids(wire: &Value) -> Vec<String> {
         return ids.iter().filter_map(Value::as_str).map(str::to_owned).collect();
     }
     wire["message"]["content"].as_array().into_iter().flatten()
-        .filter_map(|p|p["text"].as_str()).flat_map(|text|text.split("\nOwner's wake instruction:\n").next().unwrap_or("").lines())
+        .filter_map(|p|p["text"].as_str()).flat_map(|text|crate::identity::split_wake(text).map_or(text, |(data, _)| data).lines())
         .filter_map(legacy_observation).map(|o|o.id).collect()
 }
 

@@ -20,6 +20,7 @@ mod speaker_tracks;
 mod settings_apply;
 mod menu_problem;
 mod actions;
+pub(crate) use actions::app_owns_card;
 pub(crate) mod engine_models;
 /// [chrome] n1022 stage 3: naming "Speaker N" from the transcript window.
 mod transcript_naming;
@@ -40,6 +41,8 @@ pub(crate) mod echo_guard;
 // Dictating to Vella: archived and given as context, never a wake (docs/vella.md).
 mod vella;
 mod catch_up;
+mod model_downloads;
+pub(crate) mod setup_ready;
 use self::commands::*;
 
 /// The spoken commands, matched in partials, window decodes and finals: Decider V5's two screen commands, each
@@ -198,6 +201,18 @@ pub struct Pipeline {
     inference_engine: Option<crate::inference_engine::Manager>,
     /// The engine's models on this Mac: disk state, the download, what the manager runs (pipeline/engine_models.rs).
     engine_models: engine_models::EngineModels,
+    /// The first-run downloads as last seen by the settings tick (model_downloads.rs): (listening's, the chosen decider's).
+    models_seen: (bool, bool),
+    /// Setup's agent check (setup_ready.rs), and the readiness rows last sent.
+    pub(crate) agent_check: setup_ready::AgentCheck,
+    readiness_seen: Option<ui::SetupReadiness>,
+    status_written: Option<Instant>,
+    /// `Heimdall setup --arsenal add` installed Arsenal: it is used once it is here.
+    arsenal_after_install: bool,
+    /// `Heimdall setup` chose Claude Code while T3 Code installed: it connects once T3 Code is here.
+    t3_connect_after_install: bool,
+    /// Setup loaded (or tried to load) Phonon S to learn the chosen voice this launch (setup_ready.rs).
+    pub(crate) phonon_tried: bool,
     engine: Option<ListenEngine<listen::asr::Parakeet>>,
     live_worker: Option<Arc<listen::ListenWorker>>,
     live_stop: Option<Arc<std::sync::atomic::AtomicBool>>,
@@ -255,6 +270,9 @@ pub struct Pipeline {
     #[cfg(test)]
     hooks: plumbing_tests::Hooks,
     pub screen_buffer: Arc<Mutex<screen::ScreenBuffer>>,
+    /// Capture still starting on its own thread (live_loop.rs `CaptureRun::begin`): HAL discovery may wait up to 10 s
+    /// (30 s in a VM without audio devices, VM run 5 Nov), which on the live loop tripped the watchdog.
+    pub(crate) capture_starting: Option<crossbeam_channel::Receiver<Result<(capture::Capture, capture::CaptureReceiver)>>>,
     /// A Seeing on still starting on its own thread (live_loop.rs `start_screen`), with the config it started with.
     pub(crate) screen_starting: Option<(crossbeam_channel::Receiver<Result<screen::ScreenCapture>>, String, Arc<std::sync::atomic::AtomicBool>)>,
     /// The newest screen start or stop running off the live loop. Each joins the one before, so stops and starts
@@ -342,6 +360,8 @@ pub struct Pipeline {
     pub(crate) listening: bool,
     /// Each open microphone source and when its audio last reached this loop: the capture-stall check.
     mic_audio: HashMap<String, Instant>,
+    /// When capture last started (Setup's Microphone row waits `MIC_SILENT` for sound from then).
+    pub(crate) capture_since: Option<Instant>,
     capture_ladder: crate::health::Ladder,
     agent_ladder: crate::health::Ladder,
     /// The listen worker's finished-work count and since when it stood still with work waiting.
@@ -568,6 +588,13 @@ impl Pipeline {
             tools,
             inference_engine: None,
             engine_models,
+            models_seen: (false, false),
+            agent_check: Default::default(),
+            readiness_seen: None,
+            status_written: None,
+            arsenal_after_install: false,
+            t3_connect_after_install: false,
+            phonon_tried: false,
             engine: None,
             live_worker: None,
             live_stop: None,
@@ -606,6 +633,7 @@ impl Pipeline {
             hooks: Default::default(),
             screen_buffer,
             screen_starting: None,
+            capture_starting: None,
             screen_lane: None,
             speaker_cpu,
             enrollment_lock: Arc::new(Mutex::new(())),
@@ -663,6 +691,7 @@ impl Pipeline {
             health: Default::default(),
             listening: false,
             mic_audio: HashMap::new(),
+            capture_since: None,
             capture_ladder: crate::health::Ladder::new(std::time::Duration::from_secs(600)),
             agent_ladder: crate::health::Ladder::new(std::time::Duration::from_secs(600)),
             worker_watch: None,

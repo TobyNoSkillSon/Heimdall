@@ -112,7 +112,14 @@ fn heimdall_vocative(text: &str) -> bool {
     let dull_vocative = lower
         .strip_prefix("i'm dull")
         .is_some_and(|s| s.trim_start().starts_with(','));
-    dull_vocative || sentence_starts(&lower).any(opens_with_name_spelling)
+    dull_vocative || sentence_starts(&lower).any(|s| opens_with_name_spelling(s) && !states_about_name(s))
+}
+/// A sentence that opens with the exact name as the subject of a statement ("Heimdall is searching already."):
+/// `name_is_subject` on its first name word.
+fn states_about_name(sentence: &str) -> bool {
+    let tokens: Vec<&str> = sentence.split_whitespace().take(6).collect();
+    let norm: Vec<String> = tokens.iter().map(|t| bare(t)).collect();
+    norm.iter().take(3).position(|w| exact_heimdall(w)).is_some_and(|i| name_is_subject(&tokens, &norm, i))
 }
 fn exact_name_for(n: &Names, w: &str) -> bool {
     (n.assistant == crate::names::DEFAULT_ASSISTANT && exact_heimdall(w)) || n.exact(w)
@@ -332,12 +339,28 @@ pub fn addressed_by_name_for(n: &Names, text: &str) -> bool {
             continue;
         }
         let after_comma = i > 0 && tokens[i - 1].ends_with([',', ';', ':']);
-        if (lead || after_comma) && (exact_name_for(n, &w) || (heimdall && KNOWN_ONE_WORD.contains(&w.as_str())) || n.phrase_at(&norm, i).is_some()) {
+        let one_word = exact_name_for(n, &w) || (heimdall && KNOWN_ONE_WORD.contains(&w.as_str()));
+        if (lead || after_comma) && (one_word || n.phrase_at(&norm, i).is_some()) && !(one_word && name_is_subject(&tokens, &norm, i)) {
             return true;
         }
         lead = (lead && LEADS.contains(&w.as_str())) || raw.trim_end_matches(['"', '\'', '’', '”', ')']).ends_with(['.', '!', '?']);
     }
     false
+}
+/// The name at `i` is the subject of a statement about Heimdall, not an address: no punctuation after it and a
+/// third-person verb next ("Yeah, Heimdall is searching already.", the user to Angel in a call, bug 2026-11-05T02-32-17,
+/// 00:13:07: it woke the agent at once though d1 said not_for_heimdall 0.99). An inverted question stays an address
+/// ("Heimdall is it done?", "Heimdall did you see that"): a subject pronoun right after the verb. Modals ("Heimdall can
+/// you…") are never read as a statement.
+fn name_is_subject(tokens: &[&str], norm: &[String], i: usize) -> bool {
+    const VERBS: &[&str] = &["is", "was", "has", "had", "does", "did", "isnt", "wasnt", "hasnt", "doesnt", "didnt", "says", "said",
+        "keeps", "kept", "seems", "knows", "thinks", "thought", "already"];
+    const SUBJECTS: &[&str] = &["it", "you", "there", "that", "this", "he", "she", "they", "we", "i", "anything", "everything", "someone"];
+    if tokens[i].trim_end_matches(['"', '\'', '’', '”', ')']).ends_with([',', ';', ':', '.', '!', '?']) {
+        return false;
+    }
+    norm.get(i + 1).is_some_and(|v| VERBS.contains(&v.as_str()))
+        && !norm.get(i + 2).is_some_and(|s| SUBJECTS.contains(&s.as_str()))
 }
 /// During a call, whether `trigger` must wait for d1's verdict instead of waking at once: the follow-up window, "send
 /// it", and the name when it is not an address. The user's own address by name wakes at once, as do typed lines.
@@ -1103,6 +1126,35 @@ mod night2_listen_tests {
         ] {
             assert!(!addressed_by_name(text), "{text}");
             assert!(call_trigger_waits(Trigger::Name, text), "{text}");
+        }
+    }
+    /// Bug 2026-11-05T02-32-17. In the call with Angel (00:13:07) the user's "Yeah, Heimdall is searching already." woke the
+    /// agent at once as an address, though d1 said not_for_heimdall 0.99; it is a statement about Heimdall, so in a call
+    /// it now waits for d1. At 02:31:58 "…call you Heimdall like so often" was already a mention (d1 decided it).
+    #[test]
+    fn the_name_as_the_subject_of_a_statement_is_a_mention() {
+        for text in [
+            "Yeah, Heimdall is searching already. Literally had a suggestion card.",
+            "And by the way, in the calls, I feel like I shouldn't have to call you Heimdall like so often, you know",
+            "Heimdall was down all night.",
+            "Oh, Heimdall already did it.",
+            "So Heimdall has the file somewhere.",
+            "Heimdall doesn't hear Discord.",
+        ] {
+            assert!(!addressed_by_name(text), "{text}");
+            assert!(call_trigger_waits(Trigger::Name, text), "{text}");
+        }
+        for text in [
+            "Heimdall, is it done?",
+            "Heimdall is it done?",
+            "Heimdall did you see that",
+            "Heimdall does it work now?",
+            "Heimdall can you check the logs",
+            "Heimdall. Is the build done?",
+            "Is the build done, Heimdall?",
+            "Oh, Heimdall animation is bugged. I can still see it.",
+        ] {
+            assert!(addressed_by_name(text), "{text}");
         }
     }
     #[test]

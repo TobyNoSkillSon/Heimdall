@@ -115,7 +115,9 @@ into the stack is a replace transition `renderInContext` never steps, so that st
   `checks.rs` (`--island`).
 - `mac/draw/` — the drawing overlay (strokes, keys, capture; its keys and light are the island's), pointing (opacity
   from the island's frame), ink, hotkey, system profile, the app switch, and `check.rs` (`--drawing`). The overlay
-  sits above menus (pop-up menu level + 1) and the island rises above it while it is up (`island::pin`). Over an
+  sits above menus (pop-up menu level + 1) and the island rises above it while it is up (`island::pin`). Only
+  drawing mode's own controls take a press (`host::draw_control`); any other press is ink, over an open island too
+  (bug note 2026-11-04T21-56-52), and FloatingIslands keeps an open viewer open while the overlay is up. Over an
   open menu (the menu stays while they draw) it holds a still (`still.rs`): another app's menu survives
   the overlay ordered above it but closes when the overlay takes the keyboard, so the still goes under the ink first;
   Heimdall's own menu is captured shortly after it opens and comes back as the still once Drawing Mode is chosen
@@ -160,13 +162,18 @@ waveform glyph when quiet): its reply left-aligned in a centred column, then tha
 header with its icon, title and close X), scrolling as one inside half the screen; a wide table widens the shape up
 to `layout::reply_max_w` (700, never closer than 160 to the screen's sides). A click or a drag up on its lip band
 pulls it up.
+**Stop (5 Nov, bug notes 2026-11-05T00-10-37 and 2026-11-05T02-32-17).** While Heimdall speaks, the left ear is a
+stop glyph (`layout::STOP`, in the helmet's slot; dimmed with nothing to press for the grace once the audio ended; the
+pull-down has the helmet back when quiet). A press (`Target::StopSpeech`) ends the speaking look at once and sends
+`UiAction::StopSpeaking`: the app cuts the voice and labels the line that woke the agent `not_for_heimdall`
+(docs/decision-chain.md). Renders: `lab/ui-renders/stop-button/`.
 When the pointer reaches the notch (the click target's tracking area, no polling), a short lip with a grabber shows
 just below the notch's bottom edge (`Lip::Peek`); the notch and the lip open the last turn,
 and it goes as soon as the pointer leaves, so no strip below the notch takes clicks at rest. While Heimdall sends, thinks,
 compacts, works or speaks, the whole shape is that target too. ⌃⌘H (`Event::OpenChat`)
 pulls the conversation down as the user's, with only its composer when there is nothing yet, and puts the keyboard in the
 composer (`Fields::focus_composer`; the click target is a non-activating panel, so Heimdall does not come forward); a
-pull-down a note opened becomes their conversation. Pressed again while their conversation shows (`tobys_reply_open`),
+pull-down a note opened becomes their conversation. Pressed again while their conversation shows (`owners_reply_open`),
 however it opened and wherever the keyboard is, it pulls it up; one hidden under the reader or drawing mode stays. A field that had the keyboard and leaves gives it back (the panel is
 ordered out and in). The composer's placeholder is the island's drawn one only (`layout::composer_placeholder`, its
 one source of words); the native fields (composer and Other) have none, and sit `field::TEXT_SHIFT` off their slots so
@@ -236,6 +243,11 @@ with a remove badge, `Target::ComposerDetach`; the swell settles, no flight, no 
 (`Output::TypedDrop` → `UiAction::TypedWithDrop`, sent at once as one typed message with the images, the relay holding
 it like a notch drop); otherwise it goes as a notch drop. Check: `heimdall-ui-demo --pulldown-drop <dir>` (test
 `island_pulldown_drop`); renders in `lab/ui-renders/pulldown-drop/`.
+**Late takes (bug note 2026-11-03T18-33-35).** A drag let go over the notch that macOS never dropped on the catcher
+(never offered, or offered and not dropped: 4 Nov 19:27 and 5 Nov 00:00, each a few seconds after the agent started
+working) is taken from the drag pasteboard (`End::TakeLate`), skipped when it started in Heimdall, a key went down,
+another app's window covers the notch (named in the log) or the pasteboard changed (`late_take`). A drop the notch
+itself turns down in `prepareForDragOperation:` is logged with where it was let go.
 Reply text (the pull-down and island lines) is laid out by `object/prose.rs`:
 paragraph gaps, list items with hanging lines, the first sentence bold.
 **Emergency mode (docs/claude-relay.md).** `Event::Emergency` (`UiUpdate::AgentRelay`): while a backup agent covers,

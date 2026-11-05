@@ -72,6 +72,9 @@ pub struct CaptureConfig {
     /// Receives the apps whose processes are producing output now (Heimdall excluded), whenever that set
     /// changes. Learned from the process-output listeners alone; an unrecorded app is listed, never tapped.
     pub playing_apps: Option<crossbeam_channel::Sender<Vec<AppIdentity>>>,
+    /// With no microphone chosen, use macOS's default input rather than the built-in one (the public edition,
+    /// 5 Nov; the personal edition keeps the built-in fallback).
+    pub system_default_input: bool,
 }
 
 /// An input device Heimdall could use as the user's microphone. Listing one never opens it.
@@ -81,6 +84,8 @@ pub struct InputDevice {
     pub name: String,
     /// Core Audio transport type is built-in (the MacBook Pro Microphone).
     pub built_in: bool,
+    /// macOS's default input now (System Settings ▸ Sound ▸ Input).
+    pub default: bool,
 }
 
 /// What the HAL owner sees: every connected input, the choices, and the mics it opens.
@@ -107,9 +112,22 @@ pub fn select_microphone<'a>(
     chosen: Option<&str>,
     usable: impl Fn(&InputDevice) -> bool,
 ) -> Option<&'a InputDevice> {
-    chosen
-        .and_then(|uid| devices.iter().find(|d| d.uid == uid && usable(d)))
-        .or_else(|| devices.iter().find(|d| d.built_in))
+    select_microphone_from(devices, chosen, false, usable)
+}
+
+/// `select_microphone`, where `system_default` makes macOS's default input the one used while nothing is chosen
+/// (`CaptureConfig::system_default_input`); a chosen device that is missing still falls back to the built-in one.
+pub fn select_microphone_from<'a>(
+    devices: &'a [InputDevice],
+    chosen: Option<&str>,
+    system_default: bool,
+    usable: impl Fn(&InputDevice) -> bool,
+) -> Option<&'a InputDevice> {
+    match chosen {
+        Some(uid) => devices.iter().find(|d| d.uid == uid && usable(d)).or_else(|| devices.iter().find(|d| d.built_in)),
+        None if system_default => devices.iter().find(|d| d.default && usable(d)).or_else(|| devices.iter().find(|d| d.built_in)),
+        None => devices.iter().find(|d| d.built_in),
+    }
 }
 
 impl MicrophoneState {
@@ -121,7 +139,18 @@ impl MicrophoneState {
         extras: Vec<String>,
         usable: impl Fn(&InputDevice) -> bool,
     ) -> Self {
-        let in_use = select_microphone(&devices, chosen.as_deref(), &usable).map(|d| d.uid.clone());
+        Self::with_default(devices, chosen, extras, false, usable)
+    }
+
+    /// `new`, with macOS's default input used while nothing is chosen when `system_default`.
+    pub fn with_default(
+        devices: Vec<InputDevice>,
+        chosen: Option<String>,
+        extras: Vec<String>,
+        system_default: bool,
+        usable: impl Fn(&InputDevice) -> bool,
+    ) -> Self {
+        let in_use = select_microphone_from(&devices, chosen.as_deref(), system_default, &usable).map(|d| d.uid.clone());
         let mut open: Vec<String> = in_use.iter().cloned().collect();
         for d in &devices {
             if extras.contains(&d.uid) && usable(d) && !open.contains(&d.uid) {
@@ -149,6 +178,7 @@ impl Default for CaptureConfig {
             microphones: None,
             recorded_apps: vec![],
             playing_apps: None,
+            system_default_input: false,
         }
     }
 }
@@ -254,7 +284,21 @@ impl Drop for Capture {
 mod microphone_tests {
     use super::*;
     fn dev(uid: &str, name: &str, built_in: bool) -> InputDevice {
-        InputDevice { uid: uid.into(), name: name.into(), built_in }
+        InputDevice { uid: uid.into(), name: name.into(), built_in, default: false }
+    }
+
+    /// 5 Nov: the public edition starts on macOS's default input; a choice still wins, and the personal
+    /// edition keeps the built-in fallback.
+    #[test]
+    fn with_nothing_chosen_the_public_edition_uses_the_system_default_input() {
+        let shure = InputDevice { default: true, ..dev("Shure", "Shure MV7i", false) };
+        let devices = [built_in(), shure.clone(), airpods()];
+        assert_eq!(select_microphone_from(&devices, None, true, |_| true).map(|d| d.uid.as_str()), Some("Shure"));
+        assert_eq!(select_microphone_from(&devices, None, false, |_| true).map(|d| d.uid.as_str()), Some("BuiltInMicrophoneDevice"));
+        assert_eq!(select_microphone_from(&devices, Some("AC-3E-B1:input"), true, |_| true).map(|d| d.uid.as_str()), Some("AC-3E-B1:input"));
+        assert_eq!(select_microphone_from(&devices, None, true, |d| d.uid != "Shure").map(|d| d.uid.as_str()), Some("BuiltInMicrophoneDevice"), "a failing default falls back");
+        assert_eq!(select_microphone_from(&[], None, true, |_| true), None, "no input at all: none");
+        assert_eq!(MicrophoneState::with_default(devices.to_vec(), None, vec![], true, |_| true).open, ["Shure"]);
     }
     fn built_in() -> InputDevice {
         dev("BuiltInMicrophoneDevice", "MacBook Pro Microphone", true)

@@ -336,3 +336,90 @@ fn an_option_grants_only_what_the_card_names() {
     let plain = a.ask("plain-card", &parse_ask(&two_questions()).unwrap(), &p).unwrap();
     assert!(!a.needs_click(&plain));
 }
+
+/// Bug notes 2026-11-04T18-59-48 and 2026-11-04T23-37-22: the relay put the path in the question of a short card,
+/// which grants nothing. The schema's `grant` says how to use it (personal edition), and the short form refuses a
+/// grant with where it goes.
+#[test]
+fn the_grant_field_says_how_to_use_it_and_the_short_form_points_to_it() {
+    let list = tools();
+    let ask = list.as_array().unwrap().iter().find(|t| t["name"] == "ask").unwrap();
+    let grant = &ask["inputSchema"]["properties"]["questions"]["items"]["properties"]["options"]["items"]["oneOf"][1]["properties"]["grant"];
+    if heimdall_emergency::grants::ENABLED {
+        let d = grant["description"].as_str().expect("grant describes its use");
+        for part in ["only User's own click", "questions form", "plain rm of its absolute path", "30 minutes", "grants nothing", "delete login item"] {
+            assert!(d.contains(part), "{part} missing from {d}");
+        }
+    } else {
+        assert!(grant.is_null(), "no grant in the public edition");
+    }
+    let short = json!({"question": "Delete /Users/t/Applications/Arsenal.app.previous?", "options": [{"label": "Delete it", "grant": {"delete": ["/Users/t/Applications/Arsenal.app.previous"]}}, "Keep"]});
+    let e = parse_ask(&short).unwrap_err().to_string();
+    assert!(e.starts_with("ASK_BAD_GRANT") && e.contains("questions"), "{e}");
+    let e = validate_tool("ask", &short).unwrap_err().to_string();
+    assert!(e.starts_with("ASK_BAD_GRANT"), "the server says where a grant goes: {e}");
+    let full = json!({"questions": [{"question": "Delete the old Arsenal copy (56 MB)?", "options": [{"label": "Delete it", "grant": {"delete": ["~/Applications/Arsenal.app.previous"]}}, "Keep"]}]});
+    assert_eq!(parse_ask(&full).unwrap()[0].options[0].grant.as_ref().unwrap().delete, vec!["~/Applications/Arsenal.app.previous".to_string()]);
+    assert_eq!(validate_tool("ask", &full).is_ok(), heimdall_emergency::grants::ENABLED);
+}
+
+/// Bug note 2026-11-04T23-01-22: an option can grant one new keychain file for signing (the hook's
+/// `grants::grant_keychain`). Exactly one path, as text; never the login keychain, a file that exists, a relative
+/// path, a hidden character or one too long to draw. It is drawn with the grant's other lines, so it counts toward them.
+#[test]
+fn an_option_grants_one_new_keychain_file_only() {
+    let card = |grant: Value| json!({"questions": [{"question": "Set up the release signing keychain?", "options": [
+        {"label": "Set it up", "grant": grant}, "Not now"]}]});
+    let fresh = format!("~/Library/Keychains/heimdall-ask-test-{}.keychain-db", std::process::id());
+    let ok = card(json!({"keychain": fresh}));
+    assert_eq!(validate_tool("ask", &ok).is_ok(), heimdall_emergency::grants::ENABLED, "the schema offers it with the grant");
+    let items = parse_ask(&ok).unwrap();
+    assert_eq!(items[0].options[0].grant, Some(AskGrant { keychain: Some(fresh.clone()), ..Default::default() }));
+    let picked = [answer("q1", &["Set it up"], None)];
+    assert_eq!(card_grants(&items, &picked, &picked)[0].2.keychain.as_deref(), Some(fresh.as_str()), "the writer gets it");
+    assert!(card_grants(&items, &picked, &[]).is_empty(), "never without his own click");
+    // Beside deletes on the same option.
+    let both = parse_ask(&card(json!({"keychain": fresh, "delete": ["~/Backups/old-signing"]}))).unwrap();
+    assert_eq!(both[0].options[0].grant.as_ref().unwrap().delete, vec!["~/Backups/old-signing".to_string()]);
+
+    // A file that exists, inside a project of Heimdall's home when the test's scratch folder is one (the worktree's target).
+    let scratch = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("ask-keychain-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch).unwrap();
+    let scratch = std::fs::canonicalize(&scratch).unwrap();
+    let existing = scratch.join("existing.keychain-db");
+    std::fs::write(&existing, b"x").unwrap();
+    let in_project = scratch.strip_prefix(heimdall_home::home_dir().join("Projects")).is_ok();
+    let e = parse_ask(&card(json!({"keychain": existing.display().to_string()}))).unwrap_err().to_string();
+    assert!(e.starts_with("ASK_BAD_GRANT"), "{e}");
+    if in_project {
+        assert!(e.contains("already exists"), "{e}");
+        assert!(parse_ask(&card(json!({"keychain": scratch.join("new.keychain-db").display().to_string()}))).is_ok(), "a new one in a project");
+    }
+    let _ = std::fs::remove_dir_all(&scratch);
+
+    let long = format!("~/Library/Keychains/{}.keychain-db", "a".repeat(1100));
+    let tall = format!("~/Library/Keychains/{}.keychain-db", "a".repeat(460));
+    for (grant, why) in [
+        (json!({"keychain": "~/Library/Keychains/login.keychain-db"}), "the login keychain"),
+        (json!({"keychain": "/Users/t/Library/Keychains/LOGIN.keychain-db"}), "the login keychain in other case"),
+        (json!({"keychain": "~/Library/Keychains/System.keychain-db"}), "macOS's own"),
+        (json!({"keychain": "Library/Keychains/x.keychain-db"}), "relative"),
+        (json!({"keychain": "x.keychain-db"}), "a bare name"),
+        (json!({"keychain": "~/Library/Keychains/x\u{200B}.keychain-db"}), "a zero-width space"),
+        (json!({"keychain": "~/Library/Keychains/x\u{202E}bd-niahcyek.keychain-db"}), "a direction mark"),
+        (json!({"keychain": "~/Library/Keychains/x\t.keychain-db"}), "a tab"),
+        (json!({"keychain": long}), "too long for the hook"),
+        (json!({"keychain": tall}), "too long to draw in 8 lines"),
+        (json!({"keychain": ["~/Library/Keychains/a.keychain-db"]}), "a list"),
+        (json!({"keychain": ""}), "empty"),
+        (json!({"keychain": "~/Library/Keychains/$NAME.keychain-db"}), "a variable"),
+        (json!({"keychain": "~/Library/Keychains/../x.keychain-db"}), "a dot-dot"),
+        (json!({"keychain": "~/Library/Keychains/sub/x.keychain-db"}), "a folder below"),
+        (json!({"keychain": "~/Library/Keychains/x.keychain"}), "not a .keychain-db"),
+        (json!({"keychain": "/tmp/x.keychain-db"}), "outside the Keychains and the Vault's projects"),
+        (json!({"keychains": "~/Library/Keychains/x.keychain-db"}), "an unknown key"),
+    ] {
+        let e = parse_ask(&card(grant.clone())).unwrap_err().to_string();
+        assert!(e.starts_with("ASK_BAD_GRANT"), "{why}: {grant} -> {e}");
+    }
+}

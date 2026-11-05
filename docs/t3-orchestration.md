@@ -121,7 +121,14 @@ everything but a short deny list, in every session. T3 launches each Claude inst
     after the last notice (`TRAIL_MS`). It stays the user's for every confirmation rule;
   - a question or an approval wait on any thread (observer, one "T3 update" per 30 seconds): T3 says "waiting", or
     counts a request while the run is live (`threads::asks`, the same rule as the "waits on a question or approval"
-    labels). A finished thread's leftover count wakes nothing.
+    labels; bug note 2026-11-01T00-15-42). A finished thread's leftover count wakes nothing. A task's approval
+    wait wakes once per request (`approval:{thread}:{run}:{tool call}`, or `…:{run}` when T3 shows no card) with the
+    card's text (the command and Claude's reason) and the `t3-thread://` link that opens the thread; the same wait is
+    kept for the task's job island (`Workers::approval_wait`) until the prompt is gone or the run ends. More approvals
+    counted than cards the hook already answered is a wait, so an answered card in view never hides a second prompt
+    whose card is elsewhere, such as a sub-agent's (`text::approval_wait`; bug note 2026-11-04T18-30-26: on 4 Nov the
+    hook approved the beauty climb's rm prompt at 17:55:23 and the command ran the same second, but T3 kept its card
+    "Waiting for approval" until the user clicked it at 17:58, which T3 then logged as a failed delivery).
 
   "Done" is T3's own `task_status` rule (orchestration-v2 `delegatedTaskProgress`): a turn that ends while the
   thread's sub-agents or background commands still run is `waiting_for_children`, not a result.
@@ -158,7 +165,16 @@ everything but a short deny list, in every session. T3 launches each Claude inst
   run), unless the task has moved on by itself (another turn started or ended). Only the failed turn's own first line
   counts. Its result arrives as usual with the failed turns' replies before it; a sign-in failure after it is reported with a line saying the retry failed too
   and to send nothing until the sign-in works. One retry per episode (2 hours); any other ending clears it.
-  Heimdall's own interrupts and archives wake nothing.
+  Heimdall's own interrupts and archives wake nothing (day review T3).
+  A run T3 cancelled before it started is no state of the thread (`threads::current_run`): T3's thread status is
+  its latest run's, so the turn T3 queued to hand over a finished sub-agent and then dropped made the setup-wizard
+  task read "cancelled" while its turn still ran (bug note 2026-11-04T22-25-15). The scan, `needs_scan`,
+  task_status and archiving a cleared task follow the active run, else the newest run that started
+  (`threads::followed_run`, review 5 Nov), with two exceptions: a run Heimdall's own message started (`sent_runs`)
+  that T3 dropped before it started is the thread's state, "cancelled", reported once as "nothing of it ran; send it
+  again" (after the turn it was queued behind, if that one ended unreported); and a dropped run an older build recorded
+  the ending against stays the followed run while it is the newer one, so nothing is reported twice and the task can
+  be archived. The task island (`islands/binding.rs`) still reads plain `current_run`.
 
   Finished runs of other threads never wake the agent. Sub-agent threads and archived threads wake nothing. A line is
   "title, outcome, last assistant message" (or the question text, or "waits for an approval"); each line id is

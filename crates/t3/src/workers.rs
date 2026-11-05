@@ -89,6 +89,14 @@ pub struct Workers {
     /// `AUTH_COOLDOWN_MS`; tests shorten it (`set_auth_cooldown`).
     auth_cooldown_ms: Mutex<u64>,
 }
+/// An approval a followed thread waits on (`Workers::approval_wait`): its run, the card's text (the command and
+/// Claude's reason) when T3 shows the card, and the `t3-thread://` link that opens the thread in T3.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApprovalWait {
+    pub run: String,
+    pub text: Option<String>,
+    pub link: Option<String>,
+}
 pub type TaskHook = Arc<dyn Fn(&str, &str, &str) -> Option<String> + Send + Sync>;
 /// Stores whose restart notice this process has sent (`Workers::announce_restart`), with the notice's outbox id (none:
 /// nothing was followed).
@@ -219,6 +227,11 @@ impl Workers {
         // tasks whose job island the user closed, archived by Heimdall itself once finished and reported
         // (`archive_cleared`), never by the agent remembering to.
         db.execute_batch("CREATE TABLE IF NOT EXISTS cleared(thread TEXT PRIMARY KEY,ms INTEGER NOT NULL);")?;
+        // Bug note 2026-11-04T18-30-26: the approval each followed thread waits on now (`approval_wait`).
+        db.execute_batch("CREATE TABLE IF NOT EXISTS approval_waits(thread TEXT PRIMARY KEY,run TEXT NOT NULL,call TEXT,text TEXT,link TEXT,ms INTEGER NOT NULL);")?;
+        // Review 5 Nov: the runs Heimdall's own messages started (`sent_run`), so one T3 drops before it starts reads
+        // cancelled (`threads::followed_run`).
+        db.execute_batch("CREATE TABLE IF NOT EXISTS sent_runs(thread TEXT NOT NULL,run TEXT NOT NULL,ms INTEGER NOT NULL,PRIMARY KEY(thread,run));")?;
         let column = |name: &str| -> Result<bool> {
             Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('workers') WHERE name=?)", [name], |r| r.get(0))?)
         };
@@ -766,7 +779,11 @@ impl Workers {
         };
         self.task(id)?;
         let l = self.latest(id, "messages", 1, 4000).await?;
-        let status = l.thread["status"].as_str().unwrap_or("idle");
+        // Not "cancelled" while a turn still works behind a run T3 dropped before it started (bug note 2026-11-04T22-25-15).
+        let recorded: Option<(Option<String>, String)> = self.db.lock().unwrap().query_row("SELECT run,status FROM workers WHERE thread=?", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+        let recorded = recorded.as_ref().and_then(|(r, s)| Some((r.as_deref()?, s.as_str())));
+        let (_, status) = self.followed_run(id, &l.thread, l.runs.as_array().map(Vec::as_slice).unwrap_or_default(), recorded)?;
+        let status = status.as_str();
         let open = self.open_children(id)?;
         let labels = open.commands;
         let state = crate::text::task_state(status, open.agents.len(), labels.len());
@@ -897,11 +914,14 @@ impl Workers {
         if self.background_open(thread)? {
             return Ok(None);
         }
-        let r = self.client.call("t3_thread_read", json!({"threadId":thread,"limit":1,"maxCharsPerItem":1,"runLimit":1})).await?;
+        let r = self.client.call("t3_thread_read", json!({"threadId":thread,"limit":1,"maxCharsPerItem":1,"runLimit":3})).await?;
         let t = &r["thread"];
-        let status = t["status"].as_str().unwrap_or("");
-        let newer = t["latestRunId"].as_str().is_some_and(|l| Some(l) != run);
-        if !t["activeRunId"].is_null() || crate::threads::ACTIVE.contains(&status) || newer {
+        // The run it is on, past a run T3 cancelled before it started (bug note 2026-11-04T22-25-15).
+        // Compared by order: a dropped run its result was recorded against is not older than the run before it (review 5 Nov).
+        let recorded: Option<String> = self.db.lock().unwrap().query_row("SELECT status FROM workers WHERE thread=?", [thread], |r| r.get(0)).optional()?;
+        let (current, status) = self.followed_run(thread, t, r["recentRuns"].as_array().map(Vec::as_slice).unwrap_or_default(), run.zip(recorded.as_deref()))?;
+        let newer = current.as_deref().is_some_and(|l| Some(l) != run);
+        if !t["activeRunId"].is_null() || crate::threads::ACTIVE.contains(&status.as_str()) || newer {
             return Ok(None);
         }
         // A question T3 still lists keeps it open; a finished run's leftover approval does not (bug note
@@ -1319,6 +1339,7 @@ impl Workers {
                     db.execute("UPDATE auth_failures SET retried_ms=? WHERE thread=?", params![now as i64, thread])?;
                     if let Some(next) = r["runId"].as_str() {
                         db.execute("UPDATE workers SET run=?,status=? WHERE thread=? AND kind='task'", params![next, r["status"].as_str().unwrap_or("running"), thread])?;
+                        db.execute("INSERT OR IGNORE INTO sent_runs VALUES(?,?,?)", params![thread, next, now as i64])?;
                     }
                 }
                 Err(e) if now.saturating_sub(failed as u64) < AUTH_EPISODE_MS => eprintln!("t3: the automatic retry of {thread} did not go out ({e:#}); trying again on the next pass"),
@@ -1755,10 +1776,11 @@ impl Workers {
             }
         }
         let t = &r["thread"];
-        let run = t["activeRunId"].as_str().or_else(|| t["latestRunId"].as_str()).map(str::to_owned);
-        let state = t["status"].as_str().context("T3 task state missing")?.to_owned();
-        let kind = self.kind(&w.thread)?;
+        t["status"].as_str().context("T3 task state missing")?;
         let runs = r["recentRuns"].as_array().cloned().unwrap_or_default();
+        // The run the thread is on: a run T3 cancelled before it started is not its state (bug note 2026-11-04T22-25-15).
+        let (run, state) = self.followed_run(&w.thread, t, &runs, w.run.as_deref().map(|r| (r, w.status.as_str())))?;
+        let kind = self.kind(&w.thread)?;
         // A watched thread after its result (`TRAIL_MS`): runs T3 started by itself continue the answer; one started by a
         // message is someone else's, and ends the following (any continuation that ended before it is reported first).
         let trailing = kind == "watch" && target.is_none() && trail_until.is_some();
@@ -1794,10 +1816,29 @@ impl Workers {
         }
         let current = Worker { thread: w.thread.clone(), run: run.clone(), status: state.clone() };
         let who = self.who(&w.thread, t["title"].as_str(), &kind)?;
+        // Heimdall's own message that T3 cancelled before it started (review 5 Nov): nothing of it ran. Said once, as
+        // this run's result, so it is never mistaken for the earlier turn's answer; the task is free to be sent again.
+        // Heimdall's own stop (task_cancel) stays quiet as before.
+        if state == "cancelled" && !self.quiet(&w.thread)? {
+            if let Some(dropped) = run.as_deref().filter(|r| runs.iter().any(|x| x["runId"] == *r && x["startedAt"].is_null()) && self.sent(&w.thread, r).unwrap_or(false)) {
+                // The turn before it first, if it finished unreported (the message was queued behind it); once only.
+                let mut started: Vec<&Value> = runs.iter().filter(|x| x["startedAt"].is_string()).collect();
+                started.sort_by_key(|x| std::cmp::Reverse(x["ordinal"].as_i64().unwrap_or(0)));
+                if let Some((prev, status)) = started.first().and_then(|x| Some((x["runId"].as_str()?, x["status"].as_str()?))).filter(|(_, s)| terminal(s)) {
+                    let done = Worker { thread: w.thread.clone(), run: Some(prev.to_owned()), status: status.to_owned() };
+                    self.terminal_notice(&done, status, None, true, permit).await?;
+                }
+                let id = format!("terminal:{}:{dropped}:cancelled", w.thread);
+                let text = format!("{who}: T3 cancelled Heimdall's message before it started, so nothing of it ran; the thread stopped at its earlier turn. Send it again if it still matters.");
+                return self.emit(&id, &current, "terminal", &text, permit).await;
+            }
+        }
         // Reading the thread's requests never stands between a finished run and its notice (bug notes
         // 2026-11-02T16-05-08, 16-19-09: the listing failed on a completed task that T3 still counted a hook-answered
         // approval on, and the scan stopped before the notice). A live run's failed read is retried next pass.
-        if t["pendingRequestCount"].as_u64().unwrap_or(0) > 0 {
+        if t["pendingRequestCount"].as_u64().unwrap_or(0) == 0 {
+            self.db.lock().unwrap().execute("DELETE FROM approval_waits WHERE thread=?", [&w.thread])?;
+        } else {
             if let Err(e) = self.pending_requests(&t, &current, &who, &state, permit).await {
                 if !terminal(&state) {
                     return Err(e);
@@ -2001,17 +2042,58 @@ impl Workers {
                 self.db.lock().unwrap().execute("INSERT OR IGNORE INTO questions VALUES(?,?)", params![thread, id])?;
             }
         }
-        if t["pendingRequestCount"].as_u64().unwrap_or(0) > ids.len() as u64 && !terminal(state) && crate::waits_on_approval(&self.client, thread, t).await? {
-            self.emit(
-                &format!("approval:{thread}:{}", current.run.as_deref().unwrap_or("idle")),
-                current,
-                "approval",
-                &format!("{who} waits for an approval in T3; only User can give it there."),
-                permit,
-            )
-            .await?;
-        }
+        let counted = t["pendingRequestCount"].as_u64().unwrap_or(0).saturating_sub(ids.len() as u64);
+        let approval = if counted > 0 && !terminal(state) { crate::waits_on_approval(&self.client, thread, t, counted).await? } else { None };
+        let Some(approval) = approval else {
+            self.db.lock().unwrap().execute("DELETE FROM approval_waits WHERE thread=?", [thread])?;
+            return Ok(());
+        };
+        // Bug note 2026-11-04T18-30-26: once per request (its card's tool call, or the run when T3 shows no card), with
+        // the command and Claude's reason and the link that opens the thread; the task's island reads the same record
+        // (`approval_wait`).
+        let run = current.run.as_deref().unwrap_or("idle");
+        let link = t["link"].as_str().map(|l| l.trim_matches(['<', '>'])).filter(|l| !l.is_empty());
+        self.db.lock().unwrap().execute(
+            "INSERT OR REPLACE INTO approval_waits VALUES(?,?,?,?,?,?)",
+            params![thread, run, approval.call, approval.text, link, crate::now_ms() as i64],
+        )?;
+        let id = match approval.call.as_deref() {
+            Some(call) => format!("approval:{thread}:{run}:{call}"),
+            None => format!("approval:{thread}:{run}"),
+        };
+        let open = link.map(|l| format!(" Open it: {l}")).unwrap_or_default();
+        let asks = approval.text.as_deref().map(|t| format!(" It asks: {t}")).unwrap_or_default();
+        self.emit(&id, current, "approval", &format!("{who} waits for an approval in T3; only User can give it there.{asks}{open}"), permit).await?;
         Ok(())
+    }
+    /// Heimdall's own message started run `run` on `thread` (a `t3_thread_send`, the sign-in retry).
+    pub(super) fn sent_run(&self, thread: &str, run: &str) -> Result<()> {
+        self.db.lock().unwrap().execute("INSERT OR IGNORE INTO sent_runs VALUES(?,?,?)", params![thread, run, crate::now_ms() as i64])?;
+        Ok(())
+    }
+    fn sent(&self, thread: &str, run: &str) -> Result<bool> {
+        Ok(self.db.lock().unwrap().query_row("SELECT EXISTS(SELECT 1 FROM sent_runs WHERE thread=? AND run=?)", [thread, run], |r| r.get(0))?)
+    }
+    /// The run Heimdall follows on `thread` and its state (`threads::followed_run`), with its own sends known.
+    fn followed_run(&self, thread: &str, t: &Value, runs: &[Value], recorded: Option<(&str, &str)>) -> Result<(Option<String>, String)> {
+        let sent: std::collections::HashSet<String> = {
+            let db = self.db.lock().unwrap();
+            let mut q = db.prepare("SELECT run FROM sent_runs WHERE thread=?")?;
+            let rows = q.query_map([thread], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+            rows
+        };
+        Ok(crate::threads::followed_run(t, runs, recorded, &|r| sent.contains(r)))
+    }
+    /// The approval a followed thread waits on right now, as the last pass saw it (bug note 2026-11-04T18-30-26), for
+    /// its job island: a live run whose prompt Heimdall's hook did not answer. None once the run ends or the card's
+    /// tool call has run.
+    pub fn approval_wait(&self, thread: &str) -> Result<Option<ApprovalWait>> {
+        Ok(self
+            .db
+            .lock()
+            .unwrap()
+            .query_row("SELECT run,text,link FROM approval_waits WHERE thread=?", [thread], |r| Ok(ApprovalWait { run: r.get(0)?, text: r.get(1)?, link: r.get(2)? }))
+            .optional()?)
     }
     /// A watched thread after its result: the runs after `trail_run` (the last one reported). One whose first input
     /// is a message (the user's own turn), or that ended without any first input seen, ends the following; before that,
@@ -2087,10 +2169,10 @@ impl Workers {
         if pending {
             return Ok(true);
         }
-        let r = self.client.call("t3_thread_read", json!({"threadId":w.thread,"limit":1,"maxCharsPerItem":1,"runLimit":1})).await?;
+        let r = self.client.call("t3_thread_read", json!({"threadId":w.thread,"limit":1,"maxCharsPerItem":1,"runLimit":3})).await?;
         let t = &r["thread"];
-        let run = t["activeRunId"].as_str().or_else(|| t["latestRunId"].as_str());
-        if run != w.run.as_deref() || t["status"].as_str() != Some(w.status.as_str()) || crate::threads::live_requests(t) > 0 {
+        let (run, state) = self.followed_run(&w.thread, t, r["recentRuns"].as_array().map(Vec::as_slice).unwrap_or_default(), w.run.as_deref().map(|r| (r, w.status.as_str())))?;
+        if run.as_deref() != w.run.as_deref() || state != w.status || crate::threads::live_requests(t) > 0 {
             return Ok(true);
         }
         let key = format!("terminal:{}:{}:{}", w.thread, w.run.as_deref().unwrap_or(""), w.status);
@@ -2202,10 +2284,18 @@ impl Workers {
         }
         // A card Heimdall's permission hook already answered (the hook answers delegate children of Heimdall's threads
         // too) is no wait (`crate::waits_on_approval`).
-        if ids.is_empty() && crate::waits_on_approval(&self.client, child, row).await? {
-            let run = row["latestRunId"].as_str().unwrap_or("idle");
-            let text = format!("{who}: its sub-agent '{name}' waits for an approval in T3; only User can give it there [thread {child}].");
-            self.emit(&format!("approval:{child}:{run}"), &w, "approval", &text, permit).await?;
+        let counted = row["pendingRequestCount"].as_u64().unwrap_or(0);
+        if ids.is_empty() {
+            if let Some(approval) = crate::waits_on_approval(&self.client, child, row, counted).await? {
+                let run = row["latestRunId"].as_str().unwrap_or("idle");
+                let asks = approval.text.as_deref().map(|t| format!(" It asks: {t}")).unwrap_or_default();
+                let text = format!("{who}: its sub-agent '{name}' waits for an approval in T3; only User can give it there [thread {child}].{asks}");
+                let id = match approval.call.as_deref() {
+                    Some(call) => format!("approval:{child}:{run}:{call}"),
+                    None => format!("approval:{child}:{run}"),
+                };
+                self.emit(&id, &w, "approval", &text, permit).await?;
+            }
         }
         Ok(())
     }

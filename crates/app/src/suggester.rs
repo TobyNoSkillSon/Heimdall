@@ -32,8 +32,10 @@ use std::time::Duration;
 
 /// The log and ledger label.
 pub const JOB: &str = "suggester";
-/// Haiku's effort: a short judgement with a few searches, so medium.
-pub const EFFORT: &str = "medium";
+/// A short judgement with a few searches that the user waits on in a conversation: low, and never above it whatever
+/// Background Tasks ▸ Model's level says (`background_call::capped_effort`; bug 2026-11-05T02-32-17: at "max" a pass
+/// took 7-31 s).
+pub const EFFORT: &str = "low";
 pub const SUBMIT: &str = "submit_suggestion";
 pub const SEARCH_FILES: &str = "search_files";
 pub const SEARCH_TIMELINE: &str = "search_timeline";

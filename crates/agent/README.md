@@ -134,7 +134,8 @@ nothing. The harness reports each finished reply (`stop`/`length`) at its own `t
 gets its own reply and the first is still said. Aborted and failed replies report at `agent_settled`; a run that
 settles without any reply reports an empty aborted one, which closes the turn's reply state.
 Tool log (`tool_log`): every tool call's outcome is one plain line in `<data>/logs/tools.log` (rotated at 1 MiB to
-`tools.log.1`), written from Pi's `tool_execution_*` events, secrets masked; the prompt names the path
+`tools.log.1`), written from Pi's `tool_execution_*` events and, for the relay, by the scoped MCP server
+(`tool_log::record`, bug note 2026-11-05T02-53-27-4), secrets masked; the prompt names the path
 (`HEIMDALL_TOOL_LOG`).
 Outbox (`actions`): notices to the agent fit its live message limit (`Actions::set_message_limit` at each start,
 `notice_budget` for producers). A notice the agent still rejects as too long goes as its producer's short form (or

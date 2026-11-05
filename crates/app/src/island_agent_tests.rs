@@ -517,7 +517,7 @@ fn the_html_addendum_follows_the_frozen_prompt_and_its_examples_pass_the_gate() 
     assert!(SYSTEM.starts_with(include_str!("../prompt/island-agent.md")));
     for text in [include_str!("../prompt/island-agent-html.md"), include_str!("../prompt/public/island-agent-html.md")] {
         let bodies: Vec<&str> = text.split("```html").skip(1).map(|b| b.split("```").next().unwrap()).collect();
-        assert_eq!(bodies.len(), 4);
+        assert_eq!(bodies.len(), 7);
         for b in bodies {
             let c = island_html::sanitize(b, &|_| true).unwrap();
             assert!(c.stripped.is_empty(), "{:?}", c.stripped);

@@ -28,7 +28,7 @@ def requirement(bundle):
     return next(line for line in text.splitlines() if line.startswith('designated => '))
 
 RUNTIME_SOURCES = ['package.json', 'package-lock.json', 'node-lock.json', 'heimdall.ts', 'tool-owner.cjs',
-                   'loop-guard.mjs', 'loop-guard.json', 'provider-retry.mjs', 'thinking-policy.mjs', 'history-repair.mjs', 'service-tier.mjs', 'quota.mjs', 'compaction-fallback.mjs']  # runtime::pin() order
+                   'loop-guard.mjs', 'loop-guard.json', 'provider-retry.mjs', 'thinking-policy.mjs', 'history-repair.mjs', 'service-tier.mjs', 'quota.mjs', 'compaction-fallback.mjs', 'arsenal.mjs']  # runtime::pin() order
 
 def macho(path):
     with path.open('rb') as file:
@@ -63,7 +63,7 @@ def verify_agent_runtime(root):
         if file.is_file() and file != root/'receipt.json':
             files[file.relative_to(root).as_posix()] = digest(file)
     assert files == receipt['files'], 'agent runtime files missing, changed or added'
-    for name in ['package.json', 'package-lock.json', 'heimdall.ts', 'tool-owner.cjs', 'loop-guard.mjs', 'loop-guard.json', 'provider-retry.mjs', 'thinking-policy.mjs', 'history-repair.mjs', 'service-tier.mjs', 'quota.mjs', 'compaction-fallback.mjs']:
+    for name in ['package.json', 'package-lock.json', 'heimdall.ts', 'tool-owner.cjs', 'loop-guard.mjs', 'loop-guard.json', 'provider-retry.mjs', 'thinking-policy.mjs', 'history-repair.mjs', 'service-tier.mjs', 'quota.mjs', 'compaction-fallback.mjs', 'arsenal.mjs']:
         assert (root/name).read_bytes() == (sources/name).read_bytes(), name
     lock = json.loads((sources/'package-lock.json').read_text())['packages']
     shipped = {}

@@ -458,7 +458,8 @@ pub fn end_session(session: &str) {
 
 /// One call on `e`'s T3 instance (`background_call::ask`).
 pub async fn ask(e: &crate::plan_refresher::Endpoint, c: &Call<'_>) -> Result<Answer> {
-    crate::background_gate::check()?;
+    // Setup's agent check asks before Agent is on (setup_ready.rs).
+    if c.job != crate::pipeline::setup_ready::AGENT_CHECK_JOB { crate::background_gate::check()?; }
     crate::background_gate::quota_check(e.provider, agent::now_ms())?;
     let r = registered().context("T3 is not connected: no T3 background call")?;
     let instance = ui::t3_instance(e.provider).unwrap_or(ui::T3_DEFAULT_INSTANCE).to_owned();

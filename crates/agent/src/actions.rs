@@ -27,8 +27,8 @@ pub struct AskOption {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grant: Option<AskGrant>,
 }
-/// An option's grant (bug notes 2026-11-03T23-04-19, 2026-11-03T18-04-11): exact paths to delete and login items to
-/// remove, each named on the card. Only his click on the option writes it for the hook
+/// An option's grant (bug notes 2026-11-03T23-04-19, 2026-11-03T18-04-11): exact paths to delete, login items to
+/// remove and one new keychain file to make (2026-11-04T23-01-22), each named on the card. Only his click on the option writes it for the hook
 /// (`heimdall_emergency::grants`), for 30 minutes and once per path or item; his voice never does.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,6 +37,10 @@ pub struct AskGrant {
     pub delete: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub login_items: Vec<String>,
+    /// One new keychain file to make and fill for signing (bug note 2026-11-04T23-01-22,
+    /// `heimdall_emergency::grants::grant_keychain`): `security` create, unlock, import and partition-list on it only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keychain: Option<String>,
 }
 /// One question of an `ask` card (24 Oct: "one adaptive card"). The legacy `question` + `options` call is one item with
 /// id `q1`, no header, single select and Other on.
@@ -90,6 +94,9 @@ pub fn parse_ask(args: &serde_json::Value) -> Result<Vec<AskItem>> {
     let labels = rows
         .iter()
         .map(|o| {
+            // A grant rides only on the questions form (bug note 2026-11-04T18-59-48: the relay's short cards named the
+            // path in the question and granted nothing); say so instead of "a string".
+            ensure!(o.get("grant").is_none(), "ASK_BAD_GRANT: options: a grant rides on an option of the questions form: send questions: [{{question, options: [{{label, grant}}, ...]}}]");
             let label = o.as_str().context("options: each option is a string")?.trim();
             ensure!(!label.is_empty() && label.chars().count() <= OPTION_CHARS, "options: each option is 1 to 24 characters");
             Ok(label.to_owned())
@@ -145,7 +152,7 @@ fn ask_item(row: &serde_json::Value, n: usize) -> Result<AskItem> {
         options,
     };
     check_options(&item, &at("options"))?;
-    let lines: usize = item.options.iter().flat_map(|o| o.grant.iter()).flat_map(|g| g.delete.iter().chain(&g.login_items)).map(|s| s.chars().count().div_ceil(GRANT_LINE_CHARS)).sum();
+    let lines: usize = item.options.iter().flat_map(|o| o.grant.iter()).flat_map(|g| g.delete.iter().chain(&g.login_items).chain(&g.keychain)).map(|s| s.chars().count().div_ceil(GRANT_LINE_CHARS)).sum();
     ensure!(lines <= GRANT_LINES, "ASK_BAD_GRANT: {}: the grants of one question fill at most {GRANT_LINES} lines of {GRANT_LINE_CHARS} characters on the card (these need {lines}); split them over several asks", at("options"));
     Ok(item)
 }
@@ -158,7 +165,7 @@ const GRANT_LINE_CHARS: usize = 56;
 /// login item in full under the option (`ui` ask card, 4 Nov evening), so the question and description need not repeat
 /// them.
 fn ask_grant(g: &serde_json::Value, field: &str) -> std::result::Result<AskGrant, String> {
-    use heimdall_emergency::grants::{grant_login_item, grant_path, MAX_LOGIN_ITEMS, MAX_PATHS};
+    use heimdall_emergency::grants::{grant_keychain, grant_login_item, grant_path, MAX_LOGIN_ITEMS, MAX_PATHS};
     let list = |key: &str| -> std::result::Result<Vec<String>, String> {
         match g.get(key) {
             None => Ok(vec![]),
@@ -166,9 +173,14 @@ fn ask_grant(g: &serde_json::Value, field: &str) -> std::result::Result<AskGrant
                 .map(|s| s.as_str().map(|s| s.trim().to_owned()).ok_or(format!("{field}.grant.{key}: text"))).collect(),
         }
     };
-    ensure_str(g.is_object() && g.as_object().unwrap().keys().all(|k| k == "delete" || k == "loginItems"), format!("{field}.grant: {{delete: [exact paths]}} and/or {{loginItems: [names]}}"))?;
+    ensure_str(g.is_object() && g.as_object().unwrap().keys().all(|k| matches!(k.as_str(), "delete" | "loginItems" | "keychain")), format!("{field}.grant: {{delete: [exact paths]}}, {{loginItems: [names]}} and/or {{keychain: one new file path}}"))?;
     let (delete, login_items) = (list("delete")?, list("loginItems")?);
-    ensure_str(!delete.is_empty() || !login_items.is_empty(), format!("{field}.grant: name a path to delete or a login item"))?;
+    // Exactly one path, as text (never a list): the hook covers one new file per grant.
+    let keychain = match g.get("keychain") {
+        None => None,
+        Some(k) => Some(k.as_str().ok_or(format!("{field}.grant.keychain: one new file path, as text"))?.trim().to_owned()),
+    };
+    ensure_str(!delete.is_empty() || !login_items.is_empty() || keychain.is_some(), format!("{field}.grant: name a path to delete, a login item or a new keychain"))?;
     ensure_str(delete.len() <= MAX_PATHS && login_items.len() <= MAX_LOGIN_ITEMS, format!("{field}.grant: at most {MAX_PATHS} paths and {MAX_LOGIN_ITEMS} login items"))?;
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_else(|| "/var/empty".into());
     let vault = heimdall_home::home_dir();
@@ -176,9 +188,15 @@ fn ask_grant(g: &serde_json::Value, field: &str) -> std::result::Result<AskGrant
         grant_path(p, &home, &vault)?;
     }
     let login_items = login_items.iter().map(|n| grant_login_item(n)).collect::<std::result::Result<Vec<_>, _>>()?;
+    if let Some(k) = &keychain {
+        // The hook's own rules (one new `<name>.keychain-db` right inside ~/Library/Keychains or a Vault project,
+        // never macOS's own), and new at the card as the writer checks again at the click.
+        let path = grant_keychain(k, &home, &vault)?;
+        ensure_str(std::fs::symlink_metadata(&path).is_err(), format!("{field}.grant.keychain: {} already exists; a grant makes only a new keychain", path.display()))?;
+    }
     let unique = |v: &[String]| v.iter().enumerate().all(|(i, a)| !v[..i].contains(a));
     ensure_str(unique(&delete) && unique(&login_items), format!("{field}.grant: name each path and login item once"))?;
-    Ok(AskGrant { delete, login_items })
+    Ok(AskGrant { delete, login_items, keychain })
 }
 fn ensure_str(ok: bool, why: String) -> std::result::Result<(), String> {
     if ok { Ok(()) } else { Err(why) }

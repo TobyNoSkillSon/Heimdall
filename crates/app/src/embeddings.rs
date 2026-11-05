@@ -7,7 +7,20 @@ pub struct Jobs {
     stop:Arc<(Mutex<bool>,Condvar)>,
     thread:Option<std::thread::JoinHandle<()>>,
     status:Arc<Mutex<Option<String>>>,
+    search:Arc<std::sync::atomic::AtomicU8>,
 }
+/// Whether memory search runs here (Setup's row, `setup_ready::memory_row`).
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub enum Search {
+    /// Nothing embedded yet this run.
+    NotYet,
+    /// The worker loaded and embedded.
+    Running,
+    /// The worker refused to load: too little free memory (it needs 8 GiB; VM run 5 Nov 05:43, a 16 GB Mac).
+    NoMemory,
+}
+/// A worker's refusal for memory, as it words it (`embedding/worker.py`, `Worker.swift`).
+pub(crate) fn memory_refusal(cause:&str)->bool {cause.contains("admission needs")}
 pub fn backfill_gate() -> BackfillGate {
     heimdall_night::gate::state().map(|s|BackfillGate{on_ac:s.on_ac,idle_seconds:s.idle_seconds})
         .unwrap_or(BackfillGate{on_ac:false,idle_seconds:f64::NAN})
@@ -16,6 +29,8 @@ impl Jobs {
     pub fn start(root:PathBuf,service:Arc<Service>,floor:Arc<std::sync::atomic::AtomicU64>) -> Result<Self> {
         let stop=Arc::new((Mutex::new(false),Condvar::new()));let state=stop.clone();
         let status=Arc::new(Mutex::new(None));let report=status.clone();
+        let search=Arc::new(std::sync::atomic::AtomicU8::new(0));let seen=search.clone();
+        let mark=move|s:Search| seen.store(s as u8,std::sync::atomic::Ordering::Release);
         let thread=std::thread::Builder::new().name("heimdall-embeddings".into()).spawn(move|| {
             let _=heimdall_night::gate::background_thread();
             let model=heimdall_archive::embedding::model();
@@ -46,6 +61,7 @@ impl Jobs {
                     })();
                     match result {
                         Ok(n)=>{
+                            if n>0 {mark(Search::Running);}
                             match timeline::embedding_error_status(&root,&model) {
                                 Ok(status)=>*report.lock().unwrap()=status,
                                 Err(e) if heimdall_archive::embedding::database_busy(&e)=>{},
@@ -58,6 +74,7 @@ impl Jobs {
                         // next successful pass replaces this from the archive's error rows.
                         Err(e) if heimdall_archive::embedding::database_busy(&e)=>{},
                         Err(e)=>{
+                            if memory_refusal(&format!("{e:#}")) {mark(Search::NoMemory);}
                             eprintln!("embedding job failed: {e:#}");
                             *report.lock().unwrap()=Some(timeline::embedding_failure_status(&format!("{e:#}")));
                         },
@@ -69,9 +86,12 @@ impl Jobs {
             }
             if let Ok(mut provider)=service.0.lock() {provider.unload();}
         })?;
-        Ok(Self{stop,thread:Some(thread),status})
+        Ok(Self{stop,thread:Some(thread),status,search})
     }
     pub fn status(&self)->Option<String> {self.status.lock().unwrap().clone()}
+    pub fn search(&self)->Search {
+        match self.search.load(std::sync::atomic::Ordering::Acquire) {1=>Search::Running,2=>Search::NoMemory,_=>Search::NotYet}
+    }
 }
 impl Drop for Jobs {
     fn drop(&mut self) {

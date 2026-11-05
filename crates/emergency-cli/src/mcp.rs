@@ -85,6 +85,42 @@ fn list_state(data: &Path, caller: Option<&str>) -> Option<String> {
     listable(data, caller).map(|c| c.token_digest())
 }
 
+/// A digest of the tool definitions Heimdall serves this session now (`None` when it lists none or cannot be asked).
+fn tools_digest(data: &Path, caller: Option<&str>) -> Option<String> {
+    use sha2::Digest;
+    let tools = listable(data, caller).and_then(|c| rpc(&c, "tools/list", json!({})).ok())?;
+    Some(sha2::Sha256::digest(tools["tools"].to_string().as_bytes()).iter().take(8).map(|b| format!("{b:02x}")).collect())
+}
+/// How often (in the watcher's one-second ticks) the definitions are compared when the grant has not changed.
+const TOOLS_EVERY: u64 = 10;
+/// When the session should be told to list again (bug note 2026-11-04T23-37-22: the relay thread kept the `ask`
+/// schema it loaded on 3 Nov, before grants, through the 4 Nov update). It is told once its grant (the token) or the
+/// tool definitions Heimdall serves have changed and held for a tick, so a re-issue's brief gap (no file, then the new
+/// one) is one notice for the settled list, never a notice for the empty list in between. A definition change with the
+/// same token (an update that kept the relay's grant) is seen within `TOOLS_EVERY` ticks.
+struct Watch { told: (Option<String>, Option<String>), last: (Option<String>, Option<String>), tick: u64 }
+impl Watch {
+    fn new(data: &Path, caller: Option<&str>) -> Watch {
+        let now = (list_state(data, caller), tools_digest(data, caller));
+        Watch { told: now.clone(), last: now, tick: 0 }
+    }
+    /// One tick: whether to send `notifications/tools/list_changed` now.
+    fn step(&mut self, data: &Path, caller: Option<&str>) -> bool {
+        self.tick += 1;
+        let token = list_state(data, caller);
+        let fresh = token != self.last.0 || self.tick % TOOLS_EVERY == 0;
+        let tools = match &token {
+            None => None,
+            Some(_) if fresh => tools_digest(data, caller).or_else(|| if token == self.last.0 { self.last.1.clone() } else { None }),
+            Some(_) => self.last.1.clone(),
+        };
+        let now = (token, tools);
+        if now != self.last { self.last = now; return false; }
+        if now != self.told { self.told = now; return true; }
+        false
+    }
+}
+
 /// One JSON-RPC message from Claude: the answer, or `None` for a notification.
 pub fn handle(msg: &Value, data: &Path, caller: Option<&str>) -> Option<Value> {
     let id = msg.get("id")?.clone();
@@ -110,8 +146,9 @@ pub fn handle(msg: &Value, data: &Path, caller: Option<&str>) -> Option<Value> {
 }
 
 /// The stdio loop: one JSON message per line in, one per line out, until Claude closes stdin. Each call runs on its
-/// own thread (a slow tool holds up nothing else); a watcher tells Claude to list again when the grant changes for this
-/// session (`notifications/tools/list_changed`), so a session started before its grant still gets the tools. A
+/// own thread (a slow tool holds up nothing else); a watcher tells Claude to list again when the grant or Heimdall's
+/// tool definitions change for this session (`notifications/tools/list_changed`, `Watch`), so a session started before
+/// its grant, or before an update, gets the tools as they are. A
 /// cancelled call is not stopped: Heimdall's dispatch has no cancel, as for Pi.
 pub fn serve(data: &Path) -> (i32, String) {
     use std::sync::{Arc, Mutex};
@@ -121,14 +158,10 @@ pub fn serve(data: &Path) -> (i32, String) {
     {
         let (data, caller, out) = (data.to_path_buf(), caller.clone(), out.clone());
         std::thread::spawn(move || {
-            let mut seen = list_state(&data, caller.as_deref());
+            let mut watch = Watch::new(&data, caller.as_deref());
             loop {
                 std::thread::sleep(Duration::from_secs(1));
-                let now = list_state(&data, caller.as_deref());
-                if now != seen {
-                    seen = now;
-                    if !send(&out, &json!({"jsonrpc":"2.0","method":"notifications/tools/list_changed"})) { break; }
-                }
+                if watch.step(&data, caller.as_deref()) && !send(&out, &json!({"jsonrpc":"2.0","method":"notifications/tools/list_changed"})) { break; }
             }
         });
     }
@@ -309,6 +342,48 @@ mod tests {
         assert!(list_state(d.path(), Some("t-relay")).is_some_and(|now| Some(now) != before), "a new token changes the list");
         std::fs::remove_file(d.path().join("emergency/connection.json")).unwrap();
         assert!(list_state(d.path(), Some("t-relay")).is_none());
+    }
+
+    /// A server answering every request with `result` until dropped.
+    fn steady(result: Value) -> String {
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/mcp", server.local_addr().unwrap());
+        std::thread::spawn(move || for s in server.incoming() {
+            let Ok(mut s) = s else { break };
+            let mut req = String::new();
+            let mut buf = vec![0u8; 65536];
+            while !req.ends_with('}') { let Ok(n) = s.read(&mut buf) else { break }; if n == 0 { break; } req.push_str(&String::from_utf8_lossy(&buf[..n])); }
+            let body = json!({"jsonrpc":"2.0","id":1,"result":result}).to_string();
+            let _ = write!(s, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}", body.len());
+        });
+        url
+    }
+
+    /// Bug note 2026-11-04T23-37-22: the session is told to list again when Heimdall's definitions change under the
+    /// same grant, and once per re-issue (after the gap settles), never for the gap itself.
+    #[test]
+    fn the_session_is_told_when_the_definitions_or_the_grant_change() {
+        let d = tempfile::tempdir().unwrap();
+        let old = steady(json!({"tools":[{"name":"ask","inputSchema":{"type":"object"}}]}));
+        grant(d.path(), &old, "t-relay");
+        let me = Some("t-relay");
+        let mut w = Watch::new(d.path(), me);
+        assert!(w.told.1.is_some());
+        assert!((0..2 * TOOLS_EVERY).all(|_| !w.step(d.path(), me)), "nothing changed");
+        // An update with the same token: new definitions, seen within TOOLS_EVERY ticks, told once.
+        let new = steady(json!({"tools":[{"name":"ask","inputSchema":{"type":"object","properties":{"grant":{}}}}]}));
+        grant(d.path(), &new, "t-relay");
+        let told: Vec<bool> = (0..2 * TOOLS_EVERY).map(|_| w.step(d.path(), me)).collect();
+        assert_eq!(told.iter().filter(|t| **t).count(), 1, "{told:?}");
+        // A re-issue: the file goes, then a new token comes. One notice, after the new grant holds.
+        std::fs::remove_file(d.path().join("emergency/connection.json")).unwrap();
+        assert!(!w.step(d.path(), me), "the gap is not told");
+        std::fs::write(d.path().join("emergency/connection.json"), json!({"url":new,"token":"tok-2","thread":"t-relay"}).to_string()).unwrap();
+        let told: Vec<bool> = (0..3).map(|_| w.step(d.path(), me)).collect();
+        assert_eq!(told, [false, true, false]);
+        // Another thread never lists, so is never told.
+        let mut other = Watch::new(d.path(), Some("t-worker"));
+        assert!((0..TOOLS_EVERY + 1).all(|_| !other.step(d.path(), Some("t-worker"))));
     }
 
     #[test]

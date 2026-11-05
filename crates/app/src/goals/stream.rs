@@ -78,7 +78,8 @@ fn without_headers(t: &str) -> String {
     let mut out: Vec<&str> = Vec::new();
     for l in t.lines() {
         let s = l.trim();
-        if BOILERPLATE.contains(&s) { continue }
+        // In either edition's wording (the public one sends the user's name or "the user": `agent::identity::for_agent`).
+        if BOILERPLATE.iter().any(|b| *b == s || agent::identity::public_wording(b, &agent::identity::current()) == s) { continue }
         if s.starts_with("[Heimdall delivery: ") && s.ends_with(']') || s.starts_with("[Now: ") && s.ends_with(']') { continue }
         out.push(l);
     }

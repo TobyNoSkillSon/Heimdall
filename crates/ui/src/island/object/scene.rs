@@ -1115,6 +1115,11 @@ impl Model {
             }
             Target::ReplyBand => self.reply_open = None,
             Target::Hush => self.voice.hushed = true,
+            // The look ends at once (as a cut does), before the app's own cut comes back as `SpeechCut`.
+            Target::StopSpeech => {
+                self.voice_cut(t);
+                self.outputs.push(Output::StopSpeech);
+            }
             Target::ReplyCopy => {
                 let text = self.turn_paragraphs().join("\n").trim().to_string();
                 if let (false, Some(v)) = (text.is_empty(), self.reply_open.as_mut()) {

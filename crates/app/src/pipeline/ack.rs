@@ -70,6 +70,20 @@ impl Pipeline {
         }
         decide::send_v3::Generation::shipped().picks_acks()
     }
+    /// The user addressed Heimdall by name in `text` while on a call (a call line within `ACK_CALL_NS`). Rule (5 Nov):
+    /// answer the user by name in a call within about 2 s with a short line, so the ack always plays (the rule's line, at
+    /// once), whatever the decider or the reply timing would say. The call's voice rules still hold: the call level
+    /// (`speech_policy::voice_gain`), and anyone talking stops it (`Tools::guest_talked_over`, `ack_speech_start`).
+    pub(super) fn named_in_call(&self, text: &str) -> bool {
+        decide::send::addressed_by_name(text) && self.tools.speech_policy.call_heard_within(self.ack_now(), ACK_CALL_NS)
+    }
+    /// `ack_plan` for a wake on `text`: a name address on a call always gets the rule's line now (`named_in_call`).
+    pub(super) fn ack_plan_for(&self, decided: Option<Option<&str>>, text: &str) -> AckPlan {
+        if self.named_in_call(text) {
+            return AckPlan::Rule;
+        }
+        self.ack_plan(decided)
+    }
     /// The plan for a wake: `decided` is the decider's verdict on these words (None: sent before it answered), and
     /// its line when it picked one.
     pub(super) fn ack_plan(&self, decided: Option<Option<&str>>) -> AckPlan {
@@ -193,9 +207,10 @@ impl Pipeline {
             },
             plan => plan,
         };
-        // Fewer acks: when replies have been coming close behind the ack's moment, the reply answers by itself.
+        // Fewer acks: when replies have been coming close behind the ack's moment, the reply answers by itself. Not
+        // for his name on a call: that line always plays (`named_in_call`).
         let plan = match plan {
-            AckPlan::Line(_) | AckPlan::Rule if self.reply_expected_soon(source) => AckPlan::Silent("reply_expected_soon"),
+            AckPlan::Line(_) | AckPlan::Rule if !self.named_in_call(text) && self.reply_expected_soon(source) => AckPlan::Silent("reply_expected_soon"),
             plan => plan,
         };
         // A retired line the decider still knows plays the line that replaced it.
@@ -770,6 +785,60 @@ mod tests {
         quiet(&mut a, &mic, 1_010_000_000_000, 1_012_600_000_000);
         assert!(a.instant_ack(&mic, 3, "s:3", "Build it."));
         wait_idle(&a.tools);
+        assert_eq!(log.lock().unwrap().len(), 2);
+    }
+
+    /// 5 Nov: answer the user by name in a call within about 2 s with a short line. On a call his name always gets
+    /// the rule's line at once: decider v3 does not hold it for d1's verdict (which may pick nothing), and a reply
+    /// expected soon does not skip it. Off a call, or without his name, the decider's plan stands as before.
+    #[test]
+    fn on_a_call_his_name_always_gets_the_short_line_at_once() {
+        let (_t, mut a, mic) = rig();
+        a.hooks.decider_v3 = Some(true);
+        a.settings.ack_delay_ms = 0;
+        jarvis(&a, "on_it", "On it.", "en", 900);
+        let log = probe(&a.tools, Duration::from_millis(1));
+        a.tools.speech_policy.other_line(400_000_000_000);
+        quiet(&mut a, &mic, 590_000_000_000, 591_600_000_000);
+        a.hooks.expected_reply_ms = Some(1_000);
+        let named = "Heimdall, can you check the build?";
+        assert_eq!(a.ack_plan_for(None, named), super::AckPlan::Rule, "not held for d1");
+        assert_eq!(a.ack_plan_for(Some(None), named), super::AckPlan::Rule, "d1's plain send does not silence it");
+        assert_eq!(a.ack_plan_for(None, "Can you check the build?"), super::AckPlan::Later, "no name: the decider decides");
+        let plan = a.ack_plan_for(None, named);
+        assert!(a.instant_ack_with(&mic, 1, "s:1", named, plan), "{:#?}", acks(&a));
+        wait_idle(&a.tools);
+        assert_eq!(acks(&a)[0]["outcome"], "playing", "at the wake, with no added wait");
+        // Ten minutes after the call's last line: not a call any more, the decider's plan and the reply timing apply.
+        quiet(&mut a, &mic, 1_010_000_000_000, 1_011_600_000_000);
+        assert_eq!(a.ack_plan_for(None, named), super::AckPlan::Later);
+        assert!(!a.instant_ack(&mic, 2, "s:2", named), "a reply expected soon skips it off a call");
+        assert_eq!(acks(&a)[1]["reason"], "reply_expected_soon");
+        assert_eq!(log.lock().unwrap().len(), 1);
+    }
+
+    /// Review 5 Nov: the in-call level (`CALL_VOICE_GAIN`) was set only when the agent queued speech, so his name's ack
+    /// in a call played at full level, and after the call lines stayed quiet until the agent spoke. Now every line
+    /// takes its level from the call state as it starts.
+    #[test]
+    fn in_a_call_the_ack_is_quieter_and_after_the_call_the_next_line_is_at_full_level() {
+        let (_t, mut a, mic) = rig();
+        a.settings.ack_delay_ms = 0;
+        jarvis(&a, "on_it", "On it.", "en", 900);
+        let log = probe(&a.tools, Duration::from_millis(1));
+        let now = capture::host_now_ns();
+        a.tools.speech_policy.other_line(now);
+        quiet(&mut a, &mic, now, now + 2_600_000_000);
+        assert!(a.instant_ack(&mic, 1, "s:1", "Heimdall, build it."), "{:#?}", acks(&a));
+        wait_idle(&a.tools);
+        assert_eq!(a.tools.test_levels.lock().unwrap().last().copied(), Some(crate::bridge::speech_policy::CALL_VOICE_GAIN), "quieter in the call");
+        // The call is over (its last line long ago): the next line is at full level, with no agent speech between.
+        a.tools.speech_policy.test_last_line(1);
+        let later = capture::host_now_ns();
+        quiet(&mut a, &mic, later, later + 2_600_000_000);
+        assert!(a.instant_ack(&mic, 2, "s:2", "Build it."), "{:#?}", acks(&a));
+        wait_idle(&a.tools);
+        assert_eq!(a.tools.test_levels.lock().unwrap().last().copied(), Some(1.), "full level after the call");
         assert_eq!(log.lock().unwrap().len(), 2);
     }
 

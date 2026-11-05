@@ -325,6 +325,8 @@ fn play_line(tools: &Arc<Tools>, clip: i64, epoch: u64, utterance: &str, ack: Op
     if bank.line_playing.swap(true, Ordering::AcqRel) {
         return Err("line_playing");
     }
+    // Its level and patience from the call state now (in a call the ack is quieter, `Tools::apply_call_level`).
+    tools.apply_call_level();
     let is_ack = ack.is_some();
     // A new ack's stop flag is cleared only once it owns the voice, so a stop for one playing now is never lost.
     if let Some(a) = &ack { a.stop.store(false, Ordering::Release); }

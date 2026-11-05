@@ -23,8 +23,8 @@ use crate::speech_voice::SpeechVoiceState;
 pub(super) const CONTENT_Y: f64 = 68.0;
 /// Under the 24-pt two-line question (`h1.q`).
 const Q_CONTENT_Y: f64 = 84.0;
-const H1_Y: f64 = 12.0;
-const TILE: (f64, f64) = (132.0, 96.0);
+pub(super) const H1_Y: f64 = 12.0;
+pub(super) const TILE: (f64, f64) = (132.0, 96.0);
 /// `.row`: card rows; `.row.role` are taller.
 const ROW: f64 = 48.0;
 const ACT_ROW: f64 = 44.0;
@@ -85,7 +85,7 @@ impl Frame {
     }
 }
 
-fn centred(child: &NSView, parent: &NSView, y: f64) {
+pub(super) fn centred(child: &NSView, parent: &NSView, y: f64) {
     let w = parent.frame().size.width;
     let f = child.frame();
     child.setFrameOrigin(NSPoint::new(((w - f.size.width) / 2.0).round(), y));
@@ -99,7 +99,7 @@ fn row_label(parent: &NSView, s: &str, y: f64, h: f64, mtm: MainThreadMarker) ->
     text(parent, s, &font, &t2(), 16.0, y + ((h - line_height(&font)) / 2.0).round(), 104.0, left(), mtm)
 }
 
-fn check_image(mtm: MainThreadMarker) -> Retained<NSImageView> {
+pub(super) fn check_image(mtm: MainThreadMarker) -> Retained<NSImageView> {
     image_view(rect(0.0, 0.0, 16.0, 16.0), symbol("checkmark.circle.fill", 14.0, 0.0), Some(&hex(GREEN, 1.0)), mtm)
 }
 
@@ -110,7 +110,7 @@ pub(super) fn mark_image(mark: &str, size: f64) -> Option<Retained<NSImage>> {
 
 /// Right-aligned run along a row: each visible view placed from `right` leftwards, `gap` apart, centred on the row.
 /// Returns the left edge of the run.
-fn lay_right(views: &[&NSView], right: f64, h: f64, gap: f64) -> f64 {
+pub(super) fn lay_right(views: &[&NSView], right: f64, h: f64, gap: f64) -> f64 {
     let mut x = right;
     for v in views {
         if v.isHidden() {
@@ -202,7 +202,12 @@ impl NamePage {
 // ---- Do you have a subscription, or do you want a local model? ----
 
 /// The tiles, in the prototype's order: the subscriptions, then this Mac.
-pub(crate) const BRAIN_ORDER: [ProviderChoice; 4] = [ProviderChoice::ChatGpt, ProviderChoice::ClaudeViaT3, ProviderChoice::OpenCodeGo, ProviderChoice::SplashEngine];
+pub(crate) const BRAIN_ORDER: [ProviderChoice; 5] = [ProviderChoice::ChatGpt, ProviderChoice::ClaudeViaT3, ProviderChoice::OpenCodeGo, ProviderChoice::SplashEngine, ProviderChoice::Custom];
+/// The provider tiles: a little narrower than the others so five fit the window.
+const BRAIN_TILE: (f64, f64) = (124.0, 96.0);
+
+/// This Mac's model and its download (`inference-engine.json`'s default, UD-Q4_K_XL: 17,378,626,464 bytes).
+pub(crate) const THIS_MAC_MODEL: &str = "Qwen3.8 27B · 17.4 GB download";
 
 /// A provider tile's name: what the user knows it as.
 pub(crate) fn tile_title(choice: ProviderChoice) -> &'static str {
@@ -211,6 +216,7 @@ pub(crate) fn tile_title(choice: ProviderChoice) -> &'static str {
         ProviderChoice::ClaudeViaT3 => "Claude Code",
         ProviderChoice::OpenCodeGo => "OpenCode Go",
         ProviderChoice::SplashEngine => "This Mac",
+        ProviderChoice::Custom => "Custom",
     }
 }
 
@@ -231,13 +237,18 @@ pub(crate) fn brain_rows(choice: ProviderChoice, status: &ProviderStatus) -> Vec
             rows.push(("Account", value, button));
         }
         ProviderChoice::ClaudeViaT3 => {
+            // Add installs T3 Code when it is missing and connects it (the click is the consent), then the relay is
+            // the agent.
             rows.push(("Plan", "Your Claude Code plan, through T3 Code".into(), (!status.ready).then_some("Add")));
         }
         ProviderChoice::SplashEngine => {
             rows.push(("Engine", "Splash, on this Mac".into(), (!status.ready).then_some("Use This Mac")));
-            if let Some(model) = &status.model {
-                rows.push(("Model", model.clone(), None));
-            }
+            rows.push(("Model", status.model.clone().unwrap_or_else(|| THIS_MAC_MODEL.into()), None));
+        }
+        ProviderChoice::Custom => {
+            let (value, button) = if let Some(problem) = &status.problem { (problem.clone(), Some("Connect…")) }
+                else if status.ready { ("Connected".to_string(), None) } else { ("A server of your own".to_string(), Some("Connect…")) };
+            rows.push(("Server", value, button));
         }
     }
     rows
@@ -264,8 +275,8 @@ impl BrainPage {
         let doc = &frame.doc;
         heading(doc, &SetupStep::Providers.title(""), 24.0, 4.0, mtm);
         // `.tiles`: the Subscription group, 22 pt, the Local group; each captioned under its tiles.
-        let (tw, th) = TILE;
-        let groups: [(&str, &[ProviderChoice]); 2] = [("Subscription", &BRAIN_ORDER[..3]), ("Local", &BRAIN_ORDER[3..])];
+        let (tw, th) = BRAIN_TILE;
+        let groups: [(&str, &[ProviderChoice]); 2] = [("Subscription", &BRAIN_ORDER[..3]), ("Your own", &BRAIN_ORDER[3..])];
         let widths: Vec<f64> = groups.iter().map(|(_, g)| g.len() as f64 * tw + (g.len() - 1) as f64 * 10.0).collect();
         let row_w = widths.iter().sum::<f64>() + 22.0;
         let strip = FlippedView::new(rect(0.0, 0.0, row_w, th + 8.0 + 17.0), mtm);
@@ -315,7 +326,7 @@ impl BrainPage {
         for (choice, tile) in &self.tiles {
             tile.set_selected(Some(*choice) == chosen);
             let s = status(*choice);
-            let caption = s.ready.then(|| (match choice { ProviderChoice::SplashEngine => "In use", ProviderChoice::ClaudeViaT3 => "Added", _ => "Signed in" }.to_string(), hex(GREEN, 1.0)));
+            let caption = s.ready.then(|| (match choice { ProviderChoice::SplashEngine => "In use", ProviderChoice::ClaudeViaT3 => "Added", ProviderChoice::Custom => "Connected", _ => "Signed in" }.to_string(), hex(GREEN, 1.0)));
             tile.set_look(Look::Tile { image: mark_image(choice.mark(), 22.0), image_side: 26.0, title: tile_title(*choice).into(), caption });
         }
         let Some(choice) = chosen else {
@@ -455,8 +466,8 @@ impl ListenPage {
         for (i, o) in options.iter().enumerate() {
             let i = i as isize;
             self.seg.setLabel_forSegment(&ns(&o.label), i);
-            self.seg.setEnabled_forSegment(o.present, i);
-            let tip = if o.present { format!("{} RAM while deciding · {} on disk", size_text(o.memory_bytes), size_text(o.disk_bytes)) } else { format!("{} is not on this Mac", o.label) };
+            self.seg.setEnabled_forSegment(o.present || decider.downloadable, i);
+            let tip = if o.present || decider.downloadable { format!("{} RAM while deciding · {} on disk", size_text(o.memory_bytes), size_text(o.disk_bytes)) } else { format!("{} is not on this Mac", o.label) };
             self.seg.setToolTip_forSegment(Some(&ns(&tip)), i);
         }
         self.seg.setHidden(options.is_empty());
@@ -578,6 +589,16 @@ fn reason(permission: Permission) -> &'static str {
 }
 
 /// A permission's state as its row says it: the words, and whether they are green.
+/// A permission row's words. Screen Recording and Accessibility are optional (they never hold Start back): until
+/// allowed they read Optional, in grey, asked or not (macOS reports no denial for them, VM run 5 Nov: "Denied" before
+/// any choice; VM run 5 Nov 05:07: nothing said they were optional). The microphone's denial is macOS's own.
+pub(crate) fn permission_words(permission: Permission, state: PermissionState) -> (&'static str, bool) {
+    match (permission, state) {
+        (Permission::ScreenRecording | Permission::Accessibility, s) if s != PermissionState::Granted => ("Optional", false),
+        _ => permission_text(state),
+    }
+}
+
 pub(crate) fn permission_text(state: PermissionState) -> (&'static str, bool) {
     match state {
         PermissionState::Granted => ("Allowed", true),
@@ -644,9 +665,9 @@ impl AllowPage {
     pub(super) fn sync(&self, permissions: &[(Permission, PermissionState)], all_granted: bool, requesting: bool) {
         for (row, permission) in self.rows.iter().zip(Permission::ALL) {
             let state = permissions.iter().find(|(p, _)| *p == permission).map(|e| e.1).unwrap_or(PermissionState::NotDetermined);
-            let (words, green) = permission_text(state);
+            let (words, green) = permission_words(permission, state);
             retext(&row.state, words, true);
-            row.state.setTextColor(Some(&*if green { t1() } else if state == PermissionState::Denied { hex(ORANGE, 1.0) } else { t3() }));
+            row.state.setTextColor(Some(&*if green { t1() } else if words == "Denied" { hex(ORANGE, 1.0) } else { t3() }));
             // System Audio has no status call: say why it is not "Allowed" yet where the user looks for it.
             let tip = (state == PermissionState::Unconfirmed).then_some("macOS has no status for this one. It shows Allowed once sound arrives from an app in App Audio.");
             row.state.setToolTip(tip.map(ns).as_deref());

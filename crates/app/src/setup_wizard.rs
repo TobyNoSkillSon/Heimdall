@@ -11,14 +11,41 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-/// Whether Setup opens by itself at launch, and where: at Welcome, the whole tour, until setup was requested (both
-/// editions); then, in the public edition only, the home step while no home folder was chosen. The personal edition
-/// never opens it for its unmoved (legacy) profile; its owner opens it from the menu.
-pub fn first_launch(public: bool, setup_requested: bool, needs_choice: impl FnOnce() -> bool) -> Option<ui::SetupStep> {
+/// Whether Setup opens by itself at launch, and where: at the step a first Setup was on when Heimdall stopped
+/// (`resume`; VM run 5 Nov: the watchdog relaunched it mid-Setup and the window vanished); else at Welcome, the whole
+/// tour, until setup was requested (both editions); then, in the public edition only, the home step while no home
+/// folder was chosen. The personal edition never opens it for its unmoved (legacy) profile; its owner opens it from the
+/// menu.
+pub fn first_launch(public: bool, setup_requested: bool, resume: Option<ui::SetupStep>, needs_choice: impl FnOnce() -> bool) -> Option<ui::SetupStep> {
+    if resume.is_some() {
+        return resume;
+    }
     if !setup_requested {
         return Some(ui::SetupStep::Welcome);
     }
     (public && needs_choice()).then_some(ui::SetupStep::Home)
+}
+
+/// Whether Setup's recorded step is past the listening page, whose Continue starts the model downloads.
+pub(crate) fn past_listening(step: Option<&str>) -> bool {
+    let at = |s: ui::SetupStep| ui::SetupStep::ALL.iter().position(|x| *x == s);
+    step.and_then(ui::SetupStep::from_key).is_some_and(|s| at(s) > at(ui::SetupStep::Decider))
+}
+
+/// Whether the model downloads are wanted at launch (public edition): after Setup's Allow All, or once Setup passed
+/// the listening page (review 5 Nov: quit on Voice or Allow, relaunch, and nothing downloaded; Start never enabled).
+pub(crate) fn downloads_wanted(settings: &crate::settings::Settings) -> bool {
+    settings.setup_requested || past_listening(settings.setup_step.as_deref())
+}
+
+/// The first Setup has not been finished: never greeted and its Done not pressed yet.
+pub fn setup_unfinished(s: &crate::settings::Settings) -> bool {
+    s.first_run_greeted == Some(false) && !s.first_run_greeting_due
+}
+
+/// Where a relaunch reopens Setup (`first_launch`): the saved step, while the first Setup is not finished.
+pub fn resume_step(s: &crate::settings::Settings) -> Option<ui::SetupStep> {
+    s.setup_step.as_deref().filter(|_| setup_unfinished(s)).and_then(ui::SetupStep::from_key)
 }
 
 /// The one wake Setup's Done sends, once per profile ("we just send it as a prompt"). Only the public
@@ -26,12 +53,11 @@ pub fn first_launch(public: bool, setup_requested: bool, needs_choice: impl FnOn
 /// coding agents to work without asking (`harness_autonomy::wanted`); the agent verifies that once and reports it in a
 /// sentence.
 pub fn greeting(public: bool, check: Option<(&Path, &Path)>) -> String {
-    let mut text = String::from(
-        "This is your first run on the user's Mac: they have just finished setting you up. Greet them warmly and briefly \
-         explain what you can do.",
-    );
+    // The spoken greeting is the user's only sign that Heimdall started, so it is short and spoken.
+    let mut text = String::from(GREETING);
     if public {
-        text.push_str(" Load the `onboarding` skill first.");
+        // The tour waits until they ask for it (the `onboarding` skill's "First run").
+        text.push_str(" A tour of what you can do waits until they ask (the `onboarding` skill).");
     }
     if let Some((cli, data)) = check {
         let quote = |p: &Path| format!("'{}'", p.display().to_string().replace('\'', "'\\''"));
@@ -47,6 +73,11 @@ pub fn greeting(public: bool, check: Option<(&Path, &Path)>) -> String {
     }
     text
 }
+
+/// The first-run message's intent, then what the reply is: the spoken greeting is the confirmation
+/// that Heimdall started; nothing on screen says so.
+pub const GREETING: &str = "The user just finished setting you up. Greet them and talk to them. Your first reply is a short \
+     spoken welcome: a sentence or two with `speak`, no list of what you can do.";
 
 /// The greeting goes to the agent once Setup's Done was pressed (`due`) on a profile never greeted
 /// (`Settings::first_run_greeted`), and is then marked sent. A profile set up before it, or one already greeted, gets
@@ -167,7 +198,7 @@ fn detect_t3() -> t3::install::Detection {
     t3::install::detect(&home, &t3::install::app_dirs(&home))
 }
 
-fn current_t3(install: ui::T3Install) -> ui::T3Setup {
+pub(crate) fn current_t3(install: ui::T3Install) -> ui::T3Setup {
     t3_state(&detect_t3(), t3_consent().load(Ordering::Acquire), install)
 }
 
@@ -177,6 +208,11 @@ static VELLA_INSTALLING: AtomicBool = AtomicBool::new(false);
 
 /// Vella in these folders: an `.app` whose Info.plist names Vella's bundle ID.
 pub fn find_vella(dirs: &[std::path::PathBuf]) -> Option<ui::VellaApp> {
+    find_app(dirs, VELLA_ID).map(|(path, version)| ui::VellaApp { path, version })
+}
+
+/// The first `.app` in these folders whose Info.plist names `id`: its path and version.
+fn find_app(dirs: &[std::path::PathBuf], id: &str) -> Option<(std::path::PathBuf, String)> {
     let read = |plist: &str, key: &str| -> Option<String> {
         let after = &plist[plist.find(&format!("<key>{key}</key>"))?..];
         let start = after.find("<string>")? + "<string>".len();
@@ -186,11 +222,44 @@ pub fn find_vella(dirs: &[std::path::PathBuf]) -> Option<ui::VellaApp> {
         .filter(|p| p.extension().is_some_and(|e| e == "app"))
         .find_map(|path| {
             let plist = std::fs::read_to_string(path.join("Contents/Info.plist")).ok()?;
-            (read(&plist, "CFBundleIdentifier")? == VELLA_ID).then(|| ui::VellaApp {
-                version: read(&plist, "CFBundleShortVersionString").unwrap_or_default(),
-                path,
-            })
+            (read(&plist, "CFBundleIdentifier")? == id).then(|| (path, read(&plist, "CFBundleShortVersionString").unwrap_or_default()))
         })
+}
+
+/// Arsenal (github.com/TobyNoSkillSon/Arsenal): its bundle ID, its Homebrew cask (the public tap), and the MCP bridge
+/// inside the app, which finds the running app and its access token on its own (Arsenal's README, "Connect an agent
+/// over MCP").
+pub const ARSENAL_ID: &str = "dev.arsenal.app";
+pub const ARSENAL_CASK: &str = "tobynoskillson/tap/arsenal";
+pub const ARSENAL_BRIDGE: &str = "Contents/Helpers/arsenal-mcp";
+static ARSENAL_INSTALLING: AtomicBool = AtomicBool::new(false);
+
+/// Arsenal in these folders (`/Applications`, `~/Applications`), when its bridge is inside.
+pub fn find_arsenal(dirs: &[std::path::PathBuf]) -> Option<ui::ArsenalApp> {
+    find_app(dirs, ARSENAL_ID).filter(|(path, _)| path.join(ARSENAL_BRIDGE).is_file()).map(|(path, version)| ui::ArsenalApp { path, version })
+}
+
+pub fn arsenal_install_command(brew: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new(brew);
+    command.args(["install", "--cask", ARSENAL_CASK]).stdin(std::process::Stdio::null());
+    command
+}
+
+pub fn current_arsenal(install: ui::T3Install, settings: &crate::settings::Settings) -> ui::ArsenalSetup {
+    let home = Env::current().user_home;
+    let brews: Vec<&Path> = BREWS.iter().map(Path::new).collect();
+    let found = find_arsenal(&t3::install::app_dirs(&home));
+    let on = settings.arsenal_mcp.as_deref().is_some_and(Path::is_file);
+    ui::ArsenalSetup { found, brew: find_brew(&brews).is_some(), install, on }
+}
+
+/// Setup ▸ Arsenal ▸ Use it (or an install that landed): the bridge of the Arsenal found; Not now: none. Returns
+/// whether the setting changed.
+pub fn set_arsenal(settings: &mut crate::settings::Settings, on: bool, found: Option<&ui::ArsenalApp>) -> bool {
+    let next = if on { found.map(|a| a.path.join(ARSENAL_BRIDGE)) } else { None };
+    if settings.arsenal_mcp == next { return false; }
+    settings.arsenal_mcp = next;
+    true
 }
 
 /// Homebrew, where its installer puts it (Apple silicon first).
@@ -221,10 +290,12 @@ pub fn action(p: &mut Pipeline, a: ui::UiAction) -> Vec<ui::UiUpdate> {
             let pending = PLAN.lock().unwrap().clone();
             let install = if INSTALLING.load(Ordering::Acquire) { ui::T3Install::Working("Installing T3 Code…".into()) } else { ui::T3Install::Idle };
             let vella = if VELLA_INSTALLING.load(Ordering::Acquire) { ui::T3Install::Working("Installing Vella with Homebrew…".into()) } else { ui::T3Install::Idle };
+            let arsenal = if ARSENAL_INSTALLING.load(Ordering::Acquire) { ui::T3Install::Working("Installing Arsenal with Homebrew…".into()) } else { ui::T3Install::Idle };
             vec![
                 ui::UiUpdate::Home(home_state(loc, loc.needs_choice(), pending.as_ref(), None)),
                 ui::UiUpdate::T3Setup(current_t3(install)),
                 ui::UiUpdate::VellaSetup(current_vella(vella)),
+                ui::UiUpdate::ArsenalSetup(current_arsenal(arsenal, &p.settings)),
                 ui::UiUpdate::HarnessSetup(crate::harness_autonomy::current(&p.data, p.settings.harness_autonomy)),
             ]
         }
@@ -241,7 +312,24 @@ pub fn action(p: &mut Pipeline, a: ui::UiAction) -> Vec<ui::UiUpdate> {
             Ok(()) => vec![ui::UiUpdate::Home(home_state(loc, false, None, None))],
             Err(e) => vec![ui::UiUpdate::Home(home_state(loc, loc.needs_choice(), None, Some(e)))],
         },
+        // The step on screen, kept only while the first Setup is not done. A step past the listening page with no
+        // download begun (a relaunch, the CLI) starts them, so Getting ready lists every model.
+        ui::UiAction::SetupAt(step) => {
+            if setup_unfinished(&p.settings) && p.settings.setup_step.as_deref() != Some(step.key().as_str()) {
+                p.settings.setup_step = Some(step.key());
+                p.save_or_note();
+            }
+            if past_listening(Some(&step.key())) && crate::model_store::global().is_some_and(|d| d.rows().is_empty()) {
+                p.start_model_downloads();
+            }
+            vec![]
+        }
         ui::UiAction::SetupDone => {
+            if p.settings.setup_step.take().is_some() { p.save_or_note(); }
+            // Start: the agent was checked on Getting ready; it starts now, so its first-run greeting can go.
+            if crate::edition::PUBLIC && p.settings.dry_run && matches!(p.agent_check, crate::pipeline::setup_ready::AgentCheck::Passed(_)) {
+                crate::setup_cli::send(&p.tools, ui::UiAction::SetDryRun(false));
+            }
             // A fresh setup ends with every agent harness in its no-prompt mode (docs/harness-autonomy.md): always in the
             // personal edition, after Set Up in the public one.
             crate::harness_autonomy::start(&p.data, p.settings.harness_autonomy, true);
@@ -251,6 +339,8 @@ pub fn action(p: &mut Pipeline, a: ui::UiAction) -> Vec<ui::UiUpdate> {
                 p.save_or_note();
             }
             p.greet_if_due();
+            // Closing Setup no longer quits (the menu's copy of `setup_done`).
+            p.runtime_settings_ui();
             vec![]
         }
         ui::UiAction::ConnectT3 => {
@@ -301,6 +391,39 @@ pub fn action(p: &mut Pipeline, a: ui::UiAction) -> Vec<ui::UiUpdate> {
                 })
                 .ok();
             vec![ui::UiUpdate::T3Setup(current_t3(ui::T3Install::Working("Finding the newest T3 Code…".into())))]
+        }
+        ui::UiAction::InstallArsenal => {
+            let brews: Vec<&Path> = BREWS.iter().map(Path::new).collect();
+            let Some(brew) = find_brew(&brews) else { return vec![ui::UiUpdate::ArsenalSetup(current_arsenal(ui::T3Install::Idle, &p.settings))] };
+            if ARSENAL_INSTALLING.swap(true, Ordering::AcqRel) {
+                return vec![];
+            }
+            let ui_handle = p.ui;
+            let settings = p.settings.clone();
+            std::thread::Builder::new()
+                .name("arsenal-install".into())
+                .spawn(move || {
+                    let result = arsenal_install_command(&brew).output();
+                    ARSENAL_INSTALLING.store(false, Ordering::Release);
+                    let home = Env::current().user_home;
+                    let install = match result {
+                        // Installed where Heimdall does not find it with its bridge: said, not retried silently.
+                        Ok(out) if out.status.success() && find_arsenal(&t3::install::app_dirs(&home)).is_none() => {
+                            ui::T3Install::Failed("Arsenal installed, but its MCP bridge was not found.".into())
+                        }
+                        Ok(out) if out.status.success() => ui::T3Install::Idle,
+                        Ok(out) => {
+                            let err = String::from_utf8_lossy(&out.stderr);
+                            eprintln!("setup: brew install --cask {ARSENAL_CASK} failed: {err}");
+                            ui::T3Install::Failed(err.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("Homebrew could not install Arsenal.").trim().to_string())
+                        }
+                        Err(e) => ui::T3Install::Failed(format!("Homebrew did not start: {e}")),
+                    };
+                    // Setup sends Use it (`SetArsenal(true)`) when it sees Arsenal here.
+                    if let Some(h) = &ui_handle { h.send(ui::UiUpdate::ArsenalSetup(current_arsenal(install, &settings))) }
+                })
+                .ok();
+            vec![ui::UiUpdate::ArsenalSetup(current_arsenal(ui::T3Install::Working("Installing Arsenal with Homebrew…".into()), &p.settings))]
         }
         ui::UiAction::InstallVella => {
             let brews: Vec<&Path> = BREWS.iter().map(Path::new).collect();

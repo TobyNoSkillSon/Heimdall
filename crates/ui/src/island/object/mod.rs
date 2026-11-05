@@ -389,6 +389,9 @@ pub enum Target {
     /// The voice's words under the notch: a click puts them away until the next reply (bug note 2026-10-31T23-37-26:
     /// "a click dismisses it"). The audio plays on; the pull-down keeps the words.
     Hush,
+    /// The stop glyph in the left ear while Heimdall speaks (bug notes 2026-11-05T00-10-37 and 2026-11-05T02-32-17):
+    /// the voice stops at once, and the app takes the press as "this moment wasn't for Heimdall".
+    StopSpeech,
     /// The pulled-down reply's copy glyph: the reply as written goes to the clipboard.
     ReplyCopy,
     /// The pulled-down reply's pin (night 1022): the reply leaves the notch as a floating document island.
@@ -421,6 +424,8 @@ pub enum Output {
     Read(ReadResult),
     /// Put this text on the clipboard (`Target::ReplyCopy`).
     Copy(String),
+    /// The user pressed Stop while Heimdall spoke (`Target::StopSpeech`): cut the voice now (`UiAction::StopSpeaking`).
+    StopSpeech,
     /// Capture the display with the user's ink; the island's keys retract with the light.
     DrawSend,
     /// Close the overlay and discard the ink.

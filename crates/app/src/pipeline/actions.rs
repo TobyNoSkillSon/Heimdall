@@ -13,13 +13,38 @@ impl Pipeline {
         match a {
             // Setup's own actions (setup_wizard.rs).
             a @ (ui::UiAction::SetupOpened | ui::UiAction::ChooseHome(_) | ui::UiAction::ConfirmHomeMove | ui::UiAction::KeepHome
-                | ui::UiAction::SetupDone | ui::UiAction::ConnectT3 | ui::UiAction::InstallT3 | ui::UiAction::InstallVella
+                | ui::UiAction::SetupDone | ui::UiAction::SetupAt(_) | ui::UiAction::ConnectT3 | ui::UiAction::InstallT3 | ui::UiAction::InstallVella | ui::UiAction::InstallArsenal
                 | ui::UiAction::SetHarnessAutonomy(_)) => {
                 for update in crate::setup_wizard::action(self, a) { self.ui(update); }
                 return Ok(());
             }
             // Drawing mode's Send: attached to the pending utterance, never a wake (drawing.rs).
             ui::UiAction::DrawingSent(shot) => return self.attach_marked(shot),
+            // Setup ▸ Arsenal ▸ Use it or Not now: the bridge Pi's extension registers; a running agent restarts to take it.
+            ui::UiAction::SetArsenal(on) => {
+                let home = heimdall_home::Env::current().user_home;
+                let found = crate::setup_wizard::find_arsenal(&t3::install::app_dirs(&home));
+                if crate::setup_wizard::set_arsenal(&mut self.settings, on, found.as_ref()) {
+                    self.save_or_note();
+                    if self.agent.as_ref().is_some_and(|a| a.is_running()) { self.restart_agent()?; }
+                }
+                self.ui(ui::UiUpdate::ArsenalSetup(crate::setup_wizard::current_arsenal(ui::T3Install::Idle, &self.settings)));
+                return Ok(());
+            }
+            // Setup left the listening page / Getting ready's Retry (model_downloads.rs).
+            ui::UiAction::StartModelDownloads => { self.start_model_downloads(); return Ok(()); }
+            ui::UiAction::RetryModelDownloads => { self.retry_model_downloads(); return Ok(()); }
+            // Getting ready's fixes (setup_ready.rs).
+            ui::UiAction::CheckAgent => { self.recheck_agent(); return Ok(()); }
+            ui::UiAction::RetryVoice => {
+                let route = self.tools.speech_voices.route();
+                let key = self.heimdall_voice.key(&self.tools, &route);
+                self.heimdall_voice.retry.remove(&key);
+                self.phonon_tried = false;
+                self.heimdall_voice_tick();
+                self.setup_ready_tick();
+                return Ok(());
+            }
             // A drop onto the notch: held for his words, or alone after a few seconds (drops.rs).
             // Invites on the notch go to the friends bridge. An image's QR code is read on its own thread, so the live loop
             // never waits for it; what is left of the drop comes back as a completion on this thread and takes the same
@@ -94,7 +119,11 @@ impl Pipeline {
             // this build does not offer, or the one already chosen, changes nothing and the menu is told what holds.
             ui::UiAction::SetDeciderPrecision(key) => {
                 match decide::precision::Precision::from_key(&key).filter(|p| *p != self.settings.decider_precision) {
-                    Some(p) => { let mut next = self.settings.clone(); next.decider_precision = p; self.apply_menu_settings(next)?; }
+                    Some(p) => {
+                        let mut next = self.settings.clone(); next.decider_precision = p; self.apply_menu_settings(next)?;
+                        // The public edition: a precision not on this Mac downloads (it loads when it lands).
+                        self.decider_precision_chosen(p);
+                    }
                     None => { self.publish_decider(); return Ok(()); }
                 }
             }
@@ -127,10 +156,13 @@ impl Pipeline {
             ui::UiAction::DeleteEngineModel { id, quant } => self.delete_engine_model(id, quant)?,
             // Add Provider's and Setup's "Claude Code subscription": the relay is added as a provider, its row joins Agent ▸
             // Model; the agent keeps its model until the user picks the relay there (30 Oct 01:15).
+            // An agent with nothing chosen (Setup's Claude Code tile on a blank start) becomes the relay at once.
             ui::UiAction::ClaudeViaT3 => {
-                if self.settings.relay_added { self.publish_settings(); return Ok(()); }
+                let adopt = !self.settings.agent_model.is_chosen() && !self.settings.agent_relay;
+                if self.settings.relay_added && !adopt { self.publish_settings(); return Ok(()); }
                 let mut next = self.settings.clone();
                 next.relay_added = true;
+                next.agent_relay |= adopt;
                 self.apply_menu_settings(next)?;
             }
             // Providers ▸ Claude Code subscription ▸ Remove: back in Add Provider. Refused while it is the agent.
@@ -308,17 +340,21 @@ impl Pipeline {
                 next.anthropic_credit_usd = usd;
                 self.apply_menu_settings(next)?;
             }
-            // A provider connected for the first time: its default model joins the list. The agent keeps its model: a
-            // connection is not a pick (30 Oct 01:2x; until then it became the agent's model).
+            // A provider connected: its default model joins the list. The agent keeps a model it has: a connection is not
+            // a pick (30 Oct 01:2x; until then it became the agent's model). An agent with nothing chosen (the public
+            // edition's blank start: Setup's Codex or OpenCode Go tile, a first key) takes it. A catalog not loaded yet
+            // leaves the offer waiting; the hub sends it again when the catalog loads (`Hub::offer_default`).
             ui::UiAction::AddProviderDefault { provider } => {
                 let Some(p) = agent::provider::provider(&provider) else { return Ok(()) };
-                let Some(id) = self.tools.api.default_model(p.id) else { return Ok(()) };
-                let id = id.as_str();
-                if !agent::provider::has_credential(p) { return Ok(()); }
-                if self.settings.api_models.iter().any(|m| m.key() == (p.id, id)) { return Ok(()); }
-                let Some(model) = self.tools.api.catalog_model(p.id, id).or_else(|| agent::provider::ApiModel::anthropic(id).filter(|_| p.id == agent::provider::ANTHROPIC)) else { return Ok(()) };
+                let hub = self.tools.api.clone();
+                if !agent::provider::has_credential(p) { hub.default_taken(p.id); return Ok(()); }
+                let adopt = !self.settings.agent_model.is_chosen() && !self.settings.agent_relay;
+                let Some(model) = connection_default(&self.settings.api_models, p, hub.default_model(p.id).as_deref(), |id| hub.catalog_model(p.id, id), hub.catalog_rows(p.id)) else { return Ok(()) };
+                hub.default_taken(p.id);
                 let mut next = self.settings.clone();
-                next.api_models.push(model);
+                if !next.api_models.iter().any(|m| m.key() == model.key()) { next.api_models.push(model.clone()); }
+                if adopt { next.agent_model = agent::provider::AgentModel::Api { provider: model.provider.clone(), id: model.id.clone() }; }
+                if next.api_models == self.settings.api_models && next.agent_model == self.settings.agent_model { return Ok(()); }
                 self.apply_menu_settings(next)?;
             }
             ui::UiAction::StartProviderLogin { provider } => {
@@ -441,6 +477,7 @@ impl Pipeline {
             // The user's live labels for the decider (hotkeys.rs): not settings, so nothing to save.
             ui::UiAction::ForceWake => return self.force_wake(),
             ui::UiAction::ForceSuggest => return self.force_suggest(),
+            ui::UiAction::StopSpeaking => return self.stop_press(),
             ui::UiAction::SetIslandsShown(shown) => {
                 let mut next = self.settings.clone(); next.islands_hidden = !shown; self.apply_menu_settings(next)?;
             }
@@ -630,6 +667,24 @@ impl Pipeline {
     }
 }
 
+/// Island cards the app itself shows and answers in `Pipeline::action` (suggestions, relay recovery and return, the
+/// local-model cards, voice names). main.rs's `ui_action_callback` sends their answers, picks and dismissals to the
+/// live loop; every other card id is an agent question (bug note 2026-11-05T02-53-27: they all went to the agent's
+/// question path and failed with ASK_NOT_FOUND). Friends' cards are answered in main.rs itself.
+pub(crate) fn app_owns_card(request_id: &str) -> bool {
+    [
+        crate::suggester::CARD_PREFIX,
+        crate::emergency_recovery::PREFIX,
+        crate::emergency_recovery::RETURN_PREFIX,
+        crate::emergency_local::CARD_PREFIX,
+        crate::emergency_local::BACK_PREFIX,
+        crate::voice_namer::CARD_PREFIX,
+        crate::voice_suggest::CARD_PREFIX,
+    ]
+    .iter()
+    .any(|p| request_id.starts_with(p))
+}
+
 impl Pipeline {
     /// The `emergency_local` card's answer. Yes: the main model is remembered for the hand-back
     /// (`Emergency::local_fallback`), then the engine's model is picked as the menu picks it (the engine starts, and
@@ -649,4 +704,21 @@ impl Pipeline {
             }
         }
     }
+}
+
+/// The model a connection offers (`UiAction::AddProviderDefault`): the provider's default (ChatGPT's probed model, else
+/// `connect_default`) as already added, as the catalog describes it, or Anthropic's offline row; when the loaded
+/// catalog lacks it, the catalog's first model that can run. `None`: the catalog has not loaded yet.
+pub(crate) fn connection_default(
+    added: &[agent::provider::ApiModel],
+    p: &agent::provider::ProviderInfo,
+    default: Option<&str>,
+    catalog_model: impl Fn(&str) -> Option<agent::provider::ApiModel>,
+    catalog: Option<Vec<agent::provider::ApiModel>>,
+) -> Option<agent::provider::ApiModel> {
+    if let Some(id) = default {
+        if let Some(m) = added.iter().find(|m| m.key() == (p.id, id)) { return Some(m.clone()); }
+        if let Some(m) = catalog_model(id).or_else(|| agent::provider::ApiModel::anthropic(id).filter(|_| p.id == agent::provider::ANTHROPIC)) { return Some(m); }
+    }
+    catalog?.into_iter().find(|m| m.unsupported().is_none())
 }

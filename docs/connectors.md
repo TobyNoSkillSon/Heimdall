@@ -64,6 +64,9 @@ Never type a token into a command or paste it into chat. Use an environment vari
 
 ## Route 3: a server added to you
 
+Arsenal, when the user chose it in Setup, is already one of your servers (`arsenal`, registered by Heimdall for each
+session; its tools are `mcp__arsenal__*`); an `arsenal` entry in `mcp.json` would replace it.
+
 Your Pi reads MCP servers from `mcp.json` in its agent folder: `~/Library/Application Support/Heimdall/agent/config/mcp.json`.
 Heimdall never writes that file, so it is yours to edit. Heimdall's own tools are separate and keep working. Pi's own
 MCP guide is in the installed app's Resources, at `agent-runtime/node_modules/@earendil-works/pi-coding-agent/docs/mcp.md`.

@@ -50,6 +50,7 @@ impl Pipeline {
     pub fn stop_listening(&mut self, rx: &crossbeam_channel::Receiver<Option<listen::WorkerEvent>>) -> Result<()> {
         self.close_live_sources(rx)?;
         self.pause_sources();
+        self.capture_since = None;
         self.set_running(false, "setting")
     }
     /// Every open source ends with a `gap` (reason "heimdall off"). A chosen pause is not a fault, so the
@@ -57,6 +58,7 @@ impl Pipeline {
     /// Capture opened: a held "Capture:" failure from an earlier attempt is over.
     pub fn capture_started(&mut self) {
         self.component_status("capture", None);
+        self.capture_since = Some(Instant::now());
     }
     pub fn pause_sources(&mut self) {
         self.component_status("capture", None);

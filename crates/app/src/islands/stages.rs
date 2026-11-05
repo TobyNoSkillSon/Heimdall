@@ -127,6 +127,59 @@ pub fn is_commit(c: &str) -> bool {
     })
 }
 
+/// The most merged branches the signals carry.
+pub const MERGED: usize = 12;
+
+/// The branches a command's `git merge` brings in: its non-flag words up to the end of that command (`&&`, `;`,
+/// `|`, a newline), without a `-m` message. `git merge --abort` and `--continue` name none.
+pub fn merged_in(c: &str) -> Vec<String> {
+    // Shell words with their quoting: a quoted span is part of its word, a command ends at an unquoted `&`, `;`, `|`,
+    // newline or redirect. Each word: (text without quotes, quoted at all, the command's end follows it).
+    let mut words: Vec<(String, bool, bool)> = Vec::new();
+    let (mut cur, mut quoted, mut q, mut in_word) = (String::new(), false, None::<char>, false);
+    let mut push = |w: &mut String, quoted: &mut bool, in_word: &mut bool, end: bool, words: &mut Vec<(String, bool, bool)>| {
+        if *in_word { words.push((std::mem::take(w), *quoted, false)) }
+        if end { if let Some(l) = words.last_mut() { l.2 = true } else { words.push((String::new(), false, true)) } }
+        *quoted = false;
+        *in_word = false;
+    };
+    for ch in c.chars() {
+        match q {
+            Some(open) if ch == open => q = None,
+            Some(_) => cur.push(ch),
+            None if ch == '"' || ch == '\'' => { q = Some(ch); quoted = true; in_word = true }
+            None if ch.is_whitespace() && ch != '\n' => push(&mut cur, &mut quoted, &mut in_word, false, &mut words),
+            None if "&;|\n<>".contains(ch) => {
+                // `2>&1`, `2>/dev/null`: the digits before a redirect are its file descriptor, not a word.
+                if ch == '>' && in_word && !quoted && cur.chars().all(|d| d.is_ascii_digit()) { cur.clear(); in_word = false }
+                push(&mut cur, &mut quoted, &mut in_word, true, &mut words)
+            }
+            None => { cur.push(ch); in_word = true }
+        }
+    }
+    push(&mut cur, &mut quoted, &mut in_word, true, &mut words);
+    let mut out = Vec::new();
+    let mut k = 0;
+    while k + 1 < words.len() {
+        let starts = words[k].0 == "git" && !words[k].1 && !words[k].2 && words[k + 1].0 == "merge" && !words[k + 1].1;
+        k += 1;
+        if !starts { continue }
+        let mut ended = words[k].2;
+        let mut flag_arg = false;
+        while !ended && k + 1 < words.len() {
+            k += 1;
+            let (w, _, end) = &words[k];
+            ended = *end;
+            if std::mem::take(&mut flag_arg) { continue }
+            if ["-m", "-X", "-s", "--strategy", "--strategy-option", "-F", "--file"].contains(&w.as_str()) { flag_arg = true; continue }
+            if w.starts_with('-') || w.is_empty() || w.contains(char::is_whitespace) { continue }
+            let w = w.trim_matches(|ch: char| !(word(ch) || "/.-".contains(ch)));
+            if !w.is_empty() && w != "HEAD" && !out.iter().any(|x| x == w) { out.push(w.to_owned()) }
+        }
+    }
+    out
+}
+
 /// `TRAIN = (train[\w_]*\.py|trainlog|mlx_lm\.lora|--max-steps)`: a hint only (no stage without a live run).
 pub fn is_train(c: &str) -> bool {
     c.contains("trainlog") || c.contains("mlx_lm.lora") || c.contains("--max-steps") || {
@@ -474,6 +527,8 @@ pub struct Reducer {
     before_question: Option<String>,
     /// The newest `island-status.json` the run named (`status_in`).
     status: Option<String>,
+    /// Branches `git merge` brought in this run, in order (`merged_in`).
+    merged: Vec<String>,
 }
 
 /// The stage as the compact history and the island agent's triggers name it: weak stages are one Preparing.
@@ -484,7 +539,7 @@ pub fn key_stage(stage: &str) -> &str {
 /// Lines kept for the island agent's `recent`.
 pub const RECENT: usize = 12;
 /// Characters of the user's brief the island agent gets.
-pub const BRIEF_CHARS: usize = 900;
+pub const BRIEF_CHARS: usize = 1600;
 
 impl Reducer {
     pub fn new(run: &str, started: f64) -> Reducer {
@@ -533,7 +588,14 @@ impl Reducer {
             }
             Sig::Image(p) => self.picture(p),
             Sig::Check(Some(p)) => self.picture(p),
-            Sig::Commit => self.commits += 1,
+            Sig::Commit => {
+                self.commits += 1;
+                for b in merged_in(&split_command(text).0) {
+                    self.merged.retain(|x| *x != b);
+                    self.merged.push(b);
+                }
+                while self.merged.len() > MERGED { self.merged.remove(0); }
+            }
             Sig::Test => {
                 let (_, out) = split_command(text);
                 let sum: u64 = passed_counts(&out).iter().sum();
@@ -719,6 +781,7 @@ impl Reducer {
             subs_closed_at: self.subs_closed_at,
             subs_names: self.subs_names.clone(),
             status: self.status.clone(),
+            merged: self.merged.clone(),
         }
     }
 }
@@ -795,6 +858,8 @@ pub struct Signals {
     pub subs_names: Vec<String>,
     /// The task's status file, when the run named one (`STATUS_FILE`).
     pub status: Option<String>,
+    /// Branches merged this run, oldest first.
+    pub merged: Vec<String>,
 }
 
 /// How the island stands for its history: still at work, asking the user, or over.

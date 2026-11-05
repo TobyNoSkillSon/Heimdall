@@ -7,6 +7,9 @@
 //! `kit` draws the pieces (tiles, cards, buttons, dots, the app tile); `pages` lays each step; `render` writes every
 //! page and state offscreen at real size.
 
+mod arsenal;
+mod downloads;
+mod microphone;
 mod kit;
 mod pages;
 mod render;
@@ -107,6 +110,42 @@ pub(crate) fn leaving_name(identity: &Identity, field: super::personalise::Field
     super::personalise::commit(identity, field, typed).map(|a| a.map(UiAction::Identity))
 }
 
+/// Start on Getting ready: every model downloaded and checked, and every readiness row green. Nothing reported yet
+/// (the app has not sent its rows) is not ready.
+pub(crate) fn start_allowed(downloads: &ModelDownloads, readiness: &SetupReadiness) -> bool {
+    downloads.finished() && !readiness.rows.is_empty() && readiness.ready()
+}
+
+/// Getting ready's row `index`, as the list draws it (`downloads::lines`): what its button does.
+pub(crate) fn fix_at(downloads: &ModelDownloads, readiness: &SetupReadiness, index: usize) -> Option<ReadyFix> {
+    downloads::lines(downloads, readiness).into_iter().nth(index).and_then(|(_, fix)| fix)
+}
+
+pub(crate) use crate::identity::{persona, PERSONAS};
+
+/// What picking a mark on Customise sends, through the menu's own actions: the mark; its name, unless the name field
+/// holds one the user typed (anything but empty or another mark's name is kept); its voice, unless the user picked a
+/// voice on the Voice step (`voice_picked`), or Phonon S is not the voice, or its voice is not a mark's (chosen in the
+/// menu: kept).
+pub(crate) fn mark_choice(identity: &Identity, typed: &str, icon: &Icon, voice: &SpeechVoiceState, voice_picked: bool) -> Vec<UiAction> {
+    let mut actions = vec![];
+    if *icon != identity.icon {
+        actions.push(UiAction::Identity(IdentityAction::SetIcon(icon.clone())));
+    }
+    let Some((name, preset)) = persona(icon) else { return actions };
+    let typed = typed.trim();
+    let own_name = !typed.is_empty() && !PERSONAS.iter().any(|(_, n, _)| *n == typed);
+    if !own_name && identity.name != name {
+        actions.push(UiAction::Identity(IdentityAction::SetName(name.into())));
+    }
+    let current = voice_chosen(voice);
+    let follows = !voice_picked && current.is_some_and(|c| c.is_empty() || PERSONAS.iter().any(|(_, _, v)| *v == c));
+    if follows && current != Some(preset) && voice_list(voice).iter().any(|p| p.name == preset) {
+        actions.push(UiAction::SpeechVoice(crate::speech_voice::SpeechVoiceAction::SetPreset(preset.into())));
+    }
+    actions
+}
+
 /// Continue on the home page with nothing chosen yet and no move waiting: the folder shown is the choice.
 pub(crate) fn leaving_home(home: &HomeState) -> Option<UiAction> {
     (home.needs_choice && home.pending.is_none()).then_some(UiAction::KeepHome)
@@ -114,7 +153,13 @@ pub(crate) fn leaving_home(home: &HomeState) -> Option<UiAction> {
 
 /// Continue on the listening page: the precision picked there, when it is not the one in settings.
 pub(crate) fn leaving_decider(decider: &DeciderStatus, choice: Option<&str>) -> Option<UiAction> {
-    choice.filter(|c| *c != decider.chosen && decider.option(c).is_some_and(|o| o.present)).map(|c| UiAction::SetDeciderPrecision(c.to_string()))
+    choice.filter(|c| *c != decider.chosen && decider.option(c).is_some_and(|o| o.present || decider.downloadable)).map(|c| UiAction::SetDeciderPrecision(c.to_string()))
+}
+
+/// Continue on the listening page: the precision (when changed), then the downloads it needs (public edition; the app
+/// ignores it when every model is here). The order matters: the downloads read the precision in settings.
+pub(crate) fn leaving_listening(decider: &DeciderStatus, choice: Option<&str>) -> Vec<UiAction> {
+    leaving_decider(decider, choice).into_iter().chain([UiAction::StartModelDownloads]).collect()
 }
 
 /// The precision the listening page shows chosen: the one picked there, else the one in settings, else 4-bit.
@@ -166,13 +211,40 @@ pub(crate) fn vella_add_default(vella: &VellaSetup) -> bool {
     vella.brew
 }
 
+/// What Continue on Arsenal does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ArsenalLeave {
+    /// Move on after telling the app these (Use it, or Not now while it was on).
+    Next(Vec<UiAction>),
+    /// Install with Homebrew and stay, the spinner on, until it is here (then Heimdall uses it) or fails.
+    Install,
+    /// No Homebrew: Arsenal's page opens and Setup moves on.
+    OpenPage,
+}
+
+/// Continue on Arsenal with `add` (Add Arsenal or Use it) or Not now. Nothing installs any other way.
+pub(crate) fn leaving_arsenal(a: &ArsenalSetup, add: bool) -> ArsenalLeave {
+    match (add, &a.found, &a.install) {
+        (false, _, _) => ArsenalLeave::Next(if a.on { vec![UiAction::SetArsenal(false)] } else { vec![] }),
+        (true, Some(_), _) => ArsenalLeave::Next(if a.on { vec![] } else { vec![UiAction::SetArsenal(true)] }),
+        (true, None, T3Install::Working(_) | T3Install::Failed(_)) => ArsenalLeave::Next(vec![]),
+        (true, None, T3Install::Idle) if a.brew => ArsenalLeave::Install,
+        (true, None, T3Install::Idle) => ArsenalLeave::OpenPage,
+    }
+}
+
+/// Arsenal's default: chosen when it is here or Homebrew can install it; Not now when Add would only open a page.
+pub(crate) fn arsenal_add_default(a: &ArsenalSetup) -> bool {
+    a.on || a.found.is_some() || a.brew
+}
+
 /// Continue (titled Set Up) on Coding Agents while a harness still asks: set them all.
 pub(crate) fn leaving_harnesses(harnesses: &HarnessSetup) -> Option<UiAction> {
     harnesses.pending().then_some(UiAction::SetHarnessAutonomy(true))
 }
 
 /// Whether Setup has the Coding Agents step: the public edition asks; the personal edition sets the harnesses itself
-/// (docs/harness-autonomy.md).
+/// (decided 2 Nov; docs/harness-autonomy.md).
 pub(crate) const HARNESS_STEP: bool = cfg!(feature = "public");
 
 /// A provider tile's state, from what the menu knows (`provider_status`).
@@ -203,7 +275,14 @@ pub(crate) fn provider_status(choice: ProviderChoice, api: &ApiProviders, engine
             model: (!engine.model_label.is_empty()).then(|| engine.model_label.clone()),
             ..Default::default()
         },
-        ProviderAction::CustomKinds => ProviderStatus::default(),
+        ProviderAction::CustomKinds => {
+            let auth = super::provider_rows::CUSTOM_KINDS.iter().filter_map(|(id, _)| api.provider(id).map(|p| &p.auth)).collect::<Vec<_>>();
+            ProviderStatus {
+                ready: auth.iter().any(|a| **a == ProviderAuth::Connected),
+                problem: auth.iter().find_map(|a| match a { ProviderAuth::Problem(p) => Some(p.clone()), _ => None }),
+                ..Default::default()
+            }
+        }
     }
 }
 
@@ -226,10 +305,13 @@ pub struct SetupWindow {
     listen: ListenPage,
     voice_page: VoicePage,
     allow_page: AllowPage,
+    mic_page: microphone::MicPage,
     home_page: HomePage,
     t3_page: T3Page,
     harness_page: HarnessPage,
     vella_page: VellaPage,
+    arsenal_page: arsenal::ArsenalPage,
+    downloads_page: downloads::DownloadsPage,
     custom: CustomPage,
     pub(crate) allow: Retained<Pad>,
     all_granted: bool,
@@ -243,6 +325,17 @@ pub struct SetupWindow {
     pub(crate) identity: Identity,
     pub(crate) harnesses: HarnessSetup,
     pub(crate) vella: VellaSetup,
+    pub(crate) downloads: ModelDownloads,
+    pub(crate) readiness: SetupReadiness,
+    pub(crate) microphones: Microphones,
+    /// The Microphone step's level meter, while that step is on screen and the microphone is allowed.
+    meter: Option<microphone::Meter>,
+    mic_allowed: bool,
+    pub(crate) arsenal: ArsenalSetup,
+    /// Add Arsenal (Use it) or Not now as clicked; `None`: the default (`arsenal_add_default`).
+    arsenal_choice: Option<bool>,
+    /// Continue started Arsenal's install: the page waits for it.
+    arsenal_waiting: bool,
     /// Add Vella or Not now as clicked; `None`: the default (`vella_add_default`). Continue acts on it.
     vella_choice: Option<bool>,
     /// Continue started Vella's install: the page waits for it (`vella_wait`).
@@ -251,10 +344,20 @@ pub struct SetupWindow {
     setup_requested: bool,
     /// Allow All was clicked, or Continue already sent what it sends (`leaving_permissions`).
     allow_sent: bool,
+    /// When Allow All was clicked (`refocus_after`).
+    allowed_at: Option<std::time::Instant>,
+    /// The app active before the latest activation (`app_activated`).
+    last_front: Option<String>,
+    /// A voice was clicked on the Voice step: a mark's voice no longer replaces it (`mark_choice`).
+    voice_picked: bool,
+    /// Welcome offers Let my agent set it up (the public edition's Setup; its command is the public app's).
+    agent_offered: bool,
     pub(crate) t3: T3Setup,
     back: Retained<Pad>,
     /// Coding Agents' Leave as Is, left of Set Up (Continue retitled) while a harness still asks.
     leave: Retained<Pad>,
+    /// Welcome's Let my agent set it up, left of Set Up: the one line to paste into a coding agent (docs/setup.md).
+    pub(crate) agent: Retained<Pad>,
     pub(crate) next: Retained<Pad>,
     dots: Retained<Dots>,
     footer: Retained<FlippedView>,
@@ -271,6 +374,7 @@ impl SetupWindow {
         Self::build(target, mtm, HARNESS_STEP)
     }
 
+    /// `harness_step`: the public edition's own steps (Coding Agents, Getting ready).
     pub(crate) fn build(target: &AnyObject, mtm: MainThreadMarker, harness_step: bool) -> Self {
         let window = unsafe {
             NSWindow::initWithContentRect_styleMask_backing_defer(
@@ -295,6 +399,10 @@ impl SetupWindow {
         window.setToolbarStyle(objc2_app_kit::NSWindowToolbarStyle::Unified);
         let root = FlippedView::new(rect(0.0, 0.0, W, H), mtm);
         window.setContentView(Some(&root));
+        // Closing before Setup is finished asks to quit (the Controller's `windowShouldClose:`).
+        if let Some(delegate) = target.downcast_ref::<super::Controller>() {
+            window.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(delegate)));
+        }
 
         let identity = crate::identity::current();
         let welcome = WelcomePage::build(&identity, mtm);
@@ -303,10 +411,13 @@ impl SetupWindow {
         let listen = ListenPage::build(target, mtm);
         let voice_page = VoicePage::build(target, mtm);
         let allow_page = AllowPage::build(target, mtm);
+        let mic_page = microphone::MicPage::build(target, mtm);
         let home_page = HomePage::build(target, mtm);
         let t3_page = T3Page::build(target, mtm);
         let harness_page = HarnessPage::build(target, mtm);
         let vella_page = VellaPage::build(target, mtm);
+        let downloads_page = downloads::DownloadsPage::build(target, mtm);
+        let arsenal_page = arsenal::ArsenalPage::build(target, mtm);
         let custom = CustomPage::build(target, &identity, mtm);
         // The page keeps the delegate (it is weak).
         unsafe { name.field.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*custom.watch))) };
@@ -317,6 +428,7 @@ impl SetupWindow {
             (PageKind::Builtin(SetupStep::Decider), listen.frame.view.clone()),
             (PageKind::Builtin(SetupStep::Voice), voice_page.frame.view.clone()),
             (PageKind::Builtin(SetupStep::Permissions), allow_page.frame.view.clone()),
+            (PageKind::Builtin(SetupStep::Microphone), mic_page.frame.view.clone()),
             (PageKind::Builtin(SetupStep::Home), home_page.frame.view.clone()),
             (PageKind::Builtin(SetupStep::T3), t3_page.frame.view.clone()),
         ];
@@ -324,10 +436,17 @@ impl SetupWindow {
             pages.push((PageKind::Builtin(SetupStep::Harnesses), harness_page.frame.view.clone()));
         }
         pages.push((PageKind::Builtin(SetupStep::Vella), vella_page.frame.view.clone()));
+        if harness_step {
+            pages.push((PageKind::Builtin(SetupStep::Arsenal), arsenal_page.frame.view.clone()));
+        }
         for (i, extra) in extra_steps(target, mtm).into_iter().enumerate() {
             pages.push((PageKind::Extra(i), extra.view));
         }
         pages.push((PageKind::Builtin(SetupStep::Customise), custom.frame.view.clone()));
+        // Getting ready is the last step: Start waits there until every row is green.
+        if harness_step {
+            pages.push((PageKind::Builtin(SetupStep::Models), downloads_page.frame.view.clone()));
+        }
         for (_, view) in &pages {
             view.setFrame(rect(0.0, TITLEBAR, W, PAGE_H));
             view.setAutoresizingMask(Mask::ViewWidthSizable | Mask::ViewHeightSizable);
@@ -346,7 +465,8 @@ impl SetupWindow {
         let next = Pad::button("Continue", true, false, PRIMARY_MIN, target, sel!(setupNext:), mtm);
         let back = Pad::button("Back", false, false, 0.0, target, sel!(setupBack:), mtm);
         let leave = Pad::button("Leave as Is", false, false, 0.0, target, sel!(setupLeaveHarnesses:), mtm);
-        for b in [&next, &back, &leave] {
+        let agent = Pad::button(AGENT_BUTTON, false, false, 0.0, target, sel!(setupLetAgent:), mtm);
+        for b in [&next, &back, &leave, &agent] {
             b.setAutoresizingMask(Mask::ViewMinXMargin);
             footer.addSubview(b);
         }
@@ -363,10 +483,13 @@ impl SetupWindow {
             listen,
             voice_page,
             allow_page,
+            mic_page,
             home_page,
             t3_page,
             harness_page,
             vella_page,
+            arsenal_page,
+            downloads_page,
             custom,
             allow,
             all_granted: false,
@@ -380,13 +503,26 @@ impl SetupWindow {
             identity,
             harnesses: HarnessSetup::default(),
             vella: VellaSetup::default(),
+            downloads: ModelDownloads::default(),
+            readiness: SetupReadiness::default(),
+            microphones: Microphones::default(),
+            meter: None,
+            mic_allowed: false,
+            arsenal: ArsenalSetup::default(),
+            arsenal_choice: None,
+            arsenal_waiting: false,
             vella_choice: None,
             vella_waiting: false,
             setup_requested: false,
             allow_sent: false,
+            allowed_at: None,
+            last_front: None,
+            voice_picked: false,
+            agent_offered: harness_step,
             t3: T3Setup::default(),
             back,
             leave,
+            agent,
             next,
             dots,
             footer,
@@ -396,7 +532,7 @@ impl SetupWindow {
         setup.identity_views();
         setup.brain.sync(None, &[]);
         setup.go(0);
-        setup.window.center();
+        setup.place(true);
         setup
     }
 
@@ -436,6 +572,39 @@ impl SetupWindow {
         }
         self.sync_focus();
         self.sync_buttons();
+        self.sync_meter();
+    }
+
+    /// The Microphone step's inputs from the app (the menu's list): the card, the pop-up, the meter's input.
+    pub fn set_microphones(&mut self, microphones: &Microphones) {
+        self.microphones = microphones.clone();
+        self.mic_page.sync(microphones);
+        self.sync_meter();
+    }
+
+    /// The meter runs only on screen, on the Microphone step, with the microphone allowed, on the input shown.
+    fn sync_meter(&mut self) {
+        let wanted = meter_wanted(self.window.isVisible(), self.current() == PageKind::Builtin(SetupStep::Microphone), self.mic_allowed, &self.microphones);
+        if self.meter.as_ref().map(|m| &m.uid) == wanted.as_ref() { return; }
+        self.meter = None;
+        self.mic_page.set_level(0.0);
+        if let Some(uid) = wanted { self.meter = microphone::Meter::start(&uid); }
+    }
+
+    /// The meter's poll: the level moves while sound comes in; nothing changes (or draws) otherwise.
+    pub(crate) fn mic_tick(&mut self) {
+        let Some(db) = self.meter.as_ref().and_then(|m| m.power()) else { return };
+        self.mic_page.set_level(microphone::level_share(db));
+    }
+
+    /// The Microphone step's pop-up: the input picked there, when it is not the one in use.
+    pub(crate) fn picked_microphone(&self) -> Option<String> {
+        self.mic_page.picked().filter(|id| self.microphones.in_use.as_ref() != Some(id))
+    }
+
+    /// The offscreen renders' level (the meter needs a real input and the screen).
+    pub(crate) fn show_level(&mut self, share: f64) {
+        self.mic_page.set_level(share);
     }
 
     /// Back: the previous page.
@@ -487,8 +656,22 @@ impl SetupWindow {
                     return Advance::Wait(vec![UiAction::InstallVella]);
                 }
             },
+            PageKind::Builtin(SetupStep::Arsenal) => match leaving_arsenal(&self.arsenal, self.arsenal_add()) {
+                ArsenalLeave::Next(tell) => {
+                    // Moving on (Not now while an install runs, too): a landing install no longer turns it on.
+                    self.arsenal_waiting = false;
+                    tell
+                }
+                ArsenalLeave::OpenPage => vec![UiAction::InstallArsenal],
+                ArsenalLeave::Install => {
+                    self.arsenal_waiting = true;
+                    return Advance::Wait(vec![UiAction::InstallArsenal]);
+                }
+            },
+            // Start waits for every row (its button is off until then; Return does nothing either).
+            PageKind::Builtin(SetupStep::Models) if !self.start_ready() => return Advance::Stay,
             PageKind::Builtin(SetupStep::Home) => leaving_home(&self.home).into_iter().collect(),
-            PageKind::Builtin(SetupStep::Decider) => leaving_decider(&self.decider, self.decider_choice.as_deref()).into_iter().collect(),
+            PageKind::Builtin(SetupStep::Decider) => leaving_listening(&self.decider, self.decider_choice.as_deref()),
             PageKind::Builtin(SetupStep::Harnesses) => leaving_harnesses(&self.harnesses).into_iter().collect(),
             _ => vec![],
         };
@@ -542,15 +725,17 @@ impl SetupWindow {
         let choosing = self.current() == PageKind::Builtin(SetupStep::Harnesses) && self.harnesses.pending();
         let width = self.footer.frame().size.width;
         self.next.retitle(&self.primary_title(), PRIMARY_MIN);
+        self.next.setEnabled(self.current() != PageKind::Builtin(SetupStep::Models) || self.start_ready());
         let key = self.return_key();
         self.allow.setKeyEquivalent(&ns(if key == ReturnKey::Allow { "\r" } else { "" }));
         self.leave.setKeyEquivalent(&ns(if key == ReturnKey::Leave { "\r" } else { "" }));
         self.next.setKeyEquivalent(&ns(if key == ReturnKey::Next { "\r" } else { "" }));
         self.leave.setHidden(!choosing);
+        self.agent.setHidden(self.current() != PageKind::Builtin(SetupStep::Welcome) || !self.agent_offered);
         // Right to left from the primary button: Leave as Is when shown, then Back.
         let y = ((FOOTER - 32.0) / 2.0).round();
         let mut x = width - FOOTER_PAD;
-        for b in [&self.next, &self.leave, &self.back] {
+        for b in [&self.next, &self.leave, &self.agent, &self.back] {
             if b.isHidden() {
                 continue;
             }
@@ -563,6 +748,8 @@ impl SetupWindow {
 
     pub fn show(&mut self, permissions: &[(Permission, PermissionState)]) {
         self.permissions = permissions.to_vec();
+        self.mic_allowed = permissions.iter().any(|(p, s)| *p == Permission::Microphone && *s == PermissionState::Granted);
+        self.sync_meter();
         self.all_granted = permissions.iter().all(|(_, s)| s.satisfied());
         self.allow_page.sync(permissions, self.all_granted, super::permissions::request_in_flight());
         self.sync_buttons();
@@ -581,6 +768,8 @@ impl SetupWindow {
         if name_changed && !self.is_editing(&self.custom.field) {
             self.custom.field.setStringValue(&ns(&identity.name));
         }
+        // A name still being typed keeps the title and Welcome when the mark changes.
+        self.typed_views();
         self.sync_buttons();
     }
 
@@ -598,12 +787,48 @@ impl SetupWindow {
         field.currentEditor().is_some()
     }
 
-    /// Customise ▸ the name being typed: the wake word and the greeting follow it.
+    /// Customise ▸ the name being typed: the wake word, the greeting, Start, the window's title and Welcome follow it
+    /// before it is committed.
     pub(crate) fn name_typed(&mut self) {
         let typed = self.custom.field.stringValue().to_string();
         self.custom.preview_name(&self.identity, &typed);
         self.custom.show_error(None);
+        self.typed_views();
         self.sync_buttons();
+    }
+
+    /// The window's title, Welcome and Allow's title with the name as typed on Customise (the saved one when empty).
+    fn typed_views(&mut self) {
+        let typed = self.custom.field.stringValue().to_string();
+        let shown = Identity { name: if typed.trim().is_empty() { self.identity.name.clone() } else { typed.trim().to_string() }, ..self.identity.clone() };
+        self.window.setTitle(&ns(&format!("Set Up {}", crate::identity::title_for(&shown.name))));
+        self.welcome.sync(&shown);
+        self.allow_page.title.setStringValue(&ns(&SetupStep::Permissions.title(&shown.name)));
+    }
+
+    /// Customise ▸ a mark (`index` in the strip): what it sends (`mark_choice`). A name that follows the mark goes into
+    /// the field at once; the rest shows when the app's identity and voice come back.
+    pub(crate) fn choose_mark(&mut self, index: usize) -> Vec<UiAction> {
+        let Some((icon, _)) = self.custom.marks.get(index).cloned() else { return vec![] };
+        let typed = self.custom.field.stringValue().to_string();
+        let actions = mark_choice(&self.identity, &typed, &icon, &self.voice, self.voice_picked);
+        for a in &actions {
+            if let UiAction::Identity(IdentityAction::SetName(name)) = a {
+                // A field being edited keeps its editor's text over a new value, so the chip and the greeting read
+                // the old name one click behind (VM run 5 Nov): the editing ends first.
+                if self.is_editing(&self.custom.field) {
+                    self.window.makeFirstResponder(None);
+                }
+                self.custom.field.setStringValue(&ns(name));
+                self.name_typed();
+            }
+        }
+        actions
+    }
+
+    /// The Voice step's tile was clicked: from now on the voice is the user's.
+    pub(crate) fn voice_clicked(&mut self) {
+        self.voice_picked = true;
     }
 
     /// Each name field's ring follows whether it is being edited (first responder).
@@ -654,7 +879,7 @@ impl SetupWindow {
 
     /// A precision picked (`index` in `DeciderStatus::options`): it shows as the choice; Continue applies it.
     pub fn choose_decider(&mut self, index: usize) {
-        let Some(o) = self.decider.options.get(index).filter(|o| o.present) else {
+        let Some(o) = self.decider.options.get(index).filter(|o| o.present || self.decider.downloadable) else {
             self.sync_decider();
             return;
         };
@@ -714,6 +939,61 @@ impl SetupWindow {
         }
     }
 
+    /// Arsenal's state from the app. Returns true when an install Continue waited for has landed: Heimdall uses it
+    /// now (the caller sends `SetArsenal(true)`), and the page moves on.
+    pub fn set_arsenal(&mut self, a: &ArsenalSetup) -> bool {
+        self.arsenal = a.clone();
+        self.arsenal_page.sync(a, self.arsenal_add());
+        if !self.arsenal_waiting {
+            return false;
+        }
+        match (&a.found, &a.install) {
+            (None, T3Install::Working(_)) => false,
+            (found, _) => {
+                self.arsenal_waiting = false;
+                let landed = found.is_some();
+                if landed && self.current() == PageKind::Builtin(SetupStep::Arsenal) && self.current + 1 < self.pages.len() {
+                    self.go(self.current + 1);
+                }
+                landed && !a.on && self.arsenal_add()
+            }
+        }
+    }
+
+    fn arsenal_add(&self) -> bool {
+        self.arsenal_choice.unwrap_or_else(|| arsenal_add_default(&self.arsenal))
+    }
+
+    /// Arsenal's tiles: Add Arsenal / Use it (true) or Not now. Only the choice; Continue acts on it.
+    pub(crate) fn choose_arsenal(&mut self, add: bool) {
+        self.arsenal_choice = Some(add);
+        self.arsenal_page.sync(&self.arsenal, add);
+    }
+
+    /// Getting ready's rows from the app.
+    pub fn set_downloads(&mut self, downloads: &ModelDownloads) {
+        self.downloads = downloads.clone();
+        self.downloads_page.sync(downloads, &self.readiness);
+        self.sync_buttons();
+    }
+
+    /// Getting ready's other rows (the voice, listening, the decider, This Mac's model, the agent).
+    pub fn set_readiness(&mut self, readiness: &SetupReadiness) {
+        self.readiness = readiness.clone();
+        self.downloads_page.sync(&self.downloads, readiness);
+        self.sync_buttons();
+    }
+
+    /// Start may close Setup: every model in place and every readiness row green (Getting ready is the last step).
+    pub(crate) fn start_ready(&self) -> bool {
+        start_allowed(&self.downloads, &self.readiness)
+    }
+
+    /// The fix of Getting ready's row at `index` (a model's Retry, or the readiness row's own).
+    pub(crate) fn fix_at(&self, index: usize) -> Option<ReadyFix> {
+        fix_at(&self.downloads, &self.readiness, index)
+    }
+
     fn vella_add(&self) -> bool {
         self.vella_choice.unwrap_or_else(|| vella_add_default(&self.vella))
     }
@@ -732,15 +1012,165 @@ impl SetupWindow {
     /// Allow All was clicked: Continue sends nothing more.
     pub(crate) fn allow_clicked(&mut self) {
         self.allow_sent = true;
+        self.allowed_at = Some(std::time::Instant::now());
+    }
+
+    /// Another app became active (`bundle`; `own`: Heimdall itself): Setup comes back in front, key, when a permission
+    /// prompt hands activation on (`refocus_after`).
+    pub(crate) fn app_activated(&mut self, bundle: Option<String>, own: bool) {
+        let previous = std::mem::replace(&mut self.last_front, if own { None } else { bundle.clone() });
+        if own || !self.window.isVisible() { return; }
+        let on_permission_steps = matches!(self.current(), PageKind::Builtin(SetupStep::Permissions | SetupStep::Microphone));
+        if refocus_after(previous.as_deref(), bundle.as_deref(), self.allowed_at.map(|t| t.elapsed()), on_permission_steps) {
+            self.refocus();
+        }
+    }
+
+    /// Heimdall active and Setup key, so its menu bar shows and Return reaches it.
+    pub(crate) fn refocus(&self) {
+        if !self.window.isVisible() { return; }
+        let app = objc2_app_kit::NSApplication::sharedApplication(self.mtm);
+        #[allow(deprecated)]
+        app.activateIgnoringOtherApps(true);
+        self.window.makeKeyAndOrderFront(None);
+    }
+
+    /// On the primary screen's visible frame (VM run 5 Nov: it once opened at y = 1068 on a 1080-high display, 12 pt
+    /// showing behind the Dock): centred when `centre`, and always inside it, shrunk to fit if the screen is smaller.
+    pub fn place(&self, centre: bool) {
+        let screen = objc2_app_kit::NSScreen::screens(self.mtm).firstObject().or_else(|| objc2_app_kit::NSScreen::mainScreen(self.mtm));
+        let Some(screen) = screen else { return };
+        let frame = placed(self.window.frame(), screen.visibleFrame(), centre);
+        self.window.setFrame_display(frame, false);
     }
 
     pub fn is_visible(&self) -> bool {
         self.window.isVisible()
     }
 
-    pub fn close(&self) {
+    pub fn close(&mut self) {
         self.window.orderOut(None);
+        self.stop_meter();
+        leave_app_mode(self.mtm);
     }
+
+    /// The level meter's input stream closed: on every way the window goes (Start, its close button, Quit; review 5
+    /// Nov: only Start closed it).
+    pub(crate) fn stop_meter(&mut self) {
+        self.meter = None;
+        self.mic_page.set_level(0.0);
+    }
+}
+
+/// `frame` inside `visible` (AppKit's bottom-left coordinates): centred when `centre`, else moved only as far as it
+/// takes to be wholly on screen; never larger than the screen.
+pub(crate) fn placed(frame: objc2_foundation::NSRect, visible: objc2_foundation::NSRect, centre: bool) -> objc2_foundation::NSRect {
+    let w = frame.size.width.min(visible.size.width);
+    let h = frame.size.height.min(visible.size.height);
+    let (vx, vy) = (visible.origin.x, visible.origin.y);
+    let (x, y) = if centre {
+        (vx + ((visible.size.width - w) / 2.0).round(), vy + ((visible.size.height - h) / 2.0).round())
+    } else {
+        (frame.origin.x.clamp(vx, vx + visible.size.width - w), frame.origin.y.clamp(vy, vy + visible.size.height - h))
+    };
+    objc2_foundation::NSRect::new(NSPoint::new(x, y), NSSize::new(w, h))
+}
+
+/// The input the level meter listens to: only while the window shows, on the Microphone step, with the microphone
+/// allowed, and an input to listen to (`None` stops it).
+pub(crate) fn meter_wanted(visible: bool, on_step: bool, allowed: bool, microphones: &Microphones) -> Option<String> {
+    if !(visible && on_step && allowed) { return None; }
+    let (_, any, inputs, at) = microphone::mic_card(microphones);
+    any.then(|| at.map(|i| inputs[i].0.clone())).flatten()
+}
+
+/// The system processes that show macOS's permission prompts (Accessibility's, TCC's); each may take activation
+/// while its prompt is up.
+const PROMPT_AGENTS: [&str; 4] = ["com.apple.accessibility.universalAccessAuthWarn", "com.apple.UserNotificationCenter", "com.apple.coreservices.uiagent", "com.apple.tccd"];
+
+/// Whether Setup takes activation back when `activated` becomes the active app (VM run 5 Nov 05:07: after the prompts
+/// closed, macOS made Finder active, its menu bar showed and Return went to Finder on "Can you hear me?"). Back when a
+/// prompt hands activation on, and when Finder comes up on Allow or Microphone within two minutes of Allow All; never
+/// over a prompt itself or System Settings (the user's Open Settings).
+pub(crate) fn refocus_after(previous: Option<&str>, activated: Option<&str>, since_allow: Option<std::time::Duration>, on_permission_steps: bool) -> bool {
+    let prompt = |b: Option<&str>| b.is_some_and(|b| PROMPT_AGENTS.contains(&b));
+    if prompt(activated) || matches!(activated, Some("com.apple.systempreferences" | "com.apple.Settings")) { return false; }
+    if prompt(previous) { return true; }
+    on_permission_steps && activated == Some("com.apple.finder") && since_allow.is_some_and(|d| d < std::time::Duration::from_secs(120))
+}
+
+/// While Setup shows, Heimdall is a regular app: its own menu bar (the app menu with Quit, and Edit for the name
+/// fields) instead of the previous app's, which an accessory app leaves in place (VM run 5 Nov: Finder's menus while
+/// Setup had focus). Back to a menu-bar app when Setup closes.
+pub(crate) fn enter_app_mode(mtm: MainThreadMarker, target: &AnyObject) {
+    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSMenu, NSMenuItem};
+    let app = NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    let item = |title: &str, action: Option<objc2::runtime::Sel>, key: &str| unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm), &ns(title), action, &ns(key))
+    };
+    let bar = NSMenu::new(mtm);
+    let app_item = item("", None, "");
+    let app_menu = NSMenu::new(mtm);
+    // Quit as the status menu's Quit does (the app drains and answers with Terminate).
+    let quit = item(&format!("Quit {}", crate::identity::app_title()), Some(sel!(quit:)), "q");
+    unsafe { quit.setTarget(Some(target)) };
+    app_menu.addItem(&quit);
+    app_item.setSubmenu(Some(&app_menu));
+    bar.addItem(&app_item);
+    let edit_item = item("Edit", None, "");
+    let edit = NSMenu::initWithTitle(NSMenu::alloc(mtm), &ns("Edit"));
+    for (title, action, key) in [("Undo", sel!(undo:), "z"), ("Cut", sel!(cut:), "x"), ("Copy", sel!(copy:), "c"), ("Paste", sel!(paste:), "v"), ("Select All", sel!(selectAll:), "a")] {
+        edit.addItem(&item(title, Some(action), key));
+    }
+    edit_item.setSubmenu(Some(&edit));
+    bar.addItem(&edit_item);
+    app.setMainMenu(Some(&bar));
+    #[allow(deprecated)]
+    app.activateIgnoringOtherApps(true);
+}
+
+pub(crate) fn leave_app_mode(mtm: MainThreadMarker) {
+    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+    NSApplication::sharedApplication(mtm).setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+}
+
+/// Welcome's second button.
+pub(crate) const AGENT_BUTTON: &str = "Let my agent set it up";
+
+/// The one line the user pastes into their coding agent: this app's own `setup` command and its guide (docs/setup.md).
+pub(crate) fn agent_line(exe: &std::path::Path) -> String {
+    format!("Set up Heimdall for me. Run \"{}\" setup --help and follow it.", exe.display())
+}
+
+/// Let my agent set it up: the line, and Copy (to the clipboard) or Done.
+pub(crate) fn show_agent_line(mtm: MainThreadMarker) {
+    let exe = std::env::current_exe().unwrap_or_else(|_| "/Applications/Heimdall Alpha.app/Contents/MacOS/Heimdall".into());
+    let line = agent_line(&exe);
+    let alert = objc2_app_kit::NSAlert::new(mtm);
+    alert.setMessageText(&ns("Paste this into your coding agent"));
+    alert.setInformativeText(&ns(&line));
+    alert.addButtonWithTitle(&ns("Copy"));
+    alert.addButtonWithTitle(&ns("Done"));
+    if alert.runModal() == objc2_app_kit::NSAlertFirstButtonReturn {
+        let board = objc2_app_kit::NSPasteboard::generalPasteboard();
+        board.clearContents();
+        unsafe { board.setString_forType(&ns(&line), objc2_app_kit::NSPasteboardTypeString) };
+    }
+}
+
+/// The words of the alert that closing an unfinished Setup shows: (message, informative, buttons).
+pub(crate) const QUIT_ALERT: (&str, &str, [&str; 2]) = ("Quit Heimdall?", "Setup isn\u{2019}t finished.", ["Quit", "Cancel"]);
+
+/// One native alert: Quit (true) or Cancel.
+pub(crate) fn confirm_quit(mtm: MainThreadMarker) -> bool {
+    let alert = objc2_app_kit::NSAlert::new(mtm);
+    alert.setMessageText(&ns(QUIT_ALERT.0));
+    alert.setInformativeText(&ns(QUIT_ALERT.1));
+    for b in QUIT_ALERT.2 {
+        alert.addButtonWithTitle(&ns(b));
+    }
+    alert.runModal() == objc2_app_kit::NSAlertFirstButtonReturn
 }
 
 /// The arrival: from 24 pt to the side and transparent, to in place and opaque, on the prototype's curve.
@@ -785,6 +1215,139 @@ mod tests {
     }
 
     #[test]
+    fn wizard_leaving_listening_sets_the_precision_then_starts_the_downloads() {
+        let d = render::demo_decider();
+        assert_eq!(leaving_listening(&d, None), vec![UiAction::StartModelDownloads]);
+        assert_eq!(leaving_listening(&d, Some("8bit")), vec![UiAction::SetDeciderPrecision("8bit".into()), UiAction::StartModelDownloads]);
+        // The public edition: a precision not on this Mac can be chosen; choosing it downloads it.
+        let mut public = d.clone();
+        public.options[1].present = false;
+        assert_eq!(leaving_decider(&public, Some("8bit")), None, "personal: only what is here");
+        public.downloadable = true;
+        assert_eq!(leaving_decider(&public, Some("8bit")), Some(UiAction::SetDeciderPrecision("8bit".into())));
+        assert_eq!(SetupStep::Models.title(""), "Getting ready");
+        let at = |s: SetupStep| SetupStep::ALL.iter().position(|x| *x == s).unwrap();
+        assert!(at(SetupStep::Vella) < at(SetupStep::Customise) && at(SetupStep::Customise) + 1 == at(SetupStep::Models), "Getting ready is last");
+    }
+
+    /// The pairing rule: a mark brings its name and Phonon S voice; a name the user typed stays, and so does a voice
+    /// they picked on the Voice step (or one chosen in the menu that is no mark's).
+    #[test]
+    fn wizard_a_mark_brings_its_name_and_voice_unless_the_user_chose_their_own() {
+        use crate::speech_voice::{demo_speech_voice, LocalVoice, SpeechVoiceAction};
+        let sparkle = Icon::Symbol { name: "sparkle".into() };
+        let heimdall = Identity { name: "Heimdall".into(), user_name: "Ada".into(), icon: Icon::Helmet };
+        let phonon = demo_speech_voice(false, LocalVoice::Phonon, false);
+        assert_eq!(voice_chosen(&phonon), Some("Edwin"));
+        let all = vec![
+            UiAction::Identity(IdentityAction::SetIcon(sparkle.clone())),
+            UiAction::Identity(IdentityAction::SetName("Lumi".into())),
+            UiAction::SpeechVoice(SpeechVoiceAction::SetPreset("Lottie".into())),
+        ];
+        assert_eq!(mark_choice(&heimdall, "Heimdall", &sparkle, &phonon, false), all, "the default name and voice follow the mark");
+        assert_eq!(mark_choice(&heimdall, "", &sparkle, &phonon, false), all, "an empty field follows too");
+        // Another mark's name in the field is that mark's default, not the user's: it follows.
+        let lumi = Identity { name: "Lumi".into(), icon: sparkle.clone(), ..heimdall.clone() };
+        assert_eq!(mark_choice(&lumi, "Lumi", &Icon::Helmet, &phonon, false)[1], UiAction::Identity(IdentityAction::SetName("Heimdall".into())));
+        // A typed name is kept; the voice still follows.
+        assert_eq!(mark_choice(&heimdall, "Jarvis", &sparkle, &phonon, false), [all[0].clone(), all[2].clone()]);
+        // A voice picked on the Voice step is kept.
+        assert_eq!(mark_choice(&heimdall, "", &sparkle, &phonon, true), all[..2]);
+        // A voice chosen in the menu that is no mark's is kept; ElevenLabs or Drama 3 speaking: nothing to follow.
+        let zoey = SpeechVoiceState { preset: "Zoey".into(), ..phonon.clone() };
+        assert_eq!(mark_choice(&heimdall, "", &sparkle, &zoey, false), all[..2]);
+        assert_eq!(mark_choice(&heimdall, "", &sparkle, &demo_speech_voice(true, LocalVoice::Phonon, true), false), all[..2]);
+        // Every persona: a name that validates as the menu checks it, a voice Phonon S has, all different.
+        let names: std::collections::BTreeSet<&str> = PERSONAS.iter().map(|p| p.1).collect();
+        let voices: std::collections::BTreeSet<&str> = PERSONAS.iter().map(|p| p.2).collect();
+        assert_eq!((names.len(), voices.len()), (12, 12), "every persona's name and voice are its own");
+        for (key, name, _) in PERSONAS {
+            assert!(super::super::personalise::commit(&Identity::default(), super::super::personalise::Field::Name, name).is_ok(), "{name}");
+            assert!(key == "helmet" || crate::identity::BUNDLED.contains(&key), "{key} is a mark the grid offers");
+        }
+        assert_eq!(persona(&Icon::Helmet), Some(("Heimdall", "Edwin")), "Heimdall keeps Edwin");
+        assert_eq!(persona(&Icon::Image { path: "/x.png".into() }), None);
+    }
+
+    /// Arsenal: nothing installs without Continue on Add; Use it turns it on, Not now off; without Homebrew, its page.
+    #[test]
+    fn wizard_arsenal_installs_only_on_continue_with_add_and_use_it_turns_it_on() {
+        let found = ArsenalApp { path: "/Applications/Arsenal.app".into(), version: "1.0.2".into() };
+        let missing = ArsenalSetup { found: None, brew: true, install: T3Install::Idle, on: false };
+        assert!(arsenal_add_default(&missing));
+        assert_eq!(leaving_arsenal(&missing, true), ArsenalLeave::Install);
+        assert_eq!(leaving_arsenal(&missing, false), ArsenalLeave::Next(vec![]), "Not now does nothing");
+        let no_brew = ArsenalSetup { brew: false, ..missing.clone() };
+        assert!(!arsenal_add_default(&no_brew), "Add would only open a page: Not now by default");
+        assert_eq!(leaving_arsenal(&no_brew, true), ArsenalLeave::OpenPage);
+        assert_eq!(arsenal::arsenal_tiles(&no_brew), "Get Arsenal…");
+        let working = ArsenalSetup { install: T3Install::Working("Installing Arsenal with Homebrew…".into()), ..missing.clone() };
+        assert_eq!(leaving_arsenal(&working, true), ArsenalLeave::Next(vec![]), "one install at a time");
+        let here = ArsenalSetup { found: Some(found), ..missing.clone() };
+        assert_eq!(arsenal::arsenal_tiles(&here), "Use it");
+        assert_eq!(leaving_arsenal(&here, true), ArsenalLeave::Next(vec![UiAction::SetArsenal(true)]));
+        let on = ArsenalSetup { on: true, ..here.clone() };
+        assert_eq!(leaving_arsenal(&on, true), ArsenalLeave::Next(vec![]), "already on");
+        assert_eq!(leaving_arsenal(&on, false), ArsenalLeave::Next(vec![UiAction::SetArsenal(false)]));
+        assert_eq!(SetupStep::Arsenal.title(""), "Do you want Arsenal?");
+    }
+
+    /// VM run 5 Nov: the window once opened at y = 1068 on a 1080-high screen. Placed, it is always on screen.
+    #[test]
+    fn wizard_window_is_always_placed_on_the_visible_screen() {
+        use objc2_foundation::NSRect;
+        let r = |x, y, w, h| NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
+        let visible = r(0.0, 70.0, 1920.0, 985.0);
+        let off = r(560.0, 1068.0, 800.0, 680.0);
+        let centred = placed(off, visible, true);
+        assert_eq!((centred.origin.x, centred.origin.y), (560.0, 70.0 + ((985.0f64 - 680.0) / 2.0).round()));
+        let kept = placed(off, visible, false);
+        assert!(kept.origin.y + kept.size.height <= 70.0 + 985.0 && kept.origin.y >= 70.0, "pulled back on screen");
+        assert_eq!(kept.origin.x, 560.0, "only as far as needed");
+        let small = placed(off, r(0.0, 0.0, 700.0, 500.0), true);
+        assert_eq!((small.size.width, small.size.height), (700.0, 500.0), "never larger than the screen");
+        // Allow: Screen Recording and Accessibility are optional, asked or not, until allowed.
+        for state in [PermissionState::NotDetermined, PermissionState::Denied] {
+            assert_eq!(permission_words(Permission::ScreenRecording, state), ("Optional", false));
+            assert_eq!(permission_words(Permission::Accessibility, state), ("Optional", false));
+        }
+        assert_eq!(permission_words(Permission::Microphone, PermissionState::NotDetermined).0, "Not asked");
+        assert_eq!(permission_words(Permission::Microphone, PermissionState::Denied).0, "Denied", "the microphone's denial is real");
+        assert_eq!(permission_words(Permission::ScreenRecording, PermissionState::Granted), ("Allowed", true));
+    }
+
+    /// Review 5 Nov (merge): the meter's input stream is open only while the step shows; a closed or hidden window has
+    /// none (`stop_meter` on every close path).
+    #[test]
+    fn wizard_the_level_meter_listens_only_while_its_step_shows() {
+        let mic = |id: &str| Microphone { id: id.into(), name: id.into(), connected: true, built_in: false };
+        let m = Microphones { devices: vec![mic("a"), mic("b")], in_use: Some("b".into()), ..Default::default() };
+        assert_eq!(meter_wanted(true, true, true, &m).as_deref(), Some("b"));
+        assert_eq!(meter_wanted(false, true, true, &m), None, "the window closed or hidden");
+        assert_eq!(meter_wanted(true, false, true, &m), None, "another step");
+        assert_eq!(meter_wanted(true, true, false, &m), None, "the microphone not allowed");
+        assert_eq!(meter_wanted(true, true, true, &Microphones::default()), None, "no input");
+    }
+
+    /// VM run 5 Nov 05:07: after the permission prompts closed, Finder was active and Return went to it on "Can you hear
+    /// me?". Setup takes activation back from a closing prompt, and from Finder right after Allow All.
+    #[test]
+    fn wizard_takes_focus_back_after_a_permission_prompt() {
+        use std::time::Duration;
+        let ax = Some("com.apple.accessibility.universalAccessAuthWarn");
+        let finder = Some("com.apple.finder");
+        let soon = Some(Duration::from_secs(5));
+        assert!(refocus_after(ax, finder, None, false), "a prompt handed activation on");
+        assert!(!refocus_after(None, ax, soon, true), "never over the prompt itself");
+        assert!(!refocus_after(ax, Some("com.apple.systempreferences"), soon, true), "the user's Open Settings");
+        assert!(refocus_after(None, finder, soon, true), "Finder right after Allow All, on Allow or Microphone");
+        assert!(!refocus_after(None, finder, soon, false), "on another step Finder is the user's choice");
+        assert!(!refocus_after(None, finder, Some(Duration::from_secs(600)), true), "long after Allow All");
+        assert!(!refocus_after(None, finder, None, true), "Allow All never clicked");
+        assert!(!refocus_after(None, Some("com.apple.Safari"), soon, true));
+    }
+
+    #[test]
     fn wizard_coding_agents_set_up_only_while_one_still_asks() {
         let row = |name: &str, ready| HarnessRow { name: name.into(), ready, guarded: false };
         let asks = HarnessSetup { rows: vec![row("Claude Code", true), row("Codex", false)], ..Default::default() };
@@ -818,12 +1381,11 @@ mod tests {
     #[test]
     fn wizard_providers_are_the_local_engine_and_subscriptions_with_nothing_chosen() {
         let titles: Vec<_> = ProviderChoice::ALL.iter().map(|c| c.title()).collect();
-        assert_eq!(titles, ["Local Splash Engine", "OpenCode Go subscription", "Claude Code subscription", "Codex subscription"]);
-        // No tile asks for an API key (readiness audit, 3 Nov).
-        assert!(titles.iter().all(|t| !t.contains("API")));
-        assert!(ProviderChoice::ALL.iter().all(|c| !matches!(c.menu_action(), ProviderAction::CustomKinds | ProviderAction::Connect("anthropic"))));
-        // The tiles: every choice once, the subscriptions first, then this Mac; and no row of a card is an API key.
-        assert_eq!(BRAIN_ORDER.map(tile_title), ["Codex", "Claude Code", "OpenCode Go", "This Mac"]);
+        assert_eq!(titles, ["Local Splash Engine", "Custom API", "OpenCode Go subscription", "Claude Code subscription", "Codex subscription"]);
+        // No Anthropic API key tile (readiness audit, 3 Nov); a server of the user's own is Custom (5 Nov).
+        assert!(ProviderChoice::ALL.iter().all(|c| !matches!(c.menu_action(), ProviderAction::Connect("anthropic"))));
+        // The tiles: every choice once, the subscriptions first, then this Mac and Custom; no card row is an API key.
+        assert_eq!(BRAIN_ORDER.map(tile_title), ["Codex", "Claude Code", "OpenCode Go", "This Mac", "Custom"]);
         for c in ProviderChoice::ALL {
             assert!(BRAIN_ORDER.contains(&c));
             assert!(brain_rows(c, &ProviderStatus::default()).iter().all(|(label, _, _)| !label.contains("key") && !label.contains("Key")));
@@ -881,7 +1443,7 @@ mod tests {
     #[test]
     fn wizard_steps_run_in_the_prototypes_order() {
         assert_eq!(SetupStep::ALL.first(), Some(&SetupStep::Welcome));
-        assert_eq!(SetupStep::ALL.last(), Some(&SetupStep::Customise));
+        assert_eq!(SetupStep::ALL.last(), Some(&SetupStep::Models), "Getting ready, where Start waits for every row (5 Nov)");
         let at = |s: SetupStep| SetupStep::ALL.iter().position(|x| *x == s).unwrap();
         assert!(at(SetupStep::Name) < at(SetupStep::Providers) && at(SetupStep::Providers) < at(SetupStep::Decider));
         assert!(at(SetupStep::Decider) < at(SetupStep::Voice) && at(SetupStep::Voice) < at(SetupStep::Permissions));

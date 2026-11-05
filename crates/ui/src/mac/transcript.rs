@@ -370,7 +370,7 @@ fn render_line(line: &TranscriptLine) -> (Retained<NSAttributedString>, Option<S
     let words_color = if line.is_final { label() } else { tertiary() };
     let mut span = None;
     if let Some(l) = &line.label {
-        let text = format!("[{} · {}] ", l.source, l.speaker);
+        let text = format!("[{} · {}] ", l.source, crate::identity::shown_speaker(&l.speaker));
         let label_font = medium(13.0);
         // Wrapped lines start under the words, so the labels stay a column.
         paragraph.setHeadIndent(text_width(&text, &label_font).ceil());

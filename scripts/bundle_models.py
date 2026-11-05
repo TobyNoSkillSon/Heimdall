@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """Copy only pinned runtime assets; never copy evaluation data or recordings.
 
-Editions (docs/editions.md): `personal` (User's install) copies everything as before; `public` leaves out Drama 3 and
-its Python runtime, Supertonic, and the Smart Turn model tuned on User's speech (the stock one ships in both)."""
+Editions (docs/editions.md): `personal` (the developer's own install) copies everything as before; `public` leaves out
+Drama 3 and its Python runtime, Supertonic, and the Smart Turn model tuned on the developer's speech (the stock one ships
+in both).
+
+The public edition also leaves out every model it downloads on first run (crates/app/src/model_downloads.lock.json,
+docs/models.md): Parakeet, the speaker models, the decider's checkpoints, EmbeddingGemma 2's weights and the MossFormer2
+separator. It keeps the small models (Silero VAD, stock Smart Turn, Phonon S) and the helpers' runtimes (the decider's
+MLX engine and metallib, the memory-search worker), which are code, not weights."""
 import argparse, hashlib, json, shutil
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,7 +22,10 @@ def stage(destination, edition='personal'):
     destination.mkdir(parents=True, exist_ok=True)
     entries = []
     listen = json.loads((ROOT/'crates/listen/scripts/models.lock.json').read_text())
+    downloaded = {f['path'] for g in json.loads((ROOT/'crates/app/src/model_downloads.lock.json').read_text())['groups'] for f in g['files']}
     for row in listen['files']:
+        if public and row['path'] in downloaded:
+            continue
         entries.append((row['path'], row['sha256']))
     speak = json.loads((ROOT/'crates/speak/scripts/models.lock.json').read_text())
     for row in speak['assets'] if not public else []:
@@ -30,11 +39,7 @@ def stage(destination, edition='personal'):
     # setting hot-swap without a download (30 Oct, 4 Nov). Every `bundle: true` d1 row of the lock ships.
     decide = json.loads((ROOT/'crates/decide/scripts/models.lock.json').read_text())
     for row in decide['files']:
-        if row['path'].startswith('d1/') and row.get('bundle', True):
-            # Public edition: Decider V6 in 8-bit only (huggingface.co/Toby-NoSkillSon/heimdall-d1-v6, int8/;
-            # scripts/fetch_decider.sh). The app resolves its precision pick to the nearest folder present.
-            if public and not row['path'].startswith('d1/d1-2B-heimdall-v6-8bit/'):
-                continue
+        if row['path'].startswith('d1/') and row.get('bundle', True) and not public:
             entries.append(('decide/'+row['path'], row['sha256']))
     # The decider's runtime: Decider V5's MLX engine and its metallib (scripts/build_decider_v5.sh). The llama.cpp
     # runtime for the 600M GGUFs ships only while its lock says bundle.
@@ -44,12 +49,13 @@ def stage(destination, edition='personal'):
     for row in json.loads((ROOT/'crates/decide/scripts/runtime-v5.lock.json').read_text())['files']:
         if row.get('bundle', True):
             entries.append(('decide/'+row['path'], row['sha256']))
-    entries.extend([
+    entries.extend([] if public else [
         ('speakers/Nemotron-3-Diarization.q8_0.gguf', '08456d9e22cd9a323c0364d98375f3746d6e68507ebb705cd46438c534c7a3a1'),
         ('speakers/ReDimNet2B6.onnx', 'd960e9f713eaba712f44498e82221b6fc12fcd7eaacd367c9eac45d3a6ce59ec'),
     ])
     for row in json.loads((ROOT/'scripts/extra-models.lock.json').read_text()):
-        entries.append((row['path'], row['sha256']))
+        if not (public and row['path'] in downloaded):
+            entries.append((row['path'], row['sha256']))
     embedding=json.loads((ROOT/'crates/archive/embedding/assets.lock.json').read_text())
     runtime_tree=hashlib.sha256();runtime_rows=[]
     for file in sorted((ROOT/'models'/embedding.get('runtime_directory','embeddinggemma2/runtime')).rglob('*')):
@@ -59,7 +65,7 @@ def stage(destination, edition='personal'):
     if runtime_tree.hexdigest()!=embedding['runtime_tree_sha256'] or len(runtime_rows)!=embedding['runtime_files']:
         raise RuntimeError('Missing or changed embedding runtime')
     entries.extend(runtime_rows)
-    for row in embedding['files']:
+    for row in embedding['files'] if not public else []:
         entries.append((row['path'],row['sha256']))
     # Engine/decider activate these local exports only as complete model-policy pairs.
     # Preserve the exact development runtime selection in the bundled resource root.

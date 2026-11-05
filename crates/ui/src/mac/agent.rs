@@ -805,7 +805,7 @@ impl AgentWindow {
                 let h = agent_debug::turn_heading(t);
                 let what = match (h.what, live) {
                     ("Context", Some(e)) if !e.sent && !e.queued => "Would send",
-                    ("User", Some(e)) if e.queued && !e.sent => "User · queued",
+                    (crate::identity::USER_HEADING, Some(e)) if e.queued && !e.sent => if cfg!(feature = "public") { "You · queued" } else { "User · queued" },
                     (what, _) => what,
                 };
                 append(&out, &format!("{}   ", time_label(row.time_ms())), &digits(11.0), &tertiary(), &head_style, None);

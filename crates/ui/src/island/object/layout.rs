@@ -208,6 +208,10 @@ pub struct Glyph {
 
 /// Heimdall's own helmet (not an SF Symbol).
 pub const HELMET: &str = "heimdall.helmet";
+/// The voice's Stop in the left ear while Heimdall speaks.
+pub const STOP: &str = "stop.fill";
+/// Stop's hit target (points): a trackpad tap's size, inside the ear pair's rounded shape.
+const STOP_HIT: (f64, f64) = (30.0, 24.0);
 /// Vella's mark (its app icon, not an SF Symbol): the user dictates to Vella.
 pub const VELLA: &str = "vella.mark";
 
@@ -497,6 +501,21 @@ impl B<'_> {
                 t.ear = true;
                 t.live = true;
             }
+        }
+    }
+    /// The left ear while the voice shows: Stop while it plays (a press cuts it, `Target::StopSpeech`). Once quiet,
+    /// the voice's own look (`helmet` false) keeps Stop dimmed with nothing to press, so the ears never swap as a pair
+    /// for the grace; the pull-down (`helmet` true) has the helmet back. Still: only the waveform beside it moves.
+    fn stop_ear(&mut self, playing: bool, helmet: bool) {
+        if !playing && !helmet {
+            self.ear(-1.0, &Ear::Glyph(Glyph::new(STOP).alpha(0.35)), "voice.helmet");
+        } else if playing {
+            self.ear(-1.0, &Ear::Glyph(Glyph::new(STOP)), "voice.helmet");
+            let ex = self.ear_x();
+            // Around the glyph, not the whole ear: with no words the shape is the ear pair alone, its corners rounded.
+            self.targets.push((Target::StopSpeech, Rect::centered(-ex, self.nh / 2.0, STOP_HIT.0, STOP_HIT.1)));
+        } else {
+            self.ear(-1.0, &Ear::Glyph(Glyph::new(HELMET)), "voice.helmet");
         }
     }
     /// An icon and words on one line centred at `cy`; returns its width.
@@ -812,6 +831,7 @@ impl B<'_> {
         grant.iter().map(|g| match g {
             GrantItem::Delete(p) => ("trash", super::measure::wrap_path(self.m, p, Font::Path, room)),
             GrantItem::LoginItem(n) => ("power", super::measure::wrap_path(self.m, n, Font::Path, room)),
+            GrantItem::Keychain(p) => ("key", super::measure::wrap_path(self.m, p, Font::Path, room)),
         }).collect()
     }
     /// The well under a granting option, from `x` to `right` at `top`: a recessed panel, and per item a dim symbol
@@ -938,7 +958,7 @@ pub fn layout(scene: &Scene, d: &Display, m: &dyn Measure) -> Layout {
             (b.col_w(if p.rows.is_empty() { 0.0 } else { w }), 53.0 + p.height.max(LINE), Class::Lines)
         }
         Scene::Speaking { sentences, status, stopped, level } => {
-            b.ear(-1.0, &Ear::Glyph(Glyph::new(HELMET)), "voice.helmet");
+            b.stop_ear(!*stopped, false);
             b.ear(1.0, &Ear::Wave { level: *level, flat: *stopped }, "voice");
             let mut widest: f64 = 0.0;
             let top = match status {
@@ -973,7 +993,7 @@ pub fn layout(scene: &Scene, d: &Display, m: &dyn Measure) -> Layout {
             }
         }
         Scene::Reply { paragraphs, notes, chat, follow, tail, ask, status, level, flat, scroll, hot, composer_empty, attached, working, copied } => {
-            b.ear(-1.0, &Ear::Glyph(Glyph::new(HELMET)), "voice.helmet");
+            b.stop_ear(!*flat, true);
             // The live bars while the voice plays; quiet, the system's waveform glyph (flat bars read as an
             // ellipsis, "still loading").
             if *flat {
@@ -1467,7 +1487,8 @@ pub fn layout(scene: &Scene, d: &Display, m: &dyn Measure) -> Layout {
     // whole shape opens the conversation (the voice's: puts its words away), as the notch does at rest (bug note 2026-10-25T21-28-46: it could not be
     // clicked open while Heimdall was thinking). The click opens it only when there is something to show.
     let passive = matches!(scene, Scene::Lip(Lip::Sent | Lip::Dots | Lip::Compress) | Scene::Working { .. } | Scene::Speaking { .. });
-    if passive && b.targets.is_empty() {
+    // The voice's Stop (in its ear, first, so it wins where they overlap) leaves the rest of the shape to Hush.
+    if passive && b.targets.iter().all(|(t, _)| *t == Target::StopSpeech) {
         // Between the rounded bottom corners, the shape's full depth (inside the outline everywhere).
         let c = (super::Shape { w, h, flare: FLARE }.corner() + 1.0).min(w / 2.0 - 16.0);
         // The voice's words are put away by a click instead (`Target::Hush`); the notch at rest still opens them.

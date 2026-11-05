@@ -2,7 +2,7 @@
 //!   FloatingIslands [--max-hours N (0: no limit)] [--parent-pid PID] [--selftest] [--flicktest] [--render DIR]
 //!                   [--render-lane DIR] [--viewer-shots OUT FIXTURES] [--streams-check] [--render-glance DIR]
 //!                   [--share-check OUT PAGE FILE] [--html-bench OUT FRAGMENTS [ROUNDS]] [--offscreen]
-//!                   [--web-media-check OUT [VIDEO-URL] [IMAGE-URL]]
+//!                   [--web-media-check OUT [VIDEO-URL] [IMAGE-URL]] [--viewer-zoom-shots OUT FIXTURES]
 //! Data folder: ~/Library/Application Support/FloatingIslands (FLOATING_ISLANDS_DIR overrides it).
 
 pub mod app;
@@ -20,6 +20,7 @@ pub mod lane_render;
 pub mod lists;
 pub mod look;
 pub mod marks;
+pub mod outside_click;
 pub mod overlay;
 pub mod panel;
 pub mod parts;
@@ -37,6 +38,7 @@ pub mod viewer;
 pub mod viewer_audio;
 pub mod web_check;
 pub mod viewer_shots;
+pub mod viewer_zoom_shots;
 pub mod viewer_text;
 pub mod world;
 
@@ -99,6 +101,13 @@ pub fn main() {
             let app = NSApplication::sharedApplication(mtm);
             app.setActivationPolicy(NSApplicationActivationPolicy::Prohibited);
             viewer_shots::run_viewer_shots(&args[i + 1], &args[i + 2]);
+        }
+    }
+    if let Some(i) = args.iter().position(|a| a == "--viewer-zoom-shots") {
+        if i + 2 < args.len() {
+            let app = NSApplication::sharedApplication(mtm);
+            app.setActivationPolicy(NSApplicationActivationPolicy::Prohibited);
+            viewer_zoom_shots::run(&args[i + 1], &args[i + 2]);
         }
     }
     Paths::ensure();

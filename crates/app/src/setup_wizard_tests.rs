@@ -10,13 +10,13 @@ fn env(user_home: &Path, bundle_id: &str) -> Env {
 #[test]
 fn wizard_first_launch_rule_per_edition() {
     // Before setup was requested: the whole tour from Welcome, in both editions.
-    assert_eq!(first_launch(false, false, || true), Some(ui::SetupStep::Welcome));
-    assert_eq!(first_launch(true, false, || false), Some(ui::SetupStep::Welcome));
+    assert_eq!(first_launch(false, false, None, || true), Some(ui::SetupStep::Welcome));
+    assert_eq!(first_launch(true, false, None, || false), Some(ui::SetupStep::Welcome));
     // Public: the home step while no home folder was chosen.
-    assert_eq!(first_launch(true, true, || true), Some(ui::SetupStep::Home));
-    assert_eq!(first_launch(true, true, || false), None);
+    assert_eq!(first_launch(true, true, None, || true), Some(ui::SetupStep::Home));
+    assert_eq!(first_launch(true, true, None, || false), None);
     // Personal: never by itself for the legacy profile, and the home question is not even asked.
-    assert_eq!(first_launch(false, true, || panic!("the personal edition never checks the home choice")), None);
+    assert_eq!(first_launch(false, true, None, || panic!("the personal edition never checks the home choice")), None);
 }
 
 #[test]
@@ -26,7 +26,7 @@ fn wizard_personal_legacy_profile_needs_a_choice_but_does_not_open_setup() {
     let loc = heimdall_home::resolve_in(&env(user.path(), heimdall_home::PERSONAL_ID));
     assert_eq!(loc.source, Source::Legacy);
     assert!(loc.needs_choice());
-    assert_eq!(first_launch(false, true, || loc.needs_choice()), None);
+    assert_eq!(first_launch(false, true, None, || loc.needs_choice()), None);
     // Kept as it is: home and data recorded, nothing moved, no question next time.
     home_change::keep_in(&env(user.path(), heimdall_home::PERSONAL_ID), &loc).unwrap();
     let after = heimdall_home::resolve_in(&env(user.path(), heimdall_home::PERSONAL_ID));
@@ -179,4 +179,63 @@ fn wizard_vella_detection_and_install_command() {
     let command = vella_install_command(&brew);
     assert_eq!(command.get_program(), brew.as_os_str());
     assert_eq!(command.get_args().collect::<Vec<_>>(), ["install", "--cask", "tobynoskillson/tap/vella"]);
+}
+
+/// Arsenal: found by its bundle ID with its MCP bridge inside; Homebrew installs its cask (built, never run here); Use it
+/// keeps the found bridge's path for Pi's extension, Not now clears it.
+#[test]
+fn wizard_arsenal_detection_install_command_and_use_it() {
+    let user = tempfile::tempdir().unwrap();
+    let apps = user.path().join("Applications");
+    let dirs = vec![apps.clone()];
+    assert_eq!(find_arsenal(&dirs), None);
+    let app = apps.join("Arsenal.app");
+    fs::create_dir_all(app.join("Contents")).unwrap();
+    fs::write(app.join("Contents/Info.plist"), "<plist><dict><key>CFBundleIdentifier</key><string>dev.arsenal.app</string><key>CFBundleShortVersionString</key><string>1.0.2</string></dict></plist>").unwrap();
+    assert_eq!(find_arsenal(&dirs), None, "no bridge inside: not an Arsenal Heimdall can use");
+    fs::create_dir_all(app.join("Contents/Helpers")).unwrap();
+    fs::write(app.join(ARSENAL_BRIDGE), "").unwrap();
+    let found = find_arsenal(&dirs).unwrap();
+    assert_eq!(found, ui::ArsenalApp { path: app.clone(), version: "1.0.2".into() });
+    let command = arsenal_install_command(Path::new("/opt/homebrew/bin/brew"));
+    assert_eq!(command.get_args().collect::<Vec<_>>(), ["install", "--cask", "tobynoskillson/tap/arsenal"]);
+    let mut s = crate::settings::Settings::default();
+    assert!(!set_arsenal(&mut s, true, None), "nothing found: nothing to use");
+    assert!(set_arsenal(&mut s, true, Some(&found)));
+    assert_eq!(s.arsenal_mcp.as_deref(), Some(app.join("Contents/Helpers/arsenal-mcp").as_path()));
+    assert!(!set_arsenal(&mut s, true, Some(&found)), "already on");
+    assert!(set_arsenal(&mut s, false, Some(&found)));
+    assert_eq!(s.arsenal_mcp, None);
+}
+
+/// VM run 5 Nov: a relaunch in the middle of the first Setup reopens it at the step it was on (setup_requested was
+/// already true, so before this the window vanished); Done ends that, and a Setup opened later is never resumed.
+#[test]
+fn wizard_a_relaunch_mid_setup_reopens_it_where_it_was() {
+    let mut s = crate::settings::Settings { setup_requested: true, first_run_greeted: Some(false), ..Default::default() };
+    s.setup_step = Some(ui::SetupStep::Models.key());
+    assert_eq!(resume_step(&s), Some(ui::SetupStep::Models));
+    assert_eq!(first_launch(true, true, resume_step(&s), || false), Some(ui::SetupStep::Models));
+    assert_eq!(first_launch(false, true, resume_step(&s), || false), Some(ui::SetupStep::Models), "both editions");
+    // Done pressed (the greeting due) or greeted: never resumed.
+    let done = crate::settings::Settings { first_run_greeting_due: true, ..s.clone() };
+    assert_eq!(resume_step(&done), None);
+    let greeted = crate::settings::Settings { first_run_greeted: Some(true), ..s.clone() };
+    assert_eq!(resume_step(&greeted), None);
+    assert!(!setup_unfinished(&greeted));
+    for step in ui::SetupStep::ALL {
+        assert_eq!(ui::SetupStep::from_key(&step.key()), Some(step));
+    }
+    assert_eq!(ui::SetupStep::from_key("nonsense"), None);
+}
+
+/// Review 5 Nov (merge): quit on Voice or Allow and relaunch, and the downloads never started (only Allow All's
+/// launch flag resumed them). Past the listening page, whose Continue starts them, a launch resumes them too.
+#[test]
+fn a_launch_past_the_listening_page_resumes_the_downloads() {
+    let at = |step: Option<&str>| crate::settings::Settings { setup_requested: false, setup_step: step.map(Into::into), ..Default::default() };
+    assert!(!downloads_wanted(&at(None)) && !downloads_wanted(&at(Some("welcome"))) && !downloads_wanted(&at(Some("decider"))));
+    for step in ["voice", "permissions", "microphone", "models"] { assert!(downloads_wanted(&at(Some(step))), "{step}"); }
+    assert!(downloads_wanted(&crate::settings::Settings { setup_requested: true, ..at(None) }), "after Allow All");
+    assert!(!past_listening(Some("not-a-step")));
 }

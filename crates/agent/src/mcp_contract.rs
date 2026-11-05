@@ -22,11 +22,15 @@ fn object(properties: Value, required: &[&str]) -> Value {
 fn ask_question() -> Value {
     let mut labelled = json!({"label":string(1,LABEL_CHARS),"description":string(0,DESCRIPTION_CHARS)});
     // An option's grant for the deny-list hook (`actions::AskGrant`), offered only once grants are switched on.
+    // Its description is how the relay learns to use it (bug notes 2026-11-04T18-59-48, 2026-11-04T23-37-22: cards
+    // that named a path in their question granted nothing).
     if heimdall_emergency::grants::ENABLED {
         labelled["grant"] = object(json!({
             "delete":{"type":"array","minItems":1,"maxItems":8,"items":string(1,1024)},
             "loginItems":{"type":"array","minItems":1,"maxItems":4,"items":string(1,128)},
+            "keychain":string(1,1024),
         }), &[]);
+        labelled["grant"]["description"] = json!(GRANT);
     }
     let option = json!({"oneOf":[string(1, LABEL_CHARS), object(labelled, &["label"])]});
     object(
@@ -64,6 +68,8 @@ pub const TABLE_ROWS: usize = 200;
 /// anything … they are only useful for us for testing"); tool outcomes go to the tool log. What is left is content.
 const ISLAND_NOTICE: &str = "Show User something to read rather than hear: a table, a list, code, links, a chart or an image. It opens in the island's pull-down under a title of one to three words. detail is text, a table (headers + rows), an SVG drawn on black (use light colours), or an archived image by archive_id. Pass notice_id to replace one you showed earlier. Not for status or progress: say those with speak.";
 const ASK: &str = "Ask User one adaptive card: one short question, or up to four in one card, each with two to four options. Options are numbered 1 to 4 on the card; each may carry a short description. Pass questions, each with question, options (a label, or {label, description}), optional header (a step chip of up to 12 characters), multiSelect (several options may be picked) and allowOther (default true: a last row where he types his own answer). A question with options still works for one quick question (labels of one to three words). He answers by click, by Option and a digit, by saying the number (\"2\", \"one and three\", \"both\") or by typing in the last row. Returns pending with request_id. For questions, his answer comes back as one line per question, keyed by its id (q1, q2 ...): the labels he picked, and his typed words. When he talks to you while it is up, the card stays open and you are told; it closes on his click, on Option and a digit, on typed text, on his dismiss (the x or Esc, which comes back as \"dismissed\"), or when you call ask_close because his words answered it. A question longer than one sentence: ask by voice instead. Silence never approves.";
+/// The `grant` field's description (personal edition only).
+const GRANT: &str = "User's yes for what Heimdall's deny list refuses: delete (exact paths outside the Vault and scratch, absolute or ~/, no wildcard or variable, never a home or top-level folder) loginItems (login item names to remove) and/or keychain (one new file to make for signing: ~/Library/Keychains/<name>.keychain-db or inside a Vault project, never login or an existing file). The card draws each path and item in full under this option, and only User's own click on it grants (never his voice, a key or ask_close); a question saying the path grants nothing. Use the questions form: the short question with options carries no grant. After his click, for 30 minutes, run each delete once as one plain rm of its absolute path written from / (rm -rf \"/Users/name/x\", alone or beside du, ls or echo), and a login item's removal as osascript -e 'tell application \"System Events\" to delete login item \"Name\"'. A keychain grant lets security create-keychain, set-keychain-settings, unlock-keychain, import (-k) and set-key-partition-list name that file by its absolute path from /, with no -P and no other security call in the line.";
 const ASK_CLOSE: &str = "Close an open ask card when his words answer it: call this once what he said, while it was up or before it appeared, answers the question. Talk to you while it is up does not close it. Pass request_id and his answer in a few words.";
 /// Pointing and drawing mode (18 Oct). `POINT_GUIDE` is `ui::drawing::AGENT_GUIDE` verbatim (crates/app tests that
 /// they match): the commands in a few lines and the instruction to act without deliberating (the user: "just don't
@@ -393,6 +399,10 @@ pub fn validate_tool(name: &str, args: &Value) -> Result<()> {
         .iter()
         .find(|t| t["name"] == name)
         .ok_or_else(|| anyhow::anyhow!("unknown tool"))?;
+    // A grant on the short form's options: say where it goes rather than "expected string" (bug note 2026-11-04T18-59-48).
+    if name == "ask" && args["options"].as_array().is_some_and(|o| o.iter().any(|o| o.get("grant").is_some())) {
+        crate::actions::parse_ask(args)?;
+    }
     // `island_notice.kind` (status icons, retired 19 Oct) is accepted and ignored: a session that learned it from
     // earlier turns must not fail its notice over it. It is no longer advertised.
     let without_kind;

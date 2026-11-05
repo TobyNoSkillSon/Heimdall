@@ -16,7 +16,15 @@ it came from, what the search found and their choice, and the agent starts from 
    evidence record. The old phrase rule (`stub_suggest_now`) runs only in the lab replay. Passes need a running agent,
    a call allowed by the pacing, and a background model with a usable credential, on any provider
    (`background_model::endpoint`; until 26 Oct only Anthropic).
-3. The pass is one background job (`background_call::ask_tools_blocking`, the background model, Haiku 5.5 by default,
+   A line of the user's in a call that d1 sent but the call gate held (`held_in_call`, `D1Gate::InCall`) is not "talking
+   to Heimdall": it starts a pass at once, without V5's question or the minute's call gap, and its card shows past the
+   pacing; the pass is told the line and offers to do what the user asked. One pass for a run of held lines: none
+   starts while a pass runs or a card is up. Journalled as `suggest_decision` `held_in_call_pass` / `held_in_call_busy`
+   (bug 2026-11-05T02-32-17: on 4 Nov 23:30-23:34 six such lines at send 0.76-0.96 reached nobody until the user
+   pressed ⌃⌘\).
+3. The pass is one background job (`background_call::ask_tools_blocking`, the background model, Haiku 5.5 by default, at
+   effort low and never above it whatever Background Tasks ▸ Model's level says (`background_call::capped_effort`: at
+   "max" on gpt-6-luna a pass took 7-31 s, cards 11-21 s after the line, 4-5 Nov),
    the one-hour prompt cache, the $0.50 limit a run, at most five tool rounds). Its tools: `search_files` (Spotlight under the user's home, Library caches out) and
    `search_timeline` (the archive, read-only). `submit_suggestion` ends it: silence, or one card of one to three
    questions with two to four options each.

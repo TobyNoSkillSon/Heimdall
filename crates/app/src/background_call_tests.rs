@@ -393,7 +393,8 @@ fn every_format_runs_a_two_round_tool_loop_that_ends_in_submit() {
                 assert!(first.get("max_tokens").is_none());
                 let m = second["messages"].as_array().unwrap();
                 assert_eq!((m[2]["tool_calls"][0]["id"].as_str(), m[3]["role"].as_str(), m[3]["tool_call_id"].as_str(), m[3]["content"].as_str()),
-                    (Some("c1"), Some("tool"), Some("c1"), Some("13:02 User: the CAD model")));
+                    (Some("c1"), Some("tool"), Some("c1"), Some("13:02 User: the CAD model")),
+                    "a tool's result in the edition's wording (agent::identity::for_agent)");
             }
             Wire::Responses => {
                 assert_eq!(auth, "Bearer sk-test-123456");
@@ -759,4 +760,19 @@ fn a_rolling_call_over_the_wire_carries_every_turn_and_the_session_key() {
     let (_, body) = seen.lock().unwrap()[0].clone();
     assert_eq!(body["prompt_cache_key"], "heimdall-goals-s1");
     assert_eq!(body["input"].as_array().unwrap().len(), 8);
+}
+
+/// Bug 2026-11-05T02-32-17: the user's Background Tasks level is "max" for gpt-6-luna, and the suggester ran at it (7-31 s a
+/// pass in calls). A live job runs at most at its own effort; every other job still takes their level, and a lower level
+/// still lowers the live job.
+#[test]
+fn a_live_job_never_runs_above_its_own_effort() {
+    let own = crate::suggester::EFFORT;
+    assert_eq!(own, "low");
+    assert_eq!(capped_effort(crate::suggester::JOB, "max", own), "low");
+    assert_eq!(capped_effort(crate::suggester::JOB, "auto", own), "low");
+    assert_eq!(capped_effort(crate::suggester::JOB, "minimal", own), "minimal");
+    assert_eq!(capped_effort(crate::suggester::JOB, "low", own), "low");
+    assert_eq!(capped_effort("plan refresher", "max", "high"), "max");
+    assert_eq!(capped_effort("island agent", "minimal", "medium"), "minimal");
 }

@@ -1314,7 +1314,7 @@ fn api_checks(mtm: MainThreadMarker) -> Vec<String> {
     let relay_on = crate::ApiProviders { relay_on: true, ..crate::demo_all_providers(ProviderAuth::Connected) };
     let left = super::provider_rows::add_groups(&relay_on, Some(&engine), None, mtm);
     check("the relay on: Add Provider has nothing left to offer", left.iter().all(|(_, e)| e.is_empty()));
-    check("no model chosen: the Agent line asks for a provider", super::menu::agent_model_problem(&blank).as_deref() == Some("Add a provider"));
+    check("no model chosen: the Agent line asks for a provider", super::menu::agent_model_problem(&blank).as_deref() == Some("Add a subscription in Model"));
     let (_, blank_rows) = super::menu::api_providers_menu(&blank, &Default::default(), Some((&off, "low")), None, None, None, mtm);
     check("no model chosen: the engine is not checked", blank_rows.local.as_ref().is_some_and(|b| b.state() == NSControlStateValueOff));
     // [providers] Native width: the list is no wider than its rows, not its pickers' long names.

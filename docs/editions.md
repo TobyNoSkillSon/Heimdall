@@ -9,6 +9,7 @@ The repository builds two editions from one workspace. This export builds the pu
 | Output | `dist/public/Heimdall Alpha.app` | `dist/Heimdall.app` |
 | Cargo | `--no-default-features --features app/public` (turns on `agent/public`, `listen/public`, `ui/public`) | default features |
 | Voice | Phonon S only (English) | extra voices that are not published |
+| Models | small ones bundled; Parakeet, the speaker models, the decider, MossFormer2 and EmbeddingGemma 2 download on first run into `<data>/models` (docs/models.md, "First-run downloads") | all bundled |
 | Python | none (checked by `scripts/check_public_bundle.py`) | a Python voice runtime |
 | Info.plist | `HeimdallEdition` = `public` | `HeimdallEdition` = `personal` |
 | Docs in `Contents/Resources/docs` | `connectors.md` only | `docs/` as committed |
@@ -21,6 +22,10 @@ The public edition is "Heimdall Alpha", bundle id `com.tobynoskillson.heimdall`,
 own pointer folder (docs/home.md). `scripts/bundle.sh` reads the signing identity from `HEIMDALL_SIGN_IDENTITY` or
 `git config heimdall.signingIdentity`; without one, use `--test-fixture` (below). The log line after
 `Heimdall diagnostics started …` says `Heimdall edition: <name>`.
+
+Footprint (measured 4 Nov with `ditto` on a bundle staged from `bundle_models.py --edition public`): the public app
+carries only the small models, 620 MB on disk and 255 MB zipped, and downloads 3.78 GB on first run at the default
+4-bit decider.
 
 `edition::PUBLIC` (`crates/app/src/edition.rs`) is the switch in code. Run the edition tests with the public feature:
 `cargo nextest run --no-default-features --features app/public`.
@@ -61,6 +66,12 @@ certificate and no models folder, so a clean public export can build it. It is n
 - Speech vocabulary: `listen/src/public-vocabulary.json` (Heimdall, Claude, Codex, T3 Code).
 - Bugs: no bug-note tool or inbox. The prompt's "Bugs in Heimdall" section offers to report a bug to
   `TobyNoSkillSon/Heimdall` through the user's own `gh`, each issue or pull request only with their yes (docs/bugs.md).
+- Arsenal (the on-device models app): the public prompt does not name it; Setup's "Do you want Arsenal?" step offers
+  it. Add Arsenal installs its Homebrew cask (`tobynoskillson/tap/arsenal`) on Continue, or opens
+  tobynoskillson.com/arsenal without Homebrew; Use it saves the path of the app's own MCP bridge
+  (`Arsenal.app/Contents/Helpers/arsenal-mcp`, settings `arsenal_mcp`), and Heimdall's Pi extension registers it as the
+  `arsenal` server for each session (`runtime/arsenal.mjs`, Pi's `registerMcpServer`; the user's mcp.json is never
+  written). Not now clears it.
 - No-prompt harness setup (docs/harness-autonomy.md): asked once in Setup's Coding Agents step (Set Up or Leave as
   Is, saved as `harness_autonomy`); nothing is touched until Set Up.
 - Personal-only features are compiled out (`cfg(feature = "public")`) or not bundled.
@@ -68,8 +79,8 @@ certificate and no models folder, so a clean public export can build it. It is n
 ## Known gaps
 
 - Decider: Decider V6 is the default and V5 the rollback. The weights are not in this repository; they are published
-  at https://huggingface.co/Toby-NoSkillSon/heimdall-d1-v6 (int8 default). They were fine-tuned partly on the
-  developer's own speech, so wakes may be less accurate for other voices.
+  at https://huggingface.co/Toby-NoSkillSon/heimdall-d1-v6 and download on first run (4-bit default). They were
+  fine-tuned partly on the developer's own speech, so wakes may be less accurate for other voices.
 - The owner's speaker label in transcripts, the decider's input and some tool descriptions is a fixed internal name,
   not the user's configured name. The decider was trained on that label, so renaming it needs a decider check.
 - Echo cancellation ships off; use headphones so Heimdall does not hear itself.

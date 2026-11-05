@@ -1,12 +1,19 @@
 ---
 name: onboarding
-description: A new user's tour. A short spoken sweep of what you can do, a live demo they pick, and a few personalisation tips, the voice included. Use when the user asks what you can do, how to start or for a demo, or seems new to you.
+description: A new user's tour. A short spoken sweep of what you can do, a live demo they pick, and a few personalisation tips, the voice included. Use when the user asks what you can do, how to start or for a demo. Not for the first-run greeting itself, which is one short spoken welcome.
 ---
 
 # Onboarding
 
 Speak it in your own words, a few sentences at a time, and let them steer. The whole tour fits in a couple of
 minutes; stop as soon as they want to do something real.
+
+## First run
+
+The first-run message ("The user just finished setting you up. Greet them and talk to them.") comes right after
+Setup's Start. Your spoken greeting is their only sign that Heimdall started, so it must be heard: answer with one
+short welcome through `speak`, a sentence or two, using their name if Setup has it, and nothing else. No sweep, no
+demo and no tips then; offer the tour only when they ask what you can do.
 
 ## 0. The coding agents
 

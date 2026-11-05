@@ -22,6 +22,59 @@ pub(crate) const ACTIVE: [&str; 5] = ["preparing", "queued", "starting", "runnin
 pub fn live_requests(t: &Value) -> u64 {
     if ACTIVE.contains(&t["status"].as_str().unwrap_or("")) { t["pendingRequestCount"].as_u64().unwrap_or(0) } else { 0 }
 }
+/// The run a thread is on and its state, from its read shell `t` and its `recentRuns`. T3's thread status is its
+/// latest run's, so a run T3 queued and cancelled before it started (its own hand-over turn for a sub-agent that
+/// finished while a turn ran) made the thread read "cancelled" while that turn still worked, and after it (bug note
+/// 2026-11-04T22-25-15: the setup-wizard task, run 7 cancelled 8 s after it was queued, run 6 running on for two
+/// minutes). A run that never started is no state of the thread: the active run decides while one runs, else the
+/// newest run that started (when `runs` reaches it). A thread whose only run never started keeps T3's state.
+pub fn current_run(t: &Value, runs: &[Value]) -> (Option<String>, String) {
+    followed_run(t, runs, None, &|_| false)
+}
+/// `current_run` for a thread Heimdall follows (review 5 Nov). `recorded`: the run Heimdall followed last and the
+/// state it recorded for it; `sent`: whether Heimdall's own message started a run.
+/// - A run Heimdall's own message started that T3 cancelled before it started (newer than every run that started)
+///   is the thread's state, "cancelled": his follow-up never ran, so the thread does not read "completed" with the
+///   earlier run's result.
+/// - A never-started run recorded earlier (a result recorded against it before this rule) that is newer than the run
+///   that started, now finished, stays the followed run with its recorded state: runs are compared by their order,
+///   not their names, so the earlier run never looks newer, nothing is reported twice and the reported task can still
+///   be archived.
+pub fn followed_run(t: &Value, runs: &[Value], recorded: Option<(&str, &str)>, sent: &dyn Fn(&str) -> bool) -> (Option<String>, String) {
+    let status = t["status"].as_str().unwrap_or("idle").to_owned();
+    let terminal = |s: &str| matches!(s, "completed" | "failed" | "interrupted" | "cancelled" | "rolled_back");
+    let run_status = |id: &str| runs.iter().find(|r| r["runId"] == id).and_then(|r| r["status"].as_str()).map(str::to_owned);
+    if let Some(active) = t["activeRunId"].as_str() {
+        let state = if terminal(&status) { run_status(active).filter(|s| !terminal(s)).unwrap_or_else(|| "running".into()) } else { status };
+        return (Some(active.to_owned()), state);
+    }
+    let latest = t["latestRunId"].as_str().map(str::to_owned);
+    let dropped = |r: &Value| r["status"] == "cancelled" && r["startedAt"].is_null();
+    let ordinal = |r: &Value| r["ordinal"].as_i64().unwrap_or(0);
+    let mut earlier: Vec<&Value> = runs.iter().filter(|r| !dropped(r) && r["startedAt"].is_string()).collect();
+    earlier.sort_by_key(|r| std::cmp::Reverse(ordinal(r)));
+    let newest_started = earlier.first().map(|r| ordinal(r));
+    let after_started = |r: &&Value| newest_started.is_none_or(|n| ordinal(r) > n);
+    // Heimdall's own message, dropped before it ran.
+    let mut mine: Vec<&Value> = runs.iter().filter(|r| dropped(r) && r["runId"].as_str().is_some_and(sent)).filter(after_started).collect();
+    mine.sort_by_key(|r| std::cmp::Reverse(ordinal(r)));
+    if let Some(r) = mine.first() {
+        return (r["runId"].as_str().map(str::to_owned), "cancelled".into());
+    }
+    if latest.as_deref().and_then(|l| runs.iter().find(|r| r["runId"] == l)).is_some_and(dropped) {
+        if let Some(r) = earlier.first() {
+            let state = r["status"].as_str().unwrap_or("completed").to_owned();
+            // The dropped run Heimdall recorded, still newer than the run that started and that run over: kept.
+            let kept = recorded.filter(|_| terminal(&state))
+                .filter(|(id, _)| runs.iter().find(|x| x["runId"] == *id).is_some_and(|x| dropped(x) && after_started(&x)));
+            if let Some((id, recorded_state)) = kept {
+                return (Some(id.to_owned()), recorded_state.to_owned());
+            }
+            return (r["runId"].as_str().map(str::to_owned), state);
+        }
+    }
+    (latest, status)
+}
 /// Whether a thread reads as waiting on a question or approval: T3 says "waiting", or counts a request while its run is
 /// live. The observer's wake, the labels and the islands use this one rule (bug note 2026-11-01T00-15-42).
 pub fn asks(t: &Value) -> bool {
@@ -467,6 +520,57 @@ pub fn compact(tool: &str, args: &Value, r: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Bug note 2026-11-04T22-25-15: the setup-wizard task's run 7, queued by T3 and cancelled before it started.
+    #[test]
+    fn a_run_cancelled_before_it_started_is_not_the_threads_state() {
+        let run6 = json!({"runId":"r6","ordinal":6,"status":"running","startedAt":"2026-11-04T21:22:19Z"});
+        let run7 = json!({"runId":"r7","ordinal":7,"status":"cancelled","startedAt":null,"completedAt":"2026-11-04T21:22:37Z"});
+        let during = json!({"status":"cancelled","latestRunId":"r7","activeRunId":"r6"});
+        assert_eq!(current_run(&during, &[run7.clone(), run6.clone()]), (Some("r6".into()), "running".into()));
+        let mut done6 = run6.clone();
+        done6["status"] = json!("completed");
+        let after = json!({"status":"cancelled","latestRunId":"r7","activeRunId":null});
+        assert_eq!(current_run(&after, &[run7.clone(), done6]), (Some("r6".into()), "completed".into()));
+        // Only the dropped run in view, or the thread's only run: T3's own state.
+        assert_eq!(current_run(&after, &[run7.clone()]), (Some("r7".into()), "cancelled".into()));
+        // A run that started and was cancelled is the thread's state.
+        let mut started = run7.clone();
+        started["startedAt"] = json!("2026-11-04T21:22:30Z");
+        assert_eq!(current_run(&after, &[started, run6]), (Some("r7".into()), "cancelled".into()));
+        let waiting = json!({"status":"waiting","latestRunId":"r1","activeRunId":"r1"});
+        assert_eq!(current_run(&waiting, &[]), (Some("r1".into()), "waiting".into()));
+    }
+    /// Review 5 Nov: (a) a result recorded against a dropped run (before the rule above) keeps that run as the followed
+    /// one while it is newer than the run that started, so the earlier run never looks newer; (b) Heimdall's own
+    /// follow-up dropped before it started reads "cancelled", not "completed" with the earlier run's result.
+    #[test]
+    fn a_dropped_run_is_compared_by_order_and_heimdalls_own_dropped_message_reads_cancelled() {
+        let run6 = json!({"runId":"r6","ordinal":6,"status":"completed","startedAt":"2026-11-04T21:22:19Z"});
+        let run7 = json!({"runId":"r7","ordinal":7,"status":"cancelled","startedAt":null,"completedAt":"2026-11-04T21:22:37Z"});
+        let after = json!({"status":"cancelled","latestRunId":"r7","activeRunId":null});
+        let runs = [run7.clone(), run6.clone()];
+        let none = |_: &str| false;
+        // (a) Recorded against r7: r7 stays, with its recorded state. Recorded at r6, or nothing recorded: r6.
+        assert_eq!(followed_run(&after, &runs, Some(("r7", "cancelled")), &none), (Some("r7".into()), "cancelled".into()));
+        assert_eq!(followed_run(&after, &runs, Some(("r6", "completed")), &none), (Some("r6".into()), "completed".into()));
+        assert_eq!(followed_run(&after, &runs, None, &none), (Some("r6".into()), "completed".into()));
+        // While r6 still runs (T3 shows no active run yet), r6 decides.
+        let mut running6 = run6.clone();
+        running6["status"] = json!("running");
+        assert_eq!(followed_run(&after, &[run7.clone(), running6], Some(("r7", "cancelled")), &none), (Some("r6".into()), "running".into()));
+        // A dropped run older than the one that started is no stand-in.
+        let run5 = json!({"runId":"r5","ordinal":5,"status":"cancelled","startedAt":null});
+        assert_eq!(followed_run(&after, &[run7.clone(), run6.clone(), run5], Some(("r5", "cancelled")), &none), (Some("r6".into()), "completed".into()));
+        // (b) Heimdall sent r7: his message never ran.
+        let mine = |id: &str| id == "r7";
+        assert_eq!(followed_run(&after, &runs, Some(("r7", "running")), &mine), (Some("r7".into()), "cancelled".into()));
+        // A run of his that started (r6) and finished is not "dropped".
+        let six = |id: &str| id == "r6";
+        assert_eq!(followed_run(&after, &runs, Some(("r6", "completed")), &six), (Some("r6".into()), "completed".into()));
+        // While a run is active it decides.
+        let during = json!({"status":"cancelled","latestRunId":"r7","activeRunId":"r8"});
+        assert_eq!(followed_run(&during, &runs, Some(("r7", "running")), &mine), (Some("r8".into()), "running".into()));
+    }
     #[test]
     fn compact_thread_read_drops_runs_and_metadata() {
         let raw = json!({"thread":{"threadId":"t1","title":"Compare Qwen 27B [heimdall:ab]","status":"completed","pendingRequestCount":0,"itemCount":321,"runtimeMode":"full-access","model":"claude-opus-5-5"},

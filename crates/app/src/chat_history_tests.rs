@@ -108,6 +108,37 @@ fn todays_conversation_is_owners_words_the_replies_and_compact_actions_only() {
     assert!(rows.windows(2).all(|w| w[0].at_ms <= w[1].at_ms));
 }
 
+/// VM run 5 Nov 05:43: the public edition sends the user's name, or "the user", where the store says User
+/// (`agent::identity::public_wording`); the session it leaves reads as the same conversation.
+#[test]
+fn the_public_wording_reads_as_the_same_conversation() {
+    fn worded(v: &mut Value, names: &agent::identity::Names) {
+        match v {
+            Value::String(s) => *s = agent::identity::public_wording(s, names),
+            Value::Array(a) => a.iter_mut().for_each(|v| worded(v, names)),
+            Value::Object(m) => m.iter_mut().filter(|(k, _)| *k != "timestamp").for_each(|(_, v)| worded(v, names)),
+            _ => {}
+        }
+    }
+    let voice = [(at(1), "mic:shure", "User", "Heimdall, how much RAM is free?", "send")];
+    let personal = tempfile::tempdir().unwrap();
+    write_day(personal.path(), &session(), &voice);
+    let want = kinds(&read_once(personal.path(), at(20)));
+    for user in ["User", "Tester"] {
+        let names = agent::identity::Names { assistant: "Heimdall".into(), user: user.into() };
+        let mut entries = session();
+        entries.iter_mut().for_each(|e| worded(e, &names));
+        let text = serde_json::to_string(&entries).unwrap();
+        assert!(!text.contains(agent::identity::WAKE_MARKER), "{user}: {text}");
+        if user != agent::identity::PUBLIC_USER {
+            assert!(!text.split(|c: char| !c.is_alphanumeric()).any(|w| w == agent::identity::DEFAULT_USER), "{user}: {text}");
+        }
+        let public = tempfile::tempdir().unwrap();
+        write_day(public.path(), &entries, &voice);
+        assert_eq!(kinds(&read_once(public.path(), at(20))), want, "{user}");
+    }
+}
+
 #[test]
 fn the_reader_tails_the_session_file_and_rereads_it_when_it_is_rewritten() {
     let d = tempfile::tempdir().unwrap();

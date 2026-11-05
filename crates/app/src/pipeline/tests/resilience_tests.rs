@@ -211,7 +211,7 @@ fn listen_models_that_never_load_are_a_hang_after_two_minutes() {
 #[test]
 fn the_microphone_switch_and_its_return_show_on_the_island_only_while_listening() {
     let (_t, mut a) = app();
-    let dev = |uid: &str, name: &str, built_in| capture::InputDevice { uid: uid.into(), name: name.into(), built_in };
+    let dev = |uid: &str, name: &str, built_in| capture::InputDevice { uid: uid.into(), name: name.into(), built_in, default: false };
     let state = |devices: Vec<capture::InputDevice>, in_use: Option<&str>| capture::MicrophoneState {
         devices,
         chosen: Some("AirPods".into()),

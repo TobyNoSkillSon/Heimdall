@@ -97,6 +97,13 @@ fn setup_done_greets_once_per_profile_and_never_an_upgraded_one() {
 
 #[test]
 fn the_greeting_wakes_the_agent_before_anyone_has_spoken() {
+    // 5 Nov: the message says the intent plainly, and asks for a short spoken welcome, not a tour.
+    for public in [false, true] {
+        let text = crate::setup_wizard::greeting(public, None);
+        assert!(text.starts_with("The user just finished setting you up. Greet them and talk to them."), "{text}");
+        assert!(text.contains("`speak`") && text.contains("a sentence or two") && !text.contains("explain what you can do"));
+        assert_eq!(text.contains("`onboarding`"), public, "only the public edition ships the skill");
+    }
     let kind = agent::notice::NoticeKind::classify(agent::notice::FIRST_RUN, &crate::setup_wizard::greeting(crate::edition::PUBLIC, None));
     assert_eq!(kind, agent::notice::NoticeKind::Scheduled);
     let checked = crate::setup_wizard::greeting(true, Some((std::path::Path::new("/Applications/Heimdall Alpha.app/Contents/MacOS/heimdall-emergency"), std::path::Path::new("/Users/a/.heimdall"))));

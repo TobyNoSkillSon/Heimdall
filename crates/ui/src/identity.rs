@@ -20,6 +20,27 @@ pub const DEFAULT_USER: &str = "User";
 /// neutral, never the owner's name (VM finding P-11, 28 Oct). Only a label: no claim that a decider trained on
 /// "the user" generalises to other names, which stays a separate release gate.
 pub const PUBLIC_USER: &str = "User";
+/// The heading of the user's own typed messages in the Agent windows: the personal build's stored label, the public one's You
+/// (VM run 5 Nov 05:43: never the owner's name in a stranger's app).
+pub const USER_HEADING: &str = if cfg!(feature = "public") { "You" } else { DEFAULT_USER };
+/// The user in a sentence the app writes about them (a reload's reason): the stored label, or the public edition's "The user".
+pub const USER_SUBJECT: &str = if cfg!(feature = "public") { "The user" } else { DEFAULT_USER };
+/// A speaker's name as the windows show it: the user's own label (`DEFAULT_USER` in every edition's store) is the public
+/// edition's chosen name, or You (VM run 5 Nov 05:43); everyone else as named.
+pub fn shown_speaker(speaker: &str) -> String {
+    if !cfg!(feature = "public") || speaker != DEFAULT_USER { return speaker.to_string(); }
+    let user = current().user_name;
+    if user == PUBLIC_USER || user == DEFAULT_USER || user.is_empty() { USER_HEADING.into() } else { user }
+}
+
+/// The wake instruction's heading, as the app stores it and as the public edition sends it (agent `identity`).
+pub const WAKE_MARKERS: [&str; 2] = ["\nOwner's wake instruction:\n", "\nThe user's wake instruction:\n"];
+
+/// A wake split at its instruction, whichever edition worded it (the last heading).
+pub fn split_wake(text: &str) -> Option<(&str, &str)> {
+    let (at, len) = WAKE_MARKERS.iter().filter_map(|m| text.rfind(m).map(|i| (i, m.len()))).max_by_key(|(i, _)| *i)?;
+    Some((&text[..at], &text[at + len..]))
+}
 /// Names: letters (any script), digits, spaces, hyphens and apostrophes, at most this many characters.
 pub const MAX_NAME: usize = 32;
 /// Greetings that lead a wake ("Hey Ivy", "Ivy, hello"); a name made only of them would wake on every "okay".
@@ -40,6 +61,33 @@ pub enum Icon {
 
 /// The bundled marks the Personalise grid offers, after the helmet: SF Symbols that read at 16 pt.
 pub const BUNDLED: [&str; 11] = ["sparkle", "leaf", "moon.stars", "bird", "cat", "hare", "flame", "bolt", "crown", "eye", "atom"];
+
+/// The prototype's personas (`MARK_NAMES`, `MARK_VOICES` in lab/setup-wizard; NOTES 28 Oct 19:30 and 19:46): each mark's
+/// default name, which is also its wake word, and its Phonon S voice. Heimdall keeps Edwin.
+pub const PERSONAS: [(&str, &str, &str); 12] = [
+    ("helmet", "Heimdall", "Edwin"),
+    ("sparkle", "Lumi", "Lottie"),
+    ("leaf", "Ivy", "Everly"),
+    ("moon.stars", "Selene", "Bryony"),
+    ("bird", "Wren", "Juniper"),
+    ("cat", "Felix", "Hugh"),
+    ("hare", "Hazel", "Pippa"),
+    ("flame", "Ember", "Delia"),
+    ("bolt", "Volta", "Russell"),
+    ("crown", "Rex", "Miles"),
+    ("eye", "Argus", "Preston"),
+    ("atom", "Niko", "Micah"),
+];
+
+/// A mark's persona: (name, voice). An image the agent drew has none.
+pub fn persona(icon: &Icon) -> Option<(&'static str, &'static str)> {
+    let key = match icon {
+        Icon::Helmet => "helmet",
+        Icon::Symbol { name } => name.as_str(),
+        Icon::Image { .. } => return None,
+    };
+    PERSONAS.iter().find(|(k, _, _)| *k == key).map(|(_, n, v)| (*n, *v))
+}
 
 /// A settings file from before 26 Oct 16:43 may carry `wake_words`: it still loads, and the field is ignored.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -311,5 +359,18 @@ mod tests {
         assert!(i.validate().is_err());
         i.icon = Icon::Image { path: "/tmp/mark.svg".into() };
         assert!(i.validate().is_ok());
+    }
+
+    /// VM run 5 Nov 05:43: the public windows never show the owner's name for the user's own lines.
+    #[test]
+    fn the_users_own_label_shows_as_the_editions_user() {
+        assert_eq!(shown_speaker("Dave"), "Dave");
+        if cfg!(feature = "public") {
+            assert_ne!(shown_speaker(DEFAULT_USER), DEFAULT_USER);
+            assert_eq!((USER_HEADING, USER_SUBJECT), ("You", "The user"));
+        } else {
+            assert_eq!(shown_speaker(DEFAULT_USER), DEFAULT_USER);
+        }
+        for m in WAKE_MARKERS { assert_eq!(split_wake(&format!("data{m}go")), Some(("data", "go"))); }
     }
 }

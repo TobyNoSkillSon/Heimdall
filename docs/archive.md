@@ -53,7 +53,7 @@ packs/YYYY-MM.sqlite   cold content of that UTC month: FLAC/Opus/zstd audio, col
   `checkpoint_fullfsync=ON`, and caps the WAL at 64 MB after checkpoints (the index WAL sat at 102 MB, 27 Oct).
 - One writer per process (`live.rs`, thread `heimdall-archive-live`, user-initiated QoS) makes every index write, in
   the order writes were handed over. Live jobs (journals, transcript, listen evidence, capture, screen, images, logs,
-  synthesized clips) commit in groups (≤256 jobs or 200 ms, a savepoint each); background jobs (compaction publish
+  synthesized clips) commit in groups (≤256 jobs, ≤2,048 while a backlog drains, or 200 ms, a savepoint each); background jobs (compaction publish
   steps, collection, embeddings) are one bounded transaction each and run when no live job waits, or once per 250 ms
   between live groups. Inside the process nothing polls SQLite's busy handler any more; only another process (a
   CLI) can make the writer wait, and it then keeps every job and retries (twenty writers on their own connections, 60 s waits and a compactor holding the lock for minutes once restarted
@@ -70,16 +70,37 @@ packs/YYYY-MM.sqlite   cold content of that UTC month: FLAC/Opus/zstd audio, col
   Every step (a write's preparation, a live write, a commit, taking the lock, a background job) carries the code
   that handed it over (`#[track_caller]`). A step of 2 s or more logs `Archive writer held 12.3 s by a background
   job from crates/archive/src/compact.rs:181`; one still running at 10 s logs `Archive writer busy … so far` once;
-  the `caught up` line adds the longest step. `Queue::holder` gives the step running now.
+  the `caught up` line adds the longest step. `Queue::holder` gives the step running now. A catch-up of 5 s or more,
+  or after a wait for another process, is always logged; a shorter one is logged when none was for 10 minutes and
+  otherwise counted into the next line (`+N shorter catch-ups since the last line`; 489 lines in two days, 3-5 Nov).
 - The WAL is capped at 64 MB only when a checkpoint copies every page and the next write restarts it; a reader
   holding an old snapshot stops that, and one large transaction fills it at once (991 MB on 2 Nov 15:55). Past the
-  cap the checkpointer logs its size and whether the checkpoint was cut short by a reader, once per doubling.
+  cap the checkpointer logs its size and whether the checkpoint was cut short by a reader, once per doubling. It is
+  logged back under the cap only after 10 minutes there; meanwhile each new rise past the cap is counted and logged
+  at most every 10 minutes (`Archive WAL crossed its 64 MB cap N times in M min`): 3-5 Nov it rose to 65-68 MB and was
+  cut back every 12 s, 7,208 lines in two days.
 - The restart needs a write that begins after a checkpoint copied every frame, with no commit in between. The
   checkpointer's full-sync checkpoint outlasts the writer's 200 ms groups, so a commit nearly always lands during it
-  (3-4 Nov: the WAL grew to 4.2 GB, "every page copied" 1,094 times in a day). Past the cap, once the checkpointer has
-  copied every frame it saw, the writer runs one small PASSIVE checkpoint itself between two groups (at most every
-  5 s) and its next write restarts the WAL. A checkpoint of 2 s or more is logged (`Archive checkpoint took …`): on
+  (3-4 Nov: the WAL grew to 4.2 GB, "every page copied" 1,094 times in a day). Past half the cap, once the
+  checkpointer has copied every frame it saw, the writer runs one small PASSIVE checkpoint itself between two groups
+  (at most every 5 s) and its next write restarts the WAL, so the WAL stays under the cap (restarting only past it,
+  the WAL rose past 64 MB and back every 8 s on 4-5 Nov, with two log lines each time). A checkpoint of 2 s or more is logged (`Archive checkpoint took …`): on
   4 Nov 03:36 and 04:19 the writer stood 5 s in a page read while the checkpointer was in its final truncate.
+- Who holds a read snapshot is named (3 Nov 22:45-23:37 one pinned the WAL about 50 minutes, growing it to 8.8 GB,
+  and nothing said who). Every connection from `store::open` and `store::read_index` is watched through SQLite's
+  statement trace on its own thread (`readers.rs`): a read transaction open 60 s logs `Archive read snapshot held 61 s
+  so far by <thread> on a connection opened at <file:line> (<statement that began it>)` once, and its end
+  `… released after N s`. A WAL line about a checkpoint cut short by a reader adds the read transactions open here a
+  second or more, or, with none, the other processes that have the index open.
+- A backlog drains in groups of up to 2,048 jobs (still 200 ms of work each): at 256 per full-sync commit plus a
+  yield it drained about 165 jobs a second, barely above what arrives, and 40,000-50,000 queued writes took 250-320 s
+  (4 Nov 22:04 and 22:10, 5 Nov 00:13). Capture's flush commits its hot blobs before its job and reads
+  `store::collections` first; under the write lock, with the count unchanged, it catalogues them without reading the
+  hot pack (`audio::publish_put`), so a pack commit or checkpoint no longer holds every index write.
+- Open: on 4 Nov 03:36 and 04:19 (hang samples) every index reader stood in `pread` while the checkpointer was in the
+  checkpoint's final `ftruncate` of the database file; slow writer steps of 2-12 s at varying sites follow the same
+  pattern. A same-size truncate with 64 MB dirty was instant in an isolated 2 GB test, so what makes it slow on the
+  11.8 GB index is not known; fewer full checkpoints (the checkpointer runs about once a second) is the next lever.
 - Readers (export, views, clips, MCP frames) hold the shared lifetime lock, so nothing they see disappears; a
   reader waits at most one collection batch, never for compaction.
 

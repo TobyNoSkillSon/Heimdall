@@ -835,7 +835,7 @@ impl Pipeline {
             let for_heimdall = explicit.is_some_and(crate::bridge::questions::for_heimdall);
             let speaker = if self.owner_line(&source, &observation.id) { agent::Speaker::Owner } else { agent::Speaker::Other };
             let before = self.dispatched_through;
-            let ack = self.ack_plan(None);
+            let ack = self.ack_plan_for(None, trigger_text.as_deref().unwrap_or(&observation.text));
             self.dispatch_pending(&source, &observation.text, snapshot.through, &observation.id, speaker, permit.clone(), for_heimdall, ack)?;
             // speech-policy (night 3): the user addressing Heimdall by name may be answered aloud during a conversation,
             // in the run this wake starts or steers (bridge/speech_policy.rs).

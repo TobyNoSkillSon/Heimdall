@@ -143,13 +143,15 @@ mod tests {
     #[test]
     fn wizard_provider_rows_do_what_the_add_provider_rows_do() {
         use crate::{ProviderAction, ProviderChoice};
-        // Setup's four rows are Add Provider's rows without the API-key ones, by title and in order.
+        // Setup's five rows are Add Provider's rows without Anthropic's key, by title and in order (Custom joined them,
+        // 5 Nov).
         let titles: Vec<_> = ProviderChoice::ALL.iter().map(|c| c.title()).collect();
-        let keyless: Vec<_> = add_order().into_iter().filter(|t| *t != CUSTOM_PROVIDER && *t != ANTHROPIC_KEY).collect();
-        assert_eq!(titles, keyless);
+        let setup: Vec<_> = add_order().into_iter().filter(|t| *t != ANTHROPIC_KEY).collect();
+        assert_eq!(titles, setup);
         let actions: Vec<_> = ProviderChoice::ALL.iter().map(|c| c.menu_action()).collect();
         assert_eq!(actions, [
             ProviderAction::Engine,
+            ProviderAction::CustomKinds,
             ProviderAction::Connect("opencode-go"),
             ProviderAction::ClaudeViaT3,
             ProviderAction::Connect("openai"),

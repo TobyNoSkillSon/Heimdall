@@ -55,8 +55,12 @@ impl Pipeline {
         self.ui(ui::UiUpdate::Listen(ui::ListenState::NeedsSetup));
         self.send_speakers();
         self.runtime_settings_ui();
+        // The voices (Phonon S's 25 presets) from the start: Setup's Voice step comes before the agent ever starts,
+        // whose supervisor used to be the first to publish them (VM run 5 Nov: the grid was empty until a relaunch).
+        self.tools.speech_voices.attach_ui(self.ui);
+        self.ui(ui::UiUpdate::SpeechVoice(self.tools.speech_voices.ui_state()));
         crate::setup_wizard::load_consent(&self.settings);
-        match crate::setup_wizard::first_launch(crate::edition::PUBLIC, self.settings.setup_requested, || heimdall_home::current().needs_choice()) {
+        match crate::setup_wizard::first_launch(crate::edition::PUBLIC, self.settings.setup_requested, crate::setup_wizard::resume_step(&self.settings), || heimdall_home::current().needs_choice()) {
             Some(ui::SetupStep::Welcome) => self.ui(ui::UiUpdate::ShowSetup),
             Some(step) => self.ui(ui::UiUpdate::ShowSetupAt(step)),
             None => {}
@@ -81,6 +85,7 @@ impl Pipeline {
             seeing: !self.settings.screen_off,
             pending_reload: self.pending_reload.keys().cloned().collect(),
             setup_requested: self.settings.setup_requested,
+            setup_done: !crate::setup_wizard::setup_unfinished(&self.settings),
         }
     }
     /// The menu's picture of the agent's choice again (the providers' selection and the settings), after a pick that

@@ -311,6 +311,39 @@ pub struct ThreadView {
     pub signals: Option<stages::Signals>,
     /// The thread as last read, for the island agent's activity digest.
     pub raw: Option<super::digest::ThreadRaw>,
+    /// The approval this run waits on (`t3::Workers::approval_wait`): the card's text (the command and Claude's
+    /// reason) and the link that opens the thread in T3. T3 itself still says "running" while a prompt waits.
+    pub approval: Option<Approval>,
+}
+
+/// An approval prompt the run waits on, as the island shows it (`ThreadView::approval`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Approval {
+    pub text: Option<String>,
+    pub link: Option<String>,
+}
+
+/// The run a thread is on, its state and its live request count, from one `t3_thread_read` answer. A run T3 queued and
+/// cancelled before it started is not the thread's state (`t3::threads::current_run`, bug note 2026-11-04T22-25-15):
+/// the task island stays on the run that works instead of reading "Stopped". Returns the current run's entry too.
+pub fn current_state(r: &Value) -> (String, String, u64, Option<&Value>) {
+    let t = &r["thread"];
+    let runs = r["recentRuns"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let (run, status) = t3::threads::current_run(t, runs);
+    let run = run.unwrap_or_default();
+    // A finished run's leftover count (an approval the hook answered) is no wait (`t3::threads::live_requests`); the
+    // state is the current run's, not the dropped one's.
+    let pending = if ACTIVE.contains(&status.as_str()) { t["pendingRequestCount"].as_u64().unwrap_or(0) } else { 0 };
+    let entry = runs.iter().find(|x| x["runId"].as_str() == Some(run.as_str())).or_else(|| runs.first());
+    (run, status, pending, entry)
+}
+
+/// The approval to show for `view`: the wait Heimdall's T3 pass recorded for this very run, while T3 still counts a
+/// live request on it (a wait the pass has not cleared yet is not shown once the prompt is gone).
+pub fn approval_for(view: &ThreadView, wait: Option<t3::ApprovalWait>) -> Option<Approval> {
+    let w = wait?;
+    (view.pending > 0 && !view.run.is_empty() && w.run == view.run && view.question.is_none())
+        .then(|| Approval { text: w.text.filter(|t| !t.trim().is_empty()), link: w.link.filter(|l| !l.trim().is_empty()) })
 }
 
 /// How recently a sub-agent must have changed to count as still working. T3 lists native sub-agents as `idle`
@@ -379,6 +412,15 @@ fn question_parts(q: &Question) -> Vec<Value> {
     vec![json!({"type": "text", "value": value, "t3q": true})]
 }
 
+/// The approval the run waits on: what it asks to run (the command and Claude's reason), and the button that opens
+/// the thread in T3, where only the user can give it. Heimdall's parts, gone once the wait ends.
+fn approval_parts(a: &Approval) -> Vec<Value> {
+    let mut parts = vec![];
+    if let Some(t) = &a.text { parts.push(json!({"type": "text", "value": t, "t3q": true})) }
+    if let Some(l) = &a.link { parts.push(json!({"type": "openButton", "target": l, "t3q": true})) }
+    parts
+}
+
 /// The island change for a thread's state (`null` removes a key), and whether the thread has settled.
 pub fn sync_patch(island: &Map<String, Value>, view: &ThreadView) -> (Map<String, Value>, bool) {
     let stage_now = island.get("stage").and_then(Value::as_str);
@@ -415,6 +457,9 @@ pub fn sync_patch(island: &Map<String, Value>, view: &ThreadView) -> (Map<String
         }
     } else if let Some(q) = view.question.as_ref().filter(|_| view.pending > 0 || s == "waiting") {
         ("waiting", json!("Your answer"), json!("question"), question_parts(q), false)
+    } else if let Some(a) = view.approval.as_ref() {
+        // T3 says "running" while an approval prompt holds the run (bug note 2026-11-04T18-30-26).
+        ("waiting", json!("Needs approval"), json!("waiting"), approval_parts(a), false)
     } else if s == "waiting" || (view.pending > 0 && !ACTIVE.contains(&s)) {
         ("waiting", json!("Needs approval"), json!("waiting"), vec![], false)
     } else if ACTIVE.contains(&s) {
@@ -668,31 +713,33 @@ pub fn parse_question(request: &str, q: &Value) -> Option<Question> {
 impl ThreadSource for T3Source {
     async fn view(&self, thread: &str) -> Result<ThreadView> {
         let c = &self.workers.client;
-        let r = c.call("t3_thread_read", json!({"threadId": thread, "view": "messages", "limit": 1, "runLimit": 1, "maxCharsPerItem": 200})).await?;
+        // Three runs, so a run T3 dropped before it started is looked past (`current_state`).
+        let r = c.call("t3_thread_read", json!({"threadId": thread, "view": "messages", "limit": 1, "runLimit": 3, "maxCharsPerItem": 200})).await?;
         let t = &r["thread"];
+        let (run, status, pending, current) = current_state(&r);
         let mut view = ThreadView {
-            status: t["status"].as_str().unwrap_or("").into(),
+            status,
             title: t["title"].as_str().unwrap_or("").into(),
-            // A finished thread's leftover count (an approval the hook answered) is no wait (`t3::threads::live_requests`).
-            pending: t3::threads::live_requests(t),
+            pending,
             question: None,
             working_children: 0,
             recent_children: 0,
-            ended_recently: r["recentRuns"].as_array().and_then(|a| a.first()).and_then(|run| run["completedAt"].as_str())
+            ended_recently: current.and_then(|run| run["completedAt"].as_str())
                 .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
                 .is_some_and(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_minutes() < 60),
             archived: t["archived"] == true,
             background: 0,
-            run: t["latestRunId"].as_str().unwrap_or("").into(),
+            run,
             new_run: false,
             signals: None,
             raw: None,
+            approval: None,
         };
         let items = t["itemCount"].as_u64().unwrap_or(0);
         let still_quiet = self.quiet.lock().unwrap_or_else(|e| e.into_inner()).get(thread)
             .is_some_and(|(n, at)| *n == items && at.elapsed() < std::time::Duration::from_secs(600));
         // The run as code follows it: the same reducer while the run is the same.
-        let started = r["recentRuns"].as_array().and_then(|a| a.first()).and_then(|run| epoch(&run["startedAt"]).or_else(|| epoch(&run["requestedAt"]))).unwrap_or_else(now_epoch);
+        let started = current.and_then(|run| epoch(&run["startedAt"]).or_else(|| epoch(&run["requestedAt"]))).unwrap_or_else(now_epoch);
         let taken = self.tracks.lock().unwrap_or_else(|e| e.into_inner()).remove(thread).filter(|tr| tr.reducer.run == view.run);
         let mut tr = taken.unwrap_or_else(|| Track { reducer: stages::Reducer::new(&view.run, started), count: 0, recent: Default::default(), children: vec![], listed: None, train: None, tests: vec![] });
         let moved = tr.count != items;
@@ -779,6 +826,11 @@ impl ThreadSource for T3Source {
                 let q = t3::read_question(c, thread, id).await?;
                 view.question = parse_question(id, &q);
             }
+            // No question: an approval prompt, as Heimdall's T3 pass recorded it for this run (its card and link).
+            view.approval = approval_for(&view, self.workers.approval_wait(thread).unwrap_or_else(|e| {
+                eprintln!("islands: approval wait of {thread} not read: {e:#}");
+                None
+            }));
         }
         Ok(view)
     }
@@ -1934,5 +1986,47 @@ mod tests {
         crate::islands::tools::put(&h, &json!({"id": "sale", "title": "Sale", "thread": "th-4"})).unwrap();
         task_island(&h, "th-4", "Sale", "Output: /tmp/out/sale.html").unwrap();
         assert_eq!(h.root.read("sale").unwrap()["open"], "/tmp/out/sale.html");
+    }
+
+    /// Bug note 2026-11-04T18-30-26: T3 says "running" while an approval prompt holds the run. With the wait Heimdall's
+    /// T3 pass recorded for this run, the island reads Needs approval, with the card's text and the button to the
+    /// thread; once the prompt is gone (no live request) or the run moved on, it does not.
+    #[test]
+    fn a_running_thread_with_an_approval_prompt_needs_approval_with_its_card_and_link() {
+        let wait = |run: &str| Some(t3::ApprovalWait { run: run.into(), text: Some("rm -rf build/ (clean the stale build)".into()), link: Some("t3-thread://v2/env/beauty".into()) });
+        let live = ThreadView { run: "r3".into(), ..view("running", 1, None) };
+        let a = approval_for(&live, wait("r3")).expect("the run's own wait");
+        assert_eq!(approval_for(&ThreadView { pending: 0, ..live.clone() }, wait("r3")), None, "the prompt is gone");
+        assert_eq!(approval_for(&live, wait("r2")), None, "an older run's wait");
+        assert_eq!(approval_for(&live, None), None);
+        let island = obj(json!({"title": "Beauty", "state": "running", "stage": "Rendering", "parts": [{"type": "stat", "value": "3"}]}));
+        let (p, settled) = sync_patch(&island, &ThreadView { approval: Some(a), ..live.clone() });
+        assert!(!settled);
+        assert_eq!((p["state"].as_str(), p["stage"].as_str(), p["attention"].as_str()), (Some("waiting"), Some("Needs approval"), Some("waiting")));
+        assert_eq!(p["parts"], json!([{"type": "stat", "value": "3"},
+            {"type": "text", "value": "rm -rf build/ (clean the stale build)", "t3q": true},
+            {"type": "openButton", "target": "t3-thread://v2/env/beauty", "t3q": true}]));
+        // Approved: the run goes on, and Heimdall's parts go with the wait.
+        let mut island = island;
+        crate::islands::files::merge(&mut island, &p);
+        let (p, _) = sync_patch(&island, &ThreadView { pending: 0, ..live });
+        assert_eq!((p["state"].as_str(), p["parts"].clone()), (Some("running"), json!([{"type": "stat", "value": "3"}])));
+    }
+
+    /// Bug note 2026-11-04T22-25-15: a turn T3 queued and cancelled before it started made the task read cancelled
+    /// (the island: Stopped) while the earlier run worked on. The island follows the run that works.
+    #[test]
+    fn a_turn_t3_dropped_before_it_started_does_not_stop_the_island() {
+        let run6 = json!({"runId": "r6", "ordinal": 6, "status": "running", "startedAt": "2026-11-04T21:22:19Z", "pendingRequestCount": 0});
+        let run7 = json!({"runId": "r7", "ordinal": 7, "status": "cancelled", "startedAt": null, "completedAt": "2026-11-04T21:22:37Z"});
+        let r = json!({"thread": {"status": "cancelled", "latestRunId": "r7", "activeRunId": "r6", "pendingRequestCount": 1}, "recentRuns": [run7, run6]});
+        let (run, status, pending, current) = current_state(&r);
+        assert_eq!((run.as_str(), status.as_str(), pending), ("r6", "running", 1));
+        assert_eq!(current.unwrap()["runId"], "r6", "the clock and the end follow the working run");
+        let island = obj(json!({"title": "Setup wizard", "state": "running", "stage": "Working"}));
+        let (p, settled) = sync_patch(&island, &ThreadView { run: run.clone(), ..view(&status, 0, None) });
+        assert!(!settled && p.get("stage").is_none_or(|s| s != "Stopped"), "{p:?}");
+        let (p, _) = sync_patch(&island, &view("cancelled", 0, None));
+        assert_eq!(p["stage"], "Stopped", "T3's own state would have stopped it");
     }
 }

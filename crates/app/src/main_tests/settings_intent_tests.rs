@@ -285,7 +285,7 @@
         let temp = tempfile::tempdir()?; let data = temp.path().join("data");
         let (mut app, mut watch, _callback, _rx) = launch(&data, temp.path(), Some(Settings { dry_run: false, ..Default::default() }))?;
         let held = app.tools.agent_enabled.permit()?;
-        let seen = capture::MicrophoneState { devices: vec![capture::InputDevice { uid: "usb-mic".into(), name: "USB Mic".into(), built_in: false }], ..Default::default() };
+        let seen = capture::MicrophoneState { devices: vec![capture::InputDevice { uid: "usb-mic".into(), name: "USB Mic".into(), built_in: false, default: false }], ..Default::default() };
         let blocker = data.join("settings.json.tmp"); std::fs::create_dir(&blocker)?;
         // The live loop's Microphone ▸ choice, twice while the disk refuses the write.
         for _ in 0..2 { app.settings.choose_microphone("usb-mic", &seen); app.save_or_note(); }

@@ -20,6 +20,7 @@ pub mod time;
 pub mod timeline;
 pub mod toggle;
 pub mod viewer_kind;
+pub mod zoom;
 
 pub use due::Due;
 pub use file::{IslandFile, Paths, Visibility};

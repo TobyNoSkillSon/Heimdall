@@ -138,7 +138,9 @@ pub const PROVIDERS: &[ProviderInfo] = &[
         anthropic_base: Some("https://opencode.ai/inference/go/anthropic"),
         openai_base: Some("https://opencode.ai/inference/go/openai/v1"),
         rejected: "access rejected / no subscription",
-        connect_default: None,
+        // The first model a sign-in gives an agent with none (Setup's OpenCode Go tile): Claude Haiku 5.5, the personal
+        // edition's default agent model on this provider (fast, cheap per request).
+        connect_default: Some(HAIKU),
         hour_cache: false,
         workspaces: None,
         custom_url: false,

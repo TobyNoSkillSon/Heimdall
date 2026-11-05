@@ -66,7 +66,9 @@ fn every_heimdall_tool_the_prompt_names_is_in_the_contract() {
         }
     }
     // Arguments and values the prompt quotes, not tools.
-    let not_tools = ["say", "language", "pl", "notice_id", "detail", "success", "error", "isolation", "steer", "queue", "confirm", "thread", "due", "follows", "target", "main", "arsenal", "grant", "path"];
+    let not_tools = ["say", "language", "pl", "notice_id", "detail", "success", "error", "isolation", "steer", "queue", "confirm", "thread", "due", "follows", "target", "main", "arsenal", "grant", "path",
+        // A model-drawn island's graphic fields (writing-briefs: one telling graphic per job island).
+        "kind", "now", "progress", "series", "values", "items", "picture"];
     let unknown: Vec<_> = named
         .iter()
         .filter(|n| !names.contains(n) && !not_tools.contains(&n.as_str()) && !skill_names.contains(n))
@@ -627,7 +629,8 @@ fn summaries_are_history_and_compactions_keep_only_open_items() {
     assert!(c.contains("override the rules above where they conflict, including \"preserve all existing information\""), "{c}");
     assert!(c.contains("never describe tools, tool names, arguments or how to call them") && c.contains("The system prompt and the tool list always describe the current tools"), "{c}");
     assert!(c.contains("Open items only") && c.contains("Remove everything finished, delivered, resolved, cancelled or superseded, also when the previous summary still lists it"), "{c}");
-    assert!(c.contains("A result User has not heard yet is open"), "{c}");
+    // Both editions word the user as "the user" here (5 Nov, agent::identity).
+    assert!(c.contains("A result the user has not heard yet is open"), "{c}");
     assert!(c.contains("never what it is now") && c.contains("never \"today\" or \"yesterday\""), "{c}");
     // The current tools appear nowhere in the summary instructions (nothing to go stale there either).
     let words: Vec<&str> = c.split(|ch: char| !(ch.is_alphanumeric() || ch == '_')).collect();
@@ -741,20 +744,20 @@ fn the_public_prompts_name_real_tools_and_carry_nothing_of_owners() {
         assert!(named.contains(&core), "public prompt never names `{core}`");
     }
     assert!(PUBLIC.contains(agent::tool_log::PROMPT_PLACEHOLDER));
-    // The bug-report section names Heimdall's developer and the repo on purpose; nothing else may.
-    let public = squash(PUBLIC).replace(REPORT_ASK, "").replace(BUG_REPO, "");
+    // The bug-report section names the repo on purpose; nothing else may.
+    let public = squash(PUBLIC).replace(BUG_REPO, "");
     for text in [public.as_str(), COMPACTION, PUBLIC_WORKER] {
         for private in ["User's", "User,", "User ", "/Users/", "Vault", "Arsenal", "Allegro", "night pass", "Polish", "Opus", "Haiku", "Discord", "GO INSTALL", "shelf"] {
             assert!(!text.contains(private), "public prompt carries {private:?}");
         }
     }
-    // 4 Nov: the label explanation says "Heimdall's internal owner name" and the transcript example shows `<owner>`,
-    // so no `User` is left at all.
-    assert_eq!(public.matches("User").count(), 0, "the public prompt names User");
-    assert!(public.contains("Heimdall's internal owner name") && public.contains("`[17:52:38 Mic · <owner>] words`"), "the owner-label explanation");
+    // 5 Nov: the public prompt never names the owner; transcript labels carry the user's name (`User` until chosen),
+    // and the label explanation and the transcript example are the only places that show the label.
+    assert_eq!(public.matches("User").count(), 2, "the public prompt names User outside the label explanation");
+    assert!(public.contains("labelled with the user's name (`User` until they choose one)") && public.contains("`[17:52:38 Mic · User] words`"), "the label explanation");
 }
 
-/// The bug-report offer (decision 18, 27 Oct). Since the 4 Nov public prompt it names "its developer", not `User`.
+/// The bug-report offer and the repo (decision 18, 27 Oct); since 5 Nov it names no one but the repo's owner handle.
 const REPORT_ASK: &str = "\"I found a bug in Heimdall. Do you want me to report it to the GitHub repo so its developer can fix it?\"";
 /// The one place the public prompt names the repo (not public yet).
 const BUG_REPO: &str = "`TobyNoSkillSon/Heimdall`";

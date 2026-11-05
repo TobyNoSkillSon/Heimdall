@@ -55,13 +55,18 @@ pub(crate) fn attach_speech_level(ui: Option<ui::Ui>, tools: std::sync::Weak<Too
     // Echo guard (23 Oct): each sentence through speakers is the reference its echo on the microphone is compared
     // with (pipeline/echo_guard.rs); the route is read as it starts.
     let echo = tools.clone();
+    let echo_for_calls = tools.clone();
     speak::set_spoken_text_hook(Some(Arc::new(move |text: Option<&str>| {
         with_tools(&echo, |t| {
             let now = capture::host_now_ns();
             // A sentence of the answer starting while the speaking flag is still up (an ack's linger): its first audio.
             if text.is_some() && !t.voice_bank.ack_playing() { crate::latency::audio(); }
             match text {
-                Some(s) => t.speech_policy.sentence_started(s, now, crate::pipeline::output_route::current() == crate::pipeline::output_route::Route::Speakers),
+                Some(s) => {
+                    // A line queued in a call that starts after it ends plays at full level, and the other way round.
+                    t.apply_call_level();
+                    t.speech_policy.sentence_started(s, now, crate::pipeline::output_route::current() == crate::pipeline::output_route::Route::Speakers)
+                }
                 None => t.speech_policy.voice_stopped(now),
             }
         });
@@ -83,6 +88,24 @@ pub(crate) fn attach_speech_level(ui: Option<ui::Ui>, tools: std::sync::Weak<Too
         }
         if let Some(u) = ui { u.send(ui::UiUpdate::HeimdallSpeaking(on)); }
     }) as speak::SpeakingHook));
+    install_call_voice_hook(&echo_for_calls);
+}
+/// Bug note 2026-11-05T02-32-17: speak only in a quiet gap, and stop as soon as anyone talks, guests included. A voice
+/// opening on a call source holds a reply waiting to start until the gap (`hold::OwnerVoice::other_voice`), and one still open `GUEST_CUT_AFTER` later while Heimdall is audible stops him
+/// (`Tools::guest_talked_over`). Nothing runs while Heimdall is silent but the hold's bookkeeping.
+pub(crate) fn install_call_voice_hook(tools: &std::sync::Weak<Tools>) {
+    let Some(t) = tools.upgrade() else { return };
+    let weak = tools.clone();
+    t.speech_policy.set_call_voice_hook(Some(Arc::new(move |source: &str, at: Option<u64>| {
+        let mut speaking = false;
+        with_tools(&weak, |t| { t.owner.other_voice(source, at.is_some()); speaking = t.heimdall_speaking(); });
+        let Some(at) = at.filter(|_| speaking) else { return };
+        let (weak, source) = (weak.clone(), source.to_owned());
+        std::thread::spawn(move || {
+            std::thread::sleep(super::speech_policy::GUEST_CUT_AFTER);
+            with_tools(&weak, |t| t.guest_talked_over(&source, at));
+        });
+    })));
 }
 /// Runs `f` on the tools if they are still alive. These hooks run inside speak's playback lock: if the hook held the
 /// last handle, dropping Tools there could take that lock again, so the last handle is dropped on its own thread.

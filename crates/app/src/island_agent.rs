@@ -335,6 +335,7 @@ pub fn signals(snap: &Snapshot, island: &Map<String, Value>, previous: Option<&V
         v["metrics"] = json!({"run": t.run, "status": t.status, "step": t.step, "total_steps": t.total, "loss": t.loss,
             "evals_percent": evals, "eval_step": t.evals.last().map(|e| e.0), "tok_s": t.tok_s, "mac_memory_gb": t.mem_gb});
     }
+    if !s.merged.is_empty() { v["merged"] = json!(s.merged) }
     if let Some(st) = s.status.as_deref().and_then(read_status) { v["status"] = st }
     if let Some(p) = previous { v["previous_island"] = p.clone() }
     v["sent"] = json!(island.get("sent").and_then(Value::as_str).map(digest::one_line).unwrap_or_default());

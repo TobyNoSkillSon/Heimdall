@@ -1138,7 +1138,8 @@ impl Island {
                 // The notch's own target (at rest and the peek lip) takes the pointer while the lip grows, so moving
                 // onto the lip never reads as leaving it.
                 // The voice's words resize with each sentence: putting them away takes the click mid-motion too (review 1 Nov).
-                let notch = *target == Target::Token(super::Token::Reply) || *target == Target::Hush;
+                // Stop keeps its place in the ear while the words grow: it takes the click mid-motion too.
+                let notch = matches!(target, Target::Token(super::Token::Reply) | Target::Hush | Target::StopSpeech);
                 r.contains(p) && (!moving || notch || self.prev_targets.iter().any(|(pt, pr)| pt == target && (pr.x - r.x).abs() < 0.5 && (pr.y - r.y).abs() < 0.5 && (pr.w - r.w).abs() < 0.5))
             })
             .map(|(target, _)| target.clone())

@@ -373,10 +373,11 @@ impl History {
     fn notice(&mut self, text: &str, at_ms: u64) {
         let Some(id) = text.split_once("[Heimdall notice: ").and_then(|(_, r)| r.split_once(']')).map(|(id, _)| id.trim().to_string()) else { return };
         if id.starts_with("ask-") {
-            if let Some(choice) = text.split_once("User clicked ").and_then(|(_, r)| r.split_once(". Question:").map(|(c, _)| c.trim().to_string())) {
+            // The user's name is the edition's (`agent::identity::for_agent`: `User`, a name, or "the user").
+            if let Some(choice) = text.split_once(" clicked ").and_then(|(_, r)| r.split_once(". Question:").map(|(c, _)| c.trim().to_string())) {
                 self.answer(&id, &choice);
-            } else if text.contains(": User answered ") {
-                // One line per question: `Question ask-…: the user answered q1 "Which?": Warm and Dark`; the chat shows the picks.
+            } else if text.lines().any(|l| l.starts_with("Question ") && l.contains(" answered ")) {
+                // One line per question: `Question ask-…: User answered q1 "Which?": Warm and Dark`; the chat shows the picks.
                 let picks: Vec<&str> = text.lines().filter_map(|l| l.rsplit_once("\": ").map(|(_, pick)| pick.trim())).collect();
                 if !picks.is_empty() {
                     self.answer(&id, &picks.join("; "));
@@ -394,7 +395,7 @@ impl History {
     /// Notes telling the agent what the user did not hear: the reply they quote is marked.
     fn marks(&mut self, text: &str) {
         // `bridge::tools::missed_lines` and `skipped_note`, as they are worded.
-        for (marker, heard) in [("he heard only the start of:", Heard::Cut), ("User talked over you before he heard:", Heard::Cut), ("with his new words:", Heard::Never)] {
+        for (marker, heard) in [("he heard only the start of:", Heard::Cut), (" talked over you before he heard:", Heard::Cut), ("with his new words:", Heard::Never)] {
             if let Some(words) = quoted_after(text, marker) {
                 self.mark(words, heard, 0);
             }

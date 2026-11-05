@@ -18,7 +18,7 @@ use anyhow::{Context, Result, ensure};
 #[doc(hidden)]
 pub use onnx::shader_module_probe;
 pub use onnx::{chunk_text, preprocess_text, write_wav_file};
-pub use playback::{CoreAudioOutput, LevelHook, SpeakingHook, SpokenTextHook, set_level_hook, set_speaking_hook, set_spoken_text_hook};
+pub use playback::{CoreAudioOutput, LevelHook, SpeakingHook, SpokenTextHook, set_level_hook, set_speaking_hook, set_spoken_text_hook, set_voice_gain, voice_gain};
 use std::{
     path::{Path, PathBuf},
     sync::{

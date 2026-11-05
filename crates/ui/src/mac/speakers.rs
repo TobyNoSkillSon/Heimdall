@@ -136,7 +136,7 @@ impl SpeakersWindow {
         self.names.clear();
         for (index, known) in list.iter().enumerate() {
             let y = 8.0 + index as f64 * ROW;
-            let name = NSTextField::textFieldWithString(&ns(&known.name), mtm);
+            let name = NSTextField::textFieldWithString(&ns(&crate::identity::shown_speaker(&known.name)), mtm);
             name.setBordered(false);
             name.setDrawsBackground(false);
             name.setFocusRingType(objc2_app_kit::NSFocusRingType::None);

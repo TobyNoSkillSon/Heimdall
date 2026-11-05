@@ -19,7 +19,7 @@ full_catalog_schema_snapshot` rewrites it from the catalog, and the diff shows w
 | What each tool does on the Mac (`ToolHost`) | `bridge::Tools` (`crates/app/src/bridge/tools.rs`) |
 | Durable receipts, replay and the notice outbox | `agent::actions::Actions`, `<data>/agent/mcp-actions.sqlite` (`crates/app/src/mcp_actions.rs`) |
 | Pi's side: one Pi tool per catalog entry, named `mcp__heimdall__<name>` | `crates/agent/runtime/heimdall.ts`; see `crates/agent/README.md`, "MCP and reload" |
-| Every call and its outcome, one line each | `<data>/logs/tools.log` (`agent::tool_log`), named to the agent as `HEIMDALL_TOOL_LOG` |
+| Every call and its outcome, one line each | `<data>/logs/tools.log` (`agent::tool_log`), named to the agent as `HEIMDALL_TOOL_LOG`: Pi's calls from its tool events, the relay's (and the cover agent's) on the scoped server (`mcp::scoped_call`, `ScopedTools::tool_log`; bug note 2026-11-05T02-53-27-4: none were logged from 30 Oct to 5 Nov). Masked, cut to 300 characters of arguments and 600 of result, images as `[image]`, rotated at 1 MiB to `tools.log.1` |
 | The cover agent's scoped server (a token that reaches only some tools) | `agent::mcp::Scope`; `docs/emergency.md` |
 
 ## The wire

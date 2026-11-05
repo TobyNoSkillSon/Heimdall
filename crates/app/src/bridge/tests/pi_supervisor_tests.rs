@@ -1345,6 +1345,31 @@ fn a_grant_is_written_only_for_a_pick_by_hand()->Result<()> {
     Ok(())
 }
 
+/// Bug note 2026-11-04T23-01-22: a keychain grant on a card reaches the hook through the same signed writer, only for
+/// his own click, and covers exactly the one new file.
+#[test]
+fn a_keychain_grant_is_written_signed_for_a_pick_by_hand()->Result<()> {
+    let (_d,data,_session,tools,_runtime)=setup()?; tools.notice_actions_available.store(true,Ordering::Release);
+    let p=tools.agent_enabled.permit()?; let actions=tools.mcp_actions.actions.as_ref().unwrap();
+    let name=format!("heimdall-grant-test-{}.keychain-db",std::process::id());
+    let card=|| agent::actions::parse_ask(&serde_json::json!({"questions":[{"question":"Set up the signing keychain?","options":[
+        {"label":"Set it up","grant":{"keychain":format!("~/Library/Keychains/{name}")}},"Not now"]}]})).unwrap();
+    let pick=vec![ui::agent_notice::QuestionAnswer{question_id:"q1".into(),labels:vec!["Set it up".into()],other:None}];
+    let home=std::env::var("HOME").unwrap();
+    let k=PathBuf::from(format!("{home}/Library/Keychains/{name}"));
+    let covers=|scope:&heimdall_emergency::grants::Scope| heimdall_emergency::grants::Ledger::load(&data,"security",agent::now_ms()).covers(scope);
+    let not_by_hand=actions.ask("keychain-key",&card(),&p)?;
+    tools.answer_question(&not_by_hand,&pick,&[])?;
+    assert!(!covers(&heimdall_emergency::grants::Scope::Keychain(k.clone())),"no grant without his own click");
+    let by_hand=actions.ask("keychain-click",&card(),&p)?;
+    tools.answer_question(&by_hand,&pick,&pick)?;
+    assert!(covers(&heimdall_emergency::grants::Scope::Keychain(k.clone())),"his click grants the new file");
+    assert!(!covers(&heimdall_emergency::grants::Scope::Keychain(PathBuf::from(format!("{home}/Library/Keychains/login.keychain-db")))));
+    let items=crate::mcp_actions::grant_items(card()[0].options[0].grant.as_ref());
+    assert_eq!(items,vec![ui::agent_notice::GrantItem::Keychain(format!("~/Library/Keychains/{name}"))],"the card draws it");
+    Ok(())
+}
+
 /// A spoken choice answers the first open question; the card waits for the rest, then completes with the last one
 /// (24 Oct, "B", then "both"). Talk that is not a choice closes a card as before.
 #[test]

@@ -68,17 +68,39 @@ impl ToolLog {
         }
     }
     fn append(&mut self, line: &str) -> anyhow::Result<()> {
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        if std::fs::metadata(&self.path).is_ok_and(|m| m.len() >= self.max_bytes) {
-            std::fs::rename(&self.path, self.path.with_extension("log.1"))?;
-        }
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(&self.path)?;
-        file.write_all(format!("{line}\n").as_bytes())?;
-        Ok(())
+        append(&self.path, self.max_bytes, line)
     }
+}
+
+/// One finished call that did not come through Pi's events: the relay's and the cover agent's calls on the scoped MCP
+/// server (`mcp::scoped_call`, bug note 2026-11-05T02-53-27-4: since the T3 relay took over on 30 Oct nothing was
+/// logged). `result` is the MCP result (`content`, `isError`); the line is the same as Pi's, masked and cut alike.
+pub fn record(log: &Path, at_ms: u64, tool: &str, ms: u64, args_value: &Value, result_value: &Value) {
+    record_bounded(log, MAX_BYTES, at_ms, tool, ms, args_value, result_value);
+}
+fn record_bounded(log: &Path, max_bytes: u64, at_ms: u64, tool: &str, ms: u64, args_value: &Value, result_value: &Value) {
+    let failed = result_value["isError"] == true;
+    let output = result(result_value);
+    if failed {
+        eprintln!("{}", failure_line(tool, ms, &output));
+    }
+    if let Err(e) = append(log, max_bytes, &line(at_ms, tool, failed, ms, &args(args_value), &output)) {
+        eprintln!("Tool log not written: {e:#}");
+    }
+}
+
+/// Appends one line, moving a full file aside to `tools.log.1` first.
+fn append(path: &Path, max_bytes: u64, line: &str) -> anyhow::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    if std::fs::metadata(path).is_ok_and(|m| m.len() >= max_bytes) {
+        std::fs::rename(path, path.with_extension("log.1"))?;
+    }
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(path)?;
+    file.write_all(format!("{line}\n").as_bytes())?;
+    Ok(())
 }
 
 /// A failed call is also one line in heimdall.log (the output is already masked by `result`; the log adds the time).
@@ -265,6 +287,30 @@ mod tests {
             assert!(line.contains('…'));
         }
         assert!(std::fs::metadata(&p).unwrap().len() < 4_000);
+    }
+
+    /// Bug note 2026-11-05T02-53-27-4: a call on the relay's scoped server is one line in the same format, masked,
+    /// cut, images as `[image]`, rotated like Pi's.
+    #[test]
+    fn a_relay_call_is_logged_like_a_pi_call() {
+        let d = tempfile::tempdir().unwrap();
+        let p = path(d.path());
+        record(&p, 1_000, "speak", 12, &json!({"text":"Done.","language":"en"}), &json!({"content":[{"type":"text","text":"Speech queued."}]}));
+        record(&p, 2_000, "t3_call", 1_530, &json!({"a_note":"Authorization: Bearer abcdefghijklmnop", "body": "x".repeat(5_000)}),
+            &json!({"isError":true,"content":[{"type":"text","text":"refused: api_key=Zx9Zx9Zx9Zx9"}]}));
+        record(&p, 3_000, "look", 40, &json!({}), &json!({"content":[{"type":"image","data":"QUFBQUFBQUFB"},{"type":"text","text":"Display 1"}]}));
+        let text = read(&p);
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(lines.len(), 3, "{text}");
+        assert!(lines[0].contains("  speak  ok  12 ms  {") && lines[0].contains("\"text\":\"Done.\"") && lines[0].ends_with("}  ->  Speech queued."), "{}", lines[0]);
+        assert!(lines[1].contains("  t3_call  ERROR  1.5 s  ") && lines[1].contains("Bearer [redacted]") && lines[1].contains("api_key=[redacted]"), "{}", lines[1]);
+        assert!(!text.contains("abcdefghijklmnop") && !text.contains("Zx9Zx9Zx9Zx9") && !text.contains("QUFBQUFB"), "{text}");
+        assert!(lines[1].chars().count() < 1_000 && lines[1].contains('…'), "a long payload is cut");
+        assert!(lines[2].contains("  look  ok  40 ms  {}  ->  [image] Display 1"), "{}", lines[2]);
+        for n in 0..20 { record_bounded(&p, 2_000, n, "speak", 1, &json!({"text":"ł".repeat(400)}), &json!({"content":[]})); }
+        assert!(p.with_extension("log.1").exists() && std::fs::metadata(&p).unwrap().len() < 4_000, "rotates");
+        assert!(!d.path().join("logs/tools.log.2").exists());
+        record(Path::new("/dev/null/cannot/tools.log"), 0, "speak", 0, &json!({}), &json!(null));
     }
 
     #[test]

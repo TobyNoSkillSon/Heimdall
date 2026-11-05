@@ -1555,7 +1555,7 @@ impl Ctl {
         self.build_header(if self.is_viewer() && old.path() != new.path() { None } else { Some(&old) });
         let shown_keys = [
             "parts", "chosen", "progress", "width", "stage", "value", "summary", "steps", "items", "goals", "kv", "image", "open", "state", "preset",
-            "updated", "started", "ended", "title",
+            "updated", "started", "ended", "title", "details",
         ];
         let body_changed = old.look() != new.look() || shown_keys.iter().any(|k| !j::opt_eq(old.raw.get(*k), new.raw.get(*k)));
         if ["task", "waiting"].contains(&new.look()) && old.look() == new.look() && body_changed {
@@ -3007,6 +3007,13 @@ impl Ctl {
                     }
                 });
             }
+            Control::Details => {
+                // As the island's own `expanded`: under the folder lock, temp file + rename.
+                new = IslandFile::patch(&id, |o| {
+                    let open = o.get("details").and_then(Value::as_bool) == Some(true);
+                    o.insert("details".into(), Value::Bool(!open));
+                });
+            }
             Control::GoalToggle { key } => {
                 // Written as the app writes the island's own `expanded`: under the folder lock, temp file + rename.
                 new = IslandFile::patch(&id, |o| {
@@ -3333,6 +3340,10 @@ impl Ctl {
                     // Back on screen for news, it is a viewer on screen like any other.
                     let Some(c) = me.upgrade() else { return };
                     if !app().on_screen(&c.id) {
+                        return;
+                    }
+                    // Heimdall's drawing mode: a press on its overlay is ink over the viewer, not a click outside.
+                    if !super::outside_click::closes_viewer() {
                         return;
                     }
                     Ctl::close_viewer(&c);

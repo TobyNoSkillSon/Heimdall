@@ -392,7 +392,7 @@ pub struct Heading {
 pub fn turn_heading(t: &Turn) -> Heading {
     let what = match t.trigger {
         Trigger::Wake => "Wake",
-        Trigger::Typed => "User",
+        Trigger::Typed => crate::identity::USER_HEADING,
         Trigger::Context => "Context",
         Trigger::Earlier => "Earlier",
     };

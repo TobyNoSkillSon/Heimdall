@@ -175,7 +175,7 @@ fn next(run: Rc<Run>) {
     });
 }
 
-fn finish(v: &Rc<FileViewer>, title: &str, size: Size, body: Rect, done: Box<dyn FnOnce(Option<Image>)>) {
+pub(super) fn finish(v: &Rc<FileViewer>, title: &str, size: Size, body: Rect, done: Box<dyn FnOnce(Option<Image>)>) {
     let Some(content) = v.snapshot(body.size()) else { return done(None) };
     let kind = v.kind();
     let title = title.to_owned();

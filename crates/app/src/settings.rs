@@ -165,6 +165,14 @@ pub struct Settings {
     /// ignores it and always sets them (docs/harness-autonomy.md).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_autonomy: Option<bool>,
+    /// Setup ▸ Arsenal ▸ Use it: the MCP bridge inside Arsenal.app (`Contents/Helpers/arsenal-mcp`), which Heimdall's Pi
+    /// extension registers as the `arsenal` server at each start (runtime/heimdall.ts). None: not used (Not now).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arsenal_mcp: Option<std::path::PathBuf>,
+    /// The Setup step on screen while the first Setup is not done (`UiAction::SetupAt`): a relaunch (the watchdog's,
+    /// an update's, a crash) reopens Setup there (`setup_wizard::first_launch`). Cleared by Setup's Done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_step: Option<String>,
     /// Ignored. Per-stream switches from before App Audio, keyed by PID and generation, so they never
     /// matched a relaunched app. Still read so older files load; never written again.
     #[serde(skip_serializing)]
@@ -350,6 +358,8 @@ impl Default for Settings {
             first_run_greeting_due: false,
             t3_connect_allowed: false,
             harness_autonomy: None,
+            arsenal_mcp: None,
+            setup_step: None,
             disabled_sources: vec![],
             recorded_apps: vec![],
             system_audio_confirmed: false,
@@ -1092,7 +1102,7 @@ mod microphone_tests {
         capture::MicrophoneState {
             devices: devices
                 .iter()
-                .map(|(uid, name, built_in)| capture::InputDevice { uid: (*uid).into(), name: (*name).into(), built_in: *built_in })
+                .map(|(uid, name, built_in)| capture::InputDevice { uid: (*uid).into(), name: (*name).into(), built_in: *built_in, default: false })
                 .collect(),
             in_use: in_use.map(Into::into),
             ..Default::default()
@@ -1272,7 +1282,7 @@ mod primary_promotion_regression {
     fn choosing_an_extra_as_primary_removes_duplicate_membership() {
         let mut settings=super::Settings::default();
         settings.extra_microphones=vec![super::MicrophoneChoice {uid:"external".into(),name:"External".into()}];
-        let seen=capture::MicrophoneState {devices:vec![capture::InputDevice {uid:"external".into(),name:"External".into(),built_in:false}],..Default::default()};
+        let seen=capture::MicrophoneState {devices:vec![capture::InputDevice {uid:"external".into(),name:"External".into(),built_in:false,default:false}],..Default::default()};
         settings.choose_microphone("external",&seen);
         assert_eq!(settings.microphone.as_ref().unwrap().uid,"external");assert!(settings.extra_microphones.is_empty());
     }

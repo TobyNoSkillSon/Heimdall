@@ -269,8 +269,12 @@ impl Archive {
         // name its objects (31 Oct 22:22:31: a 60 s wait for the lock ended here). A held lock is waited out by the
         // writer, never returned.
         let mut objects: Vec<audio::Encoded> = vec![];
+        let mut collections = 0;
         let sealed = std::mem::take(&mut self.sealed);
         let ready = (|| -> Result<()> {
+            // Read before the blobs are written: unchanged under the writer's lock, no collection removed them since,
+            // and the writer catalogues them without reading the hot pack (`audio::publish_put`).
+            collections = store::collections(&self.db)?;
             for (id, format, samples) in &sealed {
                 if objects.iter().any(|o| o.id == *id) || audio::catalogued(&self.db, id)? {
                     continue;
@@ -292,7 +296,7 @@ impl Archive {
                 _ => None,
             })
             .collect();
-        let job = Commit { segment: self.segment, root: self.root.clone(), ops: self.ops.clone(), objects, sealed: std::sync::Arc::new(sealed), dirty };
+        let job = Commit { segment: self.segment, root: self.root.clone(), ops: self.ops.clone(), objects, collections, sealed: std::sync::Arc::new(sealed), dirty };
         let sealed = job.sealed.clone();
         let zero_rows = match self.queue.call(move |db| job.apply(db)) {
             Ok(rows) => rows,
@@ -352,20 +356,23 @@ struct Commit {
     segment: i64,
     root: PathBuf,
     ops: Vec<Op>,
+    /// Blobs this flush committed to the hot pack, and `store::collections` read before it did.
     objects: Vec<audio::Encoded>,
+    collections: i64,
     sealed: std::sync::Arc<Vec<(String, NativeFormat, Vec<f32>)>>,
     dirty: Vec<(i64, u64)>,
 }
 impl Commit {
     fn apply(&self, db: &Connection) -> Result<Vec<(usize, i64)>> {
-        // An object seen as catalogued before may have been collected since.
-        let mut objects = self.objects.clone();
+        audio::publish_put(db, &self.root, store::HOT, &self.objects, self.collections)?;
+        // An object seen as catalogued before may have been collected since: its blob is written here.
+        let mut late = vec![];
         for (id, format, samples) in self.sealed.iter() {
-            if !objects.iter().any(|o| o.id == *id) && !audio::catalogued(db, id)? {
-                objects.push(audio::encode_lossless(format.sample_rate, format.channels, samples)?);
+            if !self.objects.iter().any(|o| o.id == *id) && !late.iter().any(|o: &audio::Encoded| o.id == *id) && !audio::catalogued(db, id)? {
+                late.push(audio::encode_lossless(format.sample_rate, format.channels, samples)?);
             }
         }
-        audio::publish(db, &self.root, store::HOT, &objects)?;
+        audio::publish(db, &self.root, store::HOT, &late)?;
         let mut zero_rows = vec![];
         for (index, op) in self.ops.iter().enumerate() {
             match op {

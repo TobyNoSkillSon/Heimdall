@@ -955,6 +955,39 @@ fn chunks_retracted_during_inference_are_skipped_quietly() -> Result<()> {
     Ok(())
 }
 
+/// Bug 2026-11-05T02-53-27-2: a memory pause read as "the search model is not responding
+/// correctly" and a model-wide failure stayed red for hours while every pass embedded.
+#[test]
+fn embedding_pause_is_no_health_and_model_failure_clears_once_the_model_works() -> Result<()> {
+    let (t,db,_j,sid,_)=setup();
+    final_row(&db,sid,"a","mic",S,2*S,"hello","User")?;
+    timeline::utterance(&db,sid,"a")?;
+    struct Fails(&'static str);
+    impl Embedder for Fails {
+        fn model(&self)->Model {Model{id:"pause-test".into(),version:"1".into(),dimensions:2}}
+        fn embed(&mut self,_:&Path,_:&Chunk)->Result<Vec<f32>> {anyhow::bail!("{}",self.0)}
+    }
+    let mut paused=Fails("EmbeddingGemma 2: embedding paused: low free memory, swap growth or bounded footprint exceeded");
+    assert_eq!(timeline::embed_batch(t.path(),&mut paused,100,&mut on)?,0);
+    assert!(count(&db,"chunk_embedding_errors")>0,"the pause still backs the chunks off");
+    assert_eq!(timeline::embedding_error_status(t.path(),&paused.model())?,None,"a memory pause is not a fault");
+    let mut stuck=Fails("EmbeddingGemma 2: embedding worker timed out");
+    db.execute("UPDATE chunk_embedding_errors SET retry_wall_ns=0",[])?;
+    assert_eq!(timeline::embed_batch(t.path(),&mut stuck,100,&mut on)?,0);
+    assert_eq!(timeline::embedding_error_status(t.path(),&stuck.model())?.as_deref(),Some("Search indexing is failing because the search model is not responding correctly."));
+    // The failures are due again; one chunk embeds and the rest wait their turn.
+    db.execute("UPDATE chunk_embedding_errors SET retry_wall_ns=?1",[(heimdall_archive::wall_ns()-S) as i64])?;
+    let mut fixed=Fake{model:stuck.model(),calls:0,values:vec![1.,0.]};
+    assert_eq!(timeline::embed_batch(t.path(),&mut fixed,1,&mut on)?,1);
+    assert!(count(&db,"chunk_embedding_errors")>0,"a failed chunk still waits");
+    assert_eq!(timeline::embedding_error_status(t.path(),&stuck.model())?,None,"the model stored a vector after the failure");
+    // A failure after that success is red again.
+    db.execute("UPDATE chunk_embedding_errors SET retry_wall_ns=0",[])?;
+    timeline::embed_batch(t.path(),&mut stuck,100,&mut on)?;
+    assert!(timeline::embedding_error_status(t.path(),&stuck.model())?.is_some());
+    Ok(())
+}
+
 #[test]
 fn embedding_failure_status_is_one_plain_menu_sentence() {
     for (cause,why) in [
@@ -964,11 +997,13 @@ fn embedding_failure_status_is_one_plain_menu_sentence() {
         ("embedding worker timed out","the search model is not responding correctly"),
         ("screen state has no representative frame","some screenshots cannot be read"),
         ("write audio-0.f32: No space left on device (os error 28)","the disk is full"),
+        ("EmbeddingGemma 2: image decode failed","the search model is not responding correctly"),
     ] {
         let s=timeline::embedding_failure_status(cause);
         assert_eq!(s,format!("Search indexing is failing because {why}."));
         assert!(s.len()<110 && !s.contains(':'));
     }
+    assert_eq!(timeline::embedding_failure_status("EmbeddingGemma 2: embedding paused: low free memory"),"Search indexing is paused while memory is low.");
 }
 
 /// "We shouldn't embed from second to second ... a 10 or 15 minute buffer

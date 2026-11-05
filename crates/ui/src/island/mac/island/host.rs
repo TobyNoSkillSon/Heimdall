@@ -936,6 +936,7 @@ pub(crate) fn dispatch(o: Output) {
         Output::Read(r) => emit(UiAction::FastRead(r)),
         Output::Report(r) => emit(UiAction::Island(r)),
         Output::PullOut { text, notes } => emit(UiAction::PullOut { text, notes }),
+        Output::StopSpeech => emit(UiAction::StopSpeaking),
         Output::Copy(text) => {
             let board = objc2_app_kit::NSPasteboard::generalPasteboard();
             board.clearContents();
@@ -1084,15 +1085,22 @@ define_class!(
     }
 );
 
-/// The overlay (drawing mode) asks before inking: a press on one of the island's targets is the island's.
+/// Drawing mode's own controls (Send, Close, undo, clear): the only targets that take a press while the overlay is
+/// up. Any other press is ink, even over an open island: it never becomes a click that collapses or closes it (bug
+/// note 2026-11-04T21-56-52).
+pub(crate) fn draw_control(t: &Target) -> bool {
+    matches!(t, Target::DrawSend | Target::DrawClose | Target::DrawUndo | Target::DrawClear)
+}
+
+/// The overlay (drawing mode) asks before inking: a press on one of drawing mode's controls is the island's.
 pub(crate) fn press_at(p: NSPoint) -> bool {
     with_host(|h| {
-        let t = h.hit_screen(p);
-        if t.is_some() {
+        let take = h.hit_screen(p).is_some_and(|t| draw_control(&t));
+        if take {
             // Drawing mode's overlay hands the press over: not the island's own event, so it grants nothing.
             h.pointer_down(p, crate::island::click_source::EventSource::NONE);
         }
-        t.is_some()
+        take
     })
     .unwrap_or(false)
 }
@@ -1101,10 +1109,12 @@ pub(crate) fn release_at(p: NSPoint) {
     with_host(|h| h.pointer_up(p, crate::island::click_source::EventSource::NONE));
 }
 
+/// The overlay's pointer: hovers the island; `true` over one of drawing mode's controls (the arrow), else the
+/// crosshair draws.
 pub(crate) fn hover_at(p: Option<NSPoint>) -> bool {
     with_host(|h| {
         h.pointer_moved(p);
-        h.hovered.is_some()
+        h.hovered.as_ref().is_some_and(draw_control)
     })
     .unwrap_or(false)
 }
@@ -1112,6 +1122,19 @@ pub(crate) fn hover_at(p: Option<NSPoint>) -> bool {
 #[cfg(test)]
 mod pointer_tests {
     use super::pointer_watch;
+
+    /// Bug note 2026-11-04T21-56-52: a press over an open island in drawing mode was handed to the island and became a
+    /// click that collapsed it. Only drawing mode's own controls take a press; anything else is ink.
+    #[test]
+    fn in_drawing_mode_only_the_drawing_controls_take_a_press() {
+        use super::{draw_control, Target, Token};
+        for t in [Target::DrawSend, Target::DrawClose, Target::DrawUndo, Target::DrawClear] {
+            assert!(draw_control(&t), "{t:?}");
+        }
+        for t in [Target::Token(Token::Reply), Target::ReplyBand, Target::ReplyPin, Target::Hush, Target::ReaderPlay, Target::Composer, Target::NoteClose("n".into())] {
+            assert!(!draw_control(&t), "{t:?} is ink in drawing mode");
+        }
+    }
 
     /// Review of the 28 Oct loop fix: the dots' 30 fps timer also caught a pointer that left without an exit event.
     /// With the dots in the render server, a hover or "over" with no other clock gets its own poll; at rest (neither

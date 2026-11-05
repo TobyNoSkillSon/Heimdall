@@ -68,6 +68,8 @@ pub enum GrantItem {
     Delete(String),
     /// Removing the login item of exactly this name.
     LoginItem(String),
+    /// Making and filling exactly this one new keychain file (bug note 2026-11-04T23-01-22; `~/` for the home folder).
+    Keychain(String),
 }
 
 /// One question of an `ask` card. `id` is the agent's question id ("q1".."q4"), the key of its answer.

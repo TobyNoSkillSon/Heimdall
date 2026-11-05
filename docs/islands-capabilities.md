@@ -48,6 +48,8 @@ stage within 30 s (a new run starts over), and a picture the work produced is co
 (`pictures/`), since pictures in /tmp vanish. A picture opens full size in the island viewer. A new thread-bound
 island drops out of the notch.
 
+The viewer island zooms (bug note 2026-11-04T19-07-48): pinch, ⌘+ / ⌘− / ⌘0 once the viewer has a click in it, two fingers pan when zoomed. Markdown and text, pictures, PDF and HTML zoom; audio, video and Quick Look files do not. The zoom is remembered per file in `viewer-zoom.json` in the islands folder. The viewer can't be resized by hand; when its width changes, text and PDF scale to the new width instead of reflowing.
+
 ## Parts
 
 The `islands_put` description names these nine; the helper also draws `timeline` (the Day Timeline, `islands/README.md`).

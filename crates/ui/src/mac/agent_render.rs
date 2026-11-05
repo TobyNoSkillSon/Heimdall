@@ -661,6 +661,33 @@ fn question_card(run: &mut Run, _mtm: MainThreadMarker) {
         apply(UiUpdate::ClearAgentNotices);
         advance(1.0);
     }
+    // Bug note 2026-11-04T23-01-22: a keychain grant draws a key and the one new file's path whole, beside a delete line.
+    {
+        use crate::agent_notice::{AskOption, AskQuestion, GrantItem};
+        let path = "~/Library/Keychains/heimdall-release-signing.keychain-db";
+        let card = AgentNotice {
+            action: Some(NoticeAction::Ask { request_id: "keychain".into(), expires_ms: later, countdown: false, questions: vec![AskQuestion {
+                id: "q1".into(), header: None, text: "Set up the release signing keychain?".into(), multi_select: false, allow_other: false, field: None,
+                options: vec![
+                    AskOption { label: "Set it up".into(), description: Some("Imports the Developer ID key".into()), grant: vec![
+                        GrantItem::Keychain(path.into()),
+                        GrantItem::Delete("~/Library/Caches/heimdall-signing-old".into()),
+                    ] },
+                    AskOption::label("Not now"),
+                ],
+            }] }),
+            ..AgentNotice::line("keychain", "Set up the release signing keychain?", NoticeKind::Info)
+        };
+        apply(UiUpdate::AgentNotice(card));
+        advance(1.0);
+        let ok = super::island::checks::snapshot(&run.dir.join("island-question-grant-keychain.png"));
+        run.check("island-question-grant-keychain: rendered", ok);
+        let texts = with_host_frame_texts();
+        run.check("island-question-grant-keychain: the keychain path drawn whole", texts.concat().contains(path) && texts.iter().any(|t| t == "~/Library/Caches/heimdall-signing-old"));
+        run.take();
+        apply(UiUpdate::ClearAgentNotices);
+        advance(1.0);
+    }
     // The adaptive card (24 Oct): several picks, three tabs, Other typed, and the composer in the pulled-down
     // conversation. Each is a card as the app sends it (`ask` with `questions`); its picks are set as a voice answer.
     let ask_opt = |label: &str, description: &str| crate::agent_notice::AskOption { label: label.into(), description: (!description.is_empty()).then(|| description.into()), grant: vec![] };

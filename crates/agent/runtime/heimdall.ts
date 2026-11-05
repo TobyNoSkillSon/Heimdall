@@ -9,6 +9,7 @@ import { registerServiceTier } from './service-tier.mjs';
 import { registerQuota } from './quota.mjs';
 import { registerHistoryRepair } from './history-repair.mjs';
 import { registerCompactionFallback } from './compaction-fallback.mjs';
+import { registerArsenal } from './arsenal.mjs';
 import { closeSync, readFileSync } from 'node:fs';
 
 export default function heimdall(pi: ExtensionAPI) {
@@ -36,6 +37,8 @@ export default function heimdall(pi: ExtensionAPI) {
   // inside a wake's prompt (19 Oct 18:12: the user's first words waited 45 s for it).
   // Speed (service-tier.mjs): Fast asks OpenAI routes for the priority tier; the requested and reported tiers are logged.
   registerServiceTier(pi, process.env.HEIMDALL_API_PROVIDER ?? '', process.env.HEIMDALL_SETTINGS_FILE, process.env.HEIMDALL_TIER_LOG);
+  // Setup ▸ Arsenal ▸ Use it: Arsenal's MCP bridge for this session (arsenal.mjs); a restart picks up a change.
+  registerArsenal(pi, process.env.HEIMDALL_SETTINGS_FILE);
   delete process.env.HEIMDALL_SETTINGS_FILE;
   delete process.env.HEIMDALL_TIER_LOG;
   // Plan usage limits (quota.mjs): a spent limit and its reset, and the five-hour window past 80%, go to Heimdall as

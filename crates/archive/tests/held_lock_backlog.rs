@@ -83,6 +83,30 @@ fn a_backlog_behind_a_held_lock_never_starves_another_writer() {
     assert!(drain < Duration::from_secs(8), "{JOBS} queued writes took {drain:?} to drain");
 }
 
+/// 4 Nov 22:04-22:10 and 5 Nov 00:09-00:14: 40,000-50,000 writes queued behind slow steps drained 256 jobs per
+/// full-sync commit, about 165 a second, barely above what arrives, and took 250-320 s. A backlog now commits in groups
+/// of up to `BATCH_BEHIND` jobs (still bounded by `BATCH_TIME`): 3,000 queued notes commit in a few transactions.
+#[test]
+fn a_backlog_commits_in_large_groups() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("archive");
+    store::open(&root).unwrap().execute_batch("CREATE TABLE IF NOT EXISTS group_test(k INTEGER PRIMARY KEY)").unwrap();
+    let holder = store::open(&root).unwrap();
+    holder.execute_batch("BEGIN IMMEDIATE; INSERT INTO store_meta(key,value) VALUES('held','1');").unwrap();
+    let queue = live::Queue::shared(&root).unwrap();
+    for i in 0..JOBS {
+        queue.enqueue(move |db| Ok(db.execute("INSERT INTO group_test(k) VALUES(?1)", [i as i64]).map(|_| ())?)).unwrap();
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    let before = queue.groups();
+    holder.execute_batch("ROLLBACK").unwrap();
+    assert!(queue.settle(Duration::from_secs(60)), "the backlog drains");
+    let groups = queue.groups() - before;
+    let rows: i64 = store::open(&root).unwrap().query_row("SELECT count(*) FROM group_test", [], |r| r.get(0)).unwrap();
+    assert_eq!(rows as usize, JOBS, "nothing queued is lost");
+    assert!(groups <= 4, "{JOBS} queued writes took {groups} commits (at most {} jobs each)", live::BATCH_BEHIND);
+}
+
 /// 31 Oct 22:21:13: the listen evidence writer waited its one 60 s attempt for the lock, stopped for good, and every
 /// listen event after it failed ("evidence worker failed", over 1,000 lines). It now waits as long as the lock is
 /// held, keeps taking records meanwhile, and commits all of them in order once it is free.

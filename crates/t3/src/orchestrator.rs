@@ -569,6 +569,8 @@ impl Workers {
                     self.db.lock().unwrap().execute("INSERT OR REPLACE INTO queued_sends(thread,run,text) VALUES(?,?,?)", params![thread, run, args["message"].as_str().unwrap_or("")])?;
                 }
                 if let (Some(thread), Some(run)) = (args["threadId"].as_str(), result["runId"].as_str()) {
+                    // Heimdall's own message: if T3 drops this run before it starts, the thread reads cancelled.
+                    self.sent_run(thread, run)?;
                     let task = self.db.lock().unwrap().execute(
                         "UPDATE workers SET run=?,status=?,archived=0 WHERE thread=? AND kind='task'",
                         params![run, result["status"].as_str().unwrap_or("running"), thread],

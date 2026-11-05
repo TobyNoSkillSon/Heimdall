@@ -10,6 +10,8 @@ use std::{
     path::Path,
     sync::{Arc, Mutex},
 };
+/// What a `speak` call is told after the user pressed Stop on this run's speech.
+const STOPPED_RUN: &str = "STOPPED: User pressed Stop on your speech in this turn, so the rest of it is shown on the island, not said. Do not repeat it aloud unless they ask.";
 type Delivery = Arc<dyn Fn(&str, &str, &DeliveryPermit) -> Result<()> + Send + Sync>;
 type Reload = Arc<dyn Fn(&str, &DeliveryPermit) -> Result<()> + Send + Sync>;
 type Ask = Arc<dyn Fn(&Question, &DeliveryPermit) -> Result<()> + Send + Sync>;
@@ -317,6 +319,16 @@ impl Host {
                 Self::island_line(tools, actions, id, text, op, p)?;
                 return Ok(if tool_call { crate::bridge::speech_policy::HELD_IN_CONVERSATION.into() } else { Self::SHOWN_ON_ISLAND.into() });
             }
+            // The agent's run reply (a `speak` call or its final reply), not app lines (quota, emergency mode) or a held
+            // line said later.
+            let run_reply = held.is_none() && !op.starts_with("emergency-say:") && !op.starts_with("quota:");
+            // The user pressed Stop on this run's speech (review 5 Nov: its final reply was said right after): the rest of
+            // the run shows on the island, unsaid, until their own words reach the agent again.
+            if run_reply && tools.speech_policy.run_stopped() {
+                tools.record_diagnostic("speech_held", serde_json::json!({"event":"the user pressed Stop on this run, shown on the island","op":op}));
+                Self::island_line(tools, actions, id, text, op, p)?;
+                return Ok(if tool_call { STOPPED_RUN.into() } else { Self::SHOWN_ON_ISLAND.into() });
+            }
             set_state_soft(actions, id, "submitting", p)?;
             // Written to be read as well as heard: list items and short lines become sentences for the voice.
             match agent::mcp::ToolHost::speak(tools, &agent::reply::for_speech(text), language, p) {
@@ -324,6 +336,7 @@ impl Host {
                     // A newer reply goes out: lines held in a call before it are not said after it. A held line said now
                     // supersedes only those held before it, never one held since (review: the answer to his words).
                     tools.speech_policy.reply_queued(held.map_or_else(capture::host_now_ns, |(at, _)| at));
+                    if run_reply { tools.run_speech(job); }
                     set_state_soft(actions, id, &format!("queued:{job}"), p)?;
                     // The words show on the island as each sentence starts playing (`UiUpdate::SpokenText`, from
                     // playback; "I want the text to also appear on the Dynamic Island").
@@ -675,7 +688,8 @@ pub(crate) fn island_question(item: &agent::actions::AskItem) -> ui::agent_notic
 
 /// What an option grants, as the card writes it out (approval grants, 4 Nov): each path as the hook keeps it
 /// (`heimdall_emergency::grants::grant_path`: absolute, normalised), with the home folder as `~/` only when the path
-/// lies inside it exactly, and each login item by its name.
+/// lies inside it exactly, each login item by its name, and the new keychain file as the hook keeps it
+/// (`grants::grant_keychain`, bug note 2026-11-04T23-01-22).
 pub(crate) fn grant_items(grant: Option<&agent::actions::AskGrant>) -> Vec<ui::agent_notice::GrantItem> {
     let Some(g) = grant else { return vec![] };
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_else(|| "/var/empty".into());
@@ -687,8 +701,14 @@ pub(crate) fn grant_items(grant: Option<&agent::actions::AskGrant>) -> Vec<ui::a
         },
         Err(_) => raw.trim().to_owned(),
     };
+    let home_form = |p: std::path::PathBuf| match p.strip_prefix(&home) {
+        Ok(rest) if !rest.as_os_str().is_empty() => format!("~/{}", rest.display()),
+        _ => p.display().to_string(),
+    };
+    let keychain = |raw: &str| heimdall_emergency::grants::grant_keychain(raw, &home, &vault).map_or_else(|_| raw.trim().to_owned(), home_form);
     g.delete.iter().map(|p| ui::agent_notice::GrantItem::Delete(shown(p)))
         .chain(g.login_items.iter().map(|n| ui::agent_notice::GrantItem::LoginItem(n.trim().to_owned())))
+        .chain(g.keychain.iter().map(|k| ui::agent_notice::GrantItem::Keychain(keychain(k))))
         .collect()
 }
 

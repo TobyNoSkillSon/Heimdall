@@ -480,7 +480,8 @@ fn provider_name(e: &Endpoint) -> &'static str {
 async fn post(e: &Endpoint, key: &str, c: &Call<'_>, hash: u64, body: &Value, worst_usd: f64) -> Result<Value> {
     // Agent off: nothing goes out, also between the rounds of a tool loop (`background_gate`). Nor while the provider's
     // plan limit or credit is spent (the quota episode, audit 27 Oct F8).
-    crate::background_gate::check()?;
+    // Setup's agent check asks while Agent is still off (Start turns it on); it is the user's own choice, made in Setup.
+    if c.job != crate::pipeline::setup_ready::AGENT_CHECK_JOB { crate::background_gate::check()?; }
     crate::background_gate::quota_check(e.provider, agent::now_ms())?;
     let client = reqwest::Client::builder()
         .user_agent(concat!("heimdall/", env!("CARGO_PKG_VERSION")))
@@ -551,7 +552,8 @@ async fn post(e: &Endpoint, key: &str, c: &Call<'_>, hash: u64, body: &Value, wo
 /// stored key). Errors never carry the key.
 pub async fn ask(e: &Endpoint, c: &Call<'_>) -> Result<Answer> {
     let key = e.key.clone().with_context(|| format!("{} is not connected, or the background model is not on it", provider_name(e)))?;
-    let c = &with_effort(e, c);
+    let system = agent::identity::for_agent(c.system, &agent::identity::current());
+    let c = &with_effort(e, &edition_worded(c, &system));
     if ui::t3_instance(e.provider).is_some() { return t3::ask(e, c).await }
     let l = Loop::for_endpoint(e);
     if l.limit.is_none() { return ask_unpriced(e, &l, &key, c).await }
@@ -761,11 +763,23 @@ pub fn ask_tools_blocking(e: &Endpoint, c: &Call<'_>, tools: &[Tool], submit: &s
     // The tools run here; a T3 thread cannot call them (module doc).
     if ui::t3_instance(e.provider).is_some() { return Err(t3::NoToolsOnT3 { job: c.job }.into()) }
     let key = e.key.clone().with_context(|| format!("{} is not connected, or the background model is not on it", provider_name(e)))?;
-    let c = &with_effort(e, c);
+    let system = agent::identity::for_agent(c.system, &agent::identity::current());
+    let c = &with_effort(e, &edition_worded(c, &system));
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let hash = prompt_hash(c);
     let mut send = |body: &Value, worst: f64| rt.block_on(post(e, &key, c, hash, body, worst));
-    run_tools_on(&Loop::for_endpoint(e), c, tools, submit, max_rounds, run, &mut send)
+    let names = agent::identity::current();
+    let mut worded = |name: &str, input: &Value| agent::identity::for_agent(&run(name, input), &names);
+    run_tools_on(&Loop::for_endpoint(e), c, tools, submit, max_rounds, &mut worded, &mut send)
+}
+
+/// `c` in the edition's wording, its system text given as `system` (`agent::identity::for_agent`: the public edition
+/// never sends the owner's name; VM run 5 Nov 05:43). The personal edition's call is unchanged, byte for byte.
+pub(crate) fn edition_worded<'a>(c: &Call<'_>, system: &'a str) -> Call<'a> {
+    let names = agent::identity::current();
+    let word = |p: &Prompt| Prompt { blocks: p.blocks.iter().map(|b| Block { text: agent::identity::for_agent(&b.text, &names), cache: b.cache }).collect() };
+    Call { job: c.job, model: c.model.clone(), system, schema: c.schema.clone(), effort: c.effort, prompt: word(&c.prompt),
+        history: c.history.iter().map(|t| Turn { user: word(&t.user), assistant: t.assistant.clone() }).collect(), session: c.session.clone() }
 }
 
 /// Effort names a level may carry (`Call::effort` is `&'static str`): OpenAI's, Anthropic's, T3's Claude extras.
@@ -780,11 +794,23 @@ pub fn effort_name(level: &str, e: &Endpoint) -> Option<&'static str> {
     EFFORT_NAMES.iter().find(|n| **n == level).copied()
 }
 
-/// `c` at Background Tasks ▸ Model's level for `e`'s model, when the user picked one (else the job's default effort).
+/// Jobs the user waits on while they talk: Background Tasks ▸ Model's level applies to them only up to the job's own effort
+/// (bug 2026-11-05T02-32-17: the suggester ran at their "max" on gpt-6-luna, 7-31 s a pass, its cards 11-21 s after the
+/// line that started them).
+const LIVE_JOBS: [&str; 1] = [crate::suggester::JOB];
+
+/// The effort `job` runs at when the menu asks for `level`: the level, except that a live job never goes above its own.
+pub fn capped_effort(job: &str, level: &'static str, own: &'static str) -> &'static str {
+    let rank = |n: &str| EFFORT_NAMES.iter().position(|e| *e == n).unwrap_or(EFFORT_NAMES.len());
+    if LIVE_JOBS.contains(&job) && rank(level) > rank(own) { own } else { level }
+}
+
+/// `c` at Background Tasks ▸ Model's level for `e`'s model, when the user picked one (else the job's default effort); a
+/// live job at most at its own effort (`capped_effort`).
 pub fn with_effort<'a>(e: &Endpoint, c: &Call<'a>) -> Call<'a> {
     let level = crate::background_model::effort_for(e.provider, &c.model);
     match level.as_deref().and_then(|l| effort_name(l, e)) {
-        Some(effort) => Call { effort, ..c.clone() },
+        Some(effort) => Call { effort: capped_effort(c.job, effort, c.effort), ..c.clone() },
         None => c.clone(),
     }
 }

@@ -55,12 +55,17 @@ pub enum Scope {
     Delete(PathBuf),
     /// Removing the login item of exactly this name.
     LoginItem(String),
+    /// Making exactly this one new keychain file and filling it (bug note 2026-11-04T23-01-22): `security`
+    /// create-keychain, set-keychain-settings, unlock-keychain, import and set-key-partition-list on this file only
+    /// (`deny::Ctx::keychain_grant`). Never the login keychain or one that existed before the click (`Ledger::covers`).
+    Keychain(PathBuf),
 }
 impl Scope {
     fn key(&self) -> String {
         match self {
             Scope::Delete(p) => format!("delete\n{}", p.display()),
             Scope::LoginItem(n) => format!("login-item\n{n}"),
+            Scope::Keychain(p) => format!("keychain\n{}", p.display()),
         }
     }
 }
@@ -134,10 +139,49 @@ pub fn grant_login_item(raw: &str) -> Result<String, String> {
     Ok(name.to_owned())
 }
 
+/// A new keychain file the user may approve making (bug note 2026-11-04T23-01-22), as the grant keeps it: absolute (`~/`
+/// is the user's home), exact, a plain file name of letters, digits, `.`, `_` or `-` ending in `.keychain-db`, right
+/// inside `~/Library/Keychains` or inside a project of Heimdall's home (two folders deep), with no symlinked folder on the way.
+/// Never the login keychain, the System or metadata ones, and never a file that already exists (`exists` says
+/// whether one does; the app checks at the click, the hook again at each use through the file's birth time).
+pub fn grant_keychain(raw: &str, user: &Path, vault: &Path) -> Result<PathBuf, String> {
+    let raw = raw.trim();
+    let bad = |why: &str| Err(format!("grant.keychain: {raw:?} {why}"));
+    if raw.is_empty() || raw.chars().count() > 1024 { return bad("must be 1 to 1024 characters"); }
+    if raw.chars().any(hidden_char) || raw.contains(['*', '?', '[', ']', '{', '}', '$', '`', '\\', '"', '\'']) {
+        return bad("must be one exact path, with no wildcard, variable, quote or hidden character");
+    }
+    let path = if let Some(rest) = raw.strip_prefix("~/") { user.join(rest) } else if raw.starts_with('/') { PathBuf::from(raw) } else {
+        return bad("must be absolute (or start with ~/)");
+    };
+    if path.components().any(|c| matches!(c, Component::CurDir | Component::ParentDir)) || raw.contains("//") || raw.contains("/./") || raw.ends_with('/') || raw.ends_with("/.") {
+        return bad("must not contain . , .. or //");
+    }
+    let path: PathBuf = path.components().collect();
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let stem = name.strip_suffix(".keychain-db").unwrap_or("");
+    if stem.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')) || stem.starts_with('.') {
+        return bad("must name one new file ending in .keychain-db (letters, digits, . _ -)");
+    }
+    let lower = stem.to_lowercase();
+    if ["login", "system", "metadata", "systemrootcertificates", "apsd", "ocspcache", "crlcache"].iter().any(|n| lower == *n || lower.starts_with(&format!("{n}.")) || lower.starts_with(&format!("{n}-")) || lower.starts_with(&format!("{n}_"))) {
+        return bad("is the login, System or another of macOS's own keychains");
+    }
+    let parent = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let (fp, fv) = (folded(&parent), folded(vault));
+    let in_keychains = fp == folded(&user.join("Library/Keychains"));
+    let in_project = fp.strip_prefix(&fv).is_some_and(|r| r.starts_with("/projects/") && r.matches('/').count() >= 2);
+    if !in_keychains && !in_project { return bad("must be right inside ~/Library/Keychains or inside a Vault project"); }
+    if !in_keychains && within(&fp, &folded(&user.join("Library/Keychains"))) { return bad("must be right inside ~/Library/Keychains"); }
+    if std::fs::canonicalize(&parent).is_ok_and(|real| real != parent) { return bad("has a symlinked folder on the way"); }
+    Ok(path)
+}
+
 /// What one clicked option granted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Grant {
     card: String,
+    clicked_ms: u64,
     /// Its signature: what its use marks are keyed by, so a renamed or copied file is the same grant.
     mac: String,
     scopes: Vec<Scope>,
@@ -154,14 +198,26 @@ fn signed_text(card: &str, option: &str, clicked_ms: u64, expires_ms: u64, scope
 /// grants are switched off (`ENABLED`).
 #[allow(clippy::too_many_arguments)]
 pub fn write(data: &Path, user: &Path, vault: &Path, card: &str, question: &str, label: &str, delete: &[String], login_items: &[String], now_ms: u64) -> Result<PathBuf, String> {
+    write_with(data, user, vault, card, question, label, delete, login_items, None, now_ms)
+}
+
+/// `write`, with one new keychain file as well (bug note 2026-11-04T23-01-22, `Scope::Keychain`). A keychain file
+/// that already exists is refused: the grant is only for one the user's click lets an agent make.
+#[allow(clippy::too_many_arguments)]
+pub fn write_with(data: &Path, user: &Path, vault: &Path, card: &str, question: &str, label: &str, delete: &[String], login_items: &[String], keychain: Option<&str>, now_ms: u64) -> Result<PathBuf, String> {
     if !on() { return Err("grants are switched off in this build (heimdall_emergency::grants::ENABLED)".into()); }
     let option = format!("{question}\n{label}");
     let option = option.as_str();
-    if delete.is_empty() && login_items.is_empty() { return Err("a grant names a path or a login item".into()); }
+    if delete.is_empty() && login_items.is_empty() && keychain.is_none() { return Err("a grant names a path, a login item or a new keychain".into()); }
     if delete.len() > MAX_PATHS || login_items.len() > MAX_LOGIN_ITEMS { return Err(format!("a grant names at most {MAX_PATHS} paths and {MAX_LOGIN_ITEMS} login items")); }
     let mut scopes = Vec::new();
     for p in delete { scopes.push(Scope::Delete(grant_path(p, user, vault)?)); }
     for n in login_items { scopes.push(Scope::LoginItem(grant_login_item(n)?)); }
+    if let Some(k) = keychain {
+        let path = grant_keychain(k, user, vault)?;
+        if std::fs::symlink_metadata(&path).is_ok() { return Err(format!("grant.keychain: {} already exists; a grant makes only a new keychain", path.display())); }
+        scopes.push(Scope::Keychain(path));
+    }
     let dir = data.join(DIR);
     private_dir(&dir)?;
     prune(&dir, now_ms);
@@ -173,6 +229,7 @@ pub fn write(data: &Path, user: &Path, vault: &Path, card: &str, question: &str,
         "card": card, "option": option, "clickedMs": now_ms, "expiresMs": expires_ms,
         "delete": scopes.iter().filter_map(|s| match s { Scope::Delete(p) => Some(p.display().to_string()), _ => None }).collect::<Vec<_>>(),
         "loginItems": scopes.iter().filter_map(|s| match s { Scope::LoginItem(n) => Some(n.clone()), _ => None }).collect::<Vec<_>>(),
+        "keychain": scopes.iter().filter_map(|s| match s { Scope::Keychain(p) => Some(p.display().to_string()), _ => None }).collect::<Vec<_>>(),
         "mac": mac,
     });
     let path = dir.join(format!("{id}.json"));
@@ -191,9 +248,14 @@ impl Ledger {
         };
         Ledger { dir, grants, digest: hex(&sha(what.as_bytes())), now_ms }
     }
-    /// Whether some grant holds `scope` and it is still free for this command.
+    /// Whether some grant holds `scope` and it is still free for this command. A keychain is free for the grant's whole
+    /// lifetime (making and filling it takes several commands) while its file does not exist yet, or exists as a plain
+    /// file (never a symlink) born after the click: so never the login keychain or any keychain made before it.
     pub fn covers(&self, scope: &Scope) -> bool {
-        self.grants.iter().any(|g| g.scopes.contains(scope) && self.free(g, scope))
+        self.grants.iter().any(|g| g.scopes.contains(scope) && match scope {
+            Scope::Keychain(p) => new_since(p, g.clicked_ms),
+            _ => self.free(g, scope),
+        })
     }
     fn mark(&self, g: &Grant, scope: &Scope) -> PathBuf {
         self.dir.join(USED).join(hex(&sha(format!("{}\n{}", g.mac, scope.key()).as_bytes())[..16]))
@@ -216,6 +278,12 @@ impl Ledger {
         private_dir(&used)?;
         let mut cards = Vec::new();
         'scope: for scope in scopes {
+            if let Scope::Keychain(_) = scope {
+                match self.grants.iter().find(|g| g.scopes.contains(scope) && self.covers(scope)) {
+                    Some(g) => { if !cards.contains(&g.card) { cards.push(g.card.clone()); } continue 'scope; }
+                    None => return Err(USED_UP.into()),
+                }
+            }
             for g in self.grants.iter().filter(|g| g.scopes.contains(scope)) {
                 let mark = self.mark(g, scope);
                 match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&mark) {
@@ -248,12 +316,25 @@ fn read(dir: &Path, key: &[u8], now_ms: u64) -> Vec<Grant> {
         let strings = |k: &str| v[k].as_array().into_iter().flatten().filter_map(|s| s.as_str().map(str::to_owned)).collect::<Vec<_>>();
         let mut scopes: Vec<Scope> = strings("delete").into_iter().map(|p| Scope::Delete(PathBuf::from(p))).collect();
         scopes.extend(strings("loginItems").into_iter().map(Scope::LoginItem));
+        scopes.extend(strings("keychain").into_iter().map(|p| Scope::Keychain(PathBuf::from(p))));
         let expected = hex(&hmac(key, signed_text(card, option, clicked_ms, expires_ms, &scopes).as_bytes()));
         if !equal(expected.as_bytes(), mac.as_bytes()) { continue; }
         if clicked_ms > now_ms + 60_000 || now_ms >= expires_ms || expires_ms.saturating_sub(clicked_ms) > LIFETIME_MS { continue; }
-        out.push(Grant { card: card.into(), mac: mac.to_owned(), scopes });
+        out.push(Grant { card: card.into(), clicked_ms, mac: mac.to_owned(), scopes });
     }
     out
+}
+
+/// A keychain file that does not exist yet, or a plain file (not a symlink, one link) born no earlier than the click (a
+/// second's grace for the clock). Read through `symlink_metadata`, so a link to the login keychain is never new.
+fn new_since(path: &Path, clicked_ms: u64) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+        // One link only (review 5 Nov): a hard link to the login keychain made in the project would be a plain file.
+        Ok(m) => m.file_type().is_file() && std::os::unix::fs::MetadataExt::nlink(&m) == 1 && m.created().ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .is_some_and(|born| born.as_millis() as u64 + 1000 >= clicked_ms),
+    }
 }
 
 /// Removes grants a day past their time and use marks a day old.
@@ -491,6 +572,68 @@ mod tests {
         assert_ne!(a, b);
         let l = Ledger::load(dir.path(), "x", now + 1);
         assert!(l.covers(&Scope::Delete(PathBuf::from("/Users/t/a/one"))) && l.covers(&Scope::Delete(PathBuf::from("/Users/t/a/two"))));
+    }
+
+    /// Bug note 2026-11-04T23-01-22: a keychain grant names one new file, right inside ~/Library/Keychains or inside a
+    /// project of Heimdall's home, never one of macOS's own keychains, an existing file or anything vague.
+    #[test]
+    fn only_one_new_named_keychain_file_can_be_granted() {
+        for ok in ["~/Library/Keychains/heimdall-release-signing.keychain-db", "/Users/t/Library/Keychains/ci_2026.keychain-db",
+            "/Users/t/Work/Projects/Heimdall/keys/release.keychain-db", "~/Work/Projects/P/signing.keychain-db"] {
+            assert!(grant_keychain(ok, &user(), &vault()).is_ok(), "{ok}");
+        }
+        assert_eq!(grant_keychain("~/Library/Keychains/a.keychain-db", &user(), &vault()).unwrap(), PathBuf::from("/Users/t/Library/Keychains/a.keychain-db"));
+        for bad in ["~/Library/Keychains/login.keychain-db", "~/Library/Keychains/login.keychain", "~/Library/Keychains/LOGIN.keychain-db",
+            "~/Library/Keychains/login-copy.keychain-db", "~/Library/Keychains/System.keychain-db", "~/Library/Keychains/metadata.keychain-db",
+            "/Library/Keychains/x.keychain-db", "/Library/Keychains/System.keychain", "~/Library/Keychains/sub/x.keychain-db", "~/x.keychain-db",
+            "/Users/t/Work/x.keychain-db", "/Users/t/Work/Projects/x.keychain-db", "/Users/t/Work/Assistant/Temp/x.keychain-db", "/tmp/x.keychain-db", "/Users/other/Work/Projects/P/x.keychain-db",
+            "~/Library/Keychains/$X.keychain-db", "~/Library/Keychains/*.keychain-db", "~/Library/Keychains/../x.keychain-db", "~/Library/Keychains/x.keychain",
+            "~/Library/Keychains/.keychain-db", "~/Library/Keychains/.hidden.keychain-db", "~/Library/Keychains/a b.keychain-db", "relative.keychain-db",
+            "~/Library/Keychains//x.keychain-db", "~/Library/Keychains/./x.keychain-db", "~/Library/Keychains/x\u{200B}.keychain-db", "~/Library/Keychains",
+            "~/Library/Keychains/x.keychain-db/", "~/Library/Keychains/x\".keychain-db", ""] {
+            assert!(grant_keychain(bad, &user(), &vault()).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_keychain_grant_holds_while_its_file_is_new_and_never_for_an_older_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let (home, vault) = (root.join("home"), root.join("home/Work"));
+        let keys = vault.join("Projects/P/keys");
+        std::fs::create_dir_all(&keys).unwrap();
+        let data = root.join("data");
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        let k = keys.join("release.keychain-db");
+        let old = keys.join("old.keychain-db");
+        std::fs::write(&old, b"x").unwrap();
+        let kw = |p: &Path| write_with(&data, &home, &vault, "ask-k", "q1", "Allow it", &[], &[], Some(&p.display().to_string()), now);
+        assert!(kw(&old).is_err(), "an existing keychain is never granted");
+        kw(&k).unwrap();
+        let scope = Scope::Keychain(k.clone());
+        let ledger = Ledger::load(&data, "security create-keychain", now + 1);
+        assert!(ledger.covers(&scope), "not made yet");
+        assert!(!ledger.covers(&Scope::Keychain(old.clone())), "another file");
+        std::fs::write(&k, b"made after the click").unwrap();
+        for n in 0..3 {
+            let l = Ledger::load(&data, &format!("security import {n}"), now + 2 + n);
+            assert!(l.covers(&scope), "made after the click: every step of the setup, in several commands");
+            assert_eq!(l.consume(std::slice::from_ref(&scope)).unwrap(), vec!["ask-k".to_string()]);
+        }
+        assert!(Ledger::load(&data, "x", now + LIFETIME_MS).is_empty(), "and only for the grant's lifetime");
+        // Swapped for a link (to the login keychain, say): never new.
+        std::fs::remove_file(&k).unwrap();
+        std::os::unix::fs::symlink(&old, &k).unwrap();
+        assert!(!Ledger::load(&data, "y", now + 5).covers(&scope), "a link is not the new file");
+        // Nor a hard link to an older keychain (review 5 Nov): a plain file with two names.
+        std::fs::remove_file(&k).unwrap();
+        std::fs::hard_link(&old, &k).unwrap();
+        assert!(!Ledger::load(&data, "y2", now + 6).covers(&scope), "a hard link is not the new file");
+        // A grant clicked after the file was born does not cover it.
+        let later = keys.join("later.keychain-db");
+        write_with(&data, &home, &vault, "ask-l", "q1", "Allow it", &[], &[], Some(&later.display().to_string()), now + 30_000).unwrap();
+        std::fs::write(&later, b"born before the click").unwrap();
+        assert!(!Ledger::load(&data, "z", now + 30_001).covers(&Scope::Keychain(later)), "born before the click");
     }
 
     #[test]

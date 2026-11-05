@@ -12,6 +12,8 @@ pub(crate) fn menu_problem(component: &str, message: &str, reason: Option<&str>)
         "screen" if message == SEEING_STOPPED => "Seeing couldn\u{2019}t start. Turn Seeing off and on to retry.",
         "decision" if message == DECISIONS_STOPPED => "Heimdall can\u{2019}t decide what is meant for it, so it won\u{2019}t answer. Restart Heimdall.",
         "archive" => return Some(archive_sentence(reason.unwrap_or(message)).into()),
+        // Listening waits for its downloaded models (model_downloads.rs words it).
+        "models" => return Some(message.into()),
         "settings" => "Your settings file has an error, so Heimdall is using the last good settings.",
         "settings-save" => "Heimdall can\u{2019}t save your settings. Check that the disk has free space.",
         "speech" if message == "Speech unavailable" => "Heimdall can\u{2019}t speak right now, so replies only appear on screen.",

@@ -469,6 +469,7 @@
                         },
                         "grant": {
                           "additionalProperties": false,
+                          "description": "User's yes for what Heimdall's deny list refuses: delete (exact paths outside the Vault and scratch, absolute or ~/, no wildcard or variable, never a home or top-level folder) loginItems (login item names to remove) and/or keychain (one new file to make for signing: ~/Library/Keychains/<name>.keychain-db or inside a Vault project, never login or an existing file). The card draws each path and item in full under this option, and only User's own click on it grants (never his voice, a key or ask_close); a question saying the path grants nothing. Use the questions form: the short question with options carries no grant. After his click, for 30 minutes, run each delete once as one plain rm of its absolute path written from / (rm -rf \"/Users/name/x\", alone or beside du, ls or echo), and a login item's removal as osascript -e 'tell application \"System Events\" to delete login item \"Name\"'. A keychain grant lets security create-keychain, set-keychain-settings, unlock-keychain, import (-k) and set-key-partition-list name that file by its absolute path from /, with no -P and no other security call in the line.",
                           "properties": {
                             "delete": {
                               "items": {
@@ -479,6 +480,11 @@
                               "maxItems": 8,
                               "minItems": 1,
                               "type": "array"
+                            },
+                            "keychain": {
+                              "maxLength": 1024,
+                              "minLength": 1,
+                              "type": "string"
                             },
                             "loginItems": {
                               "items": {

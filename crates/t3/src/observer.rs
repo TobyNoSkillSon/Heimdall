@@ -320,22 +320,27 @@ impl Workers {
                     }
                 };
                 // A card Heimdall's permission hook already answered is no wait (`crate::waits_on_approval`).
-                let waits = if ids.is_empty() {
-                    match crate::waits_on_approval(&self.client, thread, row).await {
-                        Ok(w) => w,
+                let approval = if ids.is_empty() {
+                    match crate::waits_on_approval(&self.client, thread, row, row["pendingRequestCount"].as_u64().unwrap_or(0)).await {
+                        Ok(Some(a)) => Some(a),
+                        Ok(None) => {
+                            self.record(thread, project, &title(row), status, run, seen.as_ref().and_then(|s| s.notified.as_deref()))?;
+                            continue;
+                        }
                         Err(e) => {
                             log_failure(&e);
                             continue;
                         }
                     }
                 } else {
-                    true
+                    None
                 };
-                if !waits {
-                    self.record(thread, project, &title(row), status, run, seen.as_ref().and_then(|s| s.notified.as_deref()))?;
-                    continue;
-                }
-                let reqs = if ids.is_empty() { "approval".to_owned() } else { ids.join(",") };
+                // One wake per request: an approval by its card's tool call when T3 shows one.
+                let reqs = if !ids.is_empty() {
+                    ids.join(",")
+                } else {
+                    approval.as_ref().and_then(|a| a.call.as_deref()).map_or("approval".to_owned(), |c| format!("approval:{c}"))
+                };
                 let key = format!("attention:{}:{reqs}", run.unwrap_or("idle"));
                 if seen.as_ref().and_then(|s| s.notified.as_deref()) != Some(key.as_str()) {
                     if !first {
@@ -343,7 +348,7 @@ impl Workers {
                             id: format!("t3:{thread}:{}:attention:{reqs}", run.unwrap_or("idle")),
                             thread: thread.clone(),
                             done: false,
-                            text: self.attention_line(thread, row, &ids).await?,
+                            text: self.attention_line(thread, row, &ids, approval.as_ref()).await?,
                         });
                     }
                     notified = Some(key);
@@ -524,14 +529,15 @@ impl Workers {
         }
         Ok((text, true))
     }
-    async fn attention_line(&self, thread: &str, row: &Value, ids: &[String]) -> Result<String> {
+    async fn attention_line(&self, thread: &str, row: &Value, ids: &[String], approval: Option<&crate::Approval>) -> Result<String> {
         let name = title(row);
         let yours = if self.owns(thread)? { " (yours)" } else { "" };
         if let Some(id) = ids.first() {
             let q = crate::read_question(&self.client, thread, id).await?;
             return Ok(format!("- '{name}'{yours} asks [thread {thread}, request {id}]:\n{}", crate::text::question(&q)));
         }
-        Ok(format!("- '{name}'{yours} waits for an approval in T3; only User can give it there [thread {thread}]"))
+        let asks = approval.and_then(|a| a.text.as_deref()).map(|t| format!(" It asks: {t}")).unwrap_or_default();
+        Ok(format!("- '{name}'{yours} waits for an approval in T3; only User can give it there [thread {thread}].{asks}"))
     }
     /// Queue lines and send one message when the last T3 wake is at least `WAKE_GAP_MS` old.
     fn deliver_lines(&self, lines: Vec<Line>, now: u64, permit: &DeliveryPermit) -> Result<()> {

@@ -29,6 +29,13 @@
 //! and a synthesizer blocked on a held speaker missed them and moved the reply to the lighter voice. The held speaker
 //! takes the synthesizer's audio into its own buffer instead (`speak::PlaybackStream::take_ready`).
 //!
+//! In a call (bug notes 2026-11-04T20-52-24, 2026-11-05T00-14-40: latency in calls between Heimdall and the user was
+//! really bad): the user talks to the call again while Heimdall's answer to them is being made, so the skip
+//! above turned most answers into a skip, a second model turn and a held line said minutes later. A line queued in a
+//! call (`set_patient`: only his own answers reach the speaker then) waits for the gap instead: while he, or a guest on
+//! the call audio (`other_voice`, bug note 2026-11-05T02-32-17: "speak only in a quiet gap"), is talking it is `Held`
+//! for up to `PATIENCE`, then skipped as before.
+//!
 //! Speech that starts while Heimdall is audible does not hold or skip the next line: it is Heimdall's own voice on
 //! the microphone, or the user talking over it, which the barge-in decides (pipeline/barge_in.rs). When the barge-in
 //! stops Heimdall, whoever is talking is the user from then on (`claim`).
@@ -58,6 +65,12 @@ const POLL: Duration = Duration::from_millis(40);
 const FIRST_POLL: Duration = Duration::from_millis(10);
 /// How long a dropped line waits for the queue interrupt that follows `drop_held` before it gives up by itself.
 const DROP_GRACE: Duration = Duration::from_secs(2);
+/// How long a line queued in a call waits for a gap while the user or a guest talks before it is skipped (the retry
+/// path, one more model turn). The user talks to the call in turns of a few seconds; ten is past most of them.
+pub(crate) const PATIENCE: Duration = Duration::from_secs(10);
+/// A guest's voice open longer than this proves nothing more (a detector that missed the end; speech_policy's
+/// `OPEN_VOICE_MAX`).
+const OTHER_VOICE_MAX: Duration = Duration::from_secs(60);
 
 /// What waiting agent speech does now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +100,12 @@ struct State {
     skipping: bool,
     /// `QUIET_AFTER`, unless a test lengthens it.
     quiet: Option<Duration>,
+    /// Lines queued now are in a call: they wait for a gap while anyone talks, up to `PATIENCE` (`set_patient`).
+    patient: bool,
+    /// Call sources with a guest's voice open, and since when (`other_voice`).
+    others: HashMap<String, Instant>,
+    /// `PATIENCE`, unless a test shortens it.
+    patience: Option<Duration>,
 }
 impl State {
     fn talking(&self) -> bool {
@@ -94,6 +113,10 @@ impl State {
     }
     fn holds(&self, now: Instant) -> bool {
         self.talking() || self.ended.is_some_and(|at| now.saturating_duration_since(at) < self.quiet.unwrap_or(QUIET_AFTER))
+    }
+    /// A guest is talking on the call audio.
+    fn others_talking(&self, now: Instant) -> bool {
+        self.others.values().any(|from| now.saturating_duration_since(*from) <= OTHER_VOICE_MAX)
     }
 }
 #[derive(Default)]
@@ -113,6 +136,20 @@ impl OwnerVoice {
         } else if state.talking.remove(source) == Some(true) {
             state.ended = Some(now);
         }
+    }
+    /// A guest's voice on call source `source` opened (`on`) or ended (bridge/speech_policy.rs `set_call_voice_hook`).
+    pub(crate) fn other_voice(&self, source: &str, on: bool) {
+        let mut state = self.state.lock().unwrap();
+        if on { state.others.insert(source.into(), Instant::now()); } else { state.others.remove(source); }
+    }
+    /// Lines queued from now are in a call (`true`): they wait for a gap while the user or a guest talks, up to
+    /// `PATIENCE`, instead of being skipped at once (`Tools::speak` sets it for every line it queues).
+    pub(crate) fn set_patient(&self, patient: bool) {
+        self.state.lock().unwrap().patient = patient;
+    }
+    #[cfg(test)]
+    pub(crate) fn set_patience(&self, patience: Duration) {
+        self.state.lock().unwrap().patience = Some(patience);
     }
     /// The barge-in stopped Heimdall for this speech: it is the user's turn now.
     pub(crate) fn claim(&self) {
@@ -139,7 +176,7 @@ impl OwnerVoice {
     }
     /// One waiting line's view of the hold (`Waiter::floor`).
     pub(crate) fn waiter(&self) -> Waiter<'_> {
-        Waiter { owner: self, counted: false, dropped: self.state.lock().unwrap().dropped }
+        Waiter { owner: self, counted: false, dropped: self.state.lock().unwrap().dropped, patient_from: None }
     }
     /// Blocks until the user's pause is over (`Free`), the line is skipped because he is talking (`Skipped`), or it is
     /// dropped or `cancelled` says to give up (Stop, Speaking off, a newer interrupt) (`Dropped`). Never `Held`.
@@ -186,12 +223,14 @@ pub(crate) struct Waiter<'a> {
     counted: bool,
     /// `State::dropped` when it began waiting.
     dropped: u64,
+    /// When this line began waiting for a gap in a call (`PATIENCE` counts from it).
+    patient_from: Option<Instant>,
 }
 impl Waiter<'_> {
     /// Looks at the hold now. Free and the count are decided under one lock, so `drop_held` never drops a line that
     /// has started.
     pub(crate) fn floor(&mut self) -> Floor {
-        look(self.owner, &mut self.counted, self.dropped)
+        look(self.owner, &mut self.counted, self.dropped, &mut self.patient_from)
     }
 }
 impl Drop for Waiter<'_> {
@@ -202,15 +241,21 @@ impl Drop for Waiter<'_> {
     }
 }
 /// One waiting line's look at the hold (`Waiter::floor`, `StartWaiter::floor`).
-fn look(owner: &OwnerVoice, counted: &mut bool, dropped: u64) -> Floor {
+fn look(owner: &OwnerVoice, counted: &mut bool, dropped: u64, patient_from: &mut Option<Instant>) -> Floor {
     let mut state = owner.state.lock().unwrap();
     let now = Instant::now();
+    // In a call, anyone talking makes the line wait for the gap, for `PATIENCE` at most.
+    let busy = state.talking() || state.others_talking(now);
+    let patient = state.patient && busy && now.saturating_duration_since(*patient_from.get_or_insert(now)) < state.patience.unwrap_or(PATIENCE);
     let floor = if state.dropped != dropped {
         Floor::Dropped
     } else if state.skipping {
         Floor::Skipped
-    } else if state.talking() {
-        eprintln!("Hold: User was talking when a reply would have played; it is skipped unheard and unshown, and the agent is told");
+    } else if patient {
+        Floor::Held
+    } else if state.talking() || (state.patient && busy) {
+        if state.patient { eprintln!("Hold: someone on the call kept talking for {} s while a reply waited for a gap; it is skipped unheard, shown on the island, and the agent is told", state.patience.unwrap_or(PATIENCE).as_secs()); }
+        else { eprintln!("Hold: User was talking when a reply would have played; it is skipped unheard and unshown, and the agent is told"); }
         state.skipping = true;
         Floor::Skipped
     } else if state.holds(now) {
@@ -231,10 +276,12 @@ struct StartWaiter {
     owner: std::sync::Arc<OwnerVoice>,
     counted: bool,
     dropped: u64,
+    /// Carried over from the line's first wait, so the pre-buffer never restarts `PATIENCE`.
+    patient_from: Option<Instant>,
 }
 impl StartWaiter {
     fn may_start(&mut self) -> speak::MayStart {
-        match look(&self.owner, &mut self.counted, self.dropped) {
+        match look(&self.owner, &mut self.counted, self.dropped, &mut self.patient_from) {
             Floor::Free => speak::MayStart::Start,
             Floor::Held => speak::MayStart::Wait,
             Floor::Skipped => speak::MayStart::Skip(anyhow::anyhow!(HOLD_SKIPPED)),
@@ -291,10 +338,10 @@ impl<O: speak::AudioOutput> speak::AudioOutput for HeldOutput<O> {
                 }
             }
         }
-        let dropped = waiter.dropped;
+        let (dropped, patient_from) = (waiter.dropped, waiter.patient_from);
         drop(waiter);
         // Asked again right before the first sample, after the output's pre-buffer.
-        let mut start = StartWaiter { owner: self.owner.clone(), counted: false, dropped };
+        let mut start = StartWaiter { owner: self.owner.clone(), counted: false, dropped, patient_from };
         self.inner.output_stream(chunks.with_start_check(move || start.may_start()), cancel, signal)
     }
 }
@@ -436,6 +483,55 @@ mod tests {
         std::thread::sleep(QUIET_AFTER + POLL);
         assert!(heard.lock().unwrap().is_none(), "never replayed later");
         assert!(!owner.waiting());
+    }
+    /// Bug notes 2026-11-04T20-52-24, 2026-11-05T00-14-40 (23:44:09 name wake, 23:44:54 skipped because he was
+    /// talking to the call): in a call his answer waits for his pause instead of being skipped, and plays after it.
+    #[test]
+    fn in_a_call_his_answer_waits_for_his_pause_instead_of_being_skipped() {
+        let owner = Arc::new(OwnerVoice::default());
+        owner.set_quiet(Duration::from_millis(100));
+        owner.set_patient(true);
+        owner.set("mic:1", true, false);
+        let (thread, heard) = play(&owner, Arc::new(AtomicBool::new(false)));
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(heard.lock().unwrap().is_none() && owner.waiting() && !owner.skipping(), "waiting, not skipped, not Heimdall speaking");
+        owner.set("mic:1", false, false);
+        let ended = Instant::now();
+        thread.join().unwrap();
+        let at = heard.lock().unwrap().expect("played in the gap");
+        assert!(at.duration_since(ended) >= Duration::from_millis(100), "after his pause");
+        assert!(!owner.waiting() && !owner.skipping());
+    }
+    /// The wait is bounded: past `PATIENCE` of talk the line is skipped as before (the retry answers).
+    #[test]
+    fn in_a_call_a_line_waits_at_most_the_patience_then_is_skipped() {
+        assert_eq!(PATIENCE, Duration::from_secs(10));
+        let owner = Arc::new(OwnerVoice::default());
+        owner.set_patient(true);
+        owner.set_patience(Duration::from_millis(300));
+        owner.set("mic:1", true, false);
+        let began = Instant::now();
+        let (thread, heard) = try_play(&owner, Arc::new(AtomicBool::new(false)));
+        assert_eq!(thread.join().unwrap().expect_err("skipped").to_string(), HOLD_SKIPPED);
+        assert!(began.elapsed() >= Duration::from_millis(300), "waited the patience first: {:?}", began.elapsed());
+        assert!(heard.lock().unwrap().is_none() && owner.skipping() && !owner.waiting());
+    }
+    /// Bug note 2026-11-05T02-32-17 (speak only in a quiet gap, guests included): in a call a guest
+    /// talking on the call audio holds the line too, until their voice ends; outside a call guests change nothing.
+    #[test]
+    fn in_a_call_a_guest_talking_holds_the_line_until_the_gap() {
+        let owner = Arc::new(OwnerVoice::default());
+        owner.other_voice("process:discord", true);
+        let (thread, heard) = play(&owner, Arc::new(AtomicBool::new(false)));
+        thread.join().unwrap();
+        assert!(heard.lock().unwrap().is_some(), "not in a call: a guest voice holds nothing");
+        owner.set_patient(true);
+        let (thread, heard) = play(&owner, Arc::new(AtomicBool::new(false)));
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(heard.lock().unwrap().is_none() && owner.waiting(), "the guest is talking");
+        owner.other_voice("process:discord", false);
+        thread.join().unwrap();
+        assert!(heard.lock().unwrap().is_some() && !owner.skipping(), "played in the gap");
     }
     #[test]
     fn quiet_microphone_plays_at_once_and_stop_while_waiting_plays_nothing() {
@@ -917,11 +1013,15 @@ while True:
         tools.voice("mic:1", true);
         agent::mcp::ToolHost::speak(&tools, "The build is green.", "en", &permit)?;
         tools.test_finish_speech()?;
+        // Bug note 2026-11-05T02-32-37: on the island at once, as quiet text, not when the reply is over.
+        assert_eq!(tools.skipped_notice.lock().unwrap().as_ref().map(|(_, t)| t.clone()).as_deref(), Some("The build is green."));
         tools.voice("mic:1", false);
         std::thread::sleep(QUIET_AFTER + POLL);
         // He is quiet now, but this is still the skipped reply.
         agent::mcp::ToolHost::speak(&tools, "All tests passed.", "en", &permit)?;
         tools.test_finish_speech()?;
+        assert_eq!(tools.skipped_notice.lock().unwrap().as_ref().map(|(_, t)| t.clone()).as_deref(), Some("The build is green. All tests passed."), "the same island line grows");
+        assert!(heimdall(&tools).is_empty(), "it joins the conversation once, when the reply is over");
         assert!(playing.try_recv().is_err(), "never said");
         assert!(notices(&mut rx).is_empty(), "one note, once the reply is over");
         tools.agent_final_answer("Want me to merge it?", "stop")?;
@@ -929,6 +1029,7 @@ while True:
         assert_eq!(*tools.test_island.lock().unwrap(), [ui::UiUpdate::LastReply("Want me to merge it?".into())], "in the pull-down");
         assert_eq!(tools.speech_status(), None, "speech is fine");
         assert_eq!(heimdall(&tools), ["The build is green. All tests passed. Want me to merge it?"], "shown once, as one line");
+        assert!(tools.skipped_notice.lock().unwrap().is_none(), "the reply is over: its island line is complete");
         // He is quiet: once the retry's grace has passed, the agent is woken (once) to answer fresh.
         let told = notices_within(&mut rx, 1, Duration::from_secs(3));
         assert_eq!(told.len(), 1, "{told:?}");
@@ -1179,6 +1280,120 @@ while True:
         let told = notices(&mut rx);
         assert!(told.iter().any(|(id, text)| id.starts_with("unheard-speech:unread:") && text.contains("It began: \"The Mistral demo")), "{told:?}");
         tools.voice("mic:1", false);
+        Ok(())
+    }
+
+    // ---- in a call (5 Nov bug round) ----
+
+    /// Bug notes 2026-11-04T20-52-24 and 2026-11-05T00-14-40 (23:44:09 name wake, 23:44:54 skipped, 23:45:16 retry,
+    /// 23:47:23 held, 23:57:23 dropped stale): the user addressed Heimdall by name in a call, kept talking to the call past
+    /// the patience, the answer was skipped and the run settled. The retry that wakes the agent carries his address,
+    /// so its fresh answer is not held in the call.
+    #[test]
+    fn the_retry_of_a_skipped_answer_to_his_name_may_speak_in_the_call() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (tools, mut rx) = tools_with_notices(dir.path())?;
+        tools.owner.set_quiet(Duration::from_millis(200));
+        tools.owner.set_patience(Duration::from_millis(200));
+        let (started, playing) = std::sync::mpsc::channel();
+        tools.test_guarded_speech_queue(
+            HeldSynth { inner: Synth, owner: tools.owner.clone() },
+            HeldOutput { inner: Blocking(started), owner: tools.owner.clone() });
+        let permit = tools.agent_enabled.permit()?;
+        tools.speech_policy.other_line(capture::host_now_ns());
+        tools.speech_policy.addressed_wake();
+        tools.voice("mic:1", true);
+        agent::mcp::ToolHost::speak(&tools, "It's nine in the evening.", "en", &permit)?;
+        // The run settles while the answer waits for him; he talks past the patience.
+        tools.speech_policy.run_settled();
+        tools.test_finish_speech()?;
+        assert!(playing.try_recv().is_err(), "skipped, never over him");
+        assert!(tools.speech_policy.speech_held(capture::host_now_ns()), "the settled run's address is gone");
+        tools.voice("mic:1", false);
+        let told = notices_within(&mut rx, 1, Duration::from_secs(3));
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(told[0].0.starts_with("skipped-reply:") && wakes(&told[0]));
+        assert!(tools.speech_policy.addressed_now() && !tools.speech_policy.speech_held(capture::host_now_ns()),
+            "the retry carries his address: its answer is spoken in the call");
+        // A skipped line that was not his answer (a notice's run) retries without it.
+        tools.speech_policy.run_settled();
+        assert!(tools.drop_held_speech().is_none());
+        tools.voice("mic:1", true);
+        agent::mcp::ToolHost::speak(&tools, "Your T3 task finished.", "en", &permit)?;
+        tools.test_finish_speech()?;
+        tools.voice("mic:1", false);
+        let told = notices_within(&mut rx, 1, Duration::from_secs(3));
+        assert!(told.len() == 1 && told[0].0.starts_with("skipped-reply:"), "{told:?}");
+        assert!(!tools.speech_policy.addressed_now(), "no address to carry");
+        Ok(())
+    }
+
+    /// Bug note 2026-11-05T02-32-17 item 5 (stop as soon as anyone talks, guests included): a guest's
+    /// voice on the call audio, still open `GUEST_CUT_AFTER` later, stops Heimdall's audible speech; the agent hears
+    /// it was a guest. A voice that already ended (a cough) stops nothing. Through the app's hook (bridge/speech.rs).
+    #[test]
+    fn a_guest_talking_on_the_call_stops_heimdall() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (tools, mut rx) = tools_with_notices(dir.path())?;
+        let tools = Arc::new(tools);
+        crate::bridge::speech::install_call_voice_hook(&Arc::downgrade(&tools));
+        let (started, playing) = std::sync::mpsc::channel();
+        tools.test_guarded_speech_queue(Synth, HeldOutput { inner: Blocking(started), owner: tools.owner.clone() });
+        let permit = tools.agent_enabled.permit()?;
+        let now = capture::host_now_ns();
+        tools.speech_policy.other_line(now);
+        agent::mcp::ToolHost::speak(&*tools, "The deploy finished and the site is live.", "en", &permit)?;
+        playing.recv_timeout(Duration::from_secs(2))?;
+        tools.test_audible.store(true, std::sync::atomic::Ordering::Release);
+        // A cough: open and closed before the check.
+        tools.speech_policy.other_voice("process:discord", Some(now + 1));
+        tools.speech_policy.other_voice("process:discord", None);
+        std::thread::sleep(crate::bridge::speech_policy::GUEST_CUT_AFTER + Duration::from_millis(200));
+        assert!(tools.heimdall_speaking(), "a cough stops nothing");
+        // Angel starts talking.
+        tools.speech_policy.other_voice("process:discord", Some(capture::host_now_ns()));
+        // (`test_finish_speech` holds the queue while it waits: the cut must come first.)
+        std::thread::sleep(crate::bridge::speech_policy::GUEST_CUT_AFTER + Duration::from_millis(300));
+        tools.test_finish_speech()?;
+        assert!(!tools.heimdall_speaking(), "stopped");
+        let told = notices_within(&mut rx, 1, Duration::from_secs(2));
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(told[0].0.starts_with("unheard-speech:cut:"));
+        assert_eq!(told[0].1, "Someone on the call started talking, so you stopped; he heard only the start of: The deploy finished and the site is live.");
+        // While Angel talks, his next answer waits for the gap.
+        agent::mcp::ToolHost::speak(&*tools, "Anything else?", "en", &permit)?;
+        assert!(playing.recv_timeout(Duration::from_millis(300)).is_err(), "not over Angel");
+        tools.speech_policy.other_voice("process:discord", None);
+        playing.recv_timeout(Duration::from_secs(2))?;
+        tools.test_audible.store(false, std::sync::atomic::Ordering::Release);
+        tools.interrupt();
+        tools.test_finish_speech()?;
+        Ok(())
+    }
+
+    /// Bug notes 2026-11-05T00-10-37 ("we need some kind of stop button") and 2026-11-05T02-32-17 item 4: Stop cuts
+    /// what plays and what is queued, and tells the agent this moment was not for it; with nothing playing it does
+    /// nothing.
+    #[test]
+    fn stop_cuts_speech_and_tells_the_agent_the_moment_was_not_for_it() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (tools, mut rx) = tools_with_notices(dir.path())?;
+        let (started, playing) = std::sync::mpsc::channel();
+        tools.test_guarded_speech_queue(Synth, Blocking(started));
+        let permit = tools.agent_enabled.permit()?;
+        tools.stop_pressed();
+        assert!(notices(&mut rx).is_empty(), "nothing playing: nothing told");
+        agent::mcp::ToolHost::speak(&tools, "Here is the long answer.", "en", &permit)?;
+        agent::mcp::ToolHost::speak(&tools, "And more of it.", "en", &permit)?;
+        playing.recv_timeout(Duration::from_secs(2))?;
+        tools.stop_pressed();
+        tools.test_finish_speech()?;
+        tools.test_finish_speech()?;
+        assert!(!tools.agent_speech_busy());
+        assert!(playing.recv_timeout(Duration::from_millis(300)).is_err(), "the queued line never plays");
+        let told = notices(&mut rx);
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(told[0].0.starts_with("unheard-speech:stopped:") && !wakes(&told[0]), "context, no turn");
         Ok(())
     }
 }

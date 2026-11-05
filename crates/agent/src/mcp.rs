@@ -136,6 +136,9 @@ pub trait ScopedTools: Send + Sync {
     async fn call(&self, name: &str, args: &Value, permit: &DeliveryPermit) -> Option<Result<String>>;
     /// Every call that ran, with its plain-text answer or error.
     fn record(&self, name: &str, args: &Value, result: &std::result::Result<String, String>);
+    /// Where each call is logged as one line (`tool_log::record`, the file Pi's calls go to): the relay's calls never
+    /// pass through Pi's events (bug note 2026-11-05T02-53-27-4). `None`: not logged.
+    fn tool_log(&self) -> Option<std::path::PathBuf> { None }
 }
 pub struct McpServer {
     pub url: String,
@@ -337,7 +340,20 @@ async fn dispatch(s: &Service, name: &str, args: &Value, action: &str, permit: &
         .await
 }
 /// A call on the scoped server: its own tools, or an allowed host tool on the shared path; anything else is not there.
+/// Every call that reaches it, refused ones included, is one line in the scope's tool log.
 async fn scoped_call(s: &Service, p: &Value, id: &Value, permit: &DeliveryPermit) -> std::result::Result<Value, (i64, String)> {
+    let started = std::time::Instant::now();
+    let answer = scoped_answer(s, p, id, permit).await;
+    let scope = s.scope.as_ref().unwrap();
+    if let Some(log) = scope.own.tool_log() {
+        let name = p["name"].as_str().unwrap_or("?");
+        let args = if p["arguments"].is_null() { json!({}) } else { p["arguments"].clone() };
+        let result = match &answer { Ok(v) => v.clone(), Err((_, why)) => json!({"isError":true,"content":[{"type":"text","text":why}]}) };
+        crate::tool_log::record(&log, crate::now_ms(), name, started.elapsed().as_millis() as u64, &args, &result);
+    }
+    answer
+}
+async fn scoped_answer(s: &Service, p: &Value, id: &Value, permit: &DeliveryPermit) -> std::result::Result<Value, (i64, String)> {
     let scope = s.scope.as_ref().unwrap();
     let name = p["name"].as_str().unwrap_or("");
     let args = if p["arguments"].is_null() { json!({}) } else { p["arguments"].clone() };
@@ -513,7 +529,11 @@ async fn request(
             _ => Err((-32601, "Method not found".into())),
         };
         match result {
-            Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
+            Ok(mut result) => {
+                // The edition's wording in what the agent reads (the public one never names the owner).
+                crate::identity::for_agent_json(&mut result, &crate::identity::current());
+                json!({"jsonrpc":"2.0","id":id,"result":result})
+            }
             Err((code, message)) => protocol_error(&id, code, &message),
         }
     };

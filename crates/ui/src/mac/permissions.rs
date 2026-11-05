@@ -87,6 +87,9 @@ pub(super) fn request_all(request_system_audio: impl Fn() + Send + Sync + 'stati
     // Flush the once-only ledger before TCC can display a modal or the app exits.
     defaults.synchronize();
     let mic = pending.contains(&Permission::Microphone);
+    // Screen Recording's and Accessibility's prompts come up after the request below and hand activation back when
+    // they close (`setup::refocus_after`); without them Setup takes it back here.
+    let prompts_follow = pending.iter().any(|p| matches!(p, Permission::ScreenRecording | Permission::Accessibility));
     let rest = move || {
         dispatch2::DispatchQueue::main().exec_async(move || {
             request_system_audio();
@@ -98,10 +101,13 @@ pub(super) fn request_all(request_system_audio: impl Fn() + Send + Sync + 'stati
                 unsafe { AXIsProcessTrustedWithOptions(&*options as *const _ as *const std::ffi::c_void) };
             }
             IN_FLIGHT.store(false, Ordering::Release);
-            super::with_state(|s| {
+            super::with_state(move |s| {
                 s.poll_permissions();
                 // The request itself finished even if TCC grants did not change.
-                if let Some(w) = s.setup.as_mut() { w.show(&s.permissions); }
+                if let Some(w) = s.setup.as_mut() {
+                    w.show(&s.permissions);
+                    if !prompts_follow { w.refocus(); }
+                }
             });
         });
     };

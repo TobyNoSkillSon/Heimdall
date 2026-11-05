@@ -494,6 +494,11 @@ impl<H: Harness> Bridge<H> {
             for part in parts { if let Some(text) = part["text"].as_str() { part["text"] = Value::String(protocol::compact_transcript(text)); } }
         }
         protocol::describe_overflow_images(&mut wire);
+        // The edition's wording (the public one never sends the owner's name): at the send, so the store keeps one.
+        if let Some(parts) = wire["message"]["content"].as_array_mut() {
+            let names = identity::current();
+            for part in parts { if let Some(text) = part["text"].as_str() { part["text"] = Value::String(identity::for_agent(text, &names)); } }
+        }
         let result = match permit {
             Some(p) => self.harness.send_with_permit(wire, p).await,
             None => self.harness.send(wire).await,
@@ -906,7 +911,7 @@ impl<H: Harness> Bridge<H> {
             }
         }
         if referenced { text.push_str("Use the observations already in context.\n"); }
-        text.push_str("\nOwner's wake instruction:\n");
+        text.push_str(identity::WAKE_MARKER);
         text.push_str(instruction);
         ensure!(text.len() <= 9 * 1024 * 1024, "wake instruction too large");
         let waiting: Vec<String> = self.db.prepare("SELECT id FROM observations WHERE settled=0 AND seq>?1")?
@@ -1540,7 +1545,7 @@ impl<H: Harness> Bridge<H> {
                 self.db.execute("UPDATE deliveries SET wire=?2,query=0 WHERE id=?1", params![id, wire.to_string()])?;
             }
             if kind == NoticeKind::Context {
-                let text = wire["message"]["content"][0]["text"].as_str().unwrap_or("").to_owned();
+                let text = identity::for_agent(wire["message"]["content"][0]["text"].as_str().unwrap_or(""), &identity::current());
                 match self.harness.append_context(&text).await {
                     Ok(()) => { self.db.execute("UPDATE deliveries SET state='appended' WHERE id=?1", [&id])?; }
                     Err(e) if e.downcast_ref::<harness::InputUnavailable>().is_some() || e.downcast_ref::<harness::EngineUnavailable>().is_some() => return Ok(()),
@@ -1763,7 +1768,7 @@ impl<H: Harness> Bridge<H> {
                 }
             }
         }
-        self.harness.append_context(&text).await?;
+        self.harness.append_context(&identity::for_agent(&text, &identity::current())).await?;
         let supplied: Vec<(String, String)> = ctx.lines.iter().filter(|l| l.observation).map(|l| (l.id.clone(), l.text.clone())).collect();
         self.record_supplied(&supplied)?;
         self.settle_start_claims()?;
