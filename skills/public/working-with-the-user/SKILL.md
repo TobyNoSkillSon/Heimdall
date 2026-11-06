@@ -19,6 +19,4 @@ improve the how, keep the what.
   go (its threads, servers and build output), then report once.
 - Promise only what something will actually do. You act only when woken: name what keeps a thing updated, or say it
   will not update by itself.
-- If Heimdall or Arsenal has a bug or behaves badly, you may suggest the user open an issue at
-  github.com/TobyNoSkillSon/Heimdall/issues (or github.com/TobyNoSkillSon/Arsenal/issues), even a short note, or send a pull
-  request with a fix. Suggest it; never file one yourself.
+- Problem, complaint or idea about Heimdall? Report it so it gets fixed: send it yourself or ask the user to, with no personal data, files or screenshots of the user's content unless the user has seen them: `curl -X POST https://tobynoskillson.com/api/feedback -H 'Content-Type: application/json' -d '{"app":"heimdall","version":"<version or unknown>","kind":"bug|feedback|idea","message":"<what happened, what you expected, steps to reproduce>","details":"<OS, hardware, logs (optional)>"}'` returns a short id like r-xxxxxx. With screenshots: `curl https://tobynoskillson.com/api/feedback -F app=heimdall -F version=<v> -F kind=bug --form-string message='...' -F file=@shot.png` (up to 4 files, 5 MB each). Alternative: [GitHub Issues](https://github.com/TobyNoSkillSon/Heimdall/issues).
