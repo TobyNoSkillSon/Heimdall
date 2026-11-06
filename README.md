@@ -163,6 +163,10 @@ turns them on), approval grants, the night pass and a few personal-only parts of
 `crates/` holds the Rust workspace (`app` is the binary; see `ARCHITECTURE.md`), `islands/` the floating-card app,
 `skills/` the agent's skills, `docs/` the design notes, `scripts/` the build. Each crate has its own README.
 
+## Feedback
+
+Bugs, complaints and ideas go to [Issues](https://github.com/TobyNoSkillSon/Heimdall/issues); even a short note helps. Fixes are welcome as pull requests.
+
 ## License
 
 Apache-2.0, see `LICENSE`. Third-party code and models keep their own licences: `NOTICE`, `THIRD_PARTY_NOTICES.md` and
