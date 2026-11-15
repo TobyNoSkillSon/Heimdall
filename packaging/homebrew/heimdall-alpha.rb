@@ -1,6 +1,6 @@
 cask "heimdall-alpha" do
   version "0.1.0-alpha.2"
-  sha256 "d0a0d9020545afa791c22c691ab5e33c1af1c96ea53d9b4ce72fad313e6ae425"
+  sha256 "e5a7ea3337575d795a75652bbe4589f16ba620f8c1a3dcdf1ea428d937711f76"
 
   url "https://github.com/TobyNoSkillSon/Heimdall/releases/download/v#{version}/Heimdall-Alpha-#{version}-arm64.zip"
   name "Heimdall Alpha"
