@@ -144,7 +144,7 @@ impl Config {
         }
     }
     /// The server to start. A bare name is a binary beside Heimdall's own (`Contents/MacOS/heimdall-splash`, the
-    /// bundled Rust server, docs/splash-native.md); an absolute path is used as given (Homebrew's `splash`, say).
+    /// bundled Rust server, docs/inference-engine.md); an absolute path is used as given (Homebrew's `splash`, say).
     pub fn executable(&self) -> PathBuf {
         if self.executable.is_absolute() {
             return self.executable.clone();
@@ -291,7 +291,15 @@ struct Process {
     birth: String,
     command: String,
 }
+#[cfg(test)]
+thread_local! {
+    /// Processes this thread's engine supervision spawned (`ps`; also four `curl` a tick before cleanup 14 Nov): the
+    /// health tick's cost, counted by `tests::a_ready_tick_spawns_one_process`.
+    pub(crate) static SPAWNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 fn processes() -> Result<Vec<Process>> {
+    #[cfg(test)]
+    SPAWNS.with(|n| n.set(n.get() + 1));
     let out = Command::new("/bin/ps")
         .args(["-ww", "-axo", "pid=,ppid=,stat=,lstart=,command="])
         .output()?;
@@ -403,7 +411,9 @@ impl Running {
                 return Ok(false);
             }
         }
-        Ok(same_process(&self.process, &processes()?))
+        // The same reading as the descendants' (cleanup 14 Nov: a second `ps` each tick); a death after it shows at
+        // the probe and the next tick.
+        Ok(same_process(&self.process, &all))
     }
 }
 fn find_owner(paths: &Paths) -> Result<Option<Process>> {
@@ -590,23 +600,33 @@ fn stop(running: &mut Running, paths: &Paths, grace: Duration) -> Result<()> {
     }
     Ok(())
 }
+/// Largest body a probe reads (curl's `--max-filesize` before cleanup 14 Nov).
+const PROBE_MAX_BYTES: u64 = 1024 * 1024;
+/// One GET of the engine's own endpoint, in process (cleanup 14 Nov: it was a `/usr/bin/curl` per call, four a tick):
+/// no proxy, no redirects, 2 s for the whole request, a status of 400 or more fails, at most `PROBE_MAX_BYTES` of JSON.
 fn get(port: u16, endpoint: &str) -> Result<Value> {
-    let out = Command::new("/usr/bin/curl")
-        .args([
-            "--silent",
-            "--show-error",
-            "--fail",
-            "--noproxy",
-            "*",
-            "--max-time",
-            "2",
-            "--max-filesize",
-            "1048576",
-        ])
-        .arg(format!("http://127.0.0.1:{port}/{endpoint}"))
-        .output()?;
-    ensure!(out.status.success(), "engine {endpoint} unavailable");
-    Ok(serde_json::from_slice(&out.stdout)?)
+    static CLIENT: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
+    let client = match CLIENT.get() {
+        Some(c) => c,
+        None => {
+            let built = reqwest::blocking::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(Duration::from_secs(2))
+                // A new connection a request, as curl made: an engine restarted on the port is never asked on a dead one.
+                .pool_max_idle_per_host(0)
+                .build()?;
+            CLIENT.get_or_init(|| built)
+        }
+    };
+    // The same words as curl's failure gave (the menu shows them, `failure_reason`).
+    let unavailable = || anyhow::anyhow!("engine {endpoint} unavailable");
+    let response = client.get(format!("http://127.0.0.1:{port}/{endpoint}")).send().map_err(|_| unavailable())?;
+    ensure!(!response.status().is_client_error() && !response.status().is_server_error(), unavailable());
+    let mut body = Vec::new();
+    std::io::Read::read_to_end(&mut std::io::Read::take(response, PROBE_MAX_BYTES + 1), &mut body).map_err(|_| unavailable())?;
+    ensure!(body.len() as u64 <= PROBE_MAX_BYTES, unavailable());
+    Ok(serde_json::from_slice(&body)?)
 }
 fn probe(config: &Config) -> Result<(EngineState, Value, Value)> {
     let _ = get(config.port, "health")?;

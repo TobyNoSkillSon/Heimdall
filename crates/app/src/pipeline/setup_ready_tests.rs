@@ -109,11 +109,12 @@ fn the_memory_search_row_says_whether_it_can_run() {
     use crate::embeddings::Search;
     assert!(memory_row(false, Search::Running, None).is_none(), "the download row stands until the model is in");
     assert_eq!(state(&memory_row(true, Search::Running, Some(1)).unwrap()), &ui::ReadyState::Ready);
-    let no_memory = ui::ReadyState::Optional { why: "Needs 8 GB free memory".into(), fix: None };
+    let no_memory = ui::ReadyState::Optional { why: "Needs 6 GB free memory".into(), fix: None };
     assert_eq!(state(&memory_row(true, Search::NoMemory, Some(64 << 30)).unwrap()), &no_memory, "the worker's refusal");
-    assert_eq!(state(&memory_row(true, Search::NotYet, Some(6 << 30)).unwrap()), &no_memory, "too little free memory to load");
+    assert_eq!(state(&memory_row(true, Search::NotYet, Some(5 << 30)).unwrap()), &no_memory, "too little free memory to load");
     assert!(matches!(state(&memory_row(true, Search::NotYet, Some(40 << 30)).unwrap()), ui::ReadyState::Optional { .. }), "not green before it ran");
-    assert!(crate::embeddings::memory_refusal("EmbeddingGemma 2: embedding admission needs 8 GiB free"));
+    assert!(crate::embeddings::memory_refusal("EmbeddingGemma 2: embedding admission needs 6 GiB free"));
+    assert!(crate::embeddings::memory_refusal(&heimdall_archive::embedding::low_memory_refusal()), "the host's words for exit 75");
     let rows = ui::SetupReadiness { rows: vec![memory_row(true, Search::NoMemory, None).unwrap()] };
     assert!(rows.ready(), "memory search is not needed to start");
 }
@@ -162,4 +163,48 @@ fn this_macs_model_is_a_row_with_its_download() {
     assert!(matches!(state(&engine_row(Some(&here), &ui::EngineState::Loading { percent: None })), ui::ReadyState::Working { .. }));
     assert_eq!(state(&engine_row(Some(&here), &ui::EngineState::Ready)), &ui::ReadyState::Ready);
     assert_eq!(gb(17_378_626_464), "17.4 GB");
+}
+
+/// VM run 14 Nov, upgrade from alpha.1: the provider key alpha.1 saved answered errSecAuthFailed to the new build, yet
+/// the agent's row was green (the test endpoint answered without a key). A key the Keychain door cannot read is a
+/// problem on the row, whose words send the user to save it again; unlocking cannot fix an item an earlier build saved.
+#[test]
+fn an_unreadable_agent_key_is_a_problem_not_a_green_tick() {
+    let s = crate::settings::Settings { agent_model: agent::provider::AgentModel::Api { provider: "opencode-go".into(), id: "claude-haiku-5-5".into() }, agent_relay: false, ..Default::default() };
+    let target = agent_target(&s, &(vec![], vec![]));
+    let key = match &target { Some(Ok((k, _, _))) => k.clone(), other => panic!("{other:?}") };
+    let green = agent_row(target, &AgentCheck::Passed(key), false);
+    assert_eq!(state(&green), &ui::ReadyState::Ready);
+    assert_eq!(agent_secret(&s), agent::provider::provider("opencode-go").map(|p| p.keychain_service));
+    assert_eq!(agent_secret(&crate::settings::Settings { agent_relay: true, ..s.clone() }), Some(t3::client::KEYCHAIN_SERVICE));
+    assert_eq!(agent_key_problem(green.clone(), None, false), green, "a key that reads keeps the row");
+    let unreadable = agent_key_problem(green.clone(), Some(keychain::Cause::Unreadable), false);
+    match state(&unreadable) {
+        ui::ReadyState::Problem { why, fix: Some(ui::ReadyFix::Step { step: ui::SetupStep::Providers, title }) } => {
+            assert!(why.contains("re-enter it in Providers") && !why.contains("unlock"), "{why}");
+            assert_eq!(title, "Re-enter Key\u{2026}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(state(&agent_key_problem(green.clone(), Some(keychain::Cause::Locked), false)), ui::ReadyState::Problem { why, .. } if why.starts_with("Keychain locked")));
+    assert!(matches!(state(&agent_key_problem(green.clone(), Some(keychain::Cause::Unreadable), true)), ui::ReadyState::Problem { fix: Some(ui::ReadyFix::Step { step: ui::SetupStep::T3, .. }), .. }));
+    // No agent chosen: that row's own problem stands.
+    let unchosen = agent_row(None, &AgentCheck::None, false);
+    assert_eq!(agent_key_problem(unchosen.clone(), Some(keychain::Cause::Unreadable), false), unchosen);
+}
+
+/// VM run 14 Nov, upgrade from alpha.1: macOS kept the microphone grant with the old signature; the capture heard
+/// silence and the row said "No sound from BlackHole 2ch" with Choose…, which cannot fix it. Denied says so, with
+/// Allow… (the page whose button opens System Settings).
+#[test]
+fn a_denied_microphone_says_so_instead_of_no_sound() {
+    let name = || Some("BlackHole 2ch".to_string());
+    let silent = microphone_row(1, name(), false, Some(MIC_SILENT + std::time::Duration::from_secs(1)), CaptureStart::NotYet);
+    assert!(matches!(state(&silent), ui::ReadyState::Problem { why, .. } if why.starts_with("No sound from")));
+    assert_eq!(microphone_access(silent.clone(), false), silent);
+    let denied = microphone_access(silent, true);
+    assert!(matches!(state(&denied), ui::ReadyState::Problem { why, fix: Some(ui::ReadyFix::Step { step: ui::SetupStep::Permissions, .. }) } if why == "Microphone access is off in System Settings"), "{denied:?}");
+    // No microphone at all stays that.
+    let none = microphone_row(0, None, false, None, CaptureStart::NotYet);
+    assert_eq!(microphone_access(none.clone(), true), none);
 }

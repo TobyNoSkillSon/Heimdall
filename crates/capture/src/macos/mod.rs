@@ -79,6 +79,8 @@ struct Active {
     native: tap::NativeSource,
     started: u64,
     retries: u8,
+    /// `hal::source_objects` when it opened: a ROUTE event on one of these (or on its current ones) restarts it.
+    objects: Vec<u32>,
 }
 struct Failure {
     attempts: u8,
@@ -140,6 +142,9 @@ fn spawn(pipeline: Option<Pipeline>, initial_access: u32, config: &CaptureConfig
     };
     let echo = Shared::new();
     let echo_worker = echo.clone();
+    // Pushed sources (the phone's microphone) join this pipeline beside the HAL's own; taken before the HAL owner
+    // thread takes the pipeline.
+    let push = pipeline.as_ref().map(Pipeline::push_input);
     let (ready_tx, ready_rx) = crossbeam_channel::bounded(1);
     let owner = thread::Builder::new()
         .name("heimdall-hal".into())
@@ -152,6 +157,7 @@ fn spawn(pipeline: Option<Pipeline>, initial_access: u32, config: &CaptureConfig
     let wake = owner.thread().clone();
     match ready_rx.recv_timeout(Duration::from_secs(10)) {
         Ok(Ok(())) => Ok(Capture {
+            push,
             stop,
             owner: Some(owner),
             wake,
@@ -229,6 +235,8 @@ fn run(
     };
     let mut published_echo: Option<EchoTarget> = None;
     let mut own_devices: Option<(u32, Vec<String>)> = None;
+    // Route events drained in a pass without the ROUTE bit (`carry_route_events`).
+    let mut carried_routes: HashSet<(u32, u32)> = HashSet::new();
     let mut active: HashMap<String, Active> = HashMap::new();
     let mut failed: HashMap<String, Failure> = HashMap::new();
     let mut seen_errors = HashSet::new();
@@ -258,7 +266,10 @@ fn run(
                 popped += 1;
             }
             // A full queue may have lost events: then no ROUTE is ever treated as the echo unit's own noise.
-            let overflowed = popped >= changes.capacity();
+            let mut overflowed = popped >= changes.capacity();
+            // Review 1110 item 9: a listener pushes its event before it sets its bit, so a pass can drain a route event
+            // whose ROUTE bit lands only for the next pass; that pass then scoped the restart without it.
+            overflowed |= carry_route_events(bits, &mut changed, &mut carried_routes);
             let now = crate::host_now_ns();
             if bits & hal::SLEEP != 0 {
                 sleeping = true;
@@ -393,7 +404,7 @@ fn run(
                         built_in: c.built_in,
                         default: matches!(c.target, hal::Target::Mic(id) if Some(id) == default_input),
                     }),
-                    crate::SourceKind::Process { .. } => None,
+                    crate::SourceKind::Process { .. } | crate::SourceKind::Phone { .. } => None,
                 })
                 .collect();
             let mic_state = crate::MicrophoneState::with_default(inputs, chosen, extras, mics.system_default, |d| {
@@ -420,12 +431,18 @@ fn run(
                 let permitted = |c: &&Candidate| match c.kind {
                     crate::SourceKind::InputDevice { .. } => crate::tap_gate::opens(true, mic_keys.contains(&c.key), grants, None),
                     crate::SourceKind::Process { .. } => crate::tap_gate::opens(false, true, grants, taps.as_ref()),
+                    // Never a HAL candidate: the phone is pushed (`PushInput`).
+                    crate::SourceKind::Phone { .. } => false,
                 };
                 let wanted: HashMap<_, _> = candidates.iter().filter(permitted).map(|c| (c.key.clone(), c)).collect();
+                // A ROUTE restarts only the sources its events concern (F5, 10 Nov): another app's device list or an
+                // unrelated device's format no longer cuts every tap and the microphone.
+                let scope = route_scope(bits, &changed, overflowed);
                 let remove: Vec<_> = active
                     .iter()
                     .filter(|(key, a)| {
-                        crate::tap_gate::stops(sleeping, bits & (hal::ROUTE | hal::WAKE) != 0, wanted.get(*key).is_some_and(|c| **c == a.candidate))
+                        let routed = scope.hits(&a.objects) || (matches!(scope, RouteScope::Objects(_)) && scope.hits(&hal::source_objects(&a.candidate.target)));
+                        crate::tap_gate::stops(sleeping, bits & hal::WAKE != 0 || routed, wanted.get(*key).is_some_and(|c| **c == a.candidate))
                     })
                     .map(|(key, _)| key.clone())
                     .collect();
@@ -456,10 +473,7 @@ fn run(
                             continue;
                         }
                         let retries = failed.get(&candidate.key).map(|f| f.attempts).unwrap_or(0);
-                        if failed
-                            .get(&candidate.key)
-                            .is_some_and(|f| now < f.retry_ns || f.attempts >= 4)
-                        {
+                        if failed.get(&candidate.key).is_some_and(|f| !retry_due(f, &candidate.target, now)) {
                             continue;
                         }
                         // Process-wide: a source opened by a restarted capture gets a new id, so the stopped capture's
@@ -479,6 +493,7 @@ fn run(
                                                 native,
                                                 started: now,
                                                 retries,
+                                                objects: hal::source_objects(&candidate.target),
                                             },
                                         );
                                     }
@@ -532,7 +547,7 @@ fn run(
                             };
                             let id = a.native.raw.info.id.clone();
                             let candidate = a.candidate.clone();
-                            let retries = a.retries;
+                            let retries = retries_after_run(a.retries, a.started, a.native.raw.last_callback.load(Ordering::Acquire));
                             for error in a.native.stop_checked() {
                                 send(p, Command::Gap(Some(a.native.raw.info.id.clone()), error));
                             }
@@ -603,7 +618,8 @@ fn run(
                 || (pipeline.is_some()
                     && (active.values().any(|a| matches!(a.candidate.target, hal::Target::Mic(_))
                         || a.native.raw.last_callback.load(Ordering::Acquire) != 0)
-                        || failed.values().any(|f| f.attempts < 4)))
+                        // A tap's recovery always comes back; an exhausted mic waits for a HAL event, asleep.
+                        || failed.iter().any(|(key, f)| f.attempts < 4 || !key.starts_with("mic:"))))
             {
                 thread::park_timeout(Duration::from_secs(3));
             } else {
@@ -663,14 +679,7 @@ fn own_route_noise(
     let (Some((object, was)), Some((now_object, now))) = (before, after) else {
         return false;
     };
-    let route_selectors = [
-        kAudioProcessPropertyDevices,
-        kAudioDevicePropertyNominalSampleRate,
-        kAudioDevicePropertyStreams,
-        kAudioStreamPropertyVirtualFormat,
-        kAudioHardwarePropertyDefaultOutputDevice,
-    ];
-    let route_events: Vec<_> = changed.iter().filter(|(_, sel)| route_selectors.contains(sel)).collect();
+    let route_events: Vec<_> = changed.iter().filter(|(_, sel)| ROUTE_SELECTORS.contains(sel)).collect();
     bits & hal::ROUTE != 0
         && !overflowed
         && object == now_object
@@ -728,8 +737,8 @@ fn record_failure(
     error: &anyhow::Error,
     p: &Pipeline,
 ) {
-    let attempts = retries + 1;
-    let delay = 1u64 << attempts.min(4);
+    let attempts = retries.saturating_add(1);
+    let delay = retry_delay_s(attempts);
     failed.insert(
         candidate.key.clone(),
         Failure {
@@ -737,20 +746,179 @@ fn record_failure(
             retry_ns: now + delay * 1_000_000_000,
         },
     );
-    send(
-        p,
-        Command::Diagnostic(
-            format!(
-                "{}: {error:#}; recovery attempt {attempts}/4{}",
-                candidate.key,
-                if attempts >= 4 {
-                    "; waiting for a HAL activity/route/wake event"
-                } else {
-                    ""
-                }
-            ),
-        ),
-    );
+    send(p, Command::Diagnostic(recovery_note(&candidate.key, error, attempts, matches!(candidate.target, hal::Target::Mic(_)))));
+}
+/// Seconds before the next try after `attempts` failures: 2, 4, 8, 16, 32, then every 60 s.
+fn retry_delay_s(attempts: u8) -> u64 {
+    (1u64 << attempts.min(6)).min(60)
+}
+/// A tap is retried whenever its delay has passed, however many times it failed (F5, 10 Nov: Discord's tap gave up
+/// after four stalls and stayed silent until an unrelated HAL event). A microphone stops at four: retrying it would
+/// switch the primary away from the built-in mic standing in for it, a gap each time; a HAL event for it, a route
+/// change, a wake or a new choice in the menu releases it.
+fn retry_due(f: &Failure, target: &hal::Target, now: u64) -> bool {
+    now >= f.retry_ns && (f.attempts < 4 || !matches!(target, hal::Target::Mic(_)))
+}
+/// A source that delivered callbacks for `HEALTHY_RUN_NS` before it stalled was recovered: its next stall starts the
+/// count again, so stalls hours apart never add up to an exhausted recovery.
+const HEALTHY_RUN_NS: u64 = 60_000_000_000;
+fn retries_after_run(retries: u8, started: u64, last_callback: u64) -> u8 {
+    if last_callback.saturating_sub(started) >= HEALTHY_RUN_NS { 0 } else { retries }
+}
+fn recovery_note(key: &str, error: &anyhow::Error, attempts: u8, mic: bool) -> String {
+    let then = if attempts < 4 {
+        String::new()
+    } else if mic {
+        "; waiting for a HAL activity/route/wake event".into()
+    } else {
+        format!("; trying again every {} s", retry_delay_s(attempts))
+    };
+    format!("{key}: {error:#}; recovery attempt {attempts}{}{then}", if attempts <= 4 { "/4" } else { "" })
+}
+/// Which open sources a pass's ROUTE restarts.
+enum RouteScope {
+    None,
+    All,
+    Objects(HashSet<u32>),
+}
+impl RouteScope {
+    fn hits(&self, objects: &[u32]) -> bool {
+        match self {
+            RouteScope::None => false,
+            RouteScope::All => true,
+            RouteScope::Objects(changed) => objects.iter().any(|o| changed.contains(o)),
+        }
+    }
+}
+/// A ROUTE pass restarts every source when macOS's default output moved (Bluetooth and AirPods routes stay as they
+/// were), when events may have been lost, or when no route event names its object; otherwise only the sources whose
+/// own objects (`hal::source_objects`) fired.
+fn route_scope(bits: u32, changed: &HashSet<(u32, u32)>, overflowed: bool) -> RouteScope {
+    if bits & hal::ROUTE == 0 {
+        return RouteScope::None;
+    }
+    let events: Vec<_> = changed.iter().filter(|(_, sel)| ROUTE_SELECTORS.contains(sel)).collect();
+    if overflowed || events.is_empty() || events.iter().any(|(o, _)| *o == kAudioObjectSystemObject as u32) {
+        return RouteScope::All;
+    }
+    RouteScope::Objects(events.iter().map(|(o, _)| *o).collect())
+}
+/// Most route events kept for a later pass; past it the next ROUTE restarts every source.
+const CARRY_LIMIT: usize = 256;
+/// Review 1110 item 9: route events drained in a pass whose bits hold no ROUTE (the listener had pushed its event but not
+/// yet set its bit) are kept and joined to the next ROUTE pass's events, so `route_scope` restarts the source they
+/// concern. Returns true when more than `CARRY_LIMIT` were kept: the ROUTE pass then treats events as lost (`All`).
+fn carry_route_events(bits: u32, changed: &mut HashSet<(u32, u32)>, carried: &mut HashSet<(u32, u32)>) -> bool {
+    if bits & hal::ROUTE != 0 {
+        let lost = carried.len() > CARRY_LIMIT;
+        changed.extend(carried.drain());
+        return lost;
+    }
+    if carried.len() <= CARRY_LIMIT {
+        carried.extend(changed.iter().filter(|(_, sel)| ROUTE_SELECTORS.contains(sel)).copied());
+    }
+    false
+}
+const ROUTE_SELECTORS: [u32; 5] = [
+    kAudioProcessPropertyDevices,
+    kAudioDevicePropertyNominalSampleRate,
+    kAudioDevicePropertyStreams,
+    kAudioStreamPropertyVirtualFormat,
+    kAudioHardwarePropertyDefaultOutputDevice,
+];
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    const S: u64 = 1_000_000_000;
+    #[test]
+    fn a_tap_never_gives_up_and_backs_off_to_a_minute() {
+        let tap = hal::Target::Tap { object: 9, device_uid: None, stream: 0 };
+        let delays: Vec<u64> = (1..=8).map(retry_delay_s).collect();
+        assert_eq!(delays, [2, 4, 8, 16, 32, 60, 60, 60]);
+        assert_eq!(retry_delay_s(u8::MAX), 60);
+        // The fourth failure used to wait for a HAL event forever; now the tap is tried again once its delay passed.
+        let fourth = Failure { attempts: 4, retry_ns: 100 * S };
+        assert!(!retry_due(&fourth, &tap, 99 * S));
+        assert!(retry_due(&fourth, &tap, 100 * S));
+        assert!(retry_due(&Failure { attempts: u8::MAX, retry_ns: 0 }, &tap, 1));
+        // A microphone still stops at four (the built-in stands in without being cut each minute).
+        assert!(!retry_due(&fourth, &hal::Target::Mic(3), 1_000 * S));
+        assert!(retry_due(&Failure { attempts: 3, retry_ns: 0 }, &hal::Target::Mic(3), 1));
+    }
+    #[test]
+    fn a_stall_after_a_healthy_run_starts_the_count_again() {
+        // 8 Nov 11:02–11:10: Discord's tap re-opened and ran each time, yet four stalls in eight minutes exhausted it.
+        assert_eq!(retries_after_run(3, 10 * S, 10 * S + HEALTHY_RUN_NS), 0);
+        assert_eq!(retries_after_run(3, 10 * S, 10 * S + HEALTHY_RUN_NS - 1), 3);
+        // Never delivered at all (last callback 0): the count goes on.
+        assert_eq!(retries_after_run(2, 10 * S, 0), 2);
+    }
+    #[test]
+    fn recovery_notes_say_when_the_next_try_comes() {
+        let e = anyhow::anyhow!("active source stopped delivering callbacks");
+        assert_eq!(recovery_note("pid:1", &e, 1, false), "pid:1: active source stopped delivering callbacks; recovery attempt 1/4");
+        assert_eq!(recovery_note("pid:1", &e, 4, false), "pid:1: active source stopped delivering callbacks; recovery attempt 4/4; trying again every 16 s");
+        assert_eq!(recovery_note("pid:1", &e, 7, false), "pid:1: active source stopped delivering callbacks; recovery attempt 7; trying again every 60 s");
+        assert_eq!(recovery_note("mic:x", &e, 4, true), "mic:x: active source stopped delivering callbacks; recovery attempt 4/4; waiting for a HAL activity/route/wake event");
+    }
+    #[test]
+    fn a_route_event_restarts_only_the_sources_it_names() {
+        let system = kAudioObjectSystemObject as u32;
+        let (discord, ego, shure, shure_stream, airpods) = (40, 41, 7, 70, 8);
+        let discord_tap = [discord, airpods];
+        let ego_tap = [ego];
+        let mic = [shure, shure_stream];
+        // Another app (ego) changed its device list: only ego's tap restarts; the mic and Discord keep running.
+        let ego_devices = HashSet::from([(ego, kAudioProcessPropertyDevices), (ego, kAudioProcessPropertyIsRunning)]);
+        let scope = route_scope(hal::ROUTE | hal::DISCOVERY, &ego_devices, false);
+        assert!(scope.hits(&ego_tap));
+        assert!(!scope.hits(&mic) && !scope.hits(&discord_tap));
+        // An output device's rate restarts the taps playing to it, not the microphone.
+        let rate = HashSet::from([(airpods, kAudioDevicePropertyNominalSampleRate)]);
+        let scope = route_scope(hal::ROUTE, &rate, false);
+        assert!(scope.hits(&discord_tap) && !scope.hits(&mic) && !scope.hits(&ego_tap));
+        // The mic's own input format restarts the mic.
+        let format = HashSet::from([(shure_stream, kAudioStreamPropertyVirtualFormat)]);
+        assert!(route_scope(hal::ROUTE, &format, false).hits(&mic));
+        // macOS's default output moved (AirPods connecting): every source restarts, as before.
+        let default_output = HashSet::from([(system, kAudioHardwarePropertyDefaultOutputDevice)]);
+        assert!(route_scope(hal::ROUTE, &default_output, false).hits(&mic));
+        // Lost events, or a ROUTE with no route event to name it: everything restarts, as before.
+        assert!(route_scope(hal::ROUTE, &ego_devices, true).hits(&mic));
+        assert!(route_scope(hal::ROUTE, &HashSet::new(), false).hits(&mic));
+        // No ROUTE (or one cleared as the echo unit's own noise): nothing restarts for a route.
+        assert!(!route_scope(hal::DISCOVERY, &ego_devices, false).hits(&ego_tap));
+    }
+    /// Review 1110 item 9: the mic's format event is drained in a pass before its ROUTE bit is set (the listener pushes,
+    /// then sets the bit); the next pass has ROUTE and an unrelated app's device-list event. The mic restarts too.
+    #[test]
+    fn a_route_event_drained_before_its_bit_still_restarts_its_source() {
+        let (ego, shure, shure_stream) = (41, 7, 70);
+        let mic = [shure, shure_stream];
+        let mut carried = HashSet::new();
+        // Pass 1: the event is in the queue, its bit not yet set (another bit woke the pass).
+        let mut first = HashSet::from([(shure_stream, kAudioStreamPropertyVirtualFormat), (ego, kAudioProcessPropertyIsRunning)]);
+        assert!(!carry_route_events(hal::DISCOVERY, &mut first, &mut carried));
+        assert!(!route_scope(hal::DISCOVERY, &first, false).hits(&mic));
+        assert_eq!(carried, HashSet::from([(shure_stream, kAudioStreamPropertyVirtualFormat)]), "only route events are kept");
+        // Pass 2: ROUTE, with only ego's device list in the queue.
+        let mut second = HashSet::from([(ego, kAudioProcessPropertyDevices)]);
+        assert!(!carry_route_events(hal::ROUTE, &mut second, &mut carried));
+        let scope = route_scope(hal::ROUTE, &second, false);
+        assert!(scope.hits(&mic) && scope.hits(&[ego]), "the mic's carried event is in this pass's scope");
+        assert!(carried.is_empty(), "used once");
+        // Pass 3: nothing carried any more.
+        let mut third = HashSet::from([(ego, kAudioProcessPropertyDevices)]);
+        carry_route_events(hal::ROUTE, &mut third, &mut carried);
+        assert!(!route_scope(hal::ROUTE, &third, false).hits(&mic));
+        // Too many carried: the next ROUTE pass counts events as lost and restarts everything.
+        for o in 0..=(CARRY_LIMIT as u32 + 1) {
+            carry_route_events(0, &mut HashSet::from([(1000 + o, kAudioDevicePropertyStreams)]), &mut carried);
+        }
+        let mut fourth = HashSet::from([(ego, kAudioProcessPropertyDevices)]);
+        let lost = carry_route_events(hal::ROUTE, &mut fourth, &mut carried);
+        assert!(lost && route_scope(hal::ROUTE, &fourth, lost).hits(&mic));
+    }
 }
 
 /// HAL publishes process objects before their first output. Arm their include-only
@@ -990,7 +1158,7 @@ mod fallback_tests {
             InputDevice { uid: "AirPods".into(), name: "AirPods Pro".into(), built_in: false, default: false },
         ];
         let state = |failure: Option<&Failure>, now: u64| {
-            MicrophoneState::new(devices.clone(), Some("AirPods".into()), vec![], |d| {
+            MicrophoneState::with_default(devices.clone(), Some("AirPods".into()), vec![], false, |d| {
                 mic_usable(if d.uid == "AirPods" { failure } else { None }, now)
             })
             .in_use

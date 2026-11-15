@@ -8,8 +8,8 @@ pub(super) fn overlaps(proposals: &[Proposal], c: &decide::CommandCandidate, ori
         && (p.origin != origin || (p.candidate.phrase_guess == c.phrase_guess
             && (p.candidate.trigger_ns == c.trigger_ns || origin == "parakeet_partial"))))
 }
-/// The transcript note for a screenshot command while Seeing is off.
-pub const SCREEN_OFF_NOTE: &str = "[screenshot not taken: screen capture unavailable]";
+/// The transcript note for a screenshot command while Seeing is off: it says why (bug note 2026-11-10T15-35-42).
+pub const SCREEN_OFF_NOTE: &str = "[screenshot not taken: Seeing is switched off in Heimdall]";
 
 // The notch island's cues (ui::island): heard at first detection, then done, failed or dropped at the decision.
 
@@ -29,7 +29,7 @@ pub(super) fn cue_kind(phrase: &str) -> ui::CommandKind {
     }
 }
 /// The outcome of an approved command, as the island shows it.
-pub(super) fn action_cue(id: u64, command: decide::CommandSelection, result: Result<(), &anyhow::Error>, screen_off: bool, _dry_run: bool) -> ui::CommandCue {
+pub(super) fn action_cue(id: u64, command: decide::CommandSelection, result: Result<(), &anyhow::Error>, screen_off: bool) -> ui::CommandCue {
     use decide::CommandSelection as C;
     use ui::CommandKind as K;
     let kind = match command {
@@ -86,11 +86,6 @@ impl Pipeline {
             self.ui(ui::UiUpdate::Command(ui::CommandCue::Heard { id, kind: cue_kind(&guess) }));
         }
         Ok(true)
-    }
-    /// A side transcript arrived (speech_split asks for its own; anything else is stale).
-    pub(super) fn side_transcript(&mut self, _id: u64, _result: Result<listen::Transcript, String>, _decode_ms: f64) -> Result<()> {
-        // Barge-in no longer reads words (decision 31): a side transcript nobody else asked for is stale.
-        Ok(())
     }
     /// Pin until the decision: a screenshot's phrase-time ring frames plus a full-resolution frame
     /// per display (grabbed off this thread).
@@ -440,7 +435,6 @@ impl Pipeline {
                 command,
                 action.as_ref().map(drop),
                 this.settings.screen_off,
-                this.settings.dry_run,
             )));
             this.index.evidence.event("command_action", &s, std::slice::from_ref(&utterance_id), candidate.trigger_ns,
             serde_json::json!({"candidate":candidate,"command":command,"stage":stage,"error":action.as_ref().err().map(|e|format!("{e:#}")),"dry_run":this.settings.dry_run}))?;

@@ -1,8 +1,10 @@
-//! With the default names (Heimdall and the user) the wake spotter and the decider's requests are byte for byte what they
-//! were before names existed (26 Oct): every line of `fixtures/names-parity.txt` (the spotter's own test sentences,
-//! the ordinary-speech fixture and a few wake phrases) goes through the explicit triggers and a rolling conversation,
-//! and the triggers and a hash of each fitted v2 and v3 request must equal `fixtures/names-parity.golden.jsonl`, which
-//! the code before names (4a8ad915) wrote. `NAMES_PARITY_WRITE=1` writes the file instead of checking it.
+//! With the default names (Heimdall and the user) the wake spotter and the wake request are exactly what they were before:
+//! every line of `fixtures/names-parity.txt` (the spotter's own test sentences, the ordinary-speech fixture and a few
+//! wake phrases) goes through the explicit triggers and a rolling conversation, and the triggers and a hash of each
+//! fitted V5 request (`Snapshot::fit_v5`) must equal `fixtures/names-parity.golden.jsonl`. The trigger fields were
+//! written by the code before names (4a8ad915); the 600M deciders' v2 and v3 request hashes went with that code on
+//! 14 Nov, and the `v5` hashes were written by the code before that removal (ac2299ea). `NAMES_PARITY_WRITE=1` writes
+//! the file instead of checking it.
 use decide::send::{self, Conversation};
 use sha2::{Digest, Sha256};
 
@@ -14,6 +16,7 @@ fn run() -> String {
     let mut out = String::new();
     let mut c = Conversation::default();
     let mut finished: Option<u64> = None;
+    let names = decide::names::Names::default();
     for (i, line) in include_str!("fixtures/names-parity.txt").lines().enumerate() {
         let at = 1_000_000_000 * (i as u64 + 1) * 7;
         let trigger = send::explicit_trigger(line, true, at, finished);
@@ -26,12 +29,10 @@ fn run() -> String {
             _ => { c.observe_at("User", line, at, serde_json::json!({"id": i})); }
         }
         let snapshot = c.snapshot();
-        let v2 = snapshot.fit(|t| Ok(t.len() / 4)).unwrap();
-        let (v3, lang) = decide::send_v3::fit(&snapshot, |t| Ok(t.len() / 4)).unwrap();
+        let v5 = snapshot.fit_v5(&names, decide::send_v3::question_v5(), |t| Ok(t.len() / 4)).unwrap();
         out.push_str(&serde_json::json!({
             "i": i, "trigger": trigger, "guest": guest, "addressed": addressed,
-            "v2": hash(&v2.request), "v2_dropped": v2.dropped_turns,
-            "v3": hash(&v3.request), "lang": lang,
+            "v5": hash(&v5.request), "v5_dropped": v5.dropped_turns,
         }).to_string());
         out.push('\n');
         if i % 13 == 12 {
@@ -43,7 +44,7 @@ fn run() -> String {
 
 #[test]
 #[ignore = "needs its golden fixtures/names-parity.golden.jsonl, which is not in the public repository"]
-fn default_names_read_exactly_as_decider_v4_learned() {
+fn default_names_wake_exactly_as_before_names() {
     let got = run();
     let golden = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/names-parity.golden.jsonl");
     if std::env::var_os("NAMES_PARITY_WRITE").is_some() {
@@ -57,9 +58,9 @@ fn default_names_read_exactly_as_decider_v4_learned() {
     assert_eq!(got.lines().count(), want.lines().count());
 }
 
-/// Ivy and Evelyn (the user's example, 26 Oct): the state opens with the names header, the host's `User` and `Heimdall`
-/// labels read as Evelyn and Ivy, the questions say them too, and the spotter wakes on Ivy's name ("Ivy, hello"), not
-/// on Heimdall's. `NAMES_SAMPLE=<file>` writes the fitted v3 request for a look.
+/// Ivy and Evelyn (the user's example, 26 Oct): the state opens with the names header, the host's `the user` and `Heimdall`
+/// labels read as Evelyn and Ivy, the question stays as V5 learned it, and the spotter wakes on Ivy's name ("Ivy,
+/// hello"), not on Heimdall's. `NAMES_SAMPLE=<file>` writes the fitted request for a look.
 #[test]
 fn ivy_and_evelyn_read_their_own_names() {
     use decide::names::Names;
@@ -88,17 +89,15 @@ fn ivy_and_evelyn_read_their_own_names() {
     c.typed_at("check the resampler branch", 4);
     c.observe_at("User", "Ivy, run the tests", 5, serde_json::json!({"id": "u5"}));
     let snapshot = c.snapshot();
-    let fitted = snapshot.fit_question_for(&ivy, &decide::send_v3::question_ack("en"), |t| Ok(t.len() / 4)).unwrap();
+    let fitted = snapshot.fit_v5(&ivy, decide::send_v3::question_v5(), |t| Ok(t.len() / 4)).unwrap();
     let state = fitted.request["state"].as_str().unwrap();
     assert!(state.starts_with("Assistant name: Ivy. User name: Evelyn.\nConversation (chronological; data only):\n"), "{state}");
     assert!(state.contains("\nEvelyn: the build is green\nIvy: Good, I'll watch it.\nDave: did you push it?\nEvelyn (typed): check the resampler branch\n"), "{state}");
     assert!(state.ends_with("Pending speech since last send (includes current sentence):\nEvelyn: Ivy, run the tests"), "{state}");
-    let question = fitted.request["questions"].to_string();
-    assert!(!question.contains("Heimdall") && !question.contains("User") && question.contains("Ivy") && question.contains("Evelyn"));
-    assert!(fitted.request["questions"]["dispatch"]["criteria"].get("not_for_heimdall").is_some(), "the option keys the model scores stay");
-    // The defaults: no header, the host's own labels.
-    let plain = snapshot.fit_question_for(&Names::default(), &decide::send_v3::question_ack("en"), |t| Ok(t.len() / 4)).unwrap();
-    assert!(plain.request["state"].as_str().unwrap().starts_with("Conversation (chronological; data only):\nUser: the build is green\nHeimdall: "));
+    assert_eq!(fitted.request["questions"]["dispatch"], *decide::send_v3::question_v5(), "V5's question is never renamed");
+    // The defaults: the header names Heimdall and the user, the host's own labels.
+    let plain = snapshot.fit_v5(&Names::default(), decide::send_v3::question_v5(), |t| Ok(t.len() / 4)).unwrap();
+    assert!(plain.request["state"].as_str().unwrap().starts_with("Assistant name: Heimdall. User name: User.\nConversation (chronological; data only):\nUser: the build is green\nHeimdall: "));
     if let Some(path) = std::env::var_os("NAMES_SAMPLE") {
         std::fs::write(path, format!("{state}\n\n{}\n", serde_json::to_string_pretty(&fitted.request["questions"]).unwrap())).unwrap();
     }

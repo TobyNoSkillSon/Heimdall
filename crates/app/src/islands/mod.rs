@@ -1,9 +1,11 @@
-//! Floating Islands inside Heimdall (night 1022): the bundled Swift helper's file protocol and everything Heimdall
+//! Floating Islands inside Heimdall (night 1022): the bundled helper's file protocol and everything Heimdall
 //! owns above it. Contract: `docs/archive/briefs/night-1022-islands.md`.
 #![allow(dead_code)] // the stage-2 parts wire these in
 
 pub mod files;
 pub mod nudge;
+// Night 1111 lane I: a job island's name kept per thread (bug notes 2026-11-10T17-13-24, 18-32-39).
+pub mod names;
 // ---- host (night 1022): helper supervisor, watcher, agent tools, responses, thread binding ----
 pub mod binding;
 pub mod digest;
@@ -20,7 +22,20 @@ pub mod supervisor;
 pub mod tools;
 pub mod train;
 pub mod visibility;
+// islands display (night 1107, bug note 2026-11-07T02-02-35)
+pub mod display;
 pub mod watch;
+#[cfg(feature = "phone")]
+pub mod phone_goals;
+// A job's report outlives its island (bug note 2026-11-11T12-05-15)
+pub mod kept_report;
+// ---- end lane R ----
+// ---- islands list (bug note 2026-11-13T12-27-46): `islands_list` ----
+pub mod list;
+// ---- end islands list ----
+// ---- wakes for the user's requests (bug note 2026-11-14T16-58-00): Scheduled items linked to wakes ----
+pub mod wake_items;
+// ---- end wakes for the user's requests ----
 // ---- end host ----
 
 use serde_json::{Map, Value};
@@ -119,7 +134,12 @@ static HOST: OnceLock<Arc<Host>> = OnceLock::new();
 
 /// The live app's host, once `live::start` ran; `None` in replays, lab modes and tests.
 pub fn host() -> Option<Arc<Host>> { HOST.get().cloned() }
-pub(crate) fn install(h: Arc<Host>) -> bool { HOST.set(h).is_ok() }
+pub(crate) fn install(h: Arc<Host>) -> bool {
+    let root = h.root.clone();
+    let ok = HOST.set(h).is_ok();
+    if ok { wake_items::drain(&root); }
+    ok
+}
 
 /// An error's first line, bounded, for logs and lines to the agent.
 pub fn short_error(e: &anyhow::Error) -> String {
@@ -127,6 +147,10 @@ pub fn short_error(e: &anyhow::Error) -> String {
     let first = t.lines().next().unwrap_or("").to_string();
     if first.chars().count() > 200 { first.chars().take(200).collect::<String>() + "…" } else { first }
 }
+
+pub use files::{user, user_cap};
+#[cfg(test)]
+pub use files::with_user;
 // ---- end host ----
 
 /// A picture an island can show: an absolute, `~/` or `file://` path (as the app reads it) to an existing file of at

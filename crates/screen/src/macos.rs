@@ -849,6 +849,16 @@ fn recovery_allowed(has_session: bool, has_retry: bool, attempts: u32) -> bool {
 }
 
 fn capture_available()->bool { capture_pause_reason().is_none() }
+/// Why no screen can be captured right now, in the user's words, or `None` when nothing blocks it: Screen Recording
+/// permission off, the session locked, or every display asleep or dark. Read-only; never prompts.
+pub fn capture_blocker()->Option<String> {
+    if !screen_permission_granted(){return Some("Screen Recording permission is off for Heimdall".into())}
+    capture_pause_reason().map(|r| match r {
+        "session locked or inactive"=>"the Mac is locked or at the login window".into(),
+        "all displays asleep or dark"=>"the display is asleep or dark".into(),
+        other=>other.into(),
+    })
+}
 fn capture_pause_reason()->Option<&'static str> {
     if !session_unlocked(){return Some("session locked or inactive")}
     let mut count=0;

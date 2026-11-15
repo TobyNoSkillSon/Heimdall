@@ -22,7 +22,10 @@ fn cue_counter(a: &Pipeline) -> Arc<AtomicUsize> {
     a.tools.speech_policy.set_player(Arc::new(move || { count.fetch_add(1, Ordering::SeqCst); }));
     played
 }
+/// The rig's Discord source; the user is talking with the people on it (night 1115: only a live conversation is a call,
+/// `SpeechPolicy::call_line`), so its unnamed lines count as the call.
 fn discord(a: &Pipeline) -> String {
+    a.tools.speech_policy.owner_talked_to_others(capture::host_now_ns());
     a.sources.iter().find(|(_, s)| crate::context_policy::is_call(s)).map(|(id, _)| id.clone()).expect("the rig's Discord source")
 }
 
@@ -161,7 +164,7 @@ fn cards_are_silent_and_nothing_is_spoken_while_owner_is_in_a_conversation() {
     turn(&mut a, &call, at, "did you see the new build", Detect::Final, 0, None, 0, |_| {});
     assert!(a.tools.speech_policy.in_conversation(capture::host_now_ns()));
     let held = say(&a, "Mobius finished: results are in.", "speak-2");
-    assert_eq!(held, crate::bridge::speech_policy::HELD_IN_CONVERSATION);
+    assert_eq!(held, crate::bridge::speech_policy::held_in_conversation());
     assert_eq!(held.lines().count(), 1, "one line for the agent");
     // A final reply is held too, and a card stays silent.
     a.tools.agent_final_answer("Tests passed.", "stop").unwrap();
@@ -177,7 +180,7 @@ fn cards_are_silent_and_nothing_is_spoken_while_owner_is_in_a_conversation() {
     // The boundary: the last call line ended exactly the conversation window ago, then a moment longer.
     let now = capture::host_now_ns();
     a.tools.speech_policy.test_last_line(now - crate::bridge::speech_policy::CONVERSATION_NS + 5 * S);
-    assert_eq!(say(&a, "Still quiet.", "speak-3"), crate::bridge::speech_policy::HELD_IN_CONVERSATION);
+    assert_eq!(say(&a, "Still quiet.", "speak-3"), crate::bridge::speech_policy::held_in_conversation());
     a.tools.speech_policy.test_last_line(now - crate::bridge::speech_policy::CONVERSATION_NS - S);
     assert!(say(&a, "Back again.", "speak-4").starts_with("Speech queued"), "speech did not resume after the conversation");
     assert_eq!(synthesized(&a), 2);
@@ -187,6 +190,65 @@ fn cards_are_silent_and_nothing_is_spoken_while_owner_is_in_a_conversation() {
 /// a question that needs a spoken answer, and then briefly." During a call, the run his address by name woke speaks
 /// its reply; the next run, woken by a worker's completion notice, is held and shown silently. Through the fake Pi:
 /// each run replies "fixture reply" and settles.
+/// 8 Nov (the installed e2e): on the phone route a call at the Mac holds nothing. The line goes to the phone at once
+/// instead of waiting for the call to end and being dropped as stale; nothing plays on the Mac.
+#[cfg(feature = "phone")]
+#[test]
+fn on_the_phone_route_a_call_at_the_mac_holds_nothing() {
+    let (_t, mut a, _mic) = rig(true);
+    let spoken = Arc::new(AtomicUsize::new(0));
+    a.tools.test_guarded_speech_queue(Synth(spoken.clone()), Output);
+    a.tools.mcp_actions.attach(ui::Ui::handle(), Arc::new(|_, _, _| Ok(())), Arc::new(|_, _| Ok(())), Arc::new(|_, _| Ok(()))).unwrap();
+    let call = discord(&a);
+    let at = capture::host_now_ns().saturating_sub(3 * S);
+    turn(&mut a, &call, at, "did you see the new build", Detect::Final, 0, None, 0, |_| {});
+    assert!(a.tools.speech_policy.in_conversation(capture::host_now_ns()));
+    let (id, rx) = crate::remote::HUB.subscribe(64);
+    crate::remote::set_route(true);
+    let said = a.tools.mcp_actions.speak(&a.tools, "On the phone now.", "en", "speak-phone", &a.tools.agent_enabled.permit().unwrap()).unwrap();
+    crate::remote::set_route(false);
+    let mut got = vec![];
+    while let Ok(f) = rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        let speak = f.starts_with("event: speak") && f.contains("On the phone now.");
+        got.push(f);
+        if speak { break; }
+    }
+    crate::remote::HUB.unsubscribe(id);
+    assert!(said.starts_with("Sent to User's phone"), "{said}");
+    assert!(got.iter().any(|f| f.starts_with("event: speak") && f.contains("On the phone now.")), "{got:?}");
+    assert_eq!(synthesized_now(&a, &spoken), 0, "the Mac played a phone line");
+}
+
+/// Bug note 2026-11-10T09-49-55: Speaking is the Mac's speaker switch. With it off, a line while the phone owns the
+/// output is still spoken on the phone; nothing plays on the Mac. With no phone, Speaking off stays text only.
+#[cfg(feature = "phone")]
+#[test]
+fn speaking_off_on_the_mac_still_speaks_on_the_phone() {
+    let (_t, a, _mic) = rig(true);
+    let spoken = Arc::new(AtomicUsize::new(0));
+    a.tools.test_guarded_speech_queue(Synth(spoken.clone()), Output);
+    a.tools.mcp_actions.attach(ui::Ui::handle(), Arc::new(|_, _, _| Ok(())), Arc::new(|_, _| Ok(())), Arc::new(|_, _| Ok(()))).unwrap();
+    a.tools.enabled.store(false, Ordering::Release);
+    let (id, rx) = crate::remote::HUB.subscribe(64);
+    crate::remote::set_route(true);
+    let said = a.tools.mcp_actions.speak(&a.tools, "Słychać mnie na telefonie.", "pl", "speak-phone-off", &a.tools.agent_enabled.permit().unwrap()).unwrap();
+    crate::remote::set_route(false);
+    let mut got = vec![];
+    while let Ok(f) = rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        let speak = f.starts_with("event: speak") && f.contains("telefonie");
+        got.push(f);
+        if speak { break; }
+    }
+    crate::remote::HUB.unsubscribe(id);
+    assert!(said.starts_with("Sent to User's phone"), "{said}");
+    assert!(got.iter().any(|f| f.starts_with("event: speak") && f.contains("telefonie")), "{got:?}");
+    assert_eq!(synthesized_now(&a, &spoken), 0, "the Mac played a line with Speaking off");
+    // No phone: Speaking off is the island line only.
+    let said = a.tools.mcp_actions.speak(&a.tools, "Only on the island.", "en", "speak-mac-off", &a.tools.agent_enabled.permit().unwrap()).unwrap();
+    assert!(!said.starts_with("Sent to User's phone"), "{said}");
+    assert_eq!(synthesized_now(&a, &spoken), 0, "Speaking off spoke on the Mac");
+}
+
 #[test]
 fn during_a_call_a_run_woken_by_name_speaks_and_a_notice_run_is_held() {
     let (_t, mut a, mic) = rig(true);
@@ -514,7 +576,7 @@ fn a_reply_held_in_a_call_leaves_one_record() {
     let call = discord(&a);
     turn(&mut a, &call, capture::host_now_ns().saturating_sub(3 * S), "did you see the new build", Detect::Final, 0, None, 0, |_| {});
     let held = a.tools.mcp_actions.speak(&a.tools, "Mobius finished.", "en", "speak-held", &a.tools.agent_enabled.permit().unwrap()).unwrap();
-    assert_eq!(held, crate::bridge::speech_policy::HELD_IN_CONVERSATION);
+    assert_eq!(held, crate::bridge::speech_policy::held_in_conversation());
     let session = a.tools.archive_session.lock().unwrap().clone().unwrap();
     let records: Vec<_> = heimdall_archive::Journal::open_read_only(&session).unwrap().records().unwrap().into_iter().filter(|r| r.kind == "speech_held").collect();
     assert_eq!(records.len(), 1);
@@ -538,6 +600,8 @@ fn in_a_call() -> (tempfile::TempDir, Pipeline, String, Arc<Mutex<Vec<String>>>)
     a.tools.test_guarded_speech_queue(Said(said.clone()), Output);
     a.tools.mcp_actions.attach(ui::Ui::handle(), Arc::new(|_, _, _| Ok(())), Arc::new(|_, _| Ok(())), Arc::new(|_, _| Ok(()))).unwrap();
     let call = discord(&a);
+    // He is talking with them (night 1115: only a live conversation is a call).
+    a.tools.speech_policy.owner_talked_to_others(capture::host_now_ns().saturating_sub(6 * S));
     turn(&mut a, &call, capture::host_now_ns().saturating_sub(3 * S), "did you see the new build", Detect::Final, 0, None, 0, |_| {});
     assert!(a.tools.speech_policy.in_conversation(capture::host_now_ns()));
     (t, a, mic, said)
@@ -565,7 +629,7 @@ fn said_after(a: &Pipeline, said: &Mutex<Vec<String>>) -> Vec<String> {
 #[test]
 fn a_reply_held_in_a_call_is_said_once_the_call_is_over() {
     let (_t, a, mic, said) = in_a_call();
-    assert_eq!(say_now(&a, "Mobius finished.", "speak-held"), crate::bridge::speech_policy::HELD_IN_CONVERSATION);
+    assert_eq!(say_now(&a, "Mobius finished.", "speak-held"), crate::bridge::speech_policy::held_in_conversation());
     a.tools.agent_final_answer("Tests passed.", "stop").unwrap();
     assert_eq!(a.tools.speech_policy.test_held().iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["Mobius finished.", "Tests passed."]);
     assert!(said_after(&a, &said).is_empty(), "a held line played during the call");
@@ -593,7 +657,7 @@ fn a_reply_held_in_a_call_is_said_once_the_call_is_over() {
 /// `his_words_to_heimdall_say_the_newest_held_reply_in_a_live_call`.)
 #[test]
 fn a_held_line_stale_or_superseded_is_dropped_unsaid() {
-    let held = crate::bridge::speech_policy::HELD_IN_CONVERSATION;
+    let held = crate::bridge::speech_policy::held_in_conversation();
     // Stale.
     let (_t, a, _mic, said) = in_a_call();
     assert_eq!(say_now(&a, "Old news.", "speak-1"), held);
@@ -700,7 +764,7 @@ fn a_goodbye_mid_line_or_his_off_the_call_ends_the_call_at_once() {
     assert!(say_now(&a, "Everything's fine.", "speak-1").starts_with("Speech queued"));
 
     let (_t, mut a2, mic2, said2) = in_a_call();
-    assert_eq!(say_now(&a2, "Held in the call.", "speak-1"), crate::bridge::speech_policy::HELD_IN_CONVERSATION);
+    assert_eq!(say_now(&a2, "Held in the call.", "speak-1"), crate::bridge::speech_policy::held_in_conversation());
     a2.tools.owner.set_quiet(std::time::Duration::ZERO);
     turn(&mut a2, &mic2, capture::host_now_ns() - 6 * S, "Okay, you can talk to me now.", Detect::Final, 0, Some(0.), 0, |_| {});
     assert!(!a2.tools.speech_policy.in_conversation(capture::host_now_ns() + S), "his 'you can talk to me now' did not end the call");
@@ -713,7 +777,7 @@ fn a_goodbye_mid_line_or_his_off_the_call_ends_the_call_at_once() {
 /// A held reply with only call talk after it, his words never reaching the agent, still waits.
 #[test]
 fn his_words_to_heimdall_say_the_newest_held_reply_in_a_live_call() {
-    let held = crate::bridge::speech_policy::HELD_IN_CONVERSATION;
+    let held = crate::bridge::speech_policy::held_in_conversation();
     let (_t, mut a, mic, said) = in_a_call();
     assert_eq!(say_now(&a, "Everything's fine.", "speak-1"), held);
     assert_eq!(say_now(&a, "Still the 08:14 build.", "speak-2"), held);
@@ -738,7 +802,7 @@ fn his_words_to_heimdall_say_the_newest_held_reply_in_a_live_call() {
 /// (before, `typed_arrived` dropped every held line as "speech was stopped").
 #[test]
 fn a_typed_message_in_a_call_says_the_newest_held_reply() {
-    let held = crate::bridge::speech_policy::HELD_IN_CONVERSATION;
+    let held = crate::bridge::speech_policy::held_in_conversation();
     let (_t, a, _mic, said) = in_a_call();
     assert_eq!(say_now(&a, "Everything's fine.", "speak-1"), held);
     a.tools.typed_arrived("is everything ok?");
@@ -764,4 +828,33 @@ fn the_call_source_stopping_ends_the_call_through_capture() {
     a.capture_event(capture::CaptureEvent::SourceRemoved { source_id: capture::SourceId(call), host_ns: now, reason: "source stopped / route or format changed".into() }).unwrap();
     assert!(a.tools.speech_policy.in_conversation(now + gone - S), "a route change returns within ~100 ms");
     assert!(!a.tools.speech_policy.in_conversation(now + gone + S), "the call source stopped");
+}
+
+// ---- address ends the call (lane S, night 1113) ----
+/// Bug note 2026-11-12T17-36-58, 17:35-17:36, with the transcript's own lines: his sign-off to Angel is no goodbye
+/// phrase, so the call stayed on; then he addressed Heimdall by name ("Okay, Hanggal, I'm back.") with nobody else
+/// speaking. That ends the call at once: the reply is spoken, not held. A guest speaking during his line keeps it on.
+#[test]
+fn his_address_by_name_with_nobody_else_speaking_ends_the_call() {
+    let (_t, mut a, mic, said) = in_a_call();
+    a.tools.owner.set_quiet(std::time::Duration::ZERO);
+    let now = capture::host_now_ns();
+    // Angel's last line half a minute ago: the call window is still open.
+    a.tools.speech_policy.test_last_line(now - 30 * S);
+    turn(&mut a, &mic, now - 20 * S, "Anyways, Angel, I think I'm gonna go try to figure out something.", Detect::Final, 0, Some(0.), 0, |_| {});
+    turn(&mut a, &mic, now - 16 * S, "So yeah guys.", Detect::Final, 0, Some(0.), 0, |_| {});
+    assert!(a.tools.speech_policy.in_conversation(capture::host_now_ns()), "his sign-off ended the call by itself");
+    turn(&mut a, &mic, now - 6 * S, "Okay, Hanggal, I'm back.", Detect::Final, 0, Some(0.), 0, |_| {});
+    assert!(!a.tools.speech_policy.in_conversation(capture::host_now_ns() + S), "his address by name did not end the call");
+    assert!(say_now(&a, "I hear you.", "speak-1").starts_with("Speech queued"));
+    assert_eq!(said_after(&a, &said), ["I hear you."]);
+
+    // Angel talks while he says it, or 3 s before (a live call's lull): the call goes on.
+    for angel in [4 * S, 9 * S] {
+        let (_t, mut a, mic, _said) = in_a_call();
+        let now = capture::host_now_ns();
+        a.tools.speech_policy.test_last_line(now - angel);
+        turn(&mut a, &mic, now - 6 * S, "Okay, Hanggal, I'm back.", Detect::Final, 0, Some(0.), 0, |_| {});
+        assert!(a.tools.speech_policy.in_conversation(capture::host_now_ns()), "Angel's line ended {} s ago, yet the call ended", angel / S);
+    }
 }

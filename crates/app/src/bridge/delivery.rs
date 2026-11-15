@@ -80,7 +80,7 @@ pub(super) fn history_repair_cue(u:ui::Ui,state:&str) {
     u.send(ui::UiUpdate::Health(ui::HealthCue::Notice{part:ui::Part::Agent,label:label.into()}));
 }
 pub(crate) fn window_problem(u:ui::Ui,text:String) {
-    u.send(ui::UiUpdate::AgentWindow(ui::AgentWindowUpdate::Entries(vec![ui::AgentLiveEntry{id:format!("message-error-{}",agent::now_ms()),session_entry_id:None,timestamp_ms:agent::now_ms(),kind:ui::AgentLiveKind::Failure,text,tool_name:None,attachments:vec![],finished:true,editable:false,error:true,sent:false,queued:false,owner_text:None,usage:None}])));
+    u.send(ui::UiUpdate::AgentWindow(ui::AgentWindowUpdate::Entries(vec![ui::AgentLiveEntry{id:format!("message-error-{}",agent::now_ms()),session_entry_id:None,timestamp_ms:agent::now_ms(),kind:ui::AgentLiveKind::Failure,text,tool_name:None,attachments:vec![],finished:true,editable:false,error:true,sent:false,queued:false,user_text:None,usage:None}])));
 }
 pub(super) fn validate_message(text: &str) -> Result<()> {
     if text.trim().is_empty() || text.len()>1024*1024 {return Err(WindowActionRejected("Empty or oversized message".into()).into());}
@@ -102,7 +102,7 @@ pub(super) fn typed_echo(id: &str, text: &str, state: Echo) -> ui::UiUpdate {
     ui::UiUpdate::AgentWindow(ui::AgentWindowUpdate::Entries(vec![ui::AgentLiveEntry {
         id: id.to_string(), session_entry_id: None, timestamp_ms: agent::now_ms(), kind: ui::AgentLiveKind::Prompt,
         text: format!("[Heimdall typed message]\n{text}"), tool_name: None, attachments: vec![], finished: true, editable: false,
-        error: state == Echo::Failed, sent: state == Echo::Sent, queued: state == Echo::Pending, owner_text: Some(text.to_string()), usage: None,
+        error: state == Echo::Failed, sent: state == Echo::Sent, queued: state == Echo::Pending, user_text: Some(text.to_string()), usage: None,
     }]))
 }
 /// `his_words`: typed by him, so they may change who Heimdall listens to; a drop onto the notch authorises nothing.
@@ -152,6 +152,8 @@ pub(super) async fn drain_ready(b: &mut agent::Bridge<RecordedAdapter>, tools:&T
         if let Event::Other(value)=&event {
             if value["type"]=="heimdall_final_answer" {tools.agent_final_answer(value["text"].as_str().context("final answer text missing")?,value["stop_reason"].as_str().unwrap_or_default())?;}
         }
+        // ---- phone endpoint: the phone turn's delivery reached, and its run done (remote.rs) ----
+        crate::remote::agent_event(&event,matches!(&event,Event::Complete {query:true,..}) && !b.turn_running());
         if let Event::Complete {query:true,..}=&event {tools.agent_working(false)?;tools.replies.lock().unwrap().settled();}
         // speech-policy (night 3): only the last completion of a settled run ends the user's address; a turn his name-wake
         // restarted (night pass H2) is still running when the aborted turn's completions arrive.
@@ -159,6 +161,8 @@ pub(super) async fn drain_ready(b: &mut agent::Bridge<RecordedAdapter>, tools:&T
     }
     Ok(())
 }
+/// Whether the last published agent state was Ready (`publish_agent_state` signals the change into it).
+static AGENT_WAS_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub(super) fn publish_agent_state(
     b: &agent::Bridge<RecordedAdapter>,
     diagnostics: &heimdall_archive::records::Writer,
@@ -168,7 +172,16 @@ pub(super) fn publish_agent_state(
     stopping: Option<bool>,
     ui: Option<ui::Ui>,
 ) {
-    crate::diagnostics::agent_record(diagnostics, &stopping_window_state(b, s, failures, reload, stopping));
+    let record = stopping_window_state(b, s, failures, reload, stopping);
+    // The agent is ready again (a start, a restart, the end of a stall): scheduled wakes and undelivered notices go
+    // to it now, not at the heartbeat's next tick (agent::wakes::agent_ready, 14 Nov).
+    let ready = matches!(record.state, ui::AgentRunState::Ready);
+    if ready && !AGENT_WAS_READY.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        agent::wakes::agent_ready();
+    } else if !ready {
+        AGENT_WAS_READY.store(false, std::sync::atomic::Ordering::Release);
+    }
+    crate::diagnostics::agent_record(diagnostics, &record);
     let Some(u) = ui else {
         return;
     };
@@ -199,6 +212,7 @@ pub(super) fn publish_agent_state(
     });
 }
 
+#[cfg(test)]
 pub(super) fn agent_window_state(
     b: &agent::Bridge<RecordedAdapter>, s: &Settings, failures: u32, reload: Option<&str>,
 ) -> ui::AgentWindowState {
@@ -231,7 +245,7 @@ pub(super) fn relay_window_state(
             agent::Status::Idle if relay_working => S::Working,
             agent::Status::Idle => S::Ready,
             agent::Status::Working => S::Working,
-            agent::Status::WaitingEngine | agent::Status::RateLimited { .. } => S::WaitingEngine,
+            agent::Status::WaitingEngine => S::WaitingEngine,
             agent::Status::WaitingProvider(_) => S::WaitingProvider,
             agent::Status::NeedsReconciliation(_) => S::NeedsReview,
             agent::Status::AuthBlocked(_) => S::Restarting,

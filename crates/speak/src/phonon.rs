@@ -50,8 +50,9 @@ pub fn validate(presets: &[Preset]) -> Result<()> {
     Ok(())
 }
 
-/// The groups in first-appearance order, each with its presets in file order (the submenu's sections).
-pub fn grouped(presets: &[Preset]) -> Vec<(&str, Vec<&Preset>)> {
+/// The groups in first-appearance order, each with its presets in file order (the order of the bundled sheet).
+#[cfg(test)]
+fn grouped(presets: &[Preset]) -> Vec<(&str, Vec<&Preset>)> {
     let mut groups: Vec<(&str, Vec<&Preset>)> = vec![];
     for p in presets {
         match groups.iter_mut().find(|(g, _)| *g == p.group) {
@@ -89,23 +90,14 @@ impl Phonon {
         let sample_rate = synth.sample_rate();
         Ok(Self { synth, sample_rate, voice: DEFAULT_PRESET.into(), names })
     }
-    pub fn sample_rate(&self) -> u32 {
-        self.sample_rate
-    }
     /// Choose the preset that speaks next; an unknown name keeps the current one and says so.
     pub fn set_voice(&mut self, name: &str) -> Result<()> {
         ensure!(self.names.iter().any(|n| n == name), "no Phonon preset named {name}");
         self.voice = name.into();
         Ok(())
     }
-    pub fn voice(&self) -> &str {
-        &self.voice
-    }
 }
 impl crate::voice::StreamingVoice for Phonon {
-    fn label(&self) -> &str {
-        "Phonon S"
-    }
     fn stream_sentence(&mut self, text: &str, cancel: &dyn Fn() -> bool, emit: &mut dyn FnMut(&[f32], u32) -> Result<()>) -> Result<()> {
         let options = ptts::synth::SpeechOptions::default().voice(self.voice.clone());
         // Dropping the stream stops its generation threads (ptts joins them), so a cancel ends generation too.
@@ -121,11 +113,6 @@ impl crate::voice::StreamingVoice for Phonon {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn lab_presets() -> Option<PathBuf> {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../lab/phonon");
-        dir.join(PRESETS_FILE).is_file().then_some(dir)
-    }
 
     #[test]
     fn presets_parse_group_and_reject_duplicates() {
@@ -146,11 +133,11 @@ mod tests {
         assert!(validate(&bad).is_err());
     }
 
-    /// The lab's list (the one bundled): 37 English presets, the default among them, groups as the user's sheet has them.
+    /// The bundled list (scripts/fetch_phonon.py copies it into the model folder): 37 English presets, the default
+    /// among them, groups as the user's sheet has them.
     #[test]
-    fn the_lab_preset_list_has_37_english_voices_in_groups() {
-        let Some(dir) = lab_presets() else { eprintln!("lab/phonon not present; skipped"); return };
-        let list = presets(&dir).unwrap();
+    fn the_bundled_preset_list_has_37_english_voices_in_groups() {
+        let list = presets(&Path::new(env!("CARGO_MANIFEST_DIR")).join("phonon")).unwrap();
         assert_eq!(list.len(), 37);
         assert!(list.iter().any(|p| p.name == DEFAULT_PRESET));
         let groups: Vec<&str> = grouped(&list).iter().map(|(g, _)| *g).collect();
@@ -178,10 +165,10 @@ mod tests {
             Ok(())
         }).unwrap();
         let synth = t.elapsed();
-        let seconds = samples.len() as f64 / model.sample_rate() as f64;
+        let seconds = samples.len() as f64 / model.sample_rate as f64;
         let rms = (samples.iter().map(|s| (*s as f64).powi(2)).sum::<f64>() / samples.len().max(1) as f64).sqrt();
         eprintln!("phonon: load {:.2} s, first audio {:.0} ms, {:.2} s of audio at {} Hz in {:.2} s ({:.1}x real time), rms {:.3}",
-            load.as_secs_f64(), first.unwrap().as_secs_f64() * 1000., seconds, model.sample_rate(), synth.as_secs_f64(), seconds / synth.as_secs_f64(), rms);
+            load.as_secs_f64(), first.unwrap().as_secs_f64() * 1000., seconds, model.sample_rate, synth.as_secs_f64(), seconds / synth.as_secs_f64(), rms);
         assert!(samples.iter().all(|s| s.is_finite()));
         assert!((1.5..8.).contains(&seconds), "{seconds}");
         assert!(rms > 0.01, "{rms}");

@@ -161,7 +161,22 @@ fn ended(who: &str, read: &str, state: &str, reply: Option<&str>, budget: usize,
         ),
         Some(r) => format!("{who} {state}.{still} {}:\n\n{r}", if state == "completed" { "Final reply" } else { "Last reply" }),
     };
-    format!("{notice}\n\n{SILENCE_RULE}")
+    format!("{notice}\n\n{}", silence_rule())
+}
+/// Lane S (night 10–11 Nov): a notice with one more line after its reply, before its closing rule.
+pub fn with_line(notice: &str, line: &str) -> String {
+    let rule = format!("\n\n{}", silence_rule());
+    match notice.strip_suffix(&rule) {
+        Some(body) => format!("{body}\n\n{line}{rule}"),
+        None => format!("{notice}\n\n{line}"),
+    }
+}
+/// Bug note 2026-11-12T00-19-55: the line of a finished task kept open because tasks it started with T3's own
+/// `delegate_task` still run: T3 wakes it with their results, so it is neither archived nor cancelled meanwhile.
+pub fn waits_on_delegated(titles: &[String]) -> String {
+    let names: Vec<String> = titles.iter().map(|t| format!("'{}'", t.replace(['\'', '\n'], " ").trim())).collect();
+    let (what, rest) = if names.len() == 1 { ("task", "runs, and it closes itself once that is done: T3 wakes it with the result") } else { ("tasks", "run, and it closes itself once they are done: T3 wakes it with their results") };
+    format!("It stays open while its delegated {what} {} still {rest}, so no task_cancel.", names.join(", "))
 }
 /// What a result delivered at its hold limit still waits on: sub-agents still working (or waiting on a question) and
 /// background work left running. None when nothing is left.
@@ -207,7 +222,10 @@ pub fn auth_failure(reply: &str) -> Option<String> {
     Some(crate::client::bounded_text(line, 160))
 }
 /// The last line of a notice whose news may need nothing from the user (a worker finished, a T3 update).
-pub const SILENCE_RULE: &str = "Tell User only what he needs to know; if nothing here needs him, your whole reply is NO_REPLY.";
+/// The configured user's name in it (`agent::identity::user`), as the notice is written.
+pub fn silence_rule() -> String {
+    format!("Tell {} only what they need to know; if nothing here needs them, your whole reply is NO_REPLY.", agent::identity::user())
+}
 /// The reply bytes a notice of `notice_budget` bytes (`Actions::notice_budget`, from the live agent message limit)
 /// may paste: the budget less room for the notice's own lines. A larger reply is pointed to instead: Heimdall's
 /// harness rejects a message above half its context window in bytes (64 KB at the smallest context setting,
@@ -388,10 +406,55 @@ pub fn approval_text(text: &str) -> String {
     crate::client::bounded_text(&text.split_whitespace().collect::<Vec<_>>().join(" "), 500)
 }
 
+// ---- Review 1111 S1: a finished task that still waits on the user stays open. ----
+/// Whether a task's final reply leaves something for the user: its last paragraph asks a question ("install it?") or puts a
+/// decision to him ("Should I …", "needs your yes"), or the reply reports a staged build waiting for its install. Vault
+/// workers ask in their final reply, not as a T3 question (CLAUDE.md), so T3 shows nothing open; closing such a task
+/// would archive it (and its worktree's build output) before he answers. Lines that say nothing needs him do not count.
+pub fn waits_on_user(reply: &str) -> bool {
+    const ASKS: [&str; 22] = [
+        "should i ", "shall i ", "should we ", "shall we ", "do you want", "want me to", "would you like", "your yes",
+        "owner's yes", "his yes", "needs your", "your call", "your decision", "for owner to", "owner to decide", "decide whether",
+        "go install", "waiting on owner", "waiting for owner", "waits on owner", "waits for owner", "awaiting",
+    ];
+    const NONE: [&str; 6] = ["nothing needs", "nothing waits", "no decision", "doesn't need", "does not need", "nothing for owner"];
+    let low = reply.to_lowercase().replace('\u{2019}', "'");
+    let sentences = |t: &str| t.split(['.', '!', '\n']).map(|s| format!(" {} ", s.trim())).filter(|s| !s.trim().is_empty()).collect::<Vec<_>>();
+    let last = low.rsplit("\n\n").map(str::trim).find(|p| !p.is_empty()).unwrap_or("");
+    // Night 1111 second review S1: the question need not be in the last paragraph (workers end on the disk line).
+    // A paragraph that ends on a question waits; a question its own paragraph answers ("Why? A stale lock.") does not.
+    if last.contains('?') || low.split("\n\n").any(|p| p.trim_end().ends_with('?')) {
+        return true;
+    }
+    if sentences(&low).iter().any(|s| !NONE.iter().any(|n| s.contains(n)) && ASKS.iter().any(|a| s.contains(a))) {
+        return true;
+    }
+    // A staged build: the stage folder, or "staged" beside a build, an app or an install.
+    low.contains(".app.stage")
+        || low.contains("ready to install")
+        || sentences(&low).iter().any(|s| s.contains("staged") && ["build", "install", " app", "candidate", "release"].iter().any(|w| s.contains(w)))
+}
+// ---- end review 1111 S1 ----
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    /// Review 1111 S1: the three shapes that wait on the user, and plain done replies that do not.
+    #[test]
+    fn a_reply_that_waits_on_owner_is_seen() {
+        assert!(waits_on_user("Built and tested the menu.\n\nThe build is ready. Install it?"));
+        assert!(waits_on_user("Fixed the parser.\n\nShould I also rewrite the old importer. Default: no."));
+        assert!(waits_on_user("Staged the build at ~/Applications/.Heimdall.app.stage; the full check passed.\n\nNothing else."));
+        assert!(waits_on_user("The release candidate is staged for install.\n\nThat is all."));
+        assert!(waits_on_user("Done.\n\nThis needs your yes before I push."));
+        // Night 1111 second review S1: the question before the disk line.
+        assert!(waits_on_user("Pushed nothing.\n\nShould I push it? Default: no.\n\nDeleted my target, 12 GB freed."));
+        assert!(waits_on_user("Built it.\n\nInstall it now?\n\nDeleted my target, 12 GB freed."));
+        assert!(!waits_on_user("Report written to Assistant/Research/x.md. Checked every link.\n\nNothing needs User."));
+        assert!(!waits_on_user("Fixed the bug and added a test; all tests pass."));
+        assert!(!waits_on_user("Why did it fail? A stale lock.\n\nRemoved the lock, reran: green."));
+        assert!(!waits_on_user("I staged the commit and committed it on the branch."));
+    }
     #[test]
     fn catalog_lines_golden() {
         let codex = json!({"provider":"codex","family":"codex","runtime_modes":null,"model":{"id":"gpt-6-luna","label":"GPT-6-Luna","options":[{"currentValue":"medium","id":"reasoningEffort","label":"Reasoning","options":[{"id":"low","label":"Low"},{"id":"medium","isDefault":true,"label":"Medium"},{"id":"high","label":"High"}],"type":"select"}]}});
@@ -430,19 +493,20 @@ mod tests {
     }
     #[test]
     fn finished_notice_carries_the_whole_reply() {
+        let rule = silence_rule();
         let reply = format!("{}\n\nSecond paragraph: zażółć 😀.\n\n{}", "Line of a long report. ".repeat(1500), "Last paragraph.");
         let n = finished("mcp:w", Some("Haiku reply test [heimdall:ff]"), "completed", Some(&reply), 64 * 1024);
         assert!(n.starts_with("Task 'Haiku reply test' (mcp:w) completed. Final reply:\n\n"), "{}", &n[..80]);
-        assert!(n.ends_with(&format!("{}\n\n{SILENCE_RULE}", reply.trim())));
-        assert_eq!(finished("w", None, "failed", None, 64 * 1024), format!("Task w failed with no reply text.\n\n{SILENCE_RULE}"));
-        assert_eq!(finished("w", None, "interrupted", Some("half"), 64 * 1024), format!("Task w interrupted. Last reply:\n\nhalf\n\n{SILENCE_RULE}"));
+        assert!(n.ends_with(&format!("{}\n\n{rule}", reply.trim())));
+        assert_eq!(finished("w", None, "failed", None, 64 * 1024), format!("Task w failed with no reply text.\n\n{rule}"));
+        assert_eq!(finished("w", None, "interrupted", Some("half"), 64 * 1024), format!("Task w interrupted. Last reply:\n\nhalf\n\n{rule}"));
         assert_eq!(
             finished_with("w", None, "completed", Some("Serving at :4321."), 64 * 1024, still(&[], &["npm run dev".into()]).as_deref()),
-            format!("Task w completed. It still has background work running: npm run dev. Final reply:\n\nServing at :4321.\n\n{SILENCE_RULE}")
+            format!("Task w completed. It still has background work running: npm run dev. Final reply:\n\nServing at :4321.\n\n{rule}")
         );
         assert_eq!(
             watched("t-qwen", Some("Compare Qwen 27B"), "completed", Some("DFlash2 wins on all three."), 64 * 1024, None),
-            format!("Thread 'Compare Qwen 27B' (t-qwen), which you sent a message, completed. Final reply:\n\nDFlash2 wins on all three.\n\n{SILENCE_RULE}")
+            format!("Thread 'Compare Qwen 27B' (t-qwen), which you sent a message, completed. Final reply:\n\nDFlash2 wins on all three.\n\n{rule}")
         );
         assert!(watched("t", None, "completed", Some("x"), 0, None).contains("read it with t3_thread_read {threadId: \"t\", last: 1}"));
         // A result delivered at the hold limit names what it still waits on.
@@ -452,7 +516,7 @@ mod tests {
             still(&["A".into(), "B's check".into()], &["npm run dev".into()]).unwrap(),
             "It is still waiting on sub-agents 'A', 'B s check'; a later result may follow. It still has background work running: npm run dev."
         );
-        assert!(SILENCE_RULE.contains(agent::reply::SILENT), "the harness's silent token");
+        assert!(rule.contains(agent::reply::SILENT), "the harness's silent token");
         // The live budget decides (`Actions::notice_budget`): every notice fits its budget, a longer reply is pointed to.
         for limit in [64 * 1024, 100 * 1024, 200 * 1024] {
             let budget = limit - limit / 8;

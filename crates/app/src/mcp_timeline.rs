@@ -228,33 +228,14 @@ impl Moment {
         self.rows.iter().enumerate().min_by_key(|(i, r)| (rank(&r.kind), *i)).unwrap().1
     }
 }
-/// A bundle id as the app's short name: `com.hnc.Discord` → "Discord", `com.citrolabs.ego.lite` → "Ego Lite".
-pub(crate) fn app_name(bundle: &str) -> String {
-    let known = [
-        ("com.t3tools.t3code", "T3 Code"), ("com.apple.QuickTimePlayerX", "QuickTime"), ("com.brave.Browser", "Brave"),
-        ("ch.protonvpn.mac", "Proton VPN"), ("ch.protonmail.desktop", "Proton Mail"), ("com.google.Chrome", "Chrome"),
-        ("com.apple.Safari", "Safari"), ("com.microsoft.VSCode", "VS Code"), ("com.valvesoftware.steam.helper", "Steam"),
-        ("com.apple.UserNotificationCenter", "Notifications"),
-    ];
-    if let Some((_, n)) = known.iter().find(|(b, _)| *b == bundle) {
-        return (*n).to_owned();
-    }
-    let parts: Vec<&str> = bundle.split('.').collect();
-    let noise = |p: &&str| matches!(p.to_ascii_lowercase().as_str(), "app" | "mac" | "macos" | "desktop" | "helper");
-    let mut words: Vec<&str> = parts.iter().skip(2).filter(|p| !noise(p)).copied().collect();
-    if words.is_empty() {
-        words = parts.get(1).into_iter().copied().collect();
-    }
-    if words.is_empty() {
-        return bundle.to_owned();
-    }
-    words.iter().map(|w| { let mut c = w.chars(); c.next().map(|f| f.to_uppercase().chain(c).collect::<String>()).unwrap_or_default() }).collect::<Vec<_>>().join(" ")
-}
+use crate::day_timeline::app_name;
 /// The short source label: "Mic · the user", "Discord · Morgan", "Screen · Ego Lite", never a device string.
 fn label(source: &str, kind: &str, app: Option<&str>, speakers: &[String]) -> String {
     let app = app.map(app_name);
     let place = if source == "mic" || source.starts_with("mic:") {
         Some("Mic".to_owned())
+    } else if crate::phone_mic::is_phone_source(source) {
+        Some("Phone".to_owned())
     } else if source.starts_with("display:") || kind == "screen" {
         Some(match &app { Some(a) => format!("Screen · {a}"), None => "Screen".into() })
     } else {
@@ -430,6 +411,38 @@ fn pending_matches(db: &Connection, query: &Value) -> Result<Vec<String>> {
     let limit = PENDING_HITS.min(query["limit"].as_u64().unwrap_or(10) as usize);
     heimdall_archive::timeline::pending_literal(db, &heimdall_archive::embedding::model(), since, until, &heimdall_archive::timeline::literal_words(text), &kinds, &tags, limit)
 }
+/// Rows a literal stand-in for meaning search reads: the newest this many that hold any of the question's words.
+const LITERAL_CANDIDATES: usize = 300;
+/// The literal stand-in for meaning search: rows holding any of the words of `_words` (four letters or more,
+/// `timeline::literal_words`), the ones holding more distinct words first, newest first among equals. The caller's
+/// time, kind, tag and `query` filters apply.
+fn literal_ranked(db: &Connection, query: &Value) -> Result<Vec<String>> {
+    let words = heimdall_archive::timeline::literal_words(query["_words"].as_str().unwrap_or(""));
+    if words.is_empty() { return Ok(vec![]); }
+    let mut sql = "SELECT c.id,c.text FROM timeline_chunks c WHERE (".to_owned();
+    sql += &vec!["instr(lower(c.text),lower(?))>0"; words.len()].join(" OR ");
+    sql.push(')');
+    let mut values: Vec<rusqlite::types::Value> = words.iter().map(|w| w.clone().into()).collect();
+    if let Some(q) = query["query"].as_str() { sql += " AND instr(lower(c.text),lower(?))>0"; values.push(q.to_owned().into()); }
+    for (key, op) in [("start", "c.end_wall_ns>=?"), ("end", "c.start_wall_ns<=?")] {
+        if let Some(t) = query[key].as_str() { sql += " AND "; sql += op; values.push((wall_ns(t)? as i64).into()); }
+    }
+    let kinds: Vec<String> = query["kinds"].as_array().into_iter().flatten().filter_map(|k| k.as_str().map(str::to_owned)).collect();
+    if !kinds.is_empty() { sql += " AND c.kind IN ("; sql += &vec!["?"; kinds.len()].join(","); sql.push(')'); values.extend(kinds.into_iter().map(Into::into)); }
+    for tag in query["tags"].as_array().into_iter().flatten() {
+        sql += " AND EXISTS(SELECT 1 FROM chunk_tags t WHERE t.chunk_id=c.id AND t.key=? AND t.value=?)";
+        values.push(tag["key"].as_str().unwrap_or("").to_owned().into()); values.push(tag["value"].as_str().unwrap_or("").to_owned().into());
+    }
+    sql += " ORDER BY c.start_wall_ns DESC,c.id LIMIT ?"; values.push((LITERAL_CANDIDATES as i64).into());
+    let rows = db.prepare(&sql)?.query_map(rusqlite::params_from_iter(values), |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut scored: Vec<(usize, String)> = rows.into_iter().map(|(id, text)| {
+        let lower = text.to_lowercase();
+        (words.iter().filter(|w| lower.contains(&w.to_lowercase())).count(), id)
+    }).collect();
+    // Stable: newest first among rows with as many words.
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    Ok(scored.into_iter().map(|(_, id)| id).collect())
+}
 pub async fn search(
     root: PathBuf,
     pages: Arc<Pages>,
@@ -451,7 +464,7 @@ pub async fn search(
     let _cancel = super::index::CancelSearch(cancellation.clone());
     tokio::task::spawn_blocking(move||->Result<Value>{
         permit.check()?;ensure!(heimdall_archive::store::exists(&root),"INDEX_UNAVAILABLE: timeline store is not ready; retry after indexing");
-        let db=Connection::open_with_flags(root.join(heimdall_archive::store::INDEX),rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;db.busy_timeout(Duration::from_secs(5))?;
+        let db=heimdall_archive::store::read_index(&root)?;
         super::index::install_search_cancellation(&db,cancellation.clone(),permit.clone())?;*cancellation.active.lock().unwrap()=Some(db.get_interrupt_handle());
         db.execute_batch("BEGIN")?;
         let mut state=state.unwrap_or(Continuation{permit:permit.clone(),expires:Instant::now()+Duration::from_secs(3600),query:query.clone(),watermark:db.query_row("SELECT COALESCE(max(seq),0) FROM timeline_ingestion",[],|r|r.get(0))?,after:None,detail:None,ranked_offset:0,floor:None,shown:vec![]});
@@ -464,7 +477,11 @@ pub async fn search(
             let out=json!({"search_mode":"detail","anchor":state.watermark.to_string(),"hits":[record],"next_cursor":cursor});ensure!(out.to_string().len()<=TEXT_BYTES,"OUTPUT_TOO_LARGE: evidence metadata exceeds page bound");permit.check()?;return Ok(out);
         }
         let full=state.query["output"]=="full";
-        let query_text=state.query["vector"]["query"].as_str().or(state.query["query"].as_str()).unwrap_or("").to_owned();
+        // Meaning search paused (`_words`, index.rs): the words of the question, ranked literally, stand in for it.
+        if state.query["_words"].is_string() && state.query.get("_ranked").is_none() {
+            state.query["_ranked"]=json!(literal_ranked(&db,&state.query)?.into_iter().map(|id|json!([id,null])).collect::<Vec<_>>());
+        }
+        let query_text=state.query["vector"]["query"].as_str().or(state.query["_words"].as_str()).or(state.query["query"].as_str()).unwrap_or("").to_owned();
         let query_terms=terms(&query_text);
         let limit=state.query["limit"].as_u64().unwrap_or(10) as usize;
         if let Some(ranked)=state.query["_ranked"].as_array().cloned() {
@@ -473,6 +490,18 @@ pub async fn search(
             let by_text=state.query["vector"]["query"].is_string();
             let recent_cutoff=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos() as u64-OWN_REPLY_WINDOW.as_nanos() as u64;
             let mut moments:Vec<Moment>=vec![]; let mut consumed=0; let mut exhausted=true;
+            // Reranked (the reranker's order, docs/chunk-index.md): similarities no longer fall down the list, so the floor
+            // comes from the best similarity of any row that could be shown, and a row under it is skipped, not the end.
+            let reranked=state.query["_reranked"]==true;
+            if reranked && state.floor.is_none() {
+                let mut best:Option<f64>=None;
+                for row_ in &ranked {
+                    let (Some(id),Some(s))=(row_[0].as_str(),row_[1].as_f64()) else {continue};
+                    if own_recent_reply(&row(&db,id)?,recent_cutoff) {continue;}
+                    best=Some(best.map_or(s,|b:f64|b.max(s)));
+                }
+                if let Some(b)=best {state.floor=Some(floor(b,by_text));}
+            }
             for row_ in ranked.iter().skip(state.ranked_offset) {
                 let id=row_[0].as_str().context("invalid semantic result")?;
                 let similarity=row_[1].as_f64();
@@ -483,7 +512,10 @@ pub async fn search(
                 if state.shown.iter().any(|x|same_moment(x,&r)) {consumed+=1;continue;}
                 if let Some(m)=moments.iter_mut().find(|m|m.rows.iter().any(|x|same_moment(x,&r))) {m.rows.push(r);consumed+=1;continue;}
                 let floor=*state.floor.get_or_insert_with(||floor(similarity.unwrap_or(0.0),by_text));
-                if similarity.is_some_and(|s|s<floor) {consumed=ranked.len()-state.ranked_offset;break;}
+                if similarity.is_some_and(|s|s<floor) {
+                    if reranked {consumed+=1;continue;}
+                    consumed=ranked.len()-state.ranked_offset;break;
+                }
                 if moments.len()==limit {exhausted=false;break;}
                 moments.push(Moment{rows:vec![r],similarity}); consumed+=1;
             }
@@ -812,6 +844,70 @@ mod tests {
         assert_eq!(shown.len(), 1, "s:2 only; s:1's audio row is the moment already shown: {second}");
         assert_ne!(shown[0], first["hits"][0]["h"]);
         assert!(second["next_cursor"].is_null());
+        Ok(())
+    }
+    /// Reranked order (index.rs `rerank`): similarities no longer fall down the list. The floor is the best one's, and a
+    /// row under it is skipped without hiding the rows after it.
+    #[tokio::test]
+    async fn a_reranked_list_skips_rows_under_the_floor_without_ending_the_page() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().join("archive");
+        let db = heimdall_archive::store::open(&root)?;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos() as i64;
+        let day = 86_400_000_000_000i64;
+        for (i, id) in ["a", "low", "b"].iter().enumerate() { insert(&db, id, &format!("words {id}"), now - day * (i as i64 + 1))?; }
+        let gate = Arc::new(DeliveryGate::new(true));
+        let permit = gate.permit()?;
+        let pages = Arc::new(Pages::default());
+        // The reranker put "a" (0.78) first; "b" (0.84) is the best similarity, so the floor is 0.79: "a" and "low"
+        // fall under it and are skipped, "b" is still shown.
+        let ranked = json!([["a",0.78],["low",0.50],["b",0.84]]);
+        let out = search(root.clone(), pages.clone(), json!({"_ranked":ranked,"_reranked":true,"vector":{"query":"words"},"limit":10}), &permit).await?;
+        let texts: Vec<String> = out["hits"].as_array().unwrap().iter().map(|h| h.to_string()).collect();
+        assert_eq!(texts.len(), 1, "{out}");
+        assert!(texts[0].contains("words b"), "{out}");
+        // Not reranked, the same list ends at the first row under the floor (0.73 from "a"): "a" only.
+        let plain = search(root, pages, json!({"_ranked":json!([["a",0.78],["low",0.50],["b",0.84]]),"vector":{"query":"words"},"limit":10}), &permit).await?;
+        assert_eq!(plain["hits"].as_array().unwrap().len(), 1, "{plain}");
+        assert!(plain["hits"][0].to_string().contains("words a"), "{plain}");
+        Ok(())
+    }
+    /// 14 Nov VM run (8 GiB guest): the embedding worker refused to load for memory and `timeline_search` failed with
+    /// "embedding worker disconnected without a reply". Now the answer says meaning search is paused and gives the
+    /// literal hits of the same archive, the rows holding more of the question's words first.
+    #[tokio::test]
+    async fn a_meaning_search_paused_for_memory_answers_by_words_and_says_so() -> Result<()> {
+        use agent::mcp::TranscriptSearch;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().join("archive");
+        let db = heimdall_archive::store::open(&root)?;
+        let now = heimdall_archive::wall_ns() as i64;
+        let minute = 60 * 1_000_000_000;
+        insert(&db, "both", "Did you catch the game last night? It went to overtime.", now - 30 * minute)?;
+        insert(&db, "one", "We could play a game later.", now - 2 * minute)?;
+        insert(&db, "none", "lunch plans", now - minute)?;
+        // A worker that refuses to load for memory, as Worker.swift does: exit 75 before any reply.
+        let models = dir.path().join("models");
+        let native = models.join("embeddinggemma2/native");
+        std::fs::create_dir_all(&native)?;
+        std::fs::create_dir_all(models.join("embeddinggemma2/weights"))?;
+        std::fs::write(models.join("embeddinggemma2/weights/model.safetensors"), b"")?;
+        std::fs::write(native.join("mlx.metallib"), b"")?;
+        let worker = native.join("heimdall-embedding-worker");
+        std::fs::write(&worker, "#!/bin/sh\necho 'EmbeddingGemma 2: embedding admission needs 6 GiB free' >&2\nexit 75\n")?;
+        std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o755))?;
+        let search = crate::index::ArchiveSearch { root, embeddings: Arc::new(heimdall_archive::embedding::Service::new(&models)) };
+        let gate = Arc::new(DeliveryGate::new(true));
+        let out = search.timeline(json!({"vector":{"query":"the game last night"},"limit":10,"output":"full"}), &gate.permit()?).await?;
+        assert_eq!(out["search_mode"], "literal_fallback", "{out}");
+        assert_eq!(out["notice"], crate::index::MEANING_PAUSED);
+        let ids: Vec<_> = out["hits"].as_array().unwrap().iter().map(|h| h["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["both", "one"], "most words first, then newest; rows without a word left out");
+        let plain = agent::plain::timeline(&out, &chrono::Utc);
+        assert!(plain.starts_with("Meaning search is paused because this Mac is low on free memory."), "{plain}");
+        assert!(plain.contains("overtime"), "{plain}");
+        assert!(!plain.contains("disconnected"), "{plain}");
         Ok(())
     }
 }

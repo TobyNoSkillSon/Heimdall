@@ -101,7 +101,8 @@ pub fn download_size(repo: &str, quant: &str) -> Option<u64> {
 /// "16.8 GB".
 pub fn size_text(bytes: u64) -> String { format!("{:.1} GB", bytes as f64 / 1e9) }
 
-fn until(reset_ms: Option<u64>) -> String { reset_ms.map(|ms| format!(" · back at {}", ui::model::local_hhmm(ms))).unwrap_or_default() }
+/// The day goes with the time when it is not today (bug note 2026-11-08T02-03-52).
+fn until(reset_ms: Option<u64>) -> String { reset_ms.map(|ms| format!(" · back at {}", agent::emergency::clock(ms))).unwrap_or_default() }
 
 /// What the island shows, in order: the warning line (its triangle), then the question or the closing line.
 pub fn cards(engine: &Engine, reset_ms: Option<u64>, now_ms: u64) -> Vec<AgentNotice> {
@@ -135,6 +136,11 @@ pub fn cards(engine: &Engine, reset_ms: Option<u64>, now_ms: u64) -> Vec<AgentNo
 /// The quiet line after No (or an unanswered card): waiting for the quota, with its reset when known.
 pub fn waiting(reset_ms: Option<u64>) -> AgentNotice {
     AgentNotice::line(format!("{CARD_PREFIX}waiting"), format!("Waiting for the quota{}", until(reset_ms)), NoticeKind::Info)
+}
+/// night1114 relay: waiting for an account that failed for another reason than its quota: what, and why ("Waiting for
+/// Claude · Fable 5.2 · sign-in failed: 403 from Cloudflare"). The same line id as `waiting`.
+pub fn waiting_for(who: &str, why: &str) -> AgentNotice {
+    AgentNotice::line(format!("{CARD_PREFIX}waiting"), format!("Waiting for {who} · {why}"), NoticeKind::Info)
 }
 
 /// The open offer: what Yes switches to, and the reset for the waiting line.
@@ -331,7 +337,7 @@ mod tests {
     fn declined_waits_for_the_quota_with_or_without_its_reset() {
         assert_eq!(waiting(None).text, "Waiting for the quota");
         let reset = 1_900_000_000_000;
-        assert_eq!(waiting(Some(reset)).text, format!("Waiting for the quota · back at {}", ui::model::local_hhmm(reset)));
+        assert_eq!(waiting(Some(reset)).text, format!("Waiting for the quota · back at {}", agent::emergency::clock(reset)));
         assert_eq!(waiting(Some(reset)).kind, NoticeKind::Info);
         set_open(Some(Offer { request_id: "emergency-local:5".into(), model: "qwen3.8-27b".into(), reset_ms: Some(reset) }));
         assert_eq!(take_answer("emergency-local:4", YES), None, "another card");

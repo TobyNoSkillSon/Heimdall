@@ -130,7 +130,7 @@ export default function heimdall(pi: ExtensionAPI) {
       // The public edition has no source checkout or owner to name (VM finding P-04).
       const reason = process.env.HEIMDALL_EDITION === 'public'
         ? `${target} is an instruction file; you never edit those. Follow the user's correction now.`
-        : `${target} is an instruction file; you never edit those. Follow User's correction now and have a T3 worker record it in crates/agent/prompt/heimdall.md.`;
+        : `${target} is an instruction file; you never edit those. Follow ${process.env.HEIMDALL_USER_NAME || 'the user'}'s correction now and have a T3 worker record it in crates/agent/prompt/heimdall.md.`;
       return { block: true, reason };
     }
     effects = true;

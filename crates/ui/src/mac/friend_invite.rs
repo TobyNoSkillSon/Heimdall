@@ -99,6 +99,7 @@ impl InvitePanel {
     }
 
     /// Render mode: the open panel's card, as PNG at `path`. False when no panel is open or the write fails.
+    #[cfg(feature = "lab")]
     pub fn capture(&self, path: &Path, dark: bool) -> bool {
         let Some(view) = self.current.as_ref().and_then(|w| w.contentView()) else { return false };
         super::offscreen::capture_with(path, &view, dark, CORNER)

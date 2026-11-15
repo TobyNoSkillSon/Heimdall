@@ -31,4 +31,5 @@ for name,url,size,sha in FILES:
 (OUT/'downloads.json').write_text(json.dumps(receipts,indent=2)+'\n')
 if '--verify-only' in __import__('sys').argv: raise SystemExit(0)
 # First 480 s of the public four-speaker SDM meeting, mono, 16 kHz. No packet loss simulation.
+if not __import__('shutil').which('ffmpeg'):raise SystemExit('ffmpeg is needed to cut the speaker tests\' meeting clip (brew install ffmpeg), then run this again')
 subprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-y','-i',str(OUT/'ES2004a.Array1-01.wav'),'-t','480','-ac','1','-ar','16000',str(OUT/'ami-480.wav')],check=True,timeout=30)

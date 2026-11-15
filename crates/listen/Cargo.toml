@@ -5,7 +5,8 @@ version.workspace = true
 license.workspace = true
 
 [features]
-placement-probe = ["ort/coreml"]
+# Agent-only small-model probe (ONNX Runtime Silero reference for VAD parity).
+placement-probe = []
 # The public edition (app's `public` feature, docs/editions.md): a vocabulary without the user's project and place names,
 # and no English-and-Polish-only penalty.
 public = []
@@ -32,4 +33,3 @@ dispatch2 = "0.3"
 objc2 = "0.6.4"
 objc2-foundation = "0.3.2"
 objc2-core-ml = "0.3.2"
-block2 = "0.6"

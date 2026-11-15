@@ -1,12 +1,12 @@
 //! Opt-in replay eval on Heimdall's real session up to 20:45 on 23 Oct and the lists as they stood then
 //! (`tests/fixtures/plan-replay-1023`): one refresher pass on Claude Haiku 5.5. Until 31 Oct it scored To do (the
 //! three Vella items the user had set aside, Morgan's chore); To do is Goals' now (`docs/goals.md`), so it scores what
-//! the refresher still keeps: nothing lost from Scheduled and Settled, and To do untouched.
+//! the refresher still keeps: nothing lost from Scheduled, and To do untouched (Settled is the Goals shadow's since 2
+//! Nov: the refresher never writes it).
 //!
 //! Two cuts: "before" ends just before the user's 20:45 complaint; "with" adds his 20:45:39 line ("none of them are
-//! good"). Scored per run: every open Scheduled item still on Scheduled or Settled (at most one may go, fairly: a
-//! vague idea), Settled keeps at least 18 of its 20 items, and the fixture's `todo.json` is byte for byte the same
-//! after the answer is applied to the islands copy. The night-pass note is left out (it kept changing after 20:45).
+//! good"). Scored per run: every open Scheduled item still in the answer (at most one may go, fairly: a vague idea),
+//! and the fixture's `todo.json` is byte for byte the same after the answer is applied to the islands copy. The night-pass note is left out (it kept changing after 20:45).
 //!
 //! The session is read-only from the user's data folder (only its prefix is copied); the model is reached with
 //! HEIMDALL_ANTHROPIC_API_KEY when set, else through the `claude` CLI (`-p`, same model, system prompt, schema and
@@ -21,10 +21,7 @@ use std::io::Write;
 
 /// UTC: the last entry kept for each cut (the user's complaint arrived at 18:45:39.149Z, Heimdall acted at 18:45:45).
 const CUTS: [(&str, &str); 2] = [("before", "2026-10-23T18:45:39.000Z"), ("with", "2026-10-23T18:45:45.000Z")];
-/// Settled items a pass may let go of (it keeps "the most recent 20 or so").
-const SETTLED_SLACK: usize = 2;
-
-struct Score { lost: Vec<String>, settled_kept: usize, settled_before: usize, added: Vec<String> }
+struct Score { lost: Vec<String>, added: Vec<String> }
 
 fn fixture() -> PathBuf { agent::runtime::checkout_root().join("crates/app/tests/fixtures/plan-replay-1023") }
 
@@ -78,14 +75,12 @@ fn score(plan: &Plan, before: &Lists) -> Score {
     Score {
         lost: before[0].iter().filter(|o| o.get("done") != Some(&Value::Bool(true))).filter_map(id_title)
             .filter(|(id, _)| !anywhere(id)).map(|(_, t)| t).collect(),
-        settled_kept: before[1].iter().filter_map(id_title).filter(|(id, _)| plan.lists[1].iter().any(|i| &i.id == id)).count(),
-        settled_before: before[1].len(),
         added: plan.lists.iter().flatten().filter(|i| !known.contains(i.id.as_str())).map(|i| i.title.clone()).collect(),
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore]
+#[ignore = "lab replay: runs the plan refresher on a recorded session (HEIMDALL_PLAN_EVAL_SESSION, else the real data folder)"]
 async fn replay_23_oct_lists() {
     let session = std::env::var("HEIMDALL_PLAN_EVAL_SESSION").map(PathBuf::from)
         .unwrap_or_else(|_| session_path(&heimdall_home::data_dir()));
@@ -127,10 +122,9 @@ async fn replay_23_oct_lists() {
                 apply(&root, &g.lists, &plan, &g.jobs).unwrap();
                 let todo_kept = std::fs::read(root.file("todo")).unwrap() == todo;
                 let s = score(&plan, &g.lists);
-                eprintln!("{cut:6} {name}  run {run}: Scheduled lost {:?}; Settled kept {}/{}; added {:?}; todo.json untouched {todo_kept}",
-                    s.lost, s.settled_kept, s.settled_before, s.added);
+                eprintln!("{cut:6} {name}  run {run}: Scheduled lost {:?}; added {:?}; todo.json untouched {todo_kept}", s.lost, s.added);
                 total += usize::from(*name == "new");
-                if *name == "new" && (s.lost.len() > 1 || s.settled_kept + SETTLED_SLACK < s.settled_before || !todo_kept) {
+                if *name == "new" && (s.lost.len() > 1 || !todo_kept) {
                     failures.push(format!("{cut} run {run}"));
                 }
             }

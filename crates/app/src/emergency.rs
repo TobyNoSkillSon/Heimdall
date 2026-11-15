@@ -55,6 +55,10 @@ pub struct Item { pub position: u64, pub kind: String, pub text: String, pub sta
 const MIRROR_PAGES: usize = 20;
 /// One mirrored message is at most this long per context entry; a longer one goes in as consecutive parts, whole.
 const MIRROR_PART: usize = 64 * 1024;
+/// One mirror pass's bound when the agent's model is unknown: a 128K-token budget at four bytes a token.
+pub(crate) const MIRROR_BUDGET: usize = 4 * 128 * 1024 * 2 / 5;
+/// A release counts as the end of a relay when its thread was set aside this recently (`handover_note`).
+const HANDOVER_WINDOW_MS: u64 = 60_000;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Run {
     /// Still running when the wait ended: it answers.
@@ -78,6 +82,10 @@ pub trait Side: Send + Sync {
     fn say(&self, text: &str);
     /// Context in the agent's conversation, no turn (an `emergency-cover:` outbox notice).
     fn record(&self, id: &str, text: &str);
+    /// The most one mirror pass puts in Pi's conversation, in bytes: 40% of the built-in agent's budget (bug note
+    /// 2026-11-08T02-03-47). Messages go in whole (total continuity); only a backlog no request could hold keeps its
+    /// newest items and names the older ones in one pointer line. The switch back fits the rest (`Outcome::Handover`).
+    fn mirror_budget(&self) -> usize { MIRROR_BUDGET }
     /// End the hold; with `back`, the agent's next turn starts with it (a hand-back), without, nothing starts (Agent off).
     fn release(&self, back: Option<String>);
     /// Input that reached the relay as the relay ended: nobody covers it, so it wakes the agent.
@@ -194,6 +202,58 @@ struct State {
     /// update between its stand-down and its reuse was never told).
     #[serde(default)]
     tools_thread: Option<String>,
+    /// night1114 relay: the relay thread its account's failure stopped, kept so the relay carries on in it (its whole
+    /// conversation) once that account works again (bug note 2026-11-13T10-57-01).
+    #[serde(default)]
+    resume: Option<Resume>,
+}
+// Continuing the stopped relay thread (bug notes 2026-11-13T10-54-06, 10-57-01, 10-58-09)
+/// The relay thread a failure of its account stopped: the user's choice to wait for that account (or a search that picks
+/// it again) continues it instead of opening a new thread. A new one only when it cannot continue, said with why.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+struct Resume {
+    thread: String,
+    harness: String,
+    route: Option<Route>,
+    /// Its last mirrored timeline position.
+    mirrored: u64,
+    /// When it stopped.
+    at_ms: u64,
+    /// Sends T3 refused in a row (the thread unreachable): after `RESUME_SEND_TRIES` it counts as gone.
+    #[serde(default)]
+    send_errors: u32,
+    /// Fresh review S3 (night 1114): a note already went into it and its run failed. Later tries test the account in a
+    /// throwaway check thread first (`account_check`); the kept thread gets a note only once a run has answered.
+    #[serde(default)]
+    noted: bool,
+}
+/// How a try to continue the stopped thread ended.
+#[derive(Debug, PartialEq)]
+enum Resumed {
+    /// It answers again: it covers, and the held input follows.
+    Yes,
+    /// Nothing to continue, or another account or model was asked for.
+    NotHere,
+    /// Its account still fails (the run failed again, or T3 did not take the message): wait and try again.
+    AccountFails(String),
+    /// It cannot continue (T3 lost it, or kept refusing it): a new thread. `said` is one plain sentence for the user's
+    /// ears (never a thread id or T3's raw error: fresh review S2); `detail` goes to the log.
+    Impossible { said: &'static str, detail: String },
+}
+/// The title of the throwaway thread that tests a failed account before the kept thread gets another note.
+const ACCOUNT_CHECK_TITLE: &str = "Heimdall account check";
+/// The first check after the user chose to wait for his account, and the backoff after each failed one (doubling, at
+/// most five minutes): held messages wait seconds, not a scheduled interval (bug note 2026-11-13T10-58-09).
+const WAIT_RETRY_MS: u64 = if cfg!(test) { 50 } else { 15_000 };
+fn wait_backoff(failed: u32) -> u64 { (WAIT_RETRY_MS << failed.min(5)).min(5 * 60_000) }
+/// How `Resumed::AccountFails` begins when T3 did not take the message (no run failed).
+const T3_REFUSED: &str = "T3 did not take the message: ";
+/// A thread T3 refused this many sends in a row is taken as gone.
+const RESUME_SEND_TRIES: u32 = 3;
+/// T3's words for a thread that no longer exists or takes no message.
+fn thread_gone(error: &str) -> bool {
+    let e = error.to_ascii_lowercase();
+    ["not found", "not_found", "archived", "deleted", "no such thread", "unknown thread"].iter().any(|p| e.contains(p))
 }
 /// One account T3 reported spent (`agent::limits`).
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -247,7 +307,7 @@ fn label_route(harness: Option<&str>, instance: Option<&str>) -> Option<Route> {
 impl State {
 }
 impl Default for State {
-    fn default() -> Self { Self { phase: Phase::Off, reason: Reason::Emergency, cause: None, since_ms: 0, thread: None, harness: None, failed_probes: 0, next_probe_ms: 0, last_thread: None, did: vec![], model: None, trying: None, fallback: None, mirrored: None, asked: None, asked_account: None, route: None, original: None, failed: None, choice: None, waiting: false, return_asked: None, return_ready: false, going_back: false, last_route: None, spent: vec![], tools: Default::default(), tools_thread: None } }
+    fn default() -> Self { Self { phase: Phase::Off, reason: Reason::Emergency, cause: None, since_ms: 0, thread: None, harness: None, failed_probes: 0, next_probe_ms: 0, last_thread: None, did: vec![], model: None, trying: None, fallback: None, mirrored: None, asked: None, asked_account: None, route: None, original: None, failed: None, choice: None, waiting: false, return_asked: None, return_ready: false, going_back: false, last_route: None, spent: vec![], tools: Default::default(), tools_thread: None, resume: None } }
 }
 /// The longest a launched harness has to show it answers. It counts as answering at its first sign of life (a CLI
 /// call, a real assistant message); a quota-dead one fails in seconds (27 Oct 19:40: the full 90 s was waited).
@@ -272,7 +332,8 @@ pub static RELAY_WORKING: std::sync::atomic::AtomicBool = std::sync::atomic::Ato
 
 enum Msg {
     Enter(Cause, Option<agent::provider::ApiModel>),
-    Choose(bool),
+    /// Relay mode on or off, with the switch this choice completes (`Emergency::choose`).
+    Choose(bool, Option<(String, bool)>),
     Relay(Relayed),
     Answered,
     End(String),
@@ -312,6 +373,9 @@ impl Options {
         self.relay_account.is_some() && self.relay_account.as_deref() != asked
     }
 }
+/// How long a requested switch waits for the relay start that completes it (a T3 start takes seconds; a switch
+/// older than this is no longer news).
+const SWITCH_FRESH_MS: u64 = 5 * 60_000;
 pub struct Emergency {
     data: PathBuf,
     state: Mutex<State>,
@@ -330,6 +394,10 @@ pub struct Emergency {
     /// Input the relay thread got whose run has not ended: if the user switches back to Pi meanwhile, nobody has answered
     /// it (the relay's reply is no longer spoken), so it wakes Pi (a switch must break nothing).
     open: Mutex<Vec<Relayed>>,
+    /// A switch the user asked for that the next relay start completes, with when it was asked (`switch_requested`): the
+    /// next brief takes it, so the new thread confirms it once (bug note 2026-11-10T06-19-44).
+    /// Review 1111: whether the user asked (his menu click), or the agent or a file changed the setting itself.
+    switched: Mutex<Option<(String, u64, bool)>>,
     /// Bumped whenever a relay ends (hand-back, stand-down, relay off): its run followers stop at once and leave the
     /// island's state and the speech policy to Pi (review 27 Oct).
     generation: AtomicU64,
@@ -353,8 +421,8 @@ impl Emergency {
         }
         let restored = std::sync::atomic::AtomicBool::new(!matches!(state.phase, Phase::Off | Phase::Local));
         Arc::new(Self { restored, mirroring: tokio::sync::Mutex::new(()), data: data.into(), state: Mutex::new(state), tx: Mutex::new(tx), rx: Mutex::new(Some(rx)), cli, docs,
-            options: Mutex::new(Options { order: em::default_order(crate::edition::PUBLIC), skip_relay: false, relay_model: None, relay_account: None }), last_call_ms: AtomicU64::new(0),
-            runs: AtomicUsize::new(0), generation: AtomicU64::new(0), replied: Mutex::new(HashSet::new()), open: Mutex::new(Vec::new()) })
+            options: Mutex::new(Options { order: em::default_order(), skip_relay: false, relay_model: None, relay_account: None }), last_call_ms: AtomicU64::new(0),
+            runs: AtomicUsize::new(0), generation: AtomicU64::new(0), replied: Mutex::new(HashSet::new()), open: Mutex::new(Vec::new()), switched: Mutex::new(None) })
     }
     /// The CLI line for the relay agent: the bundled binary beside Heimdall's, with `--data-dir` off the default folder.
     pub fn cli_for(data: &Path) -> String {
@@ -365,6 +433,20 @@ impl Emergency {
     }
     pub fn phase(&self) -> Phase { self.state.lock().unwrap().phase }
     pub fn reason(&self) -> Reason { self.state.lock().unwrap().reason }
+    /// Relay mode (the user's choice) is on: a start without it in the settings switches back (bug note 2026-11-08T02-03-47).
+    pub fn relay_chosen(&self) -> bool { let s = self.state.lock().unwrap(); s.reason == Reason::Chosen && s.phase != Phase::Off }
+    /// The note that stands where a handover cut leaves the older conversation out (bug note 2026-11-08T02-03-47):
+    /// where the relay's whole conversation can still be read.
+    /// `None` when no relay thread ended with this release (an emergency that never reached a relay): then Pi's own
+    /// compaction stays in charge and nothing is cut (review, 8 Nov).
+    pub fn handover_note(&self, at_ms: u64) -> Option<String> {
+        let ended = self.state.lock().unwrap().last_thread.clone().filter(|(_, _, ended)| at_ms.abs_diff(*ended) <= HANDOVER_WINDOW_MS);
+        let thread = Some(ended?.0);
+        let context = self.data.join(em::DIR).join(em::CONTEXT);
+        let thread = thread.map_or_else(|| "the relay's T3 thread".to_owned(), |t| format!("T3 thread {t}"));
+        Some(format!("[Heimdall, {}: you took over from the relay again. The older part of this conversation is left out here, unsummarised, so the rest fits your model's context. The relay's whole conversation is in {thread} (t3_thread_read), the relay's starting brief in {}, and the whole record stays in the session file.]",
+            em::clock(at_ms), context.display()))
+    }
     /// Input is held (the relay takes it) in these phases.
     pub fn holding(&self) -> bool { matches!(self.phase(), Phase::Starting | Phase::Covering | Phase::NoCover | Phase::Choosing) }
     /// The user's answer to a recovery or return card (`pipeline/actions.rs`). The local model is switched to by the
@@ -390,14 +472,28 @@ impl Emergency {
         self.begin(Reason::Emergency);
         self.send(Msg::Enter(cause, model));
     }
+    /// The user asked for a switch the relay completes (relay mode on, or another relay model or account): the next relay
+    /// thread's first message tells it to confirm the switch once, naming `what` (bug note 2026-11-10T06-19-44).
+    /// `by_owner`: the user's own change (a menu click), not the agent's settings tool or a settings.json edit (review 1111).
+    pub fn switch_requested(&self, what: String, by_owner: bool) {
+        *self.switched.lock().unwrap() = Some((what, agent::now_ms(), by_owner));
+    }
+    /// The switch the next `choose` carries to its relay start: only one asked for in the last `SWITCH_FRESH_MS`, taken
+    /// once. Review 1111: taken by the choice that follows the request (the restart it caused), never left for a later,
+    /// unrelated start to confirm.
+    fn take_switch(&self) -> Option<(String, bool)> {
+        self.switched.lock().unwrap().take().filter(|(_, at, _)| agent::now_ms().saturating_sub(*at) < SWITCH_FRESH_MS).map(|(what, _, by)| (what, by))
+    }
     /// Relay mode on or off (`Settings::agent_relay`). On holds at once, like `enter`.
     pub fn choose(&self, on: bool) {
         // Every start says it; the controller decides in order (review 27 Oct: a stale early return here left relay
         // mode on in the settings with nothing held after a quick Agent off and on).
         let s = self.state.lock().unwrap().clone();
+        // The switch this choice completes goes with it (review 1111): a choice that starts no relay drops it.
+        let switch = self.take_switch();
         if !on && s.reason != Reason::Chosen { return; }
         if on { self.begin(Reason::Chosen); }
-        self.send(Msg::Choose(on));
+        self.send(Msg::Choose(on, switch.filter(|_| on)));
     }
     fn begin(&self, reason: Reason) {
         let mut s = self.state.lock().unwrap();
@@ -481,7 +577,7 @@ impl Emergency {
     pub async fn run(self: Arc<Self>, t3: Arc<dyn CoverT3>, probe: Arc<dyn MainProbe>, side: Arc<dyn Side>, host: Arc<dyn ToolHost>,
                      archive: Arc<dyn TranscriptSearch>, gate: Arc<agent::delivery::DeliveryGate>, mut stop: tokio::sync::watch::Receiver<bool>) {
         let Some(mut rx) = self.rx.lock().unwrap().take() else { return };
-        let mut run = Running { em: self.clone(), t3, probe, side, host, archive, gate, server: None, token: None, grace_until: None, pending: VecDeque::new(), relaunch_ms: None, retry_ms: None };
+        let mut run = Running { em: self.clone(), t3, probe, side, host, archive, gate, server: None, token: None, grace_until: None, pending: VecDeque::new(), relaunch_ms: None, retry_ms: None, switch: None };
         // A restart in the middle of a relay picks it up now, or when Agent comes on (`resume`).
         if run.gate.load(Ordering::Acquire) && self.restored.swap(false, Ordering::AcqRel) { run.resume().await; }
         run.side.indicator(self.indicator());
@@ -528,15 +624,19 @@ struct Running {
     /// When held input that failed to reach the thread is tried again: fixed at the first failure, so input that keeps
     /// arriving never pushes it back (review 27 Oct).
     retry_ms: Option<u64>,
+    /// The switch the `Choose` being handled completes (review 1111): set only while that choice runs, so only the
+    /// relay start it causes confirms it.
+    switch: Option<(String, bool)>,
 }
 impl Running {
-    fn cause(&self) -> Option<Cause> {
-        self.em.state.lock().unwrap().cause.as_ref().and_then(Cause::from_json)
-    }
     async fn handle(&mut self, msg: Msg) {
         match msg {
             Msg::Enter(cause, model) => self.enter(cause, model).await,
-            Msg::Choose(on) => self.choose(on).await,
+            Msg::Choose(on, switch) => {
+                self.switch = switch;
+                self.choose(on).await;
+                self.switch = None;
+            }
             Msg::Resume => self.resume().await,
             Msg::RelayModels => match self.t3.catalog().await {
                 Ok(catalog) => {
@@ -573,7 +673,7 @@ impl Running {
                     return;
                 }
                 if self.em.reason() == Reason::Chosen {
-                    let _ = reply.send("Relay mode is User's choice: it ends when he switches Heimdall back to his built-in agent. Keep acting for him.".into());
+                    let _ = reply.send(format!("Relay mode is {}'s choice: it ends when he switches Heimdall back to his built-in agent. Keep acting for him.", agent::identity::user()));
                     return;
                 }
                 if self.em.phase() != Phase::Covering {
@@ -585,7 +685,7 @@ impl Running {
                     Ok(()) => {
                         // Going back is the user's choice (06:34): he is asked; the relay acts until he answers.
                         self.em.set(|s| s.did.push(format!("asked to hand back: {summary}")));
-                        let _ = reply.send("Heimdall's agent answers again. User will be asked whether to go back to it once your run ends; keep acting for him until you are told.".into());
+                        let _ = reply.send(format!("Heimdall's agent answers again. {} will be asked whether to go back to it once your run ends; keep acting for him until you are told.", agent::identity::user_start()));
                         self.ask_return().await;
                     }
                     Err(e) => {
@@ -618,6 +718,10 @@ impl Running {
         let (thread, reason) = { let s = self.em.state.lock().unwrap(); (s.thread.clone(), s.reason) };
         match thread {
             Some(thread) => { self.issue(&thread).await; self.em.set(|s| { s.phase = Phase::Covering; s.next_probe_ms = agent::now_ms() + 30_000; }); }
+            // night1114 relay: a restart while the user waits for his account to continue the stopped thread keeps the wait.
+            None if self.em.phase() == Phase::NoCover && { let s = self.em.state.lock().unwrap(); s.waiting && s.resume.is_some() && matches!(s.original, Some(Original::Relay(_))) } => {
+                self.em.set(|s| { s.failed_probes = 0; s.next_probe_ms = agent::now_ms() + WAIT_RETRY_MS; });
+            }
             None if reason == Reason::Chosen || self.em.phase() == Phase::Starting => { self.start(None).await; }
             None => { let s = self.em.set(|s| { s.phase = Phase::NoCover; s.next_probe_ms = agent::now_ms() + 30_000; }); if !s.waiting { self.relaunch_ms = Some(agent::now_ms()); } }
         }
@@ -629,7 +733,7 @@ impl Running {
         let failed = model.as_ref().map(|m| m.provider.clone());
         if s.reason == Reason::Chosen && s.phase != Phase::Off {
             // The relay is the agent already: Pi's provider failing changes nothing the user uses.
-            eprintln!("emergency: the agent's provider fails ({}), and the relay User chose answers anyway", cause.sentence());
+            eprintln!("emergency: the agent's provider fails ({}), and the relay the user chose answers anyway", cause.sentence());
             return;
         }
         match s.phase {
@@ -689,11 +793,14 @@ impl Running {
                 // model takes over (the record and the held input carry on).
                 Phase::Covering if self.moved(&s) => self.move_relay(&s).await,
                 Phase::Covering => {}
+                // night1114 relay: the user waits for his account to continue the stopped thread; an agent restart (the
+                // supervisor's `choose`) keeps that wait instead of opening a new thread.
+                Phase::NoCover if s.reason == Reason::Chosen && s.waiting && s.resume.is_some() && !self.moved(&s) => {}
                 // Off, Starting, a hand-back trial or the local stand-in: the relay starts, held from now (the
                 // supervisor's tick holds a Bridge that is not).
                 _ => {
                     self.close_cards();
-                    self.em.set(|s| { s.phase = Phase::Starting; s.reason = Reason::Chosen; s.cause = None; s.fallback = None; s.waiting = false; s.original = None; s.failed = None; s.return_ready = false; s.going_back = false; });
+                    self.em.set(|s| { s.phase = Phase::Starting; s.reason = Reason::Chosen; s.cause = None; s.fallback = None; s.waiting = false; s.original = None; s.failed = None; s.return_ready = false; s.going_back = false; s.resume = None; });
                     self.start(None).await;
                 }
             }
@@ -702,12 +809,12 @@ impl Running {
         }
         if s.reason != Reason::Chosen || s.phase == Phase::Off { return; }
         if let Some(thread) = &s.thread {
-            let _ = self.t3.send(thread, "User switched Heimdall back to his built-in agent. Stop acting for him now; his tools stop working for you.").await;
+            let _ = self.t3.send(thread, &agent::identity::tokens(SWITCHED_BACK, &agent::identity::current())).await;
         }
         let _ = std::fs::remove_dir_all(self.em.data.join(em::DIR).join("images"));
         // Pi's conversation mirrors the thread all along: the last of it goes in now, and nothing else is handed over.
         mirror(&self.em, &*self.t3, &*self.side).await;
-        self.side.record(&format!("{}end:{}", agent::notice::EMERGENCY_COVER, agent::now_ms()), "[Relay mode over] User switched Heimdall back to you; the relay's conversation above is yours. Carry on from there.");
+        self.side.record(&format!("{}end:{}", agent::notice::EMERGENCY_COVER, agent::now_ms()), &format!("[Relay mode over] {} switched Heimdall back to you; the relay's conversation above is yours. Carry on from there.", agent::identity::user_start()));
         // What the relay had not answered yet (a run still working, or input not yet delivered) is Pi's now: it wakes
         // Pi once the hold is off, in order.
         // The user's Stop cancels what came before it, as it would have for the relay.
@@ -719,7 +826,7 @@ impl Running {
         self.pending.clear();
         self.relaunch_ms = None;
         self.close_cards();
-        self.em.set(|s| { s.phase = Phase::Off; s.reason = Reason::Emergency; s.mirrored = None; if let (Some(t), Some(h)) = (s.thread.take(), s.harness.take()) { s.last_thread = Some((t, h, agent::now_ms())); s.last_route = s.route.clone(); } s.did.clear(); s.cause = None; s.route = None; s.original = None; s.failed = None; s.waiting = false; });
+        self.em.set(|s| { s.phase = Phase::Off; s.reason = Reason::Emergency; s.mirrored = None; if let (Some(t), Some(h)) = (s.thread.take(), s.harness.take()) { s.last_thread = Some((t, h, agent::now_ms())); s.last_route = s.route.clone(); } s.did.clear(); s.cause = None; s.route = None; s.original = None; s.failed = None; s.waiting = false; s.resume = None; });
         self.side.release(None);
         for r in &unanswered { self.side.unfinished(r); }
         self.side.indicator(ui::RelayIndicator::Off);
@@ -728,14 +835,14 @@ impl Running {
     /// Relay mode's model changed: the running thread stands down and a thread on the new model takes over.
     async fn move_relay(&mut self, s: &State) {
         if let Some(thread) = &s.thread {
-            let _ = self.t3.send(thread, "User switched the relay to another model. Stop acting for him now; his tools stop working for you.").await;
+            let _ = self.t3.send(thread, &agent::identity::tokens(SWITCHED_MODEL, &agent::identity::current())).await;
         }
         mirror(&self.em, &*self.t3, &*self.side).await;
         // What the old thread had not finished goes to the new one first.
         for r in std::mem::take(&mut *self.em.open.lock().unwrap()).into_iter().rev() { self.pending.push_front(r); }
         self.end_runs();
         self.revoke().await;
-        self.em.set(|s| { s.phase = Phase::Starting; s.thread = None; s.harness = None; s.last_thread = None; s.mirrored = None; });
+        self.em.set(|s| { s.phase = Phase::Starting; s.thread = None; s.harness = None; s.last_thread = None; s.mirrored = None; s.resume = None; });
         self.start(None).await;
     }
     /// The context file and the first message for this takeover.
@@ -745,7 +852,7 @@ impl Running {
         let (conversation, plan, tasks) = self.side.context(em::CONTEXT_BYTES);
         let why = match (&s.reason, &cause) {
             (Reason::Emergency, Some(c)) => format!("Heimdall's agent failed at {}: {}", em::clock(s.since_ms), c.sentence()),
-            _ => "User chose to run Heimdall's agent as this T3 thread (relay mode).".into(),
+            _ => format!("{} chose to run Heimdall's agent as this T3 thread (relay mode).", agent::identity::user_start()),
         };
         let body = format!("# Heimdall's context, {}\n\n{why}\n\n## Conversation, oldest first (the last 100,000 tokens at most)\n\n{}\n\n## Plan\n\n{}\n\n## T3 work Heimdall follows\n\n{}\n",
             em::clock(agent::now_ms()), if conversation.trim().is_empty() { "(nothing recent)" } else { &conversation },
@@ -758,7 +865,10 @@ impl Running {
         let plan = if plan.len() > em::PLAN_BYTES { em::tail_bytes(&plan, em::PLAN_BYTES) } else { plan };
         // The relay's whole system prompt, filled as Pi's is, goes first (docs/claude-relay.md, "Takeover").
         let prompt = relay_prompt(&self.em.data, &self.em.cli);
-        em::Brief { reason: s.reason, cause: cause.as_ref(), since_ms: s.since_ms, cli: &self.em.cli, docs: &self.em.docs, prompt: &prompt, context: &file, tail: &tail, plan: &plan }.text()
+        // A switch the user asked for: confirmed once by the thread that completes it (never by an emergency takeover).
+        // Review 1111: only the start the switch's own choice causes (`Running::switch`), saying who made it.
+        let switched = if s.reason == Reason::Chosen { self.switch.clone() } else { None };
+        em::Brief { reason: s.reason, cause: cause.as_ref(), since_ms: s.since_ms, cli: &self.em.cli, docs: &self.em.docs, prompt: &prompt, context: &file, tail: &tail, plan: &plan, switched: switched.as_ref().map(|(w, by)| (w.as_str(), *by)) }.text()
     }
     /// Whether a launched (or re-briefed) thread answers: its first CLI call, a new real assistant message, a run that
     /// completed, or a run still working after `ANSWER_WAIT`. A harness error fails it at once.
@@ -792,6 +902,17 @@ impl Running {
         // What this start asked for: a later `choose` moves the relay only for a new choice (review 28 Oct: a model
         // T3 no longer lists, or Grok standing in for Claude, restarted the relay on every Pi start).
         if reason == Reason::Chosen { self.em.set(|s| { s.asked = options.relay_model.clone(); s.asked_account = options.relay_account.clone(); }); }
+        // The stopped thread first, when this start is for its account and model.
+        let list = match list.as_ref().and_then(|l| l.first()).cloned() {
+            Some(first) => match self.continue_stopped(&first).await {
+                Resumed::Yes => return,
+                // Tried just now and still failing: the rest of the list.
+                Resumed::AccountFails(e) => { eprintln!("emergency: {} still fails ({}); trying the rest", first.name, bounded(&e, 200)); list.map(|l| l.into_iter().skip(1).collect()) }
+                Resumed::Impossible { said, detail } => { self.new_thread_because(said, &detail); list }
+                Resumed::NotHere => list,
+            },
+            None => list,
+        };
         if !(options.skip_relay && reason == Reason::Emergency && list.is_none()) {
             let brief = self.brief();
             // A recent thread on another model or account than relay mode's choice is not reused, nor one after a
@@ -891,6 +1012,8 @@ impl Running {
         let switched = self.em.state.lock().unwrap().failed.is_some();
         let s = self.em.set(|s| {
             s.phase = Phase::Covering; s.thread = Some(thread.clone()); s.harness = Some(harness.clone()); s.trying = None;
+            // night1114 relay: another thread covers now; the stopped one no longer holds the whole conversation.
+            if s.resume.as_ref().is_some_and(|r| r.thread != thread) { s.resume = None; }
             // A new thread loads the tools as they are now; a reused one keeps what it learned.
             s.learn_tools(&thread);
             // The search landed on the original account itself (2 Nov 13:06: Claude main had reset at 13:00): the
@@ -915,7 +1038,7 @@ impl Running {
         }
         let line = match s.cause.as_ref().and_then(Cause::from_json) {
             Some(cause) => format!("[Emergency mode] Your agent failed at {}: {} A relay agent, {harness}, took over in T3 thread {thread}. What reaches you meanwhile is context; what it does is recorded here.", em::clock(s.since_ms), cause.sentence()),
-            None => format!("[Relay mode] User chose to run you as a T3 thread: {harness}, thread {thread}, acts for you. What reaches you meanwhile is context; what it does is recorded here."),
+            None => format!("[Relay mode] {} chose to run you as a T3 thread: {harness}, thread {thread}, acts for you. What reaches you meanwhile is context; what it does is recorded here.", agent::identity::user_start()),
         };
         self.side.record(&format!("{}start:{}", agent::notice::EMERGENCY_COVER, s.since_ms), &line);
         self.side.indicator(self.em.indicator());
@@ -923,7 +1046,7 @@ impl Running {
         if s.reason == Reason::Emergency || s.original.is_some() { self.side.pause_background(None); }
         self.em.set(|s| { s.failed = None; s.waiting = false; });
         // Its answer to the first message is a reply like any other (emergency: the one short message to the user).
-        self.follow(thread, run, None);
+        self.follow(thread, run, None, false);
         while let Some(r) = self.pending.pop_front() {
             if let Err(r) = self.deliver(r).await { self.pending.push_front(r); self.retry_ms = Some(agent::now_ms() + 30_000); break; }
         }
@@ -954,9 +1077,14 @@ impl Running {
                 if note.is_some() { self.em.set(|s| s.tools = now_tools); }
                 // Bug note 2026-10-27 19:48: the send arrow never showed for words relayed instead of sent to Pi.
                 if matches!(r.kind.as_str(), "wake" | "typed" | "answer") { self.side.sent(); }
+                // Latency map (lab/latency): the user's words reached the relay's thread; its run is his request's turn.
+                let voice = r.kind == "wake";
+                if voice && !cfg!(test) { crate::latency::relay_sent(); }
                 if r.kind != "stop" {
+                    // night1110 phone-core: the run the phone turn's words went into (a steer joins a running one).
+                    crate::remote::relay_input_run(&r.id, run.as_deref());
                     self.em.open.lock().unwrap().push(r.clone());
-                    self.follow(thread, run, Some(r.id.clone()));
+                    self.follow(thread, run, Some(r.id.clone()), voice);
                 }
                 Ok(())
             }
@@ -966,7 +1094,8 @@ impl Running {
     /// Follows one relay run to its end: the island works meanwhile, and its final reply is spoken and shown like Pi's
     /// (once per run, while the relay still acts).
     /// `input`: the relayed input this run answers, open until the run ends.
-    fn follow(&self, thread: String, run: Option<String>, input: Option<String>) {
+    /// `voice`: the input is the user's spoken words, so the run's end closes his request's latency line.
+    fn follow(&self, thread: String, run: Option<String>, input: Option<String>, voice: bool) {
         let (em, t3, side) = (self.em.clone(), self.t3.clone(), self.side.clone());
         let generation = em.generation.load(Ordering::Acquire);
         if em.runs.fetch_add(1, Ordering::AcqRel) == 0 { side.working(true); }
@@ -996,18 +1125,32 @@ impl Running {
                         // A run that could not run at all (its account's limit): the relay's account failed.
                         if let Some((cause, billing)) = reply.as_deref().filter(|t| em::harness_error_reply(t)).and_then(cause_of).filter(|_| acting) {
                             account_failed = true;
-                            let _ = em.tx.lock().unwrap().send(Msg::RelayFailed(cause, billing));
+                            // night1114 relay: one report per run, however many inputs it took in.
+                            if run.as_ref().is_none_or(|r| em.replied.lock().unwrap().insert(format!("failed:{thread}:{r}"))) { let _ = em.tx.lock().unwrap().send(Msg::RelayFailed(cause, billing)); }
                         }
                         let mine = !account_failed && input.as_ref().is_none_or(|id| { let mut open = em.open.lock().unwrap(); let n = open.len(); open.retain(|r| &r.id != id); open.len() < n });
+                        if voice && mine && acting && !cfg!(test) { crate::latency::relay_completed(); }
                         if let Some(text) = reply.filter(|t| !em::harness_error_reply(t)) {
-                            if acting && mine && em.replied.lock().unwrap().insert(key) { side.reply(&text); }
+                            if acting && mine && em.replied.lock().unwrap().insert(key) {
+                                // The reply names the phone turn only when it answers the turn's delivery.
+                                crate::remote::relay_reply_begins(input.as_deref(), run.as_deref());
+                                side.reply(&text);
+                                crate::remote::relay_reply_said(input.as_deref(), run.as_deref());
+                            } else if acting && mine {
+                                // night1110 phone-core: this run's reply went out under another input it took in; a
+                                // phone turn whose words were among them is answered and ends (bug note 2026-11-09T07-09-41).
+                                crate::remote::relay_reply_said(input.as_deref(), run.as_deref());
+                            }
                         }
                         mirror(&em, &*t3, &*side).await;
                         break;
                     }
                     Ok(Run::Failed(e)) => {
-                        eprintln!("emergency: a relay run failed: {}", bounded(&e, 300));
-                        if let Some((cause, billing)) = cause_of(&e).filter(|_| current()) { account_failed = true; let _ = em.tx.lock().unwrap().send(Msg::RelayFailed(cause, billing)); }
+                        // night1114 relay: each input steered into one run follows that run; its failure is one
+                        // failure, logged and reported once (10:50:43: three lines and three reports for run 713).
+                        let first = run.as_ref().is_none_or(|r| em.replied.lock().unwrap().insert(format!("failed:{thread}:{r}")));
+                        if first { eprintln!("emergency: a relay run failed: {}", bounded(&e, 300)); }
+                        if let Some((cause, billing)) = cause_of(&e).filter(|_| current()) { account_failed = true; if first { let _ = em.tx.lock().unwrap().send(Msg::RelayFailed(cause, billing)); } }
                         break;
                     }
                     Ok(Run::Working | Run::Completed(_)) => break,
@@ -1065,13 +1208,15 @@ impl Running {
         let quota = matches!(s.cause.as_ref().and_then(Cause::from_json), Some(Cause::Quota { .. }))
             || matches!(&original, Original::Relay(r) if s.spent_until(&r.instance, now).is_some());
         let until = back.filter(|_| quota).map(clock);
-        let headline = match &until { Some(t) => format!("{} is out until {t}.", original.label()), None => format!("{} {}.", original.label(), if quota { "is out of quota" } else { "can't answer" }) };
+        // night1114 relay: a failure that is not the quota is named plainly ("sign-in failed: 403 from Cloudflare").
+        let why = if quota { None } else { s.cause.as_ref().and_then(Cause::from_json).as_ref().and_then(em::short_cause) };
+        let headline = match (&until, &why) { (Some(t), _) => format!("{} is out until {t}.", original.label()), (None, Some(w)) => format!("{}: {w}.", original.label()), (None, None) => format!("{} {}.", original.label(), if quota { "is out of quota" } else { "can't answer" }) };
         let card = rec::card(&open.request_id, &headline, &open.choices, open.until_ms);
         // Bug note 2026-11-02T14-47-46: the card and its countdown are said (shown on the island with Speaking off)
         // and noticed on the island.
         let any_route = open.choices.iter().any(|c| matches!(c.pick, Pick::Route(_)));
-        let line = rec::card_line(&original, quota, until.as_deref(), &open.choices);
-        let notice = rec::card_notice(&original, quota, until.as_deref(), any_route);
+        let line = rec::card_line(&original, quota, until.as_deref(), &open.choices, why.as_deref());
+        let notice = rec::card_notice(&original, quota, until.as_deref(), any_route, why.as_deref());
         self.em.set(|s| { s.phase = Phase::Choosing; s.failed = Some(failed); s.choice = Some(open); s.next_probe_ms = next; s.original = Some(original); });
         self.side.indicator(self.em.indicator());
         self.side.notice(card);
@@ -1107,9 +1252,18 @@ impl Running {
                 Some(Pick::Wait) => {
                     self.close_cards();
                     let back = match &s.original { Some(Original::Relay(_)) => Some(s.next_probe_ms.saturating_sub(60_000)), _ => reset_of(&s) };
-                    self.em.set(|s| { s.phase = Phase::NoCover; s.waiting = true; });
+                    // night1114 relay: waiting for a relay account is checked within seconds, then with a backoff,
+                    // unless T3 named a reset still ahead (bug note 2026-11-13T10-58-09: held for two minutes).
+                    let now = agent::now_ms();
+                    let reset = match &s.original { Some(Original::Relay(r)) => s.spent_until(&r.instance, now).filter(|t| *t > now), _ => None };
+                    let soon = matches!(s.original, Some(Original::Relay(_))) && reset.is_none();
+                    self.em.set(|s| { s.phase = Phase::NoCover; s.waiting = true; if soon { s.failed_probes = 0; s.next_probe_ms = now + WAIT_RETRY_MS; } });
                     self.relaunch_ms = None;
-                    self.side.notice(crate::emergency_local::waiting(back));
+                    let why = s.cause.as_ref().and_then(Cause::from_json).as_ref().and_then(em::short_cause);
+                    match (&s.original, why) {
+                        (Some(o), Some(w)) => self.side.notice(crate::emergency_local::waiting_for(&o.label(), &w)),
+                        _ => self.side.notice(crate::emergency_local::waiting(back)),
+                    }
                     self.side.indicator(self.em.indicator());
                 }
                 // Closed without a choice: the search starts now.
@@ -1148,8 +1302,11 @@ impl Running {
         });
         // Bug note 2026-11-02T14-47-44: no "stop acting" message into the spent thread: it started a run on the spent
         // account each time (runs 926, 22 and 3 on 2 Nov). Its token dies below; the thread is left as it is.
-        eprintln!("emergency: the spent thread {} gets no message (it would start a run on the spent account)", s.thread.as_deref().unwrap_or("?"));
+        eprintln!("emergency: the spent thread {} gets no message (it would start a run on the spent account); it is kept to continue in once its account works", s.thread.as_deref().unwrap_or("?"));
         mirror(&self.em, &*self.t3, &*self.side).await;
+        // night1114 relay: the stopped thread is kept, with where its mirror stands, to carry on in (bug note 2026-11-13T10-57-01).
+        let resume = { let now_s = self.em.state.lock().unwrap().clone(); now_s.thread.clone().zip(now_s.harness.clone()).map(|(thread, harness)| Resume {
+            mirrored: now_s.mirrored.as_ref().filter(|(t, _)| t == &thread).map_or(0, |m| m.1), thread, harness, route: route.clone(), at_ms: agent::now_ms(), send_errors: 0, noted: false }) };
         for r in std::mem::take(&mut *self.em.open.lock().unwrap()).into_iter().rev() { self.pending.push_front(r); }
         self.end_runs();
         self.revoke().await;
@@ -1163,6 +1320,7 @@ impl Running {
         if let Some(x) = &spent { self.side.account_spent(&x.instance, x.reset_ms); }
         self.em.set(|s| {
             s.thread = None; s.harness = None; s.last_thread = None; s.last_route = None; s.mirrored = None; s.route = None; s.original = original;
+            if resume.is_some() { s.resume = resume; }
             s.cause = Some(cause.to_json()); s.failed_probes = 0; s.return_asked = None; s.return_ready = false; s.going_back = false;
             if let Some(x) = spent { s.spent.retain(|y| y.instance != x.instance); s.spent.push(x); }
         });
@@ -1171,6 +1329,110 @@ impl Running {
         let pi_provider = match self.em.state.lock().unwrap().original.clone() { Some(Original::Pi { model }) => model.or(s.model.clone()).map(|m| m.provider), _ => None };
         let failed = routing::Failed { instance: route.as_ref().map(|r| r.instance.clone()), driver: route.as_ref().map(|r| r.driver.clone()), model: route.as_ref().map(|r| r.model.clone()), pi_provider };
         self.offer(failed, &cause.sentence()).await;
+    }
+    // Continuing the stopped relay thread.
+    /// Continues the relay thread its account's failure stopped, when `first` is that account and model: a new token,
+    /// one short message saying what happened, and the thread's next run shows whether the account works (a sign-in is
+    /// tested by a run, never by a quota reading). It answers: it covers again, mirror and tools as they were, and the
+    /// held input follows (`covering`).
+    async fn continue_stopped(&mut self, first: &Harness) -> Resumed {
+        let Some(r) = self.em.state.lock().unwrap().resume.clone() else { return Resumed::NotHere };
+        let same = match &r.route {
+            Some(route) if !route.instance.is_empty() => route.instance == first.instance && route.model == first.model,
+            _ => r.harness == format!("{} ({})", first.name, first.model),
+        };
+        if !same { return Resumed::NotHere; }
+        // A note already failed here: the account is tested apart, and the kept thread hears again only once it works.
+        if r.noted {
+            if let Err(e) = self.account_check(first).await { return Resumed::AccountFails(e); }
+        }
+        self.issue(&r.thread).await;
+        self.em.set(|s| s.trying = Some((r.thread.clone(), r.harness.clone())));
+        let before = self.t3.latest_reply(&r.thread).await.ok().flatten();
+        let base = self.t3.activity(&r.thread, r.mirrored).await.ok().and_then(|items| items.last().map(|i| i.position)).unwrap_or(r.mirrored);
+        let cause = self.em.state.lock().unwrap().cause.as_ref().and_then(Cause::from_json);
+        let what = cause.as_ref().and_then(em::short_cause).unwrap_or_else(|| "its account failed".into());
+        let note = format!("[Heimdall] Your last turn stopped at {} ({what}). Heimdall is trying your account again; if this reaches you, carry on in this thread: Heimdall's tools work again (a new connection; load them again if a call fails). {}'s messages held meanwhile follow.", em::clock(r.at_ms), agent::identity::user_start());
+        let since = agent::now_ms();
+        let outcome = match self.t3.send(&r.thread, &note).await {
+            Ok(run) => {
+                // T3 took it: the refused sends no longer run in a row (review).
+                self.em.set(|s| if let Some(x) = s.resume.as_mut() { x.send_errors = 0; });
+                match self.answers(&r.thread, run.as_deref(), before, since).await {
+                Ok(()) => {
+                    eprintln!("emergency: the relay carries on in its thread {} on {}", r.thread, r.harness);
+                    self.em.set(|s| { s.resume = None; s.route = r.route.clone().or_else(|| s.route.clone()); s.failed = None; s.waiting = false; });
+                    if let Some(route) = &r.route { self.side.cue(ui::HealthCue::Notice { part: ui::Part::Agent, label: format!("{} works again", route.label()) }); }
+                    self.covering(r.thread.clone(), r.harness.clone(), run, base).await;
+                    // The failure paused background work; the account works again.
+                    self.side.pause_background(None);
+                    return Resumed::Yes;
+                }
+                Err(e) => {
+                    self.em.set(|s| if let Some(x) = s.resume.as_mut() { x.noted = true; });
+                    Resumed::AccountFails(e)
+                }
+                }
+            }
+            Err(e) => {
+                let e = format!("{e:#}");
+                let n = self.em.set(|s| if let Some(x) = s.resume.as_mut() { x.send_errors += 1; }).resume.map_or(0, |x| x.send_errors);
+                if thread_gone(&e) { Resumed::Impossible { said: "T3 no longer has it", detail: format!("T3 no longer has thread {} ({})", r.thread, bounded(&e, 120)) } }
+                else if n >= RESUME_SEND_TRIES { Resumed::Impossible { said: "T3 kept refusing it", detail: format!("T3 refused {n} messages to thread {} in a row ({})", r.thread, bounded(&e, 120)) } }
+                else { Resumed::AccountFails(format!("{T3_REFUSED}{}", bounded(&e, 200))) }
+            }
+        };
+        self.em.set(|s| s.trying = None);
+        self.revoke().await;
+        if let Resumed::Impossible { .. } = &outcome { self.em.set(|s| s.resume = None); }
+        outcome
+    }
+    /// Fresh review S3: whether `first`'s account answers a run, tested in a throwaway thread (archived after) so the
+    /// kept relay thread is not filled with notes while a sign-in stays broken.
+    async fn account_check(&mut self, first: &Harness) -> std::result::Result<(), String> {
+        let since = agent::now_ms();
+        let (thread, run) = self.t3.launch(ACCOUNT_CHECK_TITLE, "[Heimdall] Account check after a failure: reply with just OK and do nothing else.", first).await
+            .map_err(|e| format!("{T3_REFUSED}{}", bounded(&format!("{e:#}"), 200)))?;
+        let answered = self.answers(&thread, run.as_deref(), None, since).await;
+        if let Err(e) = self.t3.archive(&thread).await { eprintln!("emergency: the account check thread {thread} was not archived ({})", bounded(&format!("{e:#}"), 120)); }
+        if let Err(e) = &answered { eprintln!("emergency: {} still fails its account check ({})", first.name, bounded(e, 200)); }
+        answered
+    }
+    /// The user waited for his relay account and it reads usable: the stopped thread carries on; still failing, the wait
+    /// goes on with a backoff (held input stays held); a thread that cannot continue gives way to a new one, said why.
+    async fn waited_back(&mut self, r: Route) {
+        eprintln!("emergency: {} reads usable again; trying it", r.label());
+        self.em.set(|s| s.phase = Phase::Starting);
+        match self.continue_stopped(&r.harness()).await {
+            Resumed::Yes => {
+                self.side.dismiss(&format!("{}waiting", crate::emergency_local::CARD_PREFIX));
+                self.side.say(&format!("{} works again; carrying on in the same conversation.", rec::spoken_route(&r)));
+            }
+            Resumed::AccountFails(e) => {
+                // A run that failed again names the cause; T3 refusing the message does not.
+                let cause = (!e.starts_with(T3_REFUSED)).then(|| em::relay_cause(&e, &r.name, agent::now_ms())).flatten();
+                let s = self.em.set(|s| {
+                    s.phase = Phase::NoCover; s.waiting = true; s.failed_probes += 1;
+                    if let Some(c) = &cause { s.cause = Some(c.to_json()); }
+                    s.next_probe_ms = s.spent_until(&r.instance, agent::now_ms()).filter(|t| *t > agent::now_ms()).map_or_else(|| agent::now_ms() + wait_backoff(s.failed_probes), |t| t + 60_000);
+                });
+                eprintln!("emergency: {} still fails ({}); next try at {}", r.label(), bounded(&e, 200), em::clock(s.next_probe_ms));
+            }
+            other => {
+                if let Resumed::Impossible { said, detail } = &other { self.new_thread_because(said, detail); }
+                eprintln!("emergency: {} works again; the relay starts on it", r.label());
+                self.em.set(|s| { s.waiting = false; s.original = None; s.failed = None; });
+                self.side.dismiss(&format!("{}waiting", crate::emergency_local::CARD_PREFIX));
+                self.start(Some(vec![r.harness()])).await;
+            }
+        }
+        self.side.indicator(self.em.indicator());
+    }
+    /// A new relay thread because the stopped one cannot continue: logged and said, with why.
+    /// Only `said` is spoken; the thread id and T3's error stay in the log (fresh review S2).
+    fn new_thread_because(&self, said: &str, detail: &str) {
+        eprintln!("emergency: the stopped relay thread cannot continue ({detail}); starting a new one");
+        self.side.say(&format!("I couldn't continue the old relay conversation: {said}. Starting a new one."));
     }
     /// The account a relay without a recorded route runs on, from its harness line "Name (model)" and T3's catalog.
     async fn route_of(&self, harness: Option<&str>) -> Option<Route> {
@@ -1194,7 +1456,15 @@ impl Running {
             Original::Relay(r) => {
                 let quotas = self.t3.quotas().await;
                 let reported = s.spent_until(&r.instance, now);
-                (routing::recovered(quotas.get(&r.instance)) && reported.is_none(), reported.or(quotas.get(&r.instance).and_then(|q| q.back_ms())))
+                // night1114 relay: after a failure that was not its quota (a sign-in), a quota reading proves nothing
+                // either way: unless it reads spent, the real test is a run in the stopped thread (`waited_back`).
+                // Only for the account the kept thread stopped on, and only when it is not reported spent (review: in
+                // a chain the newest cause can belong to another account).
+                let quota_failed = matches!(s.cause.as_ref().and_then(Cause::from_json), Some(Cause::Quota { .. }) | None);
+                let kept_here = s.resume.as_ref().and_then(|x| x.route.as_ref()).is_some_and(|x| x.instance == r.instance && x.model == r.model);
+                let weak = !quota_failed && s.phase == Phase::NoCover && kept_here && !s.spent_now(now).any(|x| x.instance == r.instance);
+                let usable = if weak { quotas.get(&r.instance).is_none_or(|q| !q.exhausted()) } else { routing::recovered(quotas.get(&r.instance)) };
+                (usable && reported.is_none(), reported.or(quotas.get(&r.instance).and_then(|q| q.back_ms())))
             }
         };
         if works { if let Original::Relay(r) = &original { self.em.set(|s| s.spent.retain(|x| x.instance != r.instance)); } }
@@ -1202,7 +1472,9 @@ impl Running {
             let s = self.em.set(|s| {
                 s.failed_probes += 1;
                 let c = Cause::from_json(s.cause.as_ref().unwrap_or(&Value::Null)).unwrap_or(Cause::NoAnswer);
-                s.next_probe_ms = back.filter(|b| *b > now).map_or_else(|| em::next_probe_ms(&c, s.failed_probes, now), |b| b + 60_000);
+                // night1114 relay: the user waits for this relay account: checked again within the backoff.
+                let waited = s.phase == Phase::NoCover && s.waiting && matches!(original, Original::Relay(_));
+                s.next_probe_ms = back.filter(|b| *b > now).map_or_else(|| if waited { now + wait_backoff(s.failed_probes) } else { em::next_probe_ms(&c, s.failed_probes, now) }, |b| b + 60_000);
             });
             eprintln!("emergency: {} does not work yet; next check at {}", original.label(), em::clock(s.next_probe_ms));
             return;
@@ -1210,10 +1482,8 @@ impl Running {
         if s.phase == Phase::NoCover {
             // The user chose to wait for this account: it takes over now.
             if let Original::Relay(r) = &original {
-                eprintln!("emergency: {} works again; the relay starts on it", r.label());
-                self.em.set(|s| { s.waiting = false; s.original = None; s.failed = None; s.phase = Phase::Starting; });
-                self.side.dismiss(&format!("{}waiting", crate::emergency_local::CARD_PREFIX));
-                return self.start(Some(vec![r.harness()])).await;
+                // night1114 relay: the stopped thread carries on when it can; its run is the test of the account.
+                return self.waited_back(r.clone()).await;
             }
             return;
         }
@@ -1232,7 +1502,7 @@ impl Running {
         let Some(current) = s.route.clone() else { return };
         let now = agent::now_ms();
         let id = format!("{}{now}", rec::RETURN_PREFIX);
-        eprintln!("emergency: {} works again; asking User whether to go back", original.label());
+        eprintln!("emergency: {} works again; asking the user whether to go back", original.label());
         self.em.set(|s| { s.return_asked = Some(id.clone()); s.return_ready = false; s.original = Some(original.clone()); });
         self.side.say(&rec::return_line(&original));
         self.side.notice(rec::return_card(&id, &original, &current, now));
@@ -1247,10 +1517,10 @@ impl Running {
         }
         self.em.set(|s| s.going_back = false);
         let s = self.em.state.lock().unwrap().clone();
-        eprintln!("emergency: User goes back to {}", s.original.as_ref().map_or_else(|| "the built-in agent".into(), Original::label));
+        eprintln!("emergency: the user goes back to {}", s.original.as_ref().map_or_else(|| "the built-in agent".into(), Original::label));
         match s.original.clone() {
             Some(Original::Relay(r)) => {
-                if let Some(thread) = &s.thread { let _ = self.t3.send(thread, "User went back to his original account. Stop acting for him now; his tools stop working for you.").await; }
+                if let Some(thread) = &s.thread { let _ = self.t3.send(thread, &agent::identity::tokens(WENT_BACK, &agent::identity::current())).await; }
                 mirror(&self.em, &*self.t3, &*self.side).await;
                 for x in std::mem::take(&mut *self.em.open.lock().unwrap()).into_iter().rev() { self.pending.push_front(x); }
                 self.end_runs();
@@ -1269,7 +1539,7 @@ impl Running {
     /// The user stays on the replacement: it becomes his relay setting, and he is not asked again.
     async fn stay(&mut self) {
         let s = self.em.set(|s| { s.original = None; s.cause = None; s.reason = Reason::Chosen; s.asked = s.route.as_ref().map(|r| r.model.clone()); s.asked_account = s.route.as_ref().map(|r| r.instance.clone()); });
-        eprintln!("emergency: User stays on {}", s.route.as_ref().map_or_else(String::new, Route::label));
+        eprintln!("emergency: the user stays on {}", s.route.as_ref().map_or_else(String::new, Route::label));
         if let Some(r) = &s.route { self.side.keep_relay(r); }
         self.side.indicator(self.em.indicator());
     }
@@ -1300,7 +1570,7 @@ impl Running {
                     // Asked, never switched (30 Oct 01:2x): the local stand-in lasts until the user answers. His Yes picks the
                     // main model (`Msg::Model` ends this phase), his No ends it on the local model (`keep_local`); an
                     // unanswered card is asked again at the next check, half an hour on.
-                    eprintln!("emergency: the main model answers again; asking User whether the agent goes back to it");
+                    eprintln!("emergency: the main model answers again; asking the user whether the agent goes back to it");
                     if let Some(m) = &s.fallback { self.side.restore_model(m); }
                     self.em.set(|s| { s.next_probe_ms = agent::now_ms() + 30 * 60_000; });
                 }
@@ -1332,7 +1602,7 @@ impl Running {
         let thread = s.thread.clone();
         if let Some(thread) = &thread {
             if summary.is_none() {
-                let _ = self.t3.send(thread, "Heimdall's agent answers again. Wrap up: stop acting for him and don't speak to User again. His tools stop working for you now.").await;
+                let _ = self.t3.send(thread, &agent::identity::tokens(WRAP_UP, &agent::identity::current())).await;
             }
         }
         mirror(&self.em, &*self.t3, &*self.side).await;
@@ -1345,9 +1615,9 @@ impl Running {
             (Some(h), Some(t)) => back.push_str(&format!(" Meanwhile {h} acted as you in T3 thread {t}: everything it was told, said and did is in your conversation above, in order. Carry on from there.")),
             _ => back.push_str(" No relay agent answered; what reached you meanwhile is in your conversation above, marked as relayed."),
         }
-        back.push_str("\nOwner hears that you are back when this turn answers; answer what still needs you, briefly.");
+        back.push_str(&format!("\n{} hears that you are back when this turn answers; answer what still needs you, briefly.", agent::identity::user_start()));
         self.close_cards();
-        self.em.set(|s| { s.phase = Phase::Trial; s.mirrored = None; s.original = None; s.last_route = s.route.take(); s.failed = None; s.waiting = false; });
+        self.em.set(|s| { s.phase = Phase::Trial; s.mirrored = None; s.original = None; s.last_route = s.route.take(); s.failed = None; s.waiting = false; s.resume = None; });
         self.side.indicator(ui::RelayIndicator::Off);
         eprintln!("emergency: the agent answers a probe; handing back");
         self.side.release(Some(agent::identity::names_only(&back, &agent::identity::current())));
@@ -1366,6 +1636,7 @@ impl Running {
             // The route went to `last_route` at the hand-back (`recover`).
             if let (Some(t), Some(h)) = (s.thread.take(), s.harness.take()) { s.last_thread = Some((t, h, agent::now_ms())); }
             s.did.clear();
+            s.resume = None;
             if local { s.failed_probes = 0; s.next_probe_ms = s.cause.as_ref().and_then(Cause::from_json).map_or(agent::now_ms() + 2 * 60_000, |c| em::next_probe_ms(&c, 0, agent::now_ms())); } else { s.cause = None; }
         });
         self.side.indicator(ui::RelayIndicator::Off);
@@ -1387,7 +1658,7 @@ impl Running {
         self.pending.clear();
         self.relaunch_ms = None;
         self.close_cards();
-        self.em.set(|s| { s.original = None; s.failed = None; s.waiting = false; });
+        self.em.set(|s| { s.original = None; s.failed = None; s.waiting = false; s.resume = None; });
         // Relay mode is the user's setting: Agent back on starts it again (the supervisor's `choose`).
         self.em.set(|s| { s.phase = Phase::Off; s.reason = Reason::Emergency; s.mirrored = None; if let (Some(t), Some(h)) = (s.thread.take(), s.harness.take()) { s.last_thread = Some((t, h, agent::now_ms())); s.last_route = s.route.clone(); } s.route = None; s.did.clear(); s.cause = None; });
         let _ = std::fs::remove_dir_all(self.em.data.join(em::DIR).join("images"));
@@ -1483,7 +1754,7 @@ impl ScopedTools for Own {
                     _ => ("?".into(), "?".into()),
                 };
                 if s.reason == Reason::Chosen {
-                    return Some(Ok(format!("Relay mode since {}: User chose to run Heimdall's agent as you, {harness} in T3 thread {thread}. It lasts until he switches back.", em::clock(s.since_ms))));
+                    return Some(Ok(format!("Relay mode since {}: {} chose to run Heimdall's agent as you, {harness} in T3 thread {thread}. It lasts until he switches back.", em::clock(s.since_ms), agent::identity::user())));
                 }
                 let parsed = Cause::from_json(s.cause.as_ref().unwrap_or(&Value::Null));
                 let cause = parsed.as_ref().map_or_else(|| "unknown".into(), |c| c.sentence());
@@ -1532,9 +1803,18 @@ async fn mirror(em: &Arc<Emergency>, t3: &dyn CoverT3, side: &dyn Side) {
         Err(e) => { eprintln!("emergency: the relay thread was not mirrored this time: {e:#}"); return }
     };
     let names = agent::identity::current();
-    for item in items {
-        if let Some(text) = mirror_text(&item, &em.cli) {
-            let text = agent::identity::names_only(&text, &names);
+    let texts: Vec<Option<String>> = items.iter().map(|item| mirror_text(item, &em.cli).map(|t| agent::identity::names_only(&t, &names))).collect();
+    // Bug note 2026-11-08T02-03-47: a pass carries the newest items up to the budget; the older ones are named once.
+    let from = bounded_from(&texts, side.mirror_budget());
+    if from > 0 {
+        let left: Vec<u64> = items[..from].iter().zip(&texts).filter(|(_, t)| t.is_some()).map(|(i, _)| i.position).collect();
+        if let (Some(first), Some(last)) = (left.first(), left.last()) {
+            side.record(&format!("{}mirror:{}:{first}-{last}:left-out", agent::notice::EMERGENCY_COVER, safe(&thread)),
+                &format!("[Relay agent: {} earlier items of its conversation are left out here so your context stays within its budget; they are in T3 thread {thread} (t3_thread_read)]", left.len()));
+        }
+    }
+    for (n, (item, text)) in items.into_iter().zip(texts).enumerate() {
+        if let Some(text) = text.filter(|_| n >= from) {
             let parts = split_whole(&text, MIRROR_PART);
             let n = parts.len();
             for (i, part) in parts.into_iter().enumerate() {
@@ -1544,6 +1824,17 @@ async fn mirror(em: &Arc<Emergency>, t3: &dyn CoverT3, side: &dyn Side) {
         }
         em.set(|s| if s.mirrored.as_ref().is_some_and(|(t, _)| t == &thread) { s.mirrored = Some((thread.clone(), item.position)); });
     }
+}
+/// The first of `texts` a mirror pass carries: the newest that fit `budget` bytes together (the newest always does).
+fn bounded_from(texts: &[Option<String>], budget: usize) -> usize {
+    let (mut bytes, mut from) = (0, texts.len());
+    for (i, t) in texts.iter().enumerate().rev() {
+        let Some(t) = t else { continue };
+        if bytes + t.len() > budget && from < texts.len() { return from; }
+        bytes += t.len();
+        from = i;
+    }
+    0
 }
 /// What one thread item becomes in Pi's session, `None` when it is already there or no message or action.
 fn mirror_text(item: &Item, cli: &str) -> Option<String> {
@@ -1589,7 +1880,7 @@ fn split_whole(text: &str, max: usize) -> Vec<String> {
 fn describe(name: &str, a: &Value) -> String {
     let s = |k: &str| a[k].as_str().map(|v| bounded(v, 300)).unwrap_or_default();
     match name {
-        "speak" => format!("said to User: \"{}\"", s("text")),
+        "speak" => format!("said to {}: \"{}\"", agent::identity::user(), s("text")),
         "island_notice" => format!("showed '{}': {}", s("text"), a["detail"]["text"].as_str().map(|t| bounded(t, 300)).unwrap_or_default()),
         "bug_note" => format!("filed a bug note: {}", s("text")),
         "plan_edit" => format!("plan {} '{}'", s("action"), s("item")),
@@ -1598,13 +1889,12 @@ fn describe(name: &str, a: &Value) -> String {
         _ => format!("{name} {}", bounded(&a.to_string(), 300)),
     }
 }
-fn label(kind: &str) -> &str {
-    match kind { "stop" => "User pressed Stop", "wake" => "User said", "typed" => "User typed", "answer" => "User clicked", "question" => "a T3 thread asks", "result" => "a task finished", "scheduled" => "a scheduled wake", _ => "a notice" }
+fn label(kind: &str) -> String {
+    let user = agent::identity::user();
+    match kind { "stop" => format!("{user} pressed Stop"), "wake" => format!("{user} said"), "typed" => format!("{user} typed"), "answer" => format!("{user} clicked"),
+        "question" => "a T3 thread asks".into(), "result" => "a task finished".into(), "scheduled" => "a scheduled wake".into(), _ => "a notice".into() }
 }
-fn bounded(s: &str, chars: usize) -> String {
-    let s = s.trim();
-    if s.chars().count() <= chars { s.into() } else { format!("{}…", s.chars().take(chars).collect::<String>()) }
-}
+use em::bounded;
 fn safe(id: &str) -> String { id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).take(80).collect() }
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
@@ -1639,6 +1929,16 @@ pub fn signal(d: &mut em::Detector, event: &agent::protocol::Event, emergency: &
 const QUOTA_WAIT: Duration = Duration::from_secs(20);
 /// The oldest reading a relay choice takes (the relay's own reader reused a scan for a minute).
 const QUOTA_AGE: Duration = Duration::from_secs(60);
+/// What the relay thread is told when relay mode ends or moves (`{user}`: `relay_worded` names the user).
+pub(crate) const SWITCHED_BACK: &str = "{user} switched Heimdall back to his built-in agent. Stop acting for him now; his tools stop working for you.";
+pub(crate) const SWITCHED_MODEL: &str = "{user} switched the relay to another model. Stop acting for him now; his tools stop working for you.";
+pub(crate) const WENT_BACK: &str = "{user} went back to his original account. Stop acting for him now; his tools stop working for you.";
+pub(crate) const WRAP_UP: &str = "Heimdall's agent answers again. Wrap up: stop acting for him and don't speak to {user} again. His tools stop working for you now.";
+
+/// A message for the relay thread in the edition's wording, as the built-in agent gets its own (`agent::identity::for_agent`):
+/// The user's words byte for byte; a renamed user, or the public edition, by their name or "the user".
+pub(crate) fn relay_worded(message: &str, names: &agent::identity::Names) -> String { agent::identity::for_agent(message, names) }
+
 /// The production T3: the app's own outside-client connection (crates/t3).
 pub struct T3Cover(pub Arc<t3::Client>);
 #[async_trait]
@@ -1652,12 +1952,14 @@ impl CoverT3 for T3Cover {
             .map(|a| routing::quotas_from(&a)).unwrap_or_default()
     }
     async fn launch(&self, title: &str, message: &str, h: &Harness) -> Result<(String, Option<String>)> {
+        let message = &relay_worded(message, &agent::identity::current());
         let project = self.vault_project().await?;
         let args = json!({"projectId":project,"title":title,"message":message,"modelSelection":{"instanceId":h.instance,"model":h.model},"runtimeMode":"full-access","workspaceStrategy":{"type":"root"}});
         let r = self.0.call_deadline("t3_thread_launch", args, Duration::from_secs(60)).await?;
         Ok((r["threadId"].as_str().context("T3 launch lacks a thread id")?.into(), r["runId"].as_str().map(str::to_owned)))
     }
     async fn send(&self, thread: &str, message: &str) -> Result<Option<String>> {
+        let message = &relay_worded(message, &agent::identity::current());
         let send = |mode: &str| self.0.call("t3_thread_send", json!({"threadId":thread,"message":message,"mode":mode,"clientRequestId":uuid::Uuid::new_v4().to_string()}));
         let r = match send("auto").await {
             // Live smoke 27 Oct: right after the user's Stop interrupted it, a run "is stopping and cannot be steered"; the
@@ -1810,6 +2112,12 @@ impl Side for AppSide {
     fn record(&self, id: &str, text: &str) {
         if let Some(t) = self.tools.upgrade() { if let Err(e) = t.emergency_record(id, text) { eprintln!("emergency: record not kept: {e:#}"); } }
     }
+    /// 40% of the built-in agent's budget, at four bytes a token: a batch delivered after the handover cut (which keeps
+    /// half) still fits beside it (review, 8 Nov).
+    fn mirror_budget(&self) -> usize {
+        let settings = crate::settings::Settings::load(&self.data.join("settings.json")).ok();
+        settings.as_ref().and_then(|s| s.selected_api_model()).map_or(MIRROR_BUDGET, |m| m.limits().context as usize * 4 * 2 / 5)
+    }
     fn release(&self, back: Option<String>) {
         if let Some(t) = self.tools.upgrade() { t.emergency_release(back); }
     }
@@ -1818,8 +2126,8 @@ impl Side for AppSide {
         if let Some(t) = self.tools.upgrade() { if let Err(e) = t.emergency_record(&format!("{}{}", agent::notice::EMERGENCY_LATE, r.id), &text) { eprintln!("emergency: late input not passed on: {e:#}"); } }
     }
     fn unfinished(&self, r: &Relayed) {
-        let images = if r.images.is_empty() { String::new() } else { format!(" ({} image(s) came with it; ask User to send them again if you need them)", r.images.len()) };
-        let text = agent::identity::names_only(&format!("[The relay had not finished this when User switched back to you; what it did is in your conversation above, and its reply was not given. Finish what is left] {}: {}{images}", label(&r.kind), r.text), &agent::identity::current());
+        let images = if r.images.is_empty() { String::new() } else { format!(" ({} image(s) came with it; ask {} to send them again if you need them)", r.images.len(), agent::identity::user()) };
+        let text = agent::identity::names_only(&format!("[The relay had not finished this when {} switched back to you; what it did is in your conversation above, and its reply was not given. Finish what is left] {}: {}{images}", agent::identity::user(), label(&r.kind), r.text), &agent::identity::current());
         if let Some(t) = self.tools.upgrade() { if let Err(e) = t.emergency_record(&format!("{}{}", agent::notice::EMERGENCY_LATE, r.id), &text) { eprintln!("emergency: unfinished input not passed on: {e:#}"); } }
     }
     fn context(&self, bytes: usize) -> (String, String, String) {

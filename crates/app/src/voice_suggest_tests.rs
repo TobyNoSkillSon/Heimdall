@@ -36,11 +36,11 @@ fn near(cos: f32) -> Embedding {
 }
 fn store(codes: &[(&str, Embedding)]) -> EnrollmentStore {
     let mut s = EnrollmentStore::default();
-    s.enroll("Kanan", unit(0)).unwrap();
+    s.enroll("Alex", unit(0)).unwrap();
     for (c, e) in codes {
         s.voices.insert((*c).into(), speakers::identity::CodedVoice {
             embeddings: vec![e.clone()],
-            heard_in: "Discord".into(), quote: String::new(), first_ms: 0, last_ms: 0, calls: 1, days: Default::default(), irrelevant: false,
+            heard_in: "Discord".into(), quote: String::new(), first_ms: 0, last_ms: 0, calls: 1, days: Default::default(), irrelevant: false, widened: vec![],
         });
     }
     s
@@ -185,16 +185,16 @@ fn the_card_offers_at_most_two_real_guesses_said_around_the_voice() {
         {"name": "Bob", "confidence": "medium", "hints": []},
         {"name": "User", "confidence": "high", "hints": []},
     ]));
-    // The voice sounds a little like Kanan (0.42): a guess after the model's, never sure.
+    // The voice sounds a little like Alex (0.42): a guess after the model's, never sure.
     let s = store(&[(MARI, near(0.42))]);
     let card = guessed(&c, &s, &State::default(), Some(&mut ask));
     assert_eq!(card.candidates, vec![
         Candidate { name: "Mari".into(), sure: true },
-        Candidate { name: "Kanan".into(), sure: false },
+        Candidate { name: "Alex".into(), sure: false },
     ], "a low hunch (Ellie) is no real guess; Bob was never said; User is never a guess");
     // The quote, the names, (the island's name field), Not important: one card, no question, no second step.
     assert_eq!(card_text(&card), "New voice: \u{201c}It was way faster than last week…\u{201d}");
-    assert_eq!(card_options(&card), ["Mari", "Kanan", NOT_IMPORTANT]);
+    assert_eq!(card_options(&card), ["Mari", "Alex", NOT_IMPORTANT]);
 }
 
 #[test]
@@ -229,9 +229,9 @@ fn with_no_real_guess_the_card_is_the_quote_the_field_and_not_important() {
     let s = store(&[(MARI, near(0.43))]);
     let mut broken = |_: &str| -> Result<String> { anyhow::bail!("quota") };
     let card = guessed(&c, &s, &State::default(), Some(&mut broken));
-    assert_eq!(card.candidates, vec![Candidate { name: "Kanan".into(), sure: false }]);
+    assert_eq!(card.candidates, vec![Candidate { name: "Alex".into(), sure: false }]);
     assert_eq!(card.error.as_deref(), Some("quota"));
-    assert_eq!(card_options(&card), ["Kanan", NOT_IMPORTANT]);
+    assert_eq!(card_options(&card), ["Alex", NOT_IMPORTANT]);
 }
 
 #[test]
@@ -239,15 +239,15 @@ fn a_voice_far_from_every_known_one_sounds_like_nobody() {
     let s = store(&[(MARI, near(0.39))]);
     assert_eq!(sounds_like(&s, MARI), None);
     let s = store(&[(MARI, near(0.41))]);
-    assert_eq!(sounds_like(&s, MARI).map(|(n, _)| n), Some("Kanan".into()));
+    assert_eq!(sounds_like(&s, MARI).map(|(n, _)| n), Some("Alex".into()));
 }
 
 #[test]
 fn the_look_has_its_own_prompt_and_a_strict_schema() {
-    let body = crate::background_call::prepare(&call("claude-haiku-5-5", "x")).unwrap().body;
-    assert_eq!(body["system"][0]["text"], SYSTEM);
+    let body = crate::background_call::prepare(&call("claude-haiku-5-5", &system(), "x")).unwrap().body;
+    assert_eq!(body["system"][0]["text"], system());
     assert_eq!(body["output_config"]["format"]["schema"]["additionalProperties"], false);
-    assert!(SYSTEM.contains("answers next") && SYSTEM.contains("Never answer User"));
+    assert!(SYSTEM.contains("answers next") && SYSTEM.contains("Never answer {user}"));
 }
 
 #[test]

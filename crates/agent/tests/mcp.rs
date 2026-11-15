@@ -1,5 +1,5 @@
 use agent::{
-    mcp::{McpServer, ScreenshotResult, ToolHost, UnavailableArchive},
+    mcp::{McpServer, ToolHost, UnavailableArchive},
     protocol::Attachment,
 };
 use anyhow::Result;
@@ -18,19 +18,22 @@ impl ToolHost for Host {
         Ok(42)
     }
     async fn screen_frames(&self, _: Value, _: &agent::delivery::DeliveryPermit) -> Result<Value> {
-        Ok(ScreenshotResult {
-            images: (1..=4)
-                .map(|id| Attachment {
-                    media_type: "image/png".into(),
-                    bytes: vec![id; 3],
-                })
-                .collect(),
-            warnings: vec!["test supplemental failure".into()],
-            notes: vec![],
-        }
-        .into_value()
+        Ok(images_result(
+            (1..=4).map(|id| Attachment { media_type: "image/png".into(), bytes: vec![id; 3] }).collect(),
+            vec!["test supplemental failure".into()],
+        )
         .unwrap())
     }
+}
+/// Image content as a tool result carries it: each image, then each warning as text.
+fn images_result(images: Vec<Attachment>, warnings: Vec<String>) -> Result<Value> {
+    let mut content = vec![];
+    for image in images {
+        let block = image.block()?;
+        content.push(json!({"type":"image","data":block["source"]["data"],"mimeType":block["source"]["media_type"]}));
+    }
+    content.extend(warnings.into_iter().map(|w| json!({"type":"text","text":w})));
+    Ok(json!({"content":content}))
 }
 async fn rpc(server: &McpServer, value: Value, auth: bool) -> String {
     rpc_at(&server.url, &server.token, value, auth).await
@@ -210,15 +213,10 @@ impl ToolHost for RetiringArchive {
         self.release.notified().await;
         permit.with(|| {
             self.completed.fetch_add(1, Ordering::SeqCst);
-            Ok(ScreenshotResult {
-                images: vec![Attachment {
-                    media_type: "image/png".into(),
-                    bytes: b"retired-server-private-result".to_vec(),
-                }],
-                warnings: vec![],
-                notes: vec![],
-            }
-            .into_value()?)
+            images_result(
+                vec![Attachment { media_type: "image/png".into(), bytes: b"retired-server-private-result".to_vec() }],
+                vec![],
+            )
         })
     }
 }

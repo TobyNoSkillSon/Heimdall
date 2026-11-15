@@ -10,9 +10,12 @@
 //!    that came due while Heimdall or the agent was off arrives once at the next start, with its original time);
 //! 2. puts each sent wake into the action outbox under `selfwake:<id>` (the existing notice path: `Actions::drain` →
 //!    the agent's durable, id-deduplicated notice queue), re-arming a row an Agent Off/On dropped before delivery;
-//! 3. runs registered checks (`add_check`), then drains the outbox, which retries every undelivered notice, also
-//!    ones the T3 watcher could not drain because its own pass failed;
+//! 3. drains the outbox, which retries every undelivered notice, also ones the T3 watcher could not drain because
+//!    its own pass failed;
 //! 4. marks wakes whose outbox row was delivered, and logs any outbox notice still undelivered after `STUCK_MS`.
+//!
+//! A pass that could not deliver is retried after `RETRY_MS`, doubling to `TICK_MS`, and `agent_ready` (the agent
+//! started, restarted or came back from a stall) runs one at once: a wake missed during a stall arrives on recovery.
 //!
 //! Exactly once: the outbox id and the agent's delivery key derive from the wake id, so a retry, a crash between
 //! delivery and bookkeeping, or a restart can never deliver a wake twice.
@@ -45,6 +48,21 @@ pub const STUCK_MS: u64 = 2 * 60_000;
 pub const MAX_PENDING: usize = 100;
 /// Outbox ids of wakes; `agent::notice::NoticeKind::classify` makes them a `Scheduled` notice.
 pub const OUTBOX_PREFIX: &str = "selfwake:";
+/// After a pass that could not deliver (the agent did not acknowledge), the next one comes this soon, doubling up to
+/// `TICK_MS`, instead of a whole tick later.
+pub const RETRY_MS: u64 = 1_000;
+
+/// Every heartbeat's "the agent is back" signal (`agent_ready`).
+static AGENT_READY: tokio::sync::Notify = tokio::sync::Notify::const_new();
+static READY_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// The agent became ready (started, restarted, or back after a stall): every heartbeat passes at once, so a wake that
+/// came due while the agent could not take it reaches it now, not at the next tick. 13-14 Nov: wake-795418 fired on
+/// time at 23:37 while a Keychain dialog held Heimdall; it was delivered at 08:16:22, 25 s after the agent was ready
+/// at 08:15:57, waiting out the 30 s retry.
+pub fn agent_ready() {
+    READY_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    AGENT_READY.notify_waiters();
+}
 
 /// When a wake is due: a local wall-clock time (the next occurrence, or on a given date) or a delay.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -184,23 +202,22 @@ pub struct Pass {
     /// The outbox drain's failure, if any (retried next pass).
     pub error: Option<String>,
 }
-/// A periodic check another part registers on the heartbeat (`add_check`); it may enqueue outbox notices, which
-/// the same pass then delivers.
-pub type Check = Arc<dyn Fn(&DeliveryPermit) -> Result<()> + Send + Sync>;
-
 pub struct Wakes {
     db: Mutex<Connection>,
     clock: ClockHandle,
     zone: Arc<dyn Zone>,
     changed: tokio::sync::Notify,
-    checks: Mutex<Vec<(String, Check)>>,
     /// Undelivered outbox ids: when first seen and whether logged as stuck.
     seen: Mutex<HashMap<String, (u64, bool)>>,
     /// The last logged pass failure; the same failure is not logged every tick.
     last_error: Mutex<Option<String>>,
     /// The longest sleep (`TICK_MS`; integration tests shorten it).
     tick_ms: std::sync::atomic::AtomicU64,
+    /// Told when a wake leaves pending for good (bug note 2026-11-14T16-58-00): `(id, "delivered" | "cancelled")`.
+    settled: Mutex<Option<SettledHook>>,
 }
+/// `Wakes::on_settled`'s callback.
+pub type SettledHook = Arc<dyn Fn(&str, &str) + Send + Sync>;
 fn outbox_id(id: &str) -> String {
     format!("{OUTBOX_PREFIX}{id}")
 }
@@ -226,15 +243,32 @@ impl Wakes {
             clock,
             zone,
             changed: tokio::sync::Notify::new(),
-            checks: Mutex::new(vec![]),
             seen: Mutex::new(HashMap::new()),
             last_error: Mutex::new(None),
             tick_ms: std::sync::atomic::AtomicU64::new(TICK_MS),
+            settled: Mutex::new(None),
         })
     }
     fn now(&self) -> u64 {
         self.clock.now_ms()
     }
+    // ---- wakes for the user's requests (bug note 2026-11-14T16-58-00) ----
+    /// Call `hook(id, state)` when a wake is delivered to the agent or cancelled: the app clears the Scheduled item a
+    /// wake carrying the user's request made (`islands::wake_items`).
+    pub fn on_settled(&self, hook: SettledHook) {
+        *self.settled.lock().unwrap() = Some(hook);
+    }
+    fn settle(&self, id: &str, state: &str) {
+        let hook = self.settled.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook(id, state);
+        }
+    }
+    /// A wake's state (`pending`, `sent`, `delivered`, `cancelled`), `None` when there is no such wake.
+    pub fn state(&self, id: &str) -> Result<Option<String>> {
+        Ok(self.select("id=?1", [id])?.into_iter().next().map(|w| w.state))
+    }
+    // ---- end wakes for the user's requests ----
     /// Schedule a wake once per `operation`: a replay returns the same wake; the same operation with another
     /// request is a `REPLAY_CONFLICT`. Returns the wake and the one-line confirmation.
     pub fn schedule(&self, operation: &str, when: &When, message: &str, source: Source) -> Result<(Wake, String)> {
@@ -356,6 +390,7 @@ impl Wakes {
         if changed == 1 {
             eprintln!("Scheduled wake {id} cancelled.");
             self.changed.notify_one();
+            self.settle(id, "cancelled");
         }
         let at = label(wake.due_ms, self.now(), self.zone.as_ref());
         Ok(match wake.state.as_str() {
@@ -369,17 +404,13 @@ impl Wakes {
         let set = label(w.created_ms, w.due_ms, z);
         let due = label(w.due_ms, now, z);
         let head = if w.source == "cli" {
-            format!("Scheduled message {} from a local agent (not User), set at {set} for {due}", w.id)
+            format!("Scheduled message {} from a local agent (not {}), set at {set} for {due}", w.id, crate::identity::user())
         } else {
             format!("Scheduled wake {}: you set it at {set} for {due}", w.id)
         };
         let late = if late { format!(". Late: it came due while Heimdall or the agent was off; it is now {}", z.local(now).format("%H:%M")) } else { String::new() };
         let tail = if w.source == "cli" { "Its message" } else { "Your note, your own instruction to act on now" };
         format!("{head}{late}.\n{tail}: {}", w.message)
-    }
-    /// Register a check run on every heartbeat pass, before the outbox drain.
-    pub fn add_check(&self, name: &str, check: Check) {
-        self.checks.lock().unwrap().push((name.into(), check));
     }
     /// One heartbeat pass (see the module comment). Blocking: the outbox drain waits for the agent's acknowledgement.
     pub fn pass(&self, actions: &Actions, permit: &DeliveryPermit) -> Result<Pass> {
@@ -417,14 +448,8 @@ impl Wakes {
                 _ => {}
             }
         }
-        // 3. Registered checks, then the drain: every undelivered outbox notice is retried.
-        let checks = self.checks.lock().unwrap().clone();
+        // 3. The drain: every undelivered outbox notice is retried.
         let mut errors = vec![];
-        for (name, check) in checks {
-            if let Err(e) = check(permit) {
-                errors.push(format!("{name}: {e:#}"));
-            }
-        }
         if let Err(e) = actions.drain(permit) {
             errors.push(format!("outbox: {e:#}"));
         }
@@ -435,6 +460,7 @@ impl Wakes {
                 if done == 1 {
                     eprintln!("Scheduled wake {} delivered to the agent.", w.id);
                     pass.delivered.push(w.id.clone());
+                    self.settle(&w.id, "delivered");
                 }
             }
         }
@@ -485,11 +511,16 @@ impl Wakes {
     }
     /// The heartbeat: a pass now, then at each due time or every `TICK_MS`, and at once after a schedule or cancel.
     /// Passes run only while the agent is on (a permit exists); a wake due while it is off fires, late, once it is on.
+    /// After a pass that could not deliver, the next comes after `RETRY_MS`, doubling to `TICK_MS`; `agent_ready`
+    /// starts one at once (also one that comes while a pass runs: the pass after it follows without a wait).
     pub async fn heartbeat(self: Arc<Self>, actions: Arc<Actions>, gate: Arc<DeliveryGate>, mut stop: tokio::sync::watch::Receiver<bool>) {
+        let mut retry: Option<u64> = None;
         loop {
             if *stop.borrow() {
                 return;
             }
+            let epoch = READY_EPOCH.load(std::sync::atomic::Ordering::SeqCst);
+            let mut failed = false;
             if let Ok(permit) = gate.permit() {
                 let (this, actions) = (self.clone(), actions.clone());
                 let pass = tokio::task::spawn_blocking(move || this.pass(&actions, &permit));
@@ -499,20 +530,36 @@ impl Wakes {
                     changed = stop.changed() => if changed.is_err() || *stop.borrow() { return } else { continue },
                     result = pass => result,
                 };
-                if let Ok(Err(e)) = result {
-                    let line = format!("{e:#}");
-                    let mut last = self.last_error.lock().unwrap();
-                    if last.as_deref() != Some(line.as_str()) {
-                        eprintln!("Heartbeat pass failed (retried every {} s): {line}", TICK_MS / 1000);
-                        *last = Some(line);
+                match result {
+                    Ok(Ok(pass)) => failed = pass.error.is_some(),
+                    Ok(Err(e)) => {
+                        failed = true;
+                        let line = format!("{e:#}");
+                        let mut last = self.last_error.lock().unwrap();
+                        if last.as_deref() != Some(line.as_str()) {
+                            eprintln!("Heartbeat pass failed (retried every {} s): {line}", TICK_MS / 1000);
+                            *last = Some(line);
+                        }
                     }
+                    Err(_) => failed = true,
                 }
             }
-            let wait = std::time::Duration::from_millis(self.next_wait_ms().max(50));
+            retry = failed.then(|| retry.map_or(RETRY_MS, |r| (r * 2).min(TICK_MS)));
+            // Listen before the epoch check: `notify_waiters` keeps no permit, so a signal between the check and the
+            // select would otherwise wait out the whole sleep (review 14 Nov).
+            let ready = AGENT_READY.notified();
+            tokio::pin!(ready);
+            ready.as_mut().enable();
+            if READY_EPOCH.load(std::sync::atomic::Ordering::SeqCst) != epoch {
+                continue;
+            }
+            let next = self.next_wait_ms();
+            let wait = std::time::Duration::from_millis(retry.map_or(next, |r| r.min(next)).max(50));
             tokio::select! {
                 biased;
                 changed = stop.changed() => if changed.is_err() || *stop.borrow() { return; },
                 _ = self.changed.notified() => {},
+                _ = &mut ready => {},
                 _ = tokio::time::sleep(wait) => {},
             }
         }
@@ -522,18 +569,21 @@ impl Wakes {
 /// The agent's three tools. `operation` is the tool call's replay identity.
 pub fn tool(wakes: &Wakes, name: &str, args: &Value, operation: &str) -> Result<String> {
     match name {
-        "schedule_wake" => {
-            let when = match (args["at"].as_str(), args["in_minutes"].as_u64()) {
-                (Some(at), None) => When::parse_at(at)?,
-                (None, Some(m)) => When::In { ms: m * 60_000 },
-                _ => bail!("give at or in_minutes"),
-            };
-            Ok(wakes.schedule(operation, &when, args["message"].as_str().unwrap_or(""), Source::Agent)?.1)
-        }
+        "schedule_wake" => Ok(schedule_tool(wakes, args, operation)?.1),
         "list_wakes" => wakes.list_line(),
         "cancel_wake" => wakes.cancel(args["id"].as_str().unwrap_or("")),
         _ => bail!("unknown wake tool"),
     }
+}
+
+/// `schedule_wake`'s wake and line; the app reads the wake to link a Scheduled item to it (`user_asked`).
+pub fn schedule_tool(wakes: &Wakes, args: &Value, operation: &str) -> Result<(Wake, String)> {
+    let when = match (args["at"].as_str(), args["in_minutes"].as_u64()) {
+        (Some(at), None) => When::parse_at(at)?,
+        (None, Some(m)) => When::In { ms: m * 60_000 },
+        _ => bail!("give at or in_minutes"),
+    };
+    wakes.schedule(operation, &when, args["message"].as_str().unwrap_or(""), Source::Agent)
 }
 
 /// `Heimdall --schedule-wake [--data-dir DIR] (--in SECONDS | --at HH:MM) --message TEXT [--id OPERATION]`: writes
@@ -787,8 +837,33 @@ mod tests {
         assert_eq!(a.wakes.cancel(&w2.id).unwrap(), format!("Wake {} already fired at 01:54; nothing to cancel.", w2.id));
         let got = agent.got.lock().unwrap().clone();
         assert_eq!(got.len(), 1, "the cancelled wake never fires");
-        assert!(got[0].1.starts_with(&format!("Scheduled message {} from a local agent (not User), set at 01:52 for 01:54. Late: it came due", w2.id)), "{}", got[0].1);
+        assert!(got[0].1.starts_with(&format!("Scheduled message {} from a local agent (not the user), set at 01:52 for 01:54. Late: it came due", w2.id)), "{}", got[0].1);
     }
+
+    // ---- wakes for the user's requests (bug note 2026-11-14T16-58-00) ----
+    #[test]
+    fn the_settled_hook_hears_each_delivery_and_cancel_once() {
+        let d = tempfile::tempdir().unwrap();
+        let clock = SimClock::at(utc(2026, 10, 20, 23, 52));
+        let agent = Arc::new(Agent::default());
+        let a = app(d.path(), &clock, &agent);
+        let (_g, p) = gate();
+        let heard = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let h = heard.clone();
+        a.wakes.on_settled(Arc::new(move |id: &str, state: &str| h.lock().unwrap().push((id.into(), state.into()))));
+        let (w1, _) = schedule_tool(&a.wakes, &json!({"in_minutes": 1, "message": "run it"}), "a").unwrap();
+        let (w2, _) = schedule_tool(&a.wakes, &json!({"in_minutes": 5, "message": "drop it"}), "b").unwrap();
+        assert_eq!(a.wakes.state(&w1.id).unwrap().as_deref(), Some("pending"));
+        a.wakes.cancel(&w2.id).unwrap();
+        a.wakes.cancel(&w2.id).unwrap();
+        clock.advance(2 * 60_000);
+        a.wakes.pass(&a.actions, &p).unwrap();
+        a.wakes.pass(&a.actions, &p).unwrap();
+        assert_eq!(*heard.lock().unwrap(), vec![(w2.id.clone(), "cancelled".into()), (w1.id.clone(), "delivered".into())]);
+        assert_eq!(a.wakes.state(&w1.id).unwrap().as_deref(), Some("delivered"));
+        assert_eq!(a.wakes.state("wake-nope").unwrap(), None);
+    }
+    // ---- end wakes for the user's requests ----
 
     #[test]
     fn a_wake_due_while_heimdall_was_down_arrives_once_at_startup_marked_late() {
@@ -798,7 +873,7 @@ mod tests {
         let (_g, p) = gate();
         let id = {
             let a = app(d.path(), &clock, &agent);
-            a.wakes.schedule("op", &hm(7, 0), "Tell User the build is ready", Source::Agent).unwrap().0.id
+            a.wakes.schedule("op", &hm(7, 0), "Tell the user the build is ready", Source::Agent).unwrap().0.id
         }; // Heimdall quits.
         clock.set(utc(2026, 10, 21, 6, 13)); // starts again at 08:13
         let a = app(d.path(), &clock, &agent);
@@ -946,7 +1021,7 @@ mod tests {
         assert_eq!(got.len(), 40, "every wake once");
         let ids: std::collections::HashSet<_> = got.iter().map(|g| g.0.clone()).collect();
         assert_eq!(ids.len(), 40);
-        assert!(got.iter().all(|g| g.1.contains("from a local agent (not User)")));
+        assert!(got.iter().all(|g| g.1.contains("from a local agent (not the user)")));
         // Bad command lines say what is wrong in one line.
         let bad = |args: &[&str]| cli(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>(), || Ok(data.clone())).unwrap_err().to_string();
         assert!(bad(&["--message", "x"]).starts_with("give --in or --at"));
@@ -976,6 +1051,41 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         assert!(started.elapsed() >= std::time::Duration::from_millis(300));
+        stop.send_replace(true);
+        tokio::time::timeout(std::time::Duration::from_secs(2), task).await.unwrap().unwrap();
+    }
+
+    /// 13-14 Nov: a wake came due while the agent could not take it (a Keychain dialog held Heimdall); when the agent
+    /// is back it arrives at once, not a 30 s tick later, and once, said late with its original time.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_wake_missed_during_a_stall_arrives_as_soon_as_the_agent_is_back() {
+        let d = tempfile::tempdir().unwrap();
+        let agent = Arc::new(Agent::default());
+        // The stalled agent: every delivery fails until it recovers.
+        agent.fail.store(usize::MAX, Ordering::SeqCst);
+        let actions = Arc::new(Actions::open(&d.path().join("agent/mcp-actions.sqlite")).unwrap());
+        actions.attach(agent.clone());
+        let wakes = Arc::new(Wakes::open(&d.path().join("agent/wakes.sqlite")).unwrap());
+        let gate = Arc::new(DeliveryGate::new(true));
+        let (stop, rx) = tokio::sync::watch::channel(false);
+        wakes.schedule("op", &When::In { ms: 1 }, "check the night pass", Source::Agent).unwrap();
+        let task = tokio::spawn(wakes.clone().heartbeat(actions.clone(), gate.clone(), rx));
+        // It fires on time and fails to reach the agent; the retries back off.
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        assert!(agent.got.lock().unwrap().is_empty());
+        assert_eq!(wakes.pending().unwrap().len(), 0, "claimed: it fired");
+        // Long enough that the backoff has grown (1 s, 2 s, 4 s ...): only the ready signal explains a fast delivery.
+        tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+        agent.fail.store(0, Ordering::SeqCst);
+        let back = std::time::Instant::now();
+        agent_ready();
+        while agent.got.lock().unwrap().is_empty() {
+            assert!(back.elapsed() < std::time::Duration::from_millis(900), "not delivered at once after the agent was back");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let got = agent.got.lock().unwrap().clone();
+        assert_eq!(got.len(), 1);
+        assert!(got[0].1.contains("check the night pass"), "{}", got[0].1);
         stop.send_replace(true);
         tokio::time::timeout(std::time::Duration::from_secs(2), task).await.unwrap().unwrap();
     }
@@ -1010,15 +1120,15 @@ mod tests {
         sim.world.lock().unwrap().replies.push_back(vec![Step::Think(10 * MIN)]);
         sim.say("another long job");
         sim.advance(MIN);
-        sim.notice("selfwake:wake-7a8b9c", "Scheduled wake wake-7a8b9c: you set it at 01:52 for 09:00.\nYour note, your own instruction to act on now: tell User the result");
+        sim.notice("selfwake:wake-7a8b9c", "Scheduled wake wake-7a8b9c: you set it at 01:52 for 09:00.\nYour note, your own instruction to act on now: tell the user the result");
         sim.restart(None);
         sim.advance(MIN);
         sim.settle();
-        assert_eq!(carrying(&sim, "tell User the result"), 1, "{:#?}", sim.wakes());
+        assert_eq!(carrying(&sim, "tell the user the result"), 1, "{:#?}", sim.wakes());
         sim.restart(None);
         sim.advance(MIN);
         sim.settle();
-        assert_eq!(carrying(&sim, "tell User the result"), 1);
+        assert_eq!(carrying(&sim, "tell the user the result"), 1);
         sim.check_global();
     }
 

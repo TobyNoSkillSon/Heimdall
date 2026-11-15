@@ -1,285 +1,370 @@
-# Heimdall archive
+# Archive store
 
-How the archive store keeps every captured source, model output and screen frame, ages it, and gives it back. Code
-map and writer rules: `crates/archive/README.md`. Capture's side: `docs/capture.md`. Video specifics:
-`docs/screen.md`. Search index: `docs/chunk-index.md` (memory search needs macOS 26 or newer on Apple silicon). Movies of a window: `docs/archive-clip.md`.
+The archive is one store, an SQLite index plus content packs, that keeps every captured audio source, model output,
+transcript line, screenshot and screen frame. It holds content hot for a day, then compacts it to a cold tier, and it
+never deletes content for age.
 
-Every captured source is kept, including sources not listened to and
-Heimdall's own voice. No speech detector removes audio and there is no retention deletion. Agents operate the
-archive and its tools.
+Read this when: you add a writer or reader of archived data, you change the schema or a pack, you debug a slow or
+stuck archive writer or a growing WAL, you change cold codecs or compaction, you migrate old per-launch folders, you
+export a dataset.
+Code: `crates/archive/src/` (`store.rs`, `live.rs`, `compact.rs`, `chunks.rs`, `records.rs`, `audio.rs`,
+`snapshot.rs`, `export.rs`, `migrate.rs`), `crates/app/src/archive.rs`. Code map:
+[crates/archive/README.md](../crates/archive/README.md).
 
-## One store
+Every source is kept, including sources nobody listens to and Heimdall's own voice. No speech detector removes audio,
+and no setting deletes content for age. Old settings files that still hold `retention_days` or `archive_format` load,
+and those keys are dropped on the next save.
 
-`~/Library/Application Support/Heimdall/archive/` (lab runs use an isolated root). No per-launch folders, no loose
-object files:
+## Layout on disk
+
+The store root is `<data>/archive/`: `<data>` is `heimdall_home::data_dir()`, normally `<home>/.heimdall`
+([home.md](home.md)). Lab runs pass the app an isolated `--data-dir`. Open Archive Folder in the menu reveals the root.
 
 ```text
-heimdall.sqlite        the index: sessions, capture segments, sources, gaps, callback blocks, the audio-object,
-                       image, chunk and log catalogues, evidence rows, payload/vector CAS, transcript, synthesized clips
-packs/hot.sqlite       hot content: native PCM objects and original screenshots (rolling, about one day)
-packs/YYYY-MM.sqlite   cold content of that UTC month: FLAC/Opus/zstd audio, cold screenshots, packed
-                       metadata chunks, compressed agent logs, synthesized clip audio
-.compact.lock          lifetime lock: readers shared; collection exclusive, one bounded batch, taken without waiting
-.compact.owner         one compactor per store across processes (never taken by a reader)
+heimdall.sqlite        the index (store::INDEX): every row and catalogue
+packs/hot.sqlite       hot content (store::HOT): native PCM objects, original screenshots, screen samples
+packs/YYYY-MM.sqlite   cold content of that UTC month: FLAC/Opus/zstd audio, cold screenshots, HAC3 chunks, logs
+.compact.lock          lifetime lock: readers take it shared, blob deletion exclusive
+.compact.owner         one compactor per store across processes; readers never take it
 ```
 
-- A session (one app launch) is a row. Code addresses it as `<archive>/<session-name>` (`session-<ms>-<uuid>`), a
-  path that is never created on disk. A capture segment (one capture timeline) is a row under its session; block,
-  evidence and utterance IDs are store-wide.
-- Content keys are content hashes, so audio objects, screenshots, JSON payloads and vectors are stored once across
-  all sessions.
-- Why packs: the index stays small enough to query and back up; bulk bytes live in a bounded number of large files,
-  one per month. Hot PCM has its own pack so a day of about 20 GB churn never moves pages in the index or a finished
-  month. Month packs are almost append-only and already compressed, so there is no whole-file sealing.
+- A pack is an SQLite file with one table, `blobs(key, added_ns, data)`. Keys say the kind: `a/<id>` audio object,
+  `i/<id>.<ext>` image, `v/<sha256>` screen sample, `c/<sha256>` HAC3 chunk, `l/<sha256>` log.
+- Content keys are content hashes, so identical audio, images, payloads and vectors are stored once across sessions.
+- A session (one app launch) is a row in `sessions`. Code names it `<archive>/session-<ms>-<uuid>`
+  (`app::archive::session_dir`), a path that is never created on disk; `store::locate` splits it into root and name.
+  A capture segment (one capture timeline) is a row in `segments` under its session.
 - Per-launch working files that are not archive content (agent dry-run log and spool, temporary screenshot PNGs, the
-  decide sink) live in `<data>/run/<session-name>/`. A clean finish archives the logs into the store's `logs` and
-  removes the directory; the next launch does this for a crashed one.
-- "Open Archive Folder" reveals `archive/` (`heimdall.sqlite` and `packs/`).
-- SQLite is WAL; readers must include the WAL. Copying a live `.sqlite` alone is unsafe; use
-  `export::snapshot_archive`.
+  decide sink) live in `<data>/run/<session-name>/` (`app::archive::run_dir`). A clean finish stores those files in
+  the session's `logs` and removes the folder (`retire_run`); the next launch does the same for a crashed one
+  (`retire_stale_runs`).
+- Why packs: the index stays small enough to query and back up, and bulk bytes live in a few large files. Hot content
+  has its own pack so its daily churn never moves pages in the index or a finished month.
 
-## Durability and locks
+## Copy or inspect the store safely
 
-- Content first, catalogue second; catalogue removal first, content second. A blob commits to its pack
-  (`synchronous=FULL`, `F_FULLFSYNC`) before the index transaction that references it, and every publishing
-  transaction re-checks under the index write lock that its blobs exist. A crash leaves at most an unreferenced blob.
-- Removing content only queues `(pack, key)` in `gc_blobs`. The collector deletes a blob only under the exclusive
-  lifetime lock and the index write lock, and only when no catalogue row references it. A publisher that finds its
-  blob gone rewrites it (capture does when identical audio returns). An hourly sweep, bounded per pack, removes
-  unreferenced blobs older than an hour; keys of unknown kinds are never touched.
-- Opening the index or a pack writes nothing: `auto_vacuum` and WAL mode are set only when they differ (a new file).
-  Setting them on every open was a write that waited for the shared lock and an fsync, and froze the live loop 2.0 s
-  (26 Oct 23:01; `tests/open_no_write.rs`). Every connection sets `synchronous=FULL`, `fullfsync=ON`,
-  `checkpoint_fullfsync=ON`, and caps the WAL at 64 MB after checkpoints (the index WAL sat at 102 MB, 27 Oct).
-- One writer per process (`live.rs`, thread `heimdall-archive-live`, user-initiated QoS) makes every index write, in
-  the order writes were handed over. Live jobs (journals, transcript, listen evidence, capture, screen, images, logs,
-  synthesized clips) commit in groups (≤256 jobs, ≤2,048 while a backlog drains, or 200 ms, a savepoint each); background jobs (compaction publish
-  steps, collection, embeddings) are one bounded transaction each and run when no live job waits, or once per 250 ms
-  between live groups. Inside the process nothing polls SQLite's busy handler any more; only another process (a
-  CLI) can make the writer wait, and it then keeps every job and retries (twenty writers on their own connections, 60 s waits and a compactor holding the lock for minutes once restarted
-  the agent on "database is locked").
-- Nothing on a live path waits long: `Journal::event` waits for its commit at most 1 s and only while the writer keeps
-  up; `note` and listen evidence never wait; capture's committer and the clip writer wait for their own commit
-  (`call`); `archive_log` waits at most 1 s, then its caller keeps the source and tries again. Busy, a full disk and
-  I/O errors are retried and never reach a caller; a job's own error drops that job alone (a job that keeps failing
-  alone with an I/O error is dropped after 8 tries). Checkpoints are PASSIVE, on their own thread, once the WAL holds
-  1,000 pages. Rules in `crates/archive/README.md`, "Writers".
-- A `call_within` past its wait returns `live::Busy` ("the archive is busy"): not a failure; the job commits later
-  and `Busy::settled` turns true once the writer has run it.
-- The writer names what holds it (2 Nov 15:51 it stood still 110 s, 1 Nov 00:15 for 133 s, and no line said why).
-  Every step (a write's preparation, a live write, a commit, taking the lock, a background job) carries the code
-  that handed it over (`#[track_caller]`). A step of 2 s or more logs `Archive writer held 12.3 s by a background
-  job from crates/archive/src/compact.rs:181`; one still running at 10 s logs `Archive writer busy … so far` once;
-  the `caught up` line adds the longest step. `Queue::holder` gives the step running now. A catch-up of 5 s or more,
-  or after a wait for another process, is always logged; a shorter one is logged when none was for 10 minutes and
-  otherwise counted into the next line (`+N shorter catch-ups since the last line`; 489 lines in two days, 3-5 Nov).
-- The WAL is capped at 64 MB only when a checkpoint copies every page and the next write restarts it; a reader
-  holding an old snapshot stops that, and one large transaction fills it at once (991 MB on 2 Nov 15:55). Past the
-  cap the checkpointer logs its size and whether the checkpoint was cut short by a reader, once per doubling. It is
-  logged back under the cap only after 10 minutes there; meanwhile each new rise past the cap is counted and logged
-  at most every 10 minutes (`Archive WAL crossed its 64 MB cap N times in M min`): 3-5 Nov it rose to 65-68 MB and was
-  cut back every 12 s, 7,208 lines in two days.
-- The restart needs a write that begins after a checkpoint copied every frame, with no commit in between. The
-  checkpointer's full-sync checkpoint outlasts the writer's 200 ms groups, so a commit nearly always lands during it
-  (3-4 Nov: the WAL grew to 4.2 GB, "every page copied" 1,094 times in a day). Past half the cap, once the
-  checkpointer has copied every frame it saw, the writer runs one small PASSIVE checkpoint itself between two groups
-  (at most every 5 s) and its next write restarts the WAL, so the WAL stays under the cap (restarting only past it,
-  the WAL rose past 64 MB and back every 8 s on 4-5 Nov, with two log lines each time). A checkpoint of 2 s or more is logged (`Archive checkpoint took …`): on
-  4 Nov 03:36 and 04:19 the writer stood 5 s in a page read while the checkpointer was in its final truncate.
-- Who holds a read snapshot is named (3 Nov 22:45-23:37 one pinned the WAL about 50 minutes, growing it to 8.8 GB,
-  and nothing said who). Every connection from `store::open` and `store::read_index` is watched through SQLite's
-  statement trace on its own thread (`readers.rs`): a read transaction open 60 s logs `Archive read snapshot held 61 s
-  so far by <thread> on a connection opened at <file:line> (<statement that began it>)` once, and its end
-  `… released after N s`. A WAL line about a checkpoint cut short by a reader adds the read transactions open here a
-  second or more, or, with none, the other processes that have the index open.
-- A backlog drains in groups of up to 2,048 jobs (still 200 ms of work each): at 256 per full-sync commit plus a
-  yield it drained about 165 jobs a second, barely above what arrives, and 40,000-50,000 queued writes took 250-320 s
-  (4 Nov 22:04 and 22:10, 5 Nov 00:13). Capture's flush commits its hot blobs before its job and reads
-  `store::collections` first; under the write lock, with the count unchanged, it catalogues them without reading the
-  hot pack (`audio::publish_put`), so a pack commit or checkpoint no longer holds every index write.
-- Open: on 4 Nov 03:36 and 04:19 (hang samples) every index reader stood in `pread` while the checkpointer was in the
-  checkpoint's final `ftruncate` of the database file; slow writer steps of 2-12 s at varying sites follow the same
-  pattern. A same-size truncate with 64 MB dirty was instant in an isolated 2 GB test, so what makes it slow on the
-  11.8 GB index is not known; fewer full checkpoints (the checkpointer runs about once a second) is the next lever.
-- Readers (export, views, clips, MCP frames) hold the shared lifetime lock, so nothing they see disappears; a
-  reader waits at most one collection batch, never for compaction.
+The index and packs run in WAL mode, so a live `.sqlite` file alone is not a consistent copy.
+
+1. Read through a connection that includes the WAL: `store::read_index` (query-only), or `sqlite3` on the file in place.
+2. To copy, use SQLite's online backup (`store::sqlite_bytes` does this for one file).
+3. Ad-hoc SQL on `heimdall.sqlite` sees live rows only. For a whole session, packed rows included, use
+   `View::session` (see [Read archived data](#read-archived-data)).
+4. Check: the copy opens and `PRAGMA quick_check` returns `ok`.
 
 ## Schema
 
-`crates/archive/src/store.rs` holds the schema.
+`store.rs` (`SCHEMA`) holds the core tables; `video.rs`, `timeline.rs` and `screen_timeline.rs` add their own.
 
-- `sessions(id,name,started_wall_ns,complete_wall_ns,migrated_wall_ns)`; `segments(id,session,name,version,
-  wall_unix_ns,host_origin_ns,codec)`, one capture timeline each.
-- `sources`, `gaps`, `blocks(id,segment,source_id,host_ns,rate,channels,frames,codec,discontinuity,object_id,
-  offset_frames,gain,wall_ns)`: native geometry stays in the original columns; `offset_frames` counts native frames.
-  Decoded rate and channels belong to the referenced object. Rows never carry PCM.
-- `audio_objects(id,rate,channels,frames,codec,pack,stored_sha256)`, blob `a/<id>`. `f32-zstd-planar-v1` reversibly
-  separates channels and the four float-byte planes before zstd; old `f32-zstd` stays readable.
-- `audio_spans` (cold signal matching), `evidence(id,session,kind,source,utterance_ids,host_ns,wall_ns,payload_id)`,
-  `payloads`, `packed_payloads`, `vectors`, `images(…,pack,stored_sha256,…)` (blob `i/<id>.<ext>`), `audio_activity`,
-  `utterances`.
-- `cold_chunks(id,kind,scope,first_id,last_id,pack,raw_bytes,sha256)` (blob `c/<sha256>`), `cold_sources`,
-  `packed_audio_refs`, `logs` (blob `l/<sha256>`, zstd 9), synthesized `clips`, `gc_blobs`, `migrations`.
-- Video: `video_segments` (per-display one-minute codec epochs, geometry, host interval, wall anchor, HEVC
-  configuration, fps, tier, closed, owner PID), `video_samples` (host PTS and end, keyframe, SHA-256, pack),
-  `video_gaps`. Samples are `v/<sha256>` blobs under the same protocol.
-- Search projection: `timeline_chunks`, `chunk_tags`, `chunk_links`, `chunk_embeddings` (`docs/chunk-index.md`).
-  These are separate from HAC3 `cold_chunks`.
-
-Packing: old rows of one segment (timeline) or one session (evidence) go into `cold_chunks`, dictionary-zstd19 HAC3
-table streams with column names, raw length and SHA-256, removed from the live tables in the publishing transaction.
-A chunk packs the longest run of up to 8192 rows whose new bodies fit 16 MiB (decode bound 128 MiB). A body that moved
-into a chunk keeps a `packed_payloads` row, so a later session repeating it reads it from there. Ad-hoc SQL against
-`heimdall.sqlite` sees live rows only; `View::session` gives the old per-session schema (`blocks`, `sources`, `gaps`,
-`evidence`, `payloads`, `utterances`) as temporary tables, live and packed.
-
-The frozen zstd dictionary is `records::DICTIONARY`, version 1; it must stay to decode old data. A new dictionary
-needs new codec and version IDs.
-
-Clocks: `host_ns` is capture's monotonic host clock, not Unix time. Each block also records its wall time. Events
-carry source, utterance IDs, host ns and Unix wall ns. Tier eligibility uses a block's end, not mtime.
-
-## What is journalled
-
-Listening off is an explicit gap, not missing data: each open source gets a `gap` evidence record (reason
-`heimdall off`) and the session gets `heimdall_off` (payload `reason`: `setting` or `launched off`), later
-`heimdall_on`.
-
-| Evidence | Durable path |
+| Tables | What they hold |
 |---|---|
-| Every ASR decode, partial and final | Raw recognizer result before reconciliation, `is_final`, source-generation `revision`, source ID and input host interval; final aligned utterance in the transcript index |
-| VAD and SmartTurn inputs and probabilities | Listen hook before UI coalescing; speech start/end and source generation |
-| Every emitted partial and rolled segment | `listen_event` journal with text, timed words and consensus hints |
-| d1, TCL and send-head inputs and outputs | Decide archive sink: typed input with source/time/audio hash and transform; embeddings in vectors; raw distributions |
-| Speaker probabilities, segments, embeddings | Native revisions as lossless changed-frame deltas; each six-second embedding with its source spans; `speaker_segments_finalized` |
-| Names and labels | Naming and confirmation requests and label changes; final index projection updated |
-| Command candidates, chain answers, actions | `command_decision` schema 1 and `command_action` (approval apart from execution); see `docs/decision-chain.md` |
-| Recorded versus supplied agent context | `agent_context_routing` before any harness; provider transport records prove delivery |
-| Screen commands and their captures | Action, command/capture host clocks and image IDs; temporary PNGs removed only after journalling |
-| Agent wakes, sends, replies | Common envelope plus actual Pi RPC JSON, recorded before transport; raw provider events before normalization |
-| Agent transport lifecycle | `agent_transport_send` (attempt), `agent_transport_sent` (completed write), `agent_transport_cancelled` (bytes and uncertainty); a partial envelope becomes `needs_reconciliation` and is never retried automatically |
-| Speak-back and every TTS component | Requested text, language, state; every component output and denoising step as lossless CAS vector chunks |
-| Every synthesized clip | Store `clips` table: lossless `f32-zstd-planar-v1` audio object plus text, voice, generator and settings; never deleted |
-| Barge-in decisions | `barge_in`: onset, each checked window with its scores against the user's voice and Heimdall's voices, the verdict, outcome and timings (schema 2, 29 Oct; schema 1 records also hold a side transcript and the decider's output); see `docs/decision-chain.md` |
-| Suggest decisions | `suggest_decision`: Decider V5's P(yes) for a line, the bar, and whether a suggester pass started; see `docs/suggester.md` |
-| End-of-turn replies | `voice_reply` and `voice_reply_playback` |
-| Capture lifecycle | `gap`, `source_removed` (with reason), `source_readded` (a device back within 5 s), `obsolete_worker_event`, `obsolete_capture_event` |
+| `sessions`, `segments` | One row per launch; one per capture timeline (wall anchor, host origin, codec). |
+| `sources`, `gaps`, `blocks` | Capture sources, gaps, and one row per capture callback: native rate, channels and frames, `host_ns`, `wall_ns`, `object_id`, `offset_frames` (native frames), `gain`. Rows never carry PCM. |
+| `audio_objects`, `audio_spans`, `packed_audio_refs` | Audio object catalogue (decoded rate, channels, frames, codec, pack, `stored_sha256`); cold signal fingerprints for deduplication; objects referenced from packed rows. |
+| `evidence`, `payloads`, `packed_payloads`, `vectors` | Model and pipeline records (kind, source, utterance IDs, `host_ns`, `wall_ns`, payload ID); their hash-keyed JSON bodies; bodies that moved into a chunk; vectors. |
+| `utterances`, `transcript_events`, `audio_activity` | The transcript index; transcript events; VAD speech runs per source (discarded once that audio is cold). |
+| `images` | Screenshot and image catalogue (MIME, pack, `stored_sha256`, `cold_checked`). |
+| `cold_chunks`, `cold_sources` | HAC3 chunks of packed rows, and the source time spans each chunk covers. |
+| `logs`, `clips` | Archived log files (zstd 9); synthesized voice clips with text, voice, generator and settings, never deleted. |
+| `gc_blobs`, `migrations`, `store_meta`, `video_tier_failures` | Blob deletion queue; migration receipts; store counters (`collections`, `sweep_wall`); video epochs that failed tiering. |
+| `video_segments`, `video_samples`, `video_gaps` | Screen recording; see [screen.md](screen.md). |
+| `timeline_chunks`, `chunk_*`, `timeline_*`, `cold_capture_*` | The search projection; see [chunk-index.md](chunk-index.md). It is separate from `cold_chunks`. |
 
-- ASR partials are kept even when the source emits only finals or the UI coalesces one away; the final projection
-  never overwrites raw decodes. Bind a revision by source, generation and input clocks.
-- Audio inputs are source + host interval references with transforms; d1/TCL keep the input PCM SHA-256. No decision
-  WAV copies. Images in envelopes are CAS references; restore original bytes and base64 to rebuild a hot wire
-  payload. Cold images keep pixels, not the original PNG encoding: use the MIME from the export index.
-- `listen:<source>:<utterance-start-ns>` names an utterance before its app ID exists; `utterance_binding` relates it
-  to the final `session:id`.
-- A final whose waveform is missing or evicted is kept as `decision.status: unavailable_audio` with the error and
-  `given_to_agent: false`; it stays searchable and no unrelated PCM stands in.
-- The live diarizer keeps at most 60 s of probabilities and cuts a stable prefix down to a 30 s tail; raw revisions
-  are archived before the frontier advances. An 8192-segment pending limit fails loudly if the consumer stalls.
-- Commit latency: capture about 1 s after arrival; listen evidence a writer group later (milliseconds), up to 65,536
-  queued notes behind a held lock, then counted as dropped (`diagnostic_drops`). A hard power loss loses those tails. A clean finish drains workers, the provider
-  bridge and evidence before marking the session complete.
-- Permission denial, overflows, unsupported capture geometry and unavailable models are kept as gaps or errors,
-  never invented outputs.
-- The dry-run agent log (`<data>/run/<session>/dry-run.jsonl`) rotates at 1 MiB into a store log
-  `dry-run-<sha256>.jsonl` (zstd 9, independently decoded, month pack and index committed before truncation).
+- Clocks: `host_ns` is capture's monotonic host clock, not Unix time. Blocks and evidence also carry Unix `wall_ns`.
+  Tier age uses a block's end (`wall_ns` plus its duration), never a file time.
+- Hot audio objects use `f32-zstd-planar-v1`: channels and the four float-byte planes are separated, then zstd level 1.
+  It is a bit permutation, never quantization. Old `f32-zstd` objects stay readable.
+- Exact `+0.0` silence has no object: capture writes a `zero` block that holds only a frame count, at most one hour
+  per block (how capture writes blocks: [capture.md](capture.md)).
+- The frozen zstd dictionary is `records::DICTIONARY` (version 1). It must stay to decode old payloads and chunks; a
+  new dictionary needs new codec and version IDs.
 
-## Compaction (cold tier)
+## Durability rules
 
-One background thread at background QoS (`compact.rs`) prepares (reads, encodes, verifies, writes the cold blob);
-every reference move is one bounded job on the store's writer, at user-initiated QoS.
+- Content first, catalogue second. A blob commits to its pack (`synchronous=FULL`, `F_FULLFSYNC`) before the index
+  transaction that references it, and that transaction re-checks the blob under the index write lock
+  (`store::ensure_blob`). A crash leaves at most an unreferenced blob.
+- Catalogue removal first, content second. Removing content only queues `(pack, key)` in `gc_blobs`. `store::collect`
+  deletes a queued blob only under the exclusive lifetime lock and the index write lock, and only when no catalogue
+  row references it. A key of an unknown kind is never deleted.
+- `store::sweep` removes unreferenced blobs older than `store::ORPHAN_GRACE_NS` (one hour), at most once an hour and
+  `store::COLLECT_KEYS` (256) per job.
+- Each collection bumps `store_meta.collections` in the same transaction. A publisher that read the count before
+  writing its blobs and finds it unchanged under the lock skips re-reading the pack (`audio::publish_put`); one that
+  finds its blob gone writes it again.
+- Opening the index or a pack writes nothing (`store::tune`): `auto_vacuum=INCREMENTAL` and `journal_mode=WAL` are
+  set only when they differ (a new file). Why: a PRAGMA that writes on every open waits for the write lock and a full
+  sync, and froze the live loop (`tests/open_no_write.rs`).
+- Every connection sets `synchronous=FULL`, `fullfsync=ON`, `checkpoint_fullfsync=ON` and
+  `journal_size_limit` = 64 MB (`live::WAL_CAP`). Connections wait `store::BUSY` (5 s) for another process.
 
-- Gate: runs while the Mac is idle on AC power (no input for 5 minutes); otherwise it waits unless free disk is within
-  2 GiB of the free-space floor (capture stops at the floor). Unknown power or idle counts as no. Asked before each
-  pass, at most once a second inside a pass, every 30 s while closed.
-- A pass migrates at most one legacy folder, drains the GC queue (hourly orphan sweep), then publishes up to 32 audio
-  groups (oldest first, store-wide) and 16 timeline plus 16 evidence chunks, continuing after 250 ms while work
-  remains, scanning every five minutes when idle. Then video tiering (`docs/screen.md`) and timeline catch-up
-  (`docs/chunk-index.md`).
-- A segment whose group fails is skipped for the rest of the pass and reported, so it cannot hold up other audio.
-  Failures keep originals readable and retryable; repeated reports are bounded to once a minute.
-- Audio groups hold at most 10 s (about 1,000 capture rows, one writer job), split at the speech/non-speech
-  boundary; a row that changed while its group was encoded fails the group. New chunks hold at most 1,024 rows
-  (decode accepts 8,192); payloads recompress 64 per job; collection removes 256 blobs per job; reclamation frees
-  512 pages per job.
-- Codecs: speech and missing or incomplete VAD coverage → FLAC mono 16 kHz 16-bit. Runs fully covered by VAD
-  probability < 0.1 → Opus AUDIO mode, mono 16 kHz, 12 kb/s VBR, 20 ms packets, complexity 10, with a 250 ms speech
-  guard at both ends. No DTX and no removal. Exact +0 silence is duration markers, bounded to one hour so a silent
-  source still ages out. Nonfinite or sub-output-sample inputs stay native float/zstd19; finite values outside
-  [−1, 1] stay mono 16 kHz float/zstd19 without clipping.
-- Why FLAC for speech: on 11 Oct every lossy setting tried (Opus 24–64 kb/s AUDIO and VOIP, AAC 24/48 kb/s) changed
-  Parakeet words on public clips or moved speaker-embedding cosine beyond repeat noise; FLAC PCM16 kept recognition
-  with minimum cosine 0.999993 (15 clips, 259 words;
-  a lab script reproduces it). A lower speech bitrate needs a larger qualified corpus.
-- Screenshots go cold as pixel-exact WebP only when smaller than the original.
-- Publication: the new object commits to its month pack, is read back and independently decoded, then one index
-  transaction checks the blob, commits all references and drops catalogue rows nothing references, queueing their
-  blobs. Originals go only after no block, packed reference or synthesized clip references them.
-- Readers never wait for compaction: a pass holds `.compact.owner`, which no reader takes; collection takes the
-  lifetime lock exclusively without waiting and skips while a reader holds it.
-- Quit preempts: `compact::preempt_all` interrupts the preparation's running statement through a progress handler; a
-  writer job in flight is one bounded transaction and finishes or rolls back. A step interrupted that way (SQLite
-  code 9) logs `archive compaction stopped for Quit…` and sets no status; any other error of that pass keeps its text
-  and sets "Archive compaction delayed".
-- Measured (`tests/hardening.rs`, throttle model): the longest write-lock hold under compaction plus every live writer
-  is about 0.2 s on an 11.7 GB index, against 1.2 s (and 12.9 s on a small store) on main fc403503; installed fc403503
-  logged "Archive write lock held 20.3 s by heimdall-cold-archive" on 1 Nov 02:04.
+## The writer
+
+Every index write in a process goes through one writer thread per store, `heimdall-archive-live` (`live::Queue`), at
+user-initiated QoS, in the order the writes were handed over. How to hand a write to it:
+[crates/archive/README.md](../crates/archive/README.md).
+
+```mermaid
+flowchart LR
+  A["Journal, capture, screen, logs"] -->|live jobs| W[heimdall-archive-live]
+  C["Compactor, embeddings"] -->|background jobs| W
+  W -->|"group commit"| I[(heimdall.sqlite)]
+  K[heimdall-archive-checkpoint] -->|PASSIVE checkpoint| I
+```
+
+- Live jobs commit in groups: up to `BATCH_JOBS` (256) jobs, `BATCH_BEHIND` (2,048) while a backlog drains, or
+  `BATCH_TIME` (200 ms) of work, each job a savepoint. Notes nobody waits on gather for `NOTE_GROUP` (250 ms) first;
+  a waiting `write` or `call` commits at once. After a full group the lock stays free for `YIELD` (120 ms) so another
+  process's writer gets in.
+- Background jobs (compaction publish steps, collection, embeddings) are one bounded transaction each. They run when
+  no live job waits, or once per `BACKGROUND_EVERY` (250 ms) between live groups.
+- The writer's connection uses `temp_store=MEMORY` so savepoint journals never go to a temp file.
+- A held lock, a full disk or an I/O error never reaches a caller: the writer keeps every live job and retries. A job's
+  own error drops that job alone. A job that keeps failing alone with an I/O error is dropped after `STRIKES` (8)
+  tries. Past `MAX_PENDING` (262,144) queued live jobs, new ones are dropped and counted (`live::dropped_writes`).
+- Waits on a live path stay short: `write` waits for its commit at most `COMMIT_WAIT` (1 s) and only while the writer
+  keeps up; `enqueue` and `Journal::note` never wait; capture's committer and the voice clip writer wait for their own
+  commit (`call`); `store::archive_log` waits at most 1 s.
+- `call_within` past its wait returns `live::Busy` ("the archive is busy"). It is not a failure: the job commits later
+  and `Busy::settled()` turns true once the writer ran it.
+- The listen evidence writer (`records::Writer`) queues at most `records::WRITER_BACKLOG` (65,536) notes behind a held
+  lock; past that it counts them in a `diagnostic_drops` record.
+
+## Checkpoints and the WAL
+
+- `heimdall-archive-checkpoint` runs a PASSIVE checkpoint on its own thread once the WAL holds `CHECKPOINT_PAGES`
+  (1,000) pages.
+- The WAL shrinks back to `WAL_CAP` only when a checkpoint has copied every frame and the next write restarts it. A
+  reader holding an old snapshot or one large transaction stops that.
+- Past `RESTART_AT` (half the cap), once the checkpointer copied every frame it saw, the writer runs one small PASSIVE
+  checkpoint between two groups (at most every `RESTART_EVERY`, 5 s) so its next write restarts the WAL. It copies at
+  most `RESTART_COPY` (2,048) frames; a larger backlog stays with the checkpointer, and after `RESTART_SKIPS` (3)
+  skips in a row the writer copies it anyway.
+- Long timeline scans run in slices of `timeline::SLICE` (512) chunks, one statement each (`timeline::by_slices`), so
+  no read snapshot outlives a slice and pins the WAL.
+
+## Read the writer's log lines
+
+Use these when the archive is slow or the WAL grows. Every writer step carries the code location that handed it over
+(`#[track_caller]`).
+
+| Line | Meaning |
+|---|---|
+| `Archive writer held 12.3 s by … from <file:line>` | One step took `SLOW_STEP` (2 s) or more; the site names who. |
+| `Archive writer busy N s so far with …; M writes waiting` | A step still running at `HELD_REPORT` (10 s), logged once. |
+| `Archive live writes caught up: …` | A backlog drained; names the longest step. Logged when 5 s or more or after another process held the lock; shorter ones at most every 10 min, counted into the next line. |
+| `Archive WAL at N MB, past its 64 MB cap: <why>` | Past the cap; says whether a reader cut the checkpoint short, names the read transactions open here a second or more (or the other processes holding the index), and the writer sites that wrote the most pages. Logged once per doubling. |
+| `Archive WAL crossed its 64 MB cap N times in M min` | Repeated crossings, at most every 10 min (`WAL_REPEAT`). |
+| `Archive WAL back under its cap` | After 10 min under it (`WAL_SETTLE`). |
+| `Archive checkpoint took N s` | A checkpoint of 2 s or more. |
+| `Archive read snapshot held N s so far by <thread> on a connection opened at <file:line> (<sql>)` | A read transaction open `readers::LONG_READ` (60 s); `… released after N s` when it ends. |
+
+`live::Queue::holder` gives the step running now; `compact::readers_held` names the threads holding the reader lock.
+Logs and the wider failure ladder: [resilience.md](resilience.md).
+
+## Locks
+
+- Readers (export, views, clips, MCP frames) take `.compact.lock` shared (`compact::reader_lock`), so nothing they see
+  is deleted. A reader waits at most one collection job, never for compaction.
+- Blob deletion and replacing a video epoch's samples take `.compact.lock` exclusively without waiting, one bounded
+  writer job at a time, and skip while any reader holds it.
+- A compaction pass holds `.compact.owner` for the whole pass (the app's compactor or `heimdall-archive compact`). A
+  second compactor finds it taken and does nothing.
+
+## When compaction runs
+
+The app starts one `compact::Compactor` per launch (`crates/app/src/pipeline/mod.rs`), thread `heimdall-cold-archive`
+at background QoS. It prepares (reads, encodes, verifies, writes the cold blob) on that thread; every reference move is
+one bounded background job on the writer.
+
+- Gate (`app::archive::compaction_allowed`): the Mac is on AC power and idle for `heimdall_night::gate::IDLE_SECONDS`
+  (300 s), or free disk is within `COMPACT_DISK_MARGIN` (2 GiB) of the free-space floor. Unknown power or idle counts
+  as no. The floor is `free_space_floor_bytes` ([settings.md](settings.md)); capture stops at it.
+- Video tiering and timeline catch-up need idle on AC; the low-disk branch never opens them.
+- The gate is asked before each pass, every `GATE_RECHECK` (1 s) inside a pass, and every `GATE_WAIT` (30 s) while
+  closed. A closed gate ends the pass after the group or chunk in progress.
+- Next pass: 250 ms after a pass that did work, 60 s after errors, 300 s when idle.
+
+A pass, in order (`compact::compact_pass`):
+
+1. Migrate at most one legacy folder ([Migration from per-launch folders](#migration-from-per-launch-folders)).
+2. Collect queued blobs; run the orphan sweep if an hour has passed.
+3. Publish up to `PASS_AUDIO_GROUPS` (32) audio groups, oldest first, store-wide.
+4. Tier up to `video::PASS_EPOCHS` (16) screen epochs ([screen.md](screen.md)).
+5. Pack up to `PASS_CHUNKS` (16) timeline chunks and 16 evidence chunks.
+6. Move day-old payload bodies (recompressed `PAYLOAD_STEP`, 64, per job) and screenshots to their month pack.
+7. After the pass, up to 256 timeline backfill steps ([chunk-index.md](chunk-index.md)).
+
+- A segment whose audio group fails is skipped for the rest of the pass, so it cannot hold up other audio. Failures
+  keep originals readable and retryable. Error lines repeat at most once a minute, and the app's component status
+  shows "Archive compaction delayed".
+- Quit calls `compact::preempt_all`: the preparation's running statement is interrupted (SQLite code 9), and a writer
+  job in flight finishes or rolls back. That logs `archive compaction stopped for Quit…` and sets no status.
+
+## Cold audio
+
+Hot audio is eligible once its block ended more than 24 hours ago (`DAY_NS`). A group holds at most `GROUP_NS` (10 s)
+of one source, split where VAD coverage changes between speech and non-speech; a row that changed while its group
+was encoded fails the group.
+
+Codec policy (`compact::encode_cold`). Non-speech is a run fully covered by VAD probability below 0.1, shrunk by a
+250 ms guard at both ends (`records::non_speech_ranges_in`). Speech and missing coverage count as speech.
+
+| Source | Speech | Non-speech |
+|---|---|---|
+| Voice: microphones, calls, Heimdall's own voice | FLAC 16-bit (`flac16`) at the capture rate; mono when every frame's channels are equal, else up to two channels | Opus AUDIO mode, mono, 32 kb/s (`VOICE_NON_SPEECH_BITRATE`), 20 ms packets, at the capture rate or 48 kHz when Opus does not take it (`opus-har2`) |
+| Other (apps, media) | FLAC 16-bit, mono 16 kHz | Opus AUDIO mode, mono 16 kHz, 12 kb/s (`opus-har1`) |
+
+- Opus runs at complexity 10 without DTX. Nothing is removed.
+- Values outside [−1, 1] are never clipped: such a group stays float, zstd 19 (`f32-zstd`), in the geometry the policy
+  chose.
+- Why the capture rate for voice: 16 kHz keeps what recognition needs but drops everything above 8 kHz.
+  Recognition, the decider and speaker models get their own 16 kHz feed from capture, not from the archive.
+- Why FLAC for speech: every lossy setting tried changed recognized words or moved speaker-embedding similarity
+  beyond repeat noise; FLAC 16-bit did not.
+- Each object's rate and channels are in `audio_objects`, so one source can hold 16 kHz objects from before the
+  policy and capture-rate objects after it. A voice source never takes over a lower-rate or fewer-channel copy, and
+  speech never takes over another source's non-speech Opus copy.
+- Publication: the new object commits to its month pack, is read back and decoded independently, then one writer job
+  re-checks the blob, moves every block to `cold-ref` with offset and gain, and queues objects nothing references any
+  more. An original goes only when no block, packed reference or voice clip references it.
 
 ## Deduplication
 
-- Native hot objects hash rate + channels + float bits; simultaneous paths with the same content share one blob.
-- Cold groups are fingerprinted after mono 16 kHz normalization. Equal host intervals, matching fingerprints and
-  correlation above 0.99999 with a bounded residual allow one shared signal with per-reference gain, preferring direct
-  process capture, then higher native rate. Distinct words, timing, phase, echoes or room colour are never merged;
-  this is not echo cancellation.
+- Hot objects are keyed by rate, channels and float bits (`audio::native_id`), so simultaneous paths with the same
+  samples share one blob.
+- Cold groups are fingerprinted after mono 16 kHz normalization. Two groups share one signal only when their host
+  intervals match within 62.5 µs, the fingerprints match, correlation is at least 0.99999 over at least 8,000 samples,
+  the gain is within 0.05–20 and the residual is within 1/16384 (`compact::same_signal`). Each reference keeps its own
+  gain. The kept copy prefers direct process capture, then the higher native rate.
+- Distinct words, timing, phase, echoes or room colour are never merged. This is not echo cancellation.
 
-## Storage budget
+## Packed rows (HAC3 chunks)
 
-Derived from measured containers (13 Oct, busy M5 Max), not a captured day. Three sources × 10 h/day (one 48 kHz mono
-mic, two 48 kHz stereo app streams): hot about 20 GB/day (the one-day rolling window); cold 0.75 GB/day typical, 1.9
-GB/day all-speech; about one year of typical use in 300 GB. FLAC speech dominates. Reproduce with
-`heimdall-archive-size` (`NEW_DIR WAV...`, `--non-speech`, `--outputs-only`, `--without-partials`).
-Compaction CPU:
-225 CPU-seconds per source-hour of audio (`heimdall-archive bench`, 13 Oct).
+Old rows of one segment (`blocks`) or one session (`evidence`) are packed into `cold_chunks` by `chunks.rs`:
+dictionary zstd 19 table streams with column names, raw length and SHA-256, stored as `c/<sha256>` in the month pack.
+The publishing transaction removes the rows it packed.
+
+- A new chunk holds at most `chunks::PACK_ROWS` (1,024) rows; decode accepts `CHUNK_ROWS` (8,192) and 128 MiB. A batch
+  over `PAYLOAD_BUDGET` (16 MiB) of raw payload packs one record alone.
+- A payload body that moved into a chunk keeps a `packed_payloads` row, so a later record repeating it reads it there.
+- Screenshots go cold as lossless WebP only when that is smaller and decodes to the same pixels; otherwise the original
+  bytes move. Cold images keep pixels, not the original PNG encoding: use the MIME in `images`.
+- Per writer job: collection removes `store::COLLECT_KEYS` (256) blobs, reclamation frees `store::RECLAIM_PAGES` (512)
+  pages, VAD activity discards `compact::ACTIVITY_ROWS` (512) rows.
+
+## What the journal records
+
+Records go through `Journal` (`records.rs`): `append`, `event` (waits up to 1 s for its commit) and `note` (never
+waits). Listening off is a gap, not missing data: each open source gets a `gap` record (reason `heimdall off`) and the
+session gets `heimdall_off` (payload `reason`: `setting` or `launched off`), later `heimdall_on`.
+
+| Kinds | Owner page |
+|---|---|
+| Raw ASR decodes (partials and finals, before reconciliation), VAD and turn probabilities, `listen_event` | [capture.md](capture.md) (the listen feed) |
+| `gap`, `source_removed`, `source_readded`, `obsolete_worker_event`, `obsolete_capture_event` | [capture.md](capture.md) |
+| Speaker revisions, embeddings, `speaker_segments_finalized`, naming and labels | [speakers.md](speakers.md) |
+| `command_decision`, `command_action`, `barge_in`, decider inputs and outputs | [decision-chain.md](decision-chain.md) |
+| `suggest_decision` | [suggester.md](suggester.md) |
+| `agent_context_routing`, `agent_wake`, `agent_send`, `agent_reply`, `agent_transport_send`, `agent_transport_sent`, `agent_transport_reply`, `agent_transport_cancelled` | [crates/agent/README.md](../crates/agent/README.md) |
+| Screen commands and their captures (action, clocks, image IDs) | [screen.md](screen.md) |
+| `diagnostic_drops`, `utterance_binding` | this page |
+
+- Records are kept even when the UI coalesces one away; the final transcript projection never overwrites raw decodes.
+- Audio inputs are source plus host-interval references, never WAV copies. Images inside payloads are image IDs; to
+  rebuild a wire payload, restore the bytes and base64 them.
+- `listen:<source>:<utterance-start-ns>` names an utterance before its app ID exists; `utterance_binding` links it to
+  the final `session:id`.
+- A final whose waveform is missing keeps `decision.status: unavailable_audio` with `audio_error`; no other PCM stands
+  in.
+- A cancelled partial agent envelope (`agent_transport_cancelled`, with written bytes and whether delivery is
+  uncertain) is never completed or retried automatically.
+- Permission denial, overflows, unsupported geometry and unavailable models become gaps or errors, never invented
+  outputs.
+- Logs: the agent's dry-run log rotates at 1 MiB into `dry-run-<sha256>.jsonl`; Pi sessions are stored as
+  `pi-session-<sha256>.jsonl` and agent payloads as `agent-payload-<sha256>.json`, all through `store::archive_log`
+  (zstd 9, decode-checked before publication). A clean finish drains workers and evidence before
+  `store::mark_complete`.
+
+## Read archived data
+
+- One session: `View::session(<archive>/<session-name>)` gives the per-session tables (`blocks`, `sources`, `gaps`,
+  `evidence`, `payloads`, `utterances`) as TEMP tables holding live and packed rows. `Journal::open_read_only` and
+  `capture::Archive::open_read_only` take the same address.
+- Audio: `audio::read_block` and `audio::read_object` decode any codec above.
+- Images: `records::image_bytes`.
+- Logs: `store::read_log`, `store::logs`.
+- Decoded events for agents: `heimdall-archive timeline [--since HH:MM] [--until HH:MM] [--kinds a,b] [--problems]
+  [--archive ROOT]` (`event_timeline.rs`, read-only handles).
+- Agents read through MCP: `timeline_search` ([chunk-index.md](chunk-index.md)), `screen_frames`
+  ([screen.md](screen.md)), `archive_clip` ([archive-clip.md](archive-clip.md)). The tool contract is in
+  `crates/agent/src/mcp_contract.rs` ([mcp.md](mcp.md)).
+
+## Export a dataset
+
+1. Build: `CARGO_TARGET_DIR=target/archive cargo build --release -p heimdall-archive --bins`.
+2. Run: `heimdall-export ARCHIVE_ROOT NEW_DATASET_DIR [NIGHT_OUTPUT_DIR]`. It refuses an existing destination and one
+   inside the archive. It uses no capture, model, provider or network.
+3. Check: `NEW_DATASET_DIR/dataset.json` exists and states the utterance count.
+
+The dataset holds `manifest.jsonl` (final utterances), `evidence.jsonl`, `vectors.jsonl`, `sources.jsonl`,
+`blocks.jsonl`, `audio.jsonl`, `images.jsonl`, `images/`, `audio/` (float32 WAVs, one per unique object) and
+`dataset.json`.
+
+- Manifest audio is clipped to each utterance with `offset_samples`, `samples`, `rate`, `channels`, `gain`, `tier` and
+  native geometry. A loader slices `offset_samples .. offset_samples + samples`, multiplies by `gain`, and aligns word
+  times to the utterance's `start_ns`. Hot WAVs can be stereo.
+- Missing audio is explicit (`audio_missing`, `audio_gaps`, `audio_complete`). Export never fills gaps or guesses
+  speakers.
 
 ## Migration from per-launch folders
 
-`heimdall-archive migrate ARCHIVE_ROOT [--keep]` moves every legacy `session-*/` folder and the legacy clip folder into the
-store, one folder at a time, under the exclusive lifetime lock. The running app's compactor migrates any it finds,
-one per pass. The pre-store app must not run: a folder without `COMPLETE` written in the last two minutes is refused.
+Profiles from before the store have `archive/session-*/` folders and `archive/voice-bank/`. The running app's
+compactor migrates one per pass; to do it all at once:
 
-1. Read every legacy container (sealed `.sqlite.zst` decoded to a private temp file, HAC1/HAC2 chunks, WAL, schema-1
-   inline PCM, `quick_check`).
+1. Quit any pre-store app: a folder without `COMPLETE` that was written in the last two minutes is refused.
+2. Run `heimdall-archive migrate ARCHIVE_ROOT [--keep]`. It prints one JSON report per folder, then a summary.
+3. Check: the summary shows `"failed":0` and the command exits zero.
+
+For each folder, under the store's locks:
+
+1. Read every legacy container (sealed `.sqlite.zst`, HAC1/HAC2 chunks, WAL, schema-1 inline PCM, `quick_check`).
 2. Write it into the store: one segment per capture database; PCM becomes hot objects, cold files and screenshots
-   month-pack blobs; rows already cold and older than a day go straight into HAC3 chunks; logs, spool and unknown
-   files become `logs` entries. Pending legacy GC is honoured.
-3. Verify through the session view: per-table counts and an order-independent SHA-256 digest over every row must
-   equal the legacy side's; every audio object and screenshot is read back and matched.
-4. Record counts, bytes and digest in `migrations`, then (unless `--keep`) delete the legacy folder.
+   month-pack blobs; rows already cold and older than a day go straight into HAC3 chunks; logs, spool and unknown files
+   become `logs` entries. Pending legacy GC is honoured.
+3. Verify through the session view: per-table counts and an order-independent SHA-256 digest over every row equal the
+   legacy side's; every audio object and screenshot is read back and matched.
+4. Record counts, bytes and digest in `migrations`, then delete the folder unless `--keep`.
 
-A failed folder stays untouched, its partial rows are removed, and the run continues and exits non-zero. Reruns are
-idempotent. The compactor retries a failed folder after an hour, and migrates a folder only with its size plus 10 GiB
-free. A legacy lines list with different bytes is a conflict: both lists and the folder stay.
+- A failed folder stays untouched, its partial rows are removed, and the run continues and exits non-zero. Reruns are
+  idempotent.
+- The compactor retries a failed folder after an hour, and migrates a folder only with its size plus 10 GiB free
+  (`migrate::RESERVE`).
+- An edited voice-bank `lines.json` moves beside the archive as `voice-bank-lines.json`. If that file already exists
+  with different bytes, the migration of that folder fails and both stay.
 
-## Export and read-back
+## Storage cost
 
-- `heimdall-export ARCHIVE_ROOT NEW_DATASET_DIR` (build `CARGO_TARGET_DIR=target/archive cargo build --release -p
-  heimdall-archive --bins`) refuses existing destinations and destinations inside the archive. No capture, model,
-  provider or network.
-- Read one session with `View::session`, `Journal::open_read_only` or capture's `Archive::open_read_only`, each given
-  `<archive>/<session-name>`. `export::snapshot_archive` copies the whole store (SQLite online backup) for offline
-  export.
-- Dataset: `manifest.jsonl` (final utterances), `evidence.jsonl`, `vectors.jsonl`, `sources.jsonl`, `blocks.jsonl`,
-  `audio.jsonl`, `images.jsonl`, `images/`, `audio/` (float32 WAVs, once per unique PCM object), `dataset.json`.
-- Manifest audio references are clipped to each utterance with `offset_samples`, `samples`, `rate`, `channels`,
-  `gain`, `tier` and native geometry. A loader slices `offset_samples .. offset_samples + samples`, multiplies by
-  `gain`, and aligns word times to the utterance's `start_ns`. Hot WAVs can be stereo. Missing audio is explicit
-  (`audio_missing`, `audio_gaps`, `audio_complete`); export never fills gaps or labels unknown speakers as the user.
+- Hot: native float PCM, zstd 1, for 24 hours. Derived for one 48 kHz mono microphone and two 48 kHz stereo app
+  streams at 10 h a day each: about 20 GB per day.
+- Cold audio, derived from twelve sampled 5-minute windows of one real day scaled to 24 h: about 1.1 GB per day under
+  the current policy, against about 0.54 GB under the earlier all-16 kHz policy. Microphone and call speech take most
+  of it.
+- Measure a window on your own store with `heimdall-archive audio-cost ARCHIVE_ROOT FROM_WALL_NS TO_WALL_NS`
+  (encodes hot audio in memory under both policies, writes nothing). `heimdall-archive-size` builds size fixtures from
+  WAVs in a new folder.
 
-## Verification
+## Test
 
-`cargo nextest run -p heimdall-archive` (isolate with `CARGO_TARGET_DIR=target/review-archive`) covers hot bit
-patterns, zero markers, gain dedup, 24 h eligibility, FLAC/Opus alignment, chunk read-back across sessions, blob GC,
-six publication failpoints and two migration failpoints with reopen and read-back, migration of the pre-store
-fixture (`tests/fixtures/legacy-archive`), aligned export, writer contention, open-without-write, and compaction
-beside a live capture owner. No live permissions are requested.
+`cargo test -p heimdall-archive` (the full check runs it under `cargo nextest`). Tests use temp stores only and request
+no permissions. Test files and the opt-in lab tests: [crates/archive/README.md](../crates/archive/README.md).
+
+## See also
+
+- [capture.md](capture.md): how capture writes PCM blocks into the store
+- [screen.md](screen.md): screen recording, video epochs and their tiering
+- [archive-clip.md](archive-clip.md): a time window as one movie
+- [chunk-index.md](chunk-index.md): the timeline index, search and reranker
+- [home.md](home.md): where the data folder lives
+- [settings.md](settings.md): `free_space_floor_bytes` and every other setting
+- [resilience.md](resilience.md): failures, logs and recovery
+- [crates/archive/README.md](../crates/archive/README.md): code map, writer rules, tests

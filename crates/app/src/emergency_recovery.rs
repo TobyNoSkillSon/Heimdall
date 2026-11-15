@@ -168,14 +168,15 @@ pub fn spoken_route(r: &Route) -> String { format!("{} on {}", model_name(&r.mod
 /// What Heimdall says when the recovery card opens (bug note 2026-11-02T14-47-46: the switches were never announced):
 /// what failed and until when, and what happens when the minute runs out. Spoken, or shown on the island with
 /// Speaking off (`mcp_actions::say`).
-pub fn card_line(original: &Original, quota: bool, back: Option<&str>, choices: &[Choice]) -> String {
+/// `why`: what failed when it was not the quota, in plain words ("sign-in failed: 403 from Cloudflare", night1114 relay).
+pub fn card_line(original: &Original, quota: bool, back: Option<&str>, choices: &[Choice], why: Option<&str>) -> String {
     let who = spoken(original);
     let mut first = who.chars();
     let who = first.next().map(|c| c.to_uppercase().collect::<String>() + first.as_str()).unwrap_or_default();
     let what = match (quota, back) {
         (true, Some(t)) => format!("{who} is out of quota until {t}."),
         (true, None) => format!("{who} is out of quota."),
-        (false, _) => format!("{who} can't answer."),
+        (false, _) => why.map_or_else(|| format!("{who} can't answer."), |w| format!("{who}: {w}.")),
     };
     match choices.iter().find_map(|c| match &c.pick { Pick::Route(r) => Some(r), _ => None }) {
         Some(r) => format!("{what} In a minute I'll switch to {}, unless you pick something else on the card.", spoken_route(r)),
@@ -183,8 +184,8 @@ pub fn card_line(original: &Original, quota: bool, back: Option<&str>, choices: 
     }
 }
 /// The island's short notice with the card: "Claude · Opus 5.5 out till 13:00 · switching in a minute".
-pub fn card_notice(original: &Original, quota: bool, back: Option<&str>, any_route: bool) -> String {
-    let state = match (quota, back) { (true, Some(t)) => format!("out till {t}"), (true, None) => "out of quota".into(), (false, _) => "can't answer".into() };
+pub fn card_notice(original: &Original, quota: bool, back: Option<&str>, any_route: bool, why: Option<&str>) -> String {
+    let state = match (quota, back) { (true, Some(t)) => format!("out till {t}"), (true, None) => "out of quota".into(), (false, _) => why.unwrap_or("can't answer").into() };
     let then = if any_route { "switching in a minute" } else { "pick on the card" };
     format!("{} {state} · {then}", original.label())
 }
@@ -208,9 +209,9 @@ mod tests {
 
     #[test]
     fn the_card_offers_what_is_there_with_honest_quotas_and_always_the_wait() {
-        let order = [h("claudeAgent_claude_code_2", "Claude code 2", "claude-opus-5-5"), h("codex", "Codex", "gpt-6"), h("grok", "Grok", "grok-5")];
+        let order = [h("claudeAgent_2", "Claude code 2", "claude-opus-5-5"), h("codex", "Codex", "gpt-6"), h("grok", "Grok", "grok-5")];
         let mut quotas = Quotas::new();
-        quotas.insert("claudeAgent_claude_code_2".into(), Quota { five_hour: Window { used_pct: Some(25.0), reset_ms: None }, weekly: Window { used_pct: Some(21.0), reset_ms: None }, ..Quota::default() });
+        quotas.insert("claudeAgent_2".into(), Quota { five_hour: Window { used_pct: Some(25.0), reset_ms: None }, weekly: Window { used_pct: Some(21.0), reset_ms: None }, ..Quota::default() });
         let original = Original::Relay(Route::from(&h("claudeAgent", "Claude", "claude-opus-5-5")));
         let c = choices(&order, Some("claudeAgent"), &quotas, Some(Local { model: "qwen".into(), label: "Qwen3.8 27B".into(), ready: true, download_bytes: None }), &original, Some(0), &|_| "14:00".into());
         let labels: Vec<&str> = c.iter().map(|c| c.label.as_str()).collect();
@@ -247,18 +248,22 @@ mod tests {
     #[test]
     fn the_card_and_the_switch_are_announced() {
         let original = Original::Relay(Route::from(&h("claudeAgent", "Claude", "claude-opus-5-5")));
-        let next = Route::from(&h("claudeAgent_claude_code_2", "Claude code 2", "claude-opus-5-5"));
+        let next = Route::from(&h("claudeAgent_2", "Claude code 2", "claude-opus-5-5"));
         let c = vec![Choice { label: next.label(), description: None, pick: Pick::Route(next.clone()) }, Choice { label: "Wait".into(), description: None, pick: Pick::Wait }];
-        assert_eq!(card_line(&original, true, Some("13:00"), &c), "Opus 5.5 on Claude is out of quota until 13:00. In a minute I'll switch to Opus 5.5 on Claude code 2, unless you pick something else on the card.");
-        assert_eq!(card_notice(&original, true, Some("13:00"), true), "Claude · Opus 5.5 out till 13:00 · switching in a minute");
-        assert_eq!(card_line(&original, false, None, &c[1..]), "Opus 5.5 on Claude can't answer. Nothing else can take over by itself; the card has what's left.");
+        assert_eq!(card_line(&original, true, Some("13:00"), &c, None), "Opus 5.5 on Claude is out of quota until 13:00. In a minute I'll switch to Opus 5.5 on Claude code 2, unless you pick something else on the card.");
+        assert_eq!(card_notice(&original, true, Some("13:00"), true, None), "Claude · Opus 5.5 out till 13:00 · switching in a minute");
+        assert_eq!(card_line(&original, false, None, &c[1..], None), "Opus 5.5 on Claude can't answer. Nothing else can take over by itself; the card has what's left.");
+        // night1114 relay: a failure that is not the quota is named (bug note 2026-11-13T10-57-01).
+        let why = Some("sign-in failed: 403 from Cloudflare");
+        assert_eq!(card_line(&original, false, None, &c, why), "Opus 5.5 on Claude: sign-in failed: 403 from Cloudflare. In a minute I'll switch to Opus 5.5 on Claude code 2, unless you pick something else on the card.");
+        assert_eq!(card_notice(&original, false, None, true, why), "Claude · Opus 5.5 sign-in failed: 403 from Cloudflare · switching in a minute");
         assert_eq!(switched_line(&next), "Switched to Opus 5.5 on Claude code 2.");
     }
 
     #[test]
     fn the_return_question_names_both_choices() {
         let original = Original::Relay(Route::from(&h("claudeAgent", "Claude", "claude-opus-5-5")));
-        let current = Route::from(&h("claudeAgent_claude_code_2", "Claude code 2", "claude-opus-5-5"));
+        let current = Route::from(&h("claudeAgent_2", "Claude code 2", "claude-opus-5-5"));
         let c = return_card("relay-return:1", &original, &current, 0);
         let Some(NoticeAction::Ask { questions, countdown, .. }) = c.action else { panic!() };
         assert!(!countdown);

@@ -511,6 +511,7 @@ impl VellaAsr {
         let retry_at = server.is_none().then(|| Instant::now() + RETRY);
         (Self { model, path, server, retry_at, announcer, ready: false }, error)
     }
+    #[cfg_attr(not(test), allow(dead_code))] // heimdall-vella-asr-lab and the tests
     pub fn socket(&self) -> &Path {
         &self.path
     }

@@ -27,6 +27,8 @@ fn call_line(a: &mut Pipeline, source: &str, speaker: &str, text: &str, at: u64)
     final_.observation.speaker = speaker.into();
     final_.turn.role = decide::Role::Other(speaker.into());
     a.hooks.send_probs.push_back((0.01, 0.0, 0.99));
+    // Labelled with a person's name (sources.rs): a live call (night 1115).
+    a.tools.speech_policy.call_line(end, true);
     a.give_to_agent(final_).unwrap();
     end
 }
@@ -48,12 +50,12 @@ fn after_a_goodbye_his_lines_to_heimdall_wake() {
     a.agent.as_ref().unwrap().barrier().unwrap();
     let last = decisions(&a).last().cloned().unwrap();
     assert_eq!((last["outcome"].as_str(), last["trigger"].as_str()), (Some("send"), Some("d1")), "{last:#}");
-    // Someone speaks in the call again: it is a call again, and his chat is held as before.
+    // Someone speaks in the call again: it is a call again, and (night 1115) his lines are still judged by d1 alone.
     call_line(&mut a, &call, "Skyline", "Wait, are you still there?", bye + 40 * S);
     a.hooks.send_probs.push_back((0.9, 0.0, 0.1));
     turn(&mut a, &mic, bye + 45 * S, "Yeah I'm here, what's up?", Detect::Final, 0, None, 3 * S, |_| {});
     let last = decisions(&a).last().cloned().unwrap();
-    assert_eq!(last["outcome"], "held_in_call", "{last:#}");
+    assert_eq!(last["outcome"], "send", "{last:#}");
 }
 
 /// ⌃⌘\ on a line V5 kept (22:28:47 "I feel like you have a lot of problems…", here not_for_heimdall): it wakes at once
@@ -71,7 +73,7 @@ fn the_wake_key_sends_unsent_lines_and_labels_them() {
     assert!(a.dispatched_through > 0, "the key woke the agent");
     let l = labels(&a);
     assert_eq!(l.len(), 1, "{l:#?}");
-    assert_eq!((l[0]["task"].as_str(), l[0]["label"].as_str(), l[0]["source"].as_str()), (Some("send"), Some("send"), Some("owner-hotkey")));
+    assert_eq!((l[0]["task"].as_str(), l[0]["label"].as_str(), l[0]["source"].as_str()), (Some("send"), Some("send"), Some("user-hotkey")));
     assert_eq!(l[0]["text"], text);
     assert_eq!(l[0]["decider_input"], d["prompt"], "exactly what V5 saw");
     assert_eq!(l[0]["v5"]["choice"], "not_for_heimdall");
@@ -94,7 +96,7 @@ fn the_suggest_key_labels_the_current_line() {
     a.action(ui::UiAction::ForceSuggest).unwrap();
     let l = labels(&a);
     assert_eq!(l.len(), 1, "{l:#?}");
-    assert_eq!((l[0]["task"].as_str(), l[0]["label"].as_str(), l[0]["source"].as_str()), (Some("suggest"), Some("yes"), Some("owner-hotkey")));
+    assert_eq!((l[0]["task"].as_str(), l[0]["label"].as_str(), l[0]["source"].as_str()), (Some("suggest"), Some("yes"), Some("user-hotkey")));
     assert_eq!(l[0]["text"], "I wonder which codec keeps the voice tracks separate.");
     assert_eq!(l[0]["v5"]["yes"].as_f64().map(|y| (y * 100.).round()), Some(12.));
     assert!(!l[0]["decider_input"].is_null());
@@ -188,7 +190,7 @@ fn the_stop_button_labels_the_line_that_woke_the_agent_not_for_heimdall() {
     a.tools.test_finish_speech().unwrap();
     let l = labels(&a);
     assert_eq!(l.len(), 1, "{l:#?}");
-    assert_eq!((l[0]["task"].as_str(), l[0]["label"].as_str(), l[0]["source"].as_str()), (Some("send"), Some("not_for_heimdall"), Some("owner-stop")));
+    assert_eq!((l[0]["task"].as_str(), l[0]["label"].as_str(), l[0]["source"].as_str()), (Some("send"), Some("not_for_heimdall"), Some("user-stop")));
     assert_eq!(l[0]["text"], text);
     assert_eq!(l[0]["decider_input"], d["prompt"], "exactly what V5 saw");
     assert_eq!(l[0]["v5"]["choice"], d["choice"]);
@@ -236,17 +238,27 @@ fn the_stop_button_cuts_the_voice_once_with_one_label_and_one_signal() {
     playing.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
 }
 
-/// A Stop with no line the decider woke for (only a kept line) stops the voice and labels nothing, even while the
-/// reply of a run nothing of his woke (a T3 result, a notice) is playing.
+/// A Stop with no line the decider woke for (only a kept line) stops the voice and gives the decider no `send` label,
+/// even while the reply of a run nothing of his woke (a T3 result, a notice) is playing. Bug note 2026-11-05T02-32-17
+/// item 4 (night 1111): the press is still a training signal: one `speak` row, `not_for_heimdall`, with the cut text
+/// (7 Nov 13:45:54, 8 Nov 01:21:23, 10 Nov 07:34:21 left nothing in the store). A press with nothing playing adds none.
 #[test]
-fn a_stop_with_no_decider_wake_labels_nothing() {
+fn a_stop_with_no_decider_wake_gives_no_send_label_but_one_speak_row() {
     let (_t, mut a, playing, hold) = speaking_rig("Just talking to myself here.", (0.05, 0.0, 0.95));
     assert_eq!(a.dispatched_through, 0, "V5 kept it");
     say(&a, "The T3 worker finished the build.", "notice-1");
     playing.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
     a.action(ui::UiAction::StopSpeaking).unwrap();
     a.tools.test_finish_speech().unwrap();
-    assert!(labels(&a).is_empty());
-    assert_eq!(stop_records(&a).last().unwrap()["speaking"], true);
+    let l = labels(&a);
+    assert!(l.iter().all(|l| l["task"] != "send"), "{l:#?}");
+    assert_eq!(l.len(), 1, "{l:#?}");
+    assert_eq!((l[0]["task"].as_str(), l[0]["label"].as_str(), l[0]["source"].as_str()), (Some("speak"), Some("not_for_heimdall"), Some("user-stop")));
+    assert_eq!(l[0]["spoken"], serde_json::json!(["The T3 worker finished the build."]));
+    assert_eq!(l[0]["in_call"], false);
+    let stop = stop_records(&a).last().cloned().unwrap();
+    assert_eq!((stop["speaking"].as_bool(), stop["labelled"].as_bool(), stop["label_task"].as_str()), (Some(true), Some(false), Some("speak")));
+    a.action(ui::UiAction::StopSpeaking).unwrap();
+    assert_eq!(labels(&a).len(), 1, "nothing playing: no row");
     release(&a, &hold);
 }

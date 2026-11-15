@@ -22,6 +22,7 @@ use speakers::embedding::Embedding;
 use std::time::Duration;
 
 /// How long a final waits for its utterance's voice before it goes on unverified.
+#[cfg_attr(test, allow(dead_code))] // the live path only; tests take a hook instead
 const WAIT: Duration = Duration::from_millis(700);
 /// Around each kept word over the echo, so its edges are in the clip.
 const KEPT_PAD_NS: u64 = 50_000_000;
@@ -64,6 +65,10 @@ pub(super) struct MicVoices {
     verdicts: VecDeque<((String, u64, u64, u64), Heard)>,
     /// Admitted lines by observation id.
     lines: VecDeque<(String, Line)>,
+    /// The apps' recent words (pipeline/playback.rs).
+    pub(super) playback: super::playback::Playback,
+    /// Voice questions put to the agent, by call source: when (pipeline/speaker_tracks.rs `voice_question`).
+    pub(super) asked: HashMap<String, u64>,
 }
 
 /// The stretch of `words` to judge: all of them, or the six seconds holding the most of their time (a long line's
@@ -135,12 +140,20 @@ impl Pipeline {
         // or a forced final before the last speech end, is asked again).
         let pending = self.mic_voices.pending.remove(source);
         let prefetched = pending.filter(|(s, e, _)| !stretch && *s == start && from.saturating_sub(*s) <= PREFETCH_SLACK_NS && to <= e.saturating_add(PREFETCH_SLACK_NS)).map(|(_, _, rx)| rx);
-        let heard = match self.mic_voice_scores(clip, prefetched) {
+        let device = self.sources.get(source).map(|i| i.label.clone()).unwrap_or_default();
+        let mut heard = match self.mic_voice_scores(clip, prefetched, device) {
             Ok(scores) => Heard { voice: heimdall_voice::mic_verdict(&scores, reliable, audible), scores: Some(scores), reason: "scored" },
             Err(reason) => Heard::unverified(reason),
         };
+        // An app talking around it: a voice clearly not his gets no benefit of the doubt (pipeline/playback.rs).
+        let app_audible = self.app_audible(from, to);
+        let judged_voice = heimdall_voice::app_audible_verdict(heard.voice, heard.scores.as_ref(), app_audible, voiced_ns, level);
+        if judged_voice != heard.voice {
+            heard.voice = judged_voice;
+            heard.reason = "app_audible";
+        }
         let mut record = serde_json::json!({"schema":1,"voice":heard.voice,"reason":heard.reason,"start_ns":from,"end_ns":to,
-            "stretch":stretch,"voiced_s":voiced_ns as f64 / 1e9,"rms":level,"reliable":reliable,"heimdall_audible":audible,
+            "stretch":stretch,"voiced_s":voiced_ns as f64 / 1e9,"rms":level,"reliable":reliable,"heimdall_audible":audible,"app_audible":app_audible,
             "user_ready":self.heimdall_voice.user.ready()});
         if let Some(s) = &heard.scores {
             record["user"] = serde_json::json!(s.user);
@@ -159,10 +172,10 @@ impl Pipeline {
         heard
     }
     /// The judged audio's scores, or why there are none.
-    fn mic_voice_scores(&mut self, clip: Option<Vec<f32>>, prefetched: Option<crossbeam_channel::Receiver<Result<Embedding>>>) -> std::result::Result<Scores, &'static str> {
+    fn mic_voice_scores(&mut self, clip: Option<Vec<f32>>, prefetched: Option<crossbeam_channel::Receiver<Result<Embedding>>>, device: String) -> std::result::Result<Scores, &'static str> {
         #[cfg(test)]
         {
-            let _ = (clip, prefetched);
+            let _ = (clip, prefetched, device);
             let (user, heimdall) = self.hooks.mic_voice.pop_front().ok_or("no_check")?;
             Ok(Scores { user, heimdall: heimdall.map(|c| ("test".to_string(), c)) })
         }
@@ -180,7 +193,7 @@ impl Pipeline {
                 }
             };
             match rx.recv_timeout(WAIT) {
-                Ok(Ok(e)) => Ok(self.heimdall_voice.scores(&e)),
+                Ok(Ok(e)) => Ok(self.heimdall_voice.scores_on(&e, &device)),
                 Ok(Err(_)) => Err("encoder_error"),
                 Err(_) => Err("late"),
             }
@@ -198,7 +211,7 @@ impl Pipeline {
     }
     /// The line `id` on `source` is the user's own: his microphone, and not a voice that is not his.
     pub(super) fn owner_line(&self, source: &str, id: &str) -> bool {
-        self.owner(source) && self.line_voice(id) != Some(&Line::Unknown)
+        self.user_source(source) && self.line_voice(id) != Some(&Line::Unknown)
     }
     /// The line counts like his for waking Heimdall: his own, or a listened guest's (listen_to.rs).
     pub(super) fn like_owner(&self, source: &str, id: &str) -> bool {

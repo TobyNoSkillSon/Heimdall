@@ -27,7 +27,7 @@ pub const USAGE: &str = "heimdall-emergency [--data-dir DIR] <command>
   hook pretool                            Claude Code's PreToolUse hook: refuses the deny list in every mode (stdin JSON)
   hook install|uninstall [--settings F]   put both hooks in Claude's user settings (~/.claude/settings.json), or take them out
   harness check|apply                     every agent harness in its no-prompt mode (docs/harness-autonomy.md)
-  grants status                           whether User's clicks on ask cards grant exact deletes in this build (read-only)";
+  grants status                           whether the user's clicks on ask cards grant exact deletes in this build (read-only)";
 
 /// Heimdall's default data folder (`HEIMDALL_DATA` from the app, else `<home>/.heimdall`).
 pub fn default_data() -> PathBuf {

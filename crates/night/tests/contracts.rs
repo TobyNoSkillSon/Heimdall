@@ -65,6 +65,24 @@ fn watchdog_deadline_and_ram_ceiling_kill_child() {
         assert!(job::supervise(&mut cmd, || Ok(true), rss, deadline).is_err());
     }
 }
+/// Review 14 Nov should-fix 5: a worker that exits between `try_wait` and the memory probe (the probe then reads
+/// nothing) finished; only an unreadable RSS from a worker still running fails the job.
+#[test]
+fn a_worker_exiting_before_its_memory_check_is_not_failed() {
+    let mut cmd = Command::new("/bin/sleep");
+    cmd.arg("0.1");
+    let probe = |_pid: u32| {
+        std::thread::sleep(Duration::from_millis(500));
+        None
+    };
+    job::supervise_with(&mut cmd, || Ok(true), probe, 1_000_000, Duration::from_secs(5)).unwrap();
+    let mut cmd = Command::new("/bin/sleep");
+    cmd.arg("20");
+    let start = std::time::Instant::now();
+    let err = job::supervise_with(&mut cmd, || Ok(true), |_| None, 1_000_000, Duration::from_secs(5)).unwrap_err();
+    assert!(format!("{err:#}").contains("RSS unreadable"), "{err:#}");
+    assert!(start.elapsed() < Duration::from_secs(4));
+}
 #[test]
 fn safe_paths_and_gaps_are_rejected() {
     let t = tempfile::tempdir().unwrap();

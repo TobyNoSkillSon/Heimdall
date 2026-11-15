@@ -73,6 +73,9 @@ pub struct Goal {
     pub tasks: Vec<GoalTask>,
     /// The finished tasks are shown (the app writes it on a click on "N done").
     pub expanded: bool,
+    /// Open-ended (`ongoing: true` or `kind: "ongoing"`): no end state, so no completion ring or bar; a loop instead
+    /// (bug note 2026-11-06T11-42-43).
+    pub ongoing: bool,
 }
 
 /// How recent a move must be for the quiet accent (the bar's leading edge lit): within the last day.
@@ -87,10 +90,13 @@ impl Goal {
         Some((self.tasks.iter().filter(|t| t.state == TaskState::Done).count(), self.tasks.len()))
     }
 
-    /// The share done, 0 to 1 (a done goal is whole whatever its tasks say).
+    /// The share done, 0 to 1 (a done goal is whole whatever its tasks say; an ongoing one has no share).
     pub fn share(&self) -> Option<f64> {
         if self.state == GoalState::Done {
             return Some(1.0);
+        }
+        if self.ongoing {
+            return None;
         }
         self.progress().map(|(d, n)| d as f64 / n as f64)
     }
@@ -190,6 +196,7 @@ impl Goals {
                 moved: Due::seconds(o.get("moved")),
                 tasks,
                 expanded: j::boolean(o.get("expanded")).unwrap_or(false),
+                ongoing: j::boolean(o.get("ongoing")).unwrap_or(false) || j::str(o.get("kind")) == Some("ongoing"),
             });
         }
         let rank = |s: GoalState| match s {

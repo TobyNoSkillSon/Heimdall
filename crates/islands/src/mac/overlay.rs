@@ -1,4 +1,4 @@
-//! Keeping islands still while Spaces slide (Swift `OverlaySpace.swift`).
+//! Keeping islands still while Spaces slide.
 //!
 //! `canJoinAllSpaces` puts a window on every Space, but WindowServer still slides it out with the old Space and in
 //! with the new one. The windows that stay still (menu bar, Dock, notch overlays) live in a Space of their own above

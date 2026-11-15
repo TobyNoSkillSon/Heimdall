@@ -1,5 +1,5 @@
 //! Instant acknowledgements: when d1 sends the user's line to the agent, Heimdall says a short line in
-//! Jarvis's voice ("On it.", "Will do.") after 1.5 s of quiet, before the agent has answered. The lines are compiled in
+//! Jarvis's voice ("On it.", "Will do.") once the user is quiet (the app's `ack_delay_ms`), before the agent has answered. The lines are compiled in
 //! as `acks.json`, written by `lab/acks-1024/make_acks.py`. English only (the Polish takes "sound
 //! so weird, especially with the accent"): a Polish turn finds no line in its language and gets no ack, never an
 //! English one; a decider's Polish line is unknown and plays nothing either.

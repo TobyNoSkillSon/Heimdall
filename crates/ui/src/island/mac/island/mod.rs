@@ -35,7 +35,60 @@ pub(crate) fn install(mtm: MainThreadMarker) {
     let place = super::util::pointer_screen(mtm).map(|s| Place::of(&s)).unwrap_or_else(Place::offscreen);
     let host = Host::new(mtm, place, false);
     HOST.with(|h| *h.borrow_mut() = Some(host));
+    watch_displays(mtm);
 }
+
+// ---- islands display (night 1107: bug notes 2026-11-07T21-57-37, 2026-11-07T02-02-35) ----
+/// The displays' names for the settings tool, now and at each display change, when the island is also laid out
+/// again where it is (`Host::screens_changed`). One observer for the app's lifetime; nothing runs between changes.
+fn watch_displays(mtm: MainThreadMarker) {
+    publish_displays(mtm);
+    let block = block2::RcBlock::new(|_: std::ptr::NonNull<objc2_foundation::NSNotification>| {
+        // After AppKit's own handling of the change, on the next turn of the main queue.
+        dispatch2::DispatchQueue::main().exec_async(|| {
+            if let Some(mtm) = MainThreadMarker::new() {
+                publish_displays(mtm);
+            }
+            reanchor();
+        });
+    });
+    let center = objc2_foundation::NSNotificationCenter::defaultCenter();
+    let observer = unsafe {
+        center.addObserverForName_object_queue_usingBlock(Some(objc2_app_kit::NSApplicationDidChangeScreenParametersNotification), None, None, &block)
+    };
+    // Kept for the app's lifetime.
+    std::mem::forget(observer);
+}
+
+/// `Host::screens_changed`; a busy host is laid out on the next turn of the main queue, until it is (as `pin`).
+fn reanchor() {
+    let done = with_host(|h| h.screens_changed());
+    if done.is_none() && HOST.with(|h| h.try_borrow().is_err()) {
+        dispatch2::DispatchQueue::main().exec_async(reanchor);
+    }
+}
+
+fn publish_displays(mtm: MainThreadMarker) {
+    let names = objc2_app_kit::NSScreen::screens(mtm).iter().map(|s| s.localizedName().to_string()).collect();
+    crate::islands_display::set_connected(names);
+}
+
+/// Settings `islands_display`: the display the notch island stays on (`None`: it follows the pointer). A showing island
+/// moves at once; a resting one opens there next.
+pub(crate) fn lock_display(name: Option<String>) {
+    if host::set_locked(name) {
+        lock_changed();
+    }
+}
+
+/// `Host::lock_changed`; a busy host on the next turn of the main queue, until it is (as `pin`).
+fn lock_changed() {
+    let done = with_host(|h| h.lock_changed());
+    if done.is_none() && HOST.with(|h| h.try_borrow().is_err()) {
+        dispatch2::DispatchQueue::main().exec_async(lock_changed);
+    }
+}
+// ---- end islands display ----
 
 /// Creates the island for checks and renders: never on a display, on a virtual clock starting at 0.
 pub(crate) fn install_offscreen(mtm: MainThreadMarker) {

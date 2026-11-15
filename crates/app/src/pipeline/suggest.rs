@@ -18,6 +18,11 @@ use speakers::identity::EnrollmentStore;
 /// 5.5): 0.7 fires on 2.8% of lines with precision 0.72 and recall 0.35; 0.5 fires on 3.4% at 0.68 (derived from
 /// `training-material/d1/runs/v5/test_v5.json`, 29 Oct). The higher bar keeps cards rare; the pacing caps them anyway.
 pub(super) const SUGGEST_MIN: f32 = 0.7;
+/// The bar in a call (`suggest_call_open`), where Heimdall does not wake without its name and a card is the only way an
+/// open question reaches it. Night 1112 lane G: in the user's calls on 11 Nov (13:35-14:35, 17:25-18:30) V5 was asked on 720
+/// lines and reached 0.7 on 7; "Yeah, I didn't know open code has image generation." (18:12:01) scored 0.55 and started
+/// nothing. At 0.5 three more lines would have started a pass in those two hours; the pacing still caps cards.
+pub(super) const SUGGEST_MIN_CALL: f32 = 0.5;
 /// After the user's line woke Heimdall or left it waiting for more, he is talking to Heimdall: no suggestion for this long.
 pub(super) const ADDRESSING_MS: u64 = 20_000;
 
@@ -62,10 +67,14 @@ pub(super) struct Snapshot {
     during_call: bool,
     /// The user pressed ⌃⌘' (hotkeys.rs): past the pacing and the addressing hold.
     forced: bool,
+    /// The line of his the call gate held, for a `Pass::HeldInCall`: its own card if the pass stays silent or fails.
+    held: Option<String>,
 }
 
-/// What the pass is told when the user asked for a card himself.
-const FORCED: &str = "\n\nOwner pressed the suggestion key: he wants one card now from this conversation. Show the most useful card you can; stay silent only if the transcript is empty.";
+/// What the pass is told when the user asked for a card themselves (their name from Personalise, never a literal).
+fn forced_note() -> String {
+    format!("\n\n{} pressed the suggestion key: he wants one card now from this conversation. Show the most useful card you can; stay silent only if the transcript is empty.", agent::identity::user_start())
+}
 
 /// What starts a pass.
 pub(super) enum Pass {
@@ -81,7 +90,7 @@ pub(super) enum Pass {
 /// What the pass is told about a line of the user's that the call gate held (bug 2026-11-05T02-32-17).
 fn held_note(line: &str) -> String {
     let line: String = line.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(600).collect();
-    format!("\n\nIn this call User just said this, and the decider read it as meant for Heimdall, but in calls Heimdall does not wake without its name: \"{line}\". If it asks Heimdall for something, show the card that offers to do it, with his request in the handoff. Stay silent only if it was plainly said to the people on the call.")
+    format!("\n\nIn this call {user} just said this, and the decider read it as meant for Heimdall, but in calls Heimdall does not wake without its name: \"{line}\". If it asks Heimdall for something, show the card that offers to do it, with his request in the handoff. Stay silent only if it was plainly said to the people on the call.", user = agent::identity::user())
 }
 
 impl Pipeline {
@@ -103,12 +112,12 @@ impl Pipeline {
         self.tools.speech_policy.in_conversation(capture::host_now_ns()) || self.discord.values().any(|d| d.active)
     }
     /// Every finished line of talk joins the suggester's window; whether it starts a pass is V5's (`suggest_ask`).
-    pub(super) fn suggest_heard(&mut self, speaker: &str, text: &str, owner: bool) {
+    pub(super) fn suggest_heard(&mut self, speaker: &str, text: &str, user: bool) {
         if text.trim().is_empty() {
             return;
         }
         let now = agent::now_ms();
-        self.suggest.window.push(sg::Line { at_ms: now, speaker: speaker.into(), text: text.into(), owner });
+        self.suggest.window.push(sg::Line { at_ms: now, speaker: speaker.into(), text: text.into(), user });
     }
     /// A pick can only reach a running agent: no pass while it is off or restarting. `is_running` stays true with
     /// Agent off (the supervisor lives on), so the switch itself is asked too (`background_gate`).
@@ -131,16 +140,16 @@ impl Pipeline {
     pub(super) fn suggest_ask(&mut self, source: &str, snapshot: &decide::send::Snapshot, record: &Value) {
         let now = agent::now_ms();
         let Some(line) = snapshot.pending.iter().find(|t| t.seq == snapshot.through) else { return };
-        let owner = self.owner(source) && line.speaker == "User";
+        let user = self.user_source(source) && line.speaker == agent::identity::DEFAULT_USER;
         let outcome = record["outcome"].as_str().unwrap_or("");
-        // Bug 2026-11-05T02-32-17: in a call, a line of the user's that d1 sent but the call gate held (23:30-23:34, six
-        // lines at send 0.76-0.96, until they pressed ⌃⌘\ at 23:35:01) reaches nobody. It no longer counts as talking to
-        // Heimdall (which held every card for 20 s); it starts a pass at once, so a card can offer what they asked.
-        if owner && outcome == "held_in_call" {
+        // Bug 2026-11-05T02-32-17: in a call, a line of his that d1 sent but the call gate held (23:30-23:34, six lines
+        // at send 0.76-0.96, until he pressed ⌃⌘\ at 23:35:01) reaches nobody. It no longer counts as talking to
+        // Heimdall (which held every card for 20 s); it starts a pass at once, so a card can offer what he asked.
+        if user && outcome == "held_in_call" {
             self.suggest_held(&line.text, line.observation.as_ref().and_then(|o| o["id"].as_str()).unwrap_or_default());
             return;
         }
-        if owner && (outcome == "send" || record["choice"] == "wait" || record["choice"] == "send") {
+        if user && (outcome == "send" || record["choice"] == "wait" || record["choice"] == "send") {
             self.suggest.addressing_until = now + ADDRESSING_MS;
         }
         if outcome == "send" || self.own_audio(source) || line.text.trim().is_empty() || self.suggest_addressing(now)
@@ -158,12 +167,16 @@ impl Pipeline {
                     "context_tokens":fitted.context_tokens,"dropped_turns":fitted.dropped_turns,"model_output":s.output})),
                 Err(e) => (None, json!({"schema":1,"error":format!("{e:#}")})),
             };
-            let fires = yes.is_some_and(|y| y >= SUGGEST_MIN);
+            let in_call = p.suggest_call_open();
+            let bar = if in_call { SUGGEST_MIN_CALL } else { SUGGEST_MIN };
+            let fires = yes.is_some_and(|y| y >= bar);
             evidence["speaker"] = json!(speaker);
-            evidence["threshold"] = json!(SUGGEST_MIN);
+            evidence["threshold"] = json!(bar);
+            evidence["in_call"] = json!(in_call);
             evidence["outcome"] = json!(if !fires { "no" } else if p.suggest_addressing(now) { "held_addressing" } else { "pass" });
             p.index.evidence.event("suggest_decision", "heimdall", &ids, capture::host_now_ns(), evidence)?;
             if fires && !p.suggest_addressing(now) {
+                eprintln!("Suggester: Decider V5 {:.2} on {speaker}'s line{}: a pass if the pacing allows", yes.unwrap_or_default(), if in_call { " in a call" } else { "" });
                 p.suggest_pass(now);
             }
             Ok(())
@@ -215,7 +228,7 @@ impl Pipeline {
             return;
         }
         let busy = self.suggest.card.is_some() || self.suggest.running.load(Ordering::Acquire);
-        let evidence = json!({"schema":1,"speaker":"User","outcome":if busy {"held_in_call_busy"} else {"held_in_call_pass"}});
+        let evidence = json!({"schema":1,"speaker":agent::identity::DEFAULT_USER,"outcome":if busy {"held_in_call_busy"} else {"held_in_call_pass"}});
         if let Err(e) = self.index.evidence.event("suggest_decision", "heimdall", &[id.to_owned()], capture::host_now_ns(), evidence) {
             eprintln!("Suggest decision failed: {e:#}");
         }
@@ -250,17 +263,23 @@ impl Pipeline {
         let mut prompt = sg::prompt(&self.suggest.window, now, &known);
         match &pass {
             Pass::Paced => {}
-            Pass::Hotkey => { prompt.push(FORCED); }
+            Pass::Hotkey => { prompt.push(forced_note()); }
             Pass::HeldInCall(line) => { prompt.push(held_note(line)); }
         }
-        let snap = Snapshot { now, excerpt: self.suggest.window.transcript(), during_call: self.suggest_call_open(), forced };
+        let held = match &pass { Pass::HeldInCall(line) => Some(line.clone()), _ => None };
+        match &pass {
+            Pass::Paced => {}
+            Pass::Hotkey => eprintln!("Suggester: a pass on his key"),
+            Pass::HeldInCall(_) => eprintln!("Suggester: a pass for his line the call gate held"),
+        }
+        let snap = Snapshot { now, excerpt: self.suggest.window.transcript(), during_call: self.suggest_call_open(), forced, held };
         let paths = self.suggest_paths();
         let running = self.suggest.running.clone();
         let tx = self.internal.0.clone();
         // Tests never reach a background model (no inference in the default suite): the pass ends here.
         #[cfg(test)]
         {
-            let _ = (snap, paths, tx, hotkey);
+            let _ = (snap, paths, tx, hotkey, running);
             return;
         }
         #[allow(unreachable_code)]
@@ -284,18 +303,41 @@ impl Pipeline {
         if result.is_ok() {
             self.suggest.failure = None;
         }
+        // Bug note 2026-11-05T02-32-17 item 2 (night 1111): a line of his the call gate held, that d1 read as for
+        // Heimdall, always gets a card: when the pass stays silent or fails, his own words are offered (`sg::held_card`).
+        // Night 1112 lane G: every outcome gets a line in the app log. On 11 Nov the passes in the user's calls left only
+        // "suggester: gpt-6-luna answered" there, and "nothing ever triggered" took the suggestions log to explain.
+        let kind = if snap.held.is_some() { "held line" } else if snap.forced { "his key" } else { "Decider V5" };
+        let place = if snap.during_call { ", in a call" } else { "" };
+        let fallback = snap.held.as_deref().and_then(sg::held_card);
+        let no_fallback = if snap.held.is_some() && fallback.is_none() { "; the held line asks for nothing or would act outward" } else { "" };
+        let result = match (result, fallback) {
+            (Ok(sg::Verdict::Silent(reason)), Some(card)) => {
+                self.log_suggest(json!({"event": "silent", "at": snap.now, "reason": reason, "transcript": snap.excerpt, "held_fallback": true}));
+                Ok(sg::Verdict::Card(card))
+            }
+            (Err(e), Some(card)) => {
+                eprintln!("Suggester: {e:#}; the line held in the call gets its own card");
+                self.log_suggest(json!({"event": "error", "at": snap.now, "error": format!("{e:#}"), "held_fallback": true}));
+                Ok(sg::Verdict::Card(card))
+            }
+            (result, _) => result,
+        };
         match result {
             Ok(sg::Verdict::Silent(reason)) => {
+                eprintln!("Suggester: no card ({kind}{place}): {reason}{no_fallback}");
                 self.log_suggest(json!({"event": "silent", "at": snap.now, "reason": reason, "transcript": snap.excerpt}));
             }
             Ok(sg::Verdict::Card(s)) => {
                 let now = agent::now_ms();
                 if !snap.forced && self.suggest_addressing(now) {
                     // He started talking to Heimdall while the pass ran: no card over that exchange.
+                    eprintln!("Suggester: no card ({kind}{place}): he is talking to Heimdall; it was on {}", s.topic);
                     self.log_suggest(json!({"event": "silent", "at": now, "reason": "talking to Heimdall", "topic": s.topic}));
                     return Ok(());
                 }
                 if self.suggest.card.is_some() || (!snap.forced && !self.suggest.pacer.may_show(now, &s.topic)) {
+                    eprintln!("Suggester: no card ({kind}{place}): held by the pacing; it was on {}", s.topic);
                     self.log_suggest(json!({"event": "silent", "at": now, "reason": "pacing: a card is up, the gap, a pause, or a repeat topic", "topic": s.topic}));
                     return Ok(());
                 }
@@ -304,6 +346,7 @@ impl Pipeline {
                 let expires_ms = now + sg::CARD_MS;
                 self.ui(ui::UiUpdate::AgentNotice(sg::card(&id, &s, expires_ms)));
                 self.suggest.pacer.shown(now, &s.topic);
+                eprintln!("Suggester: card shown ({kind}{place}): {}", s.topic);
                 self.log_suggest(json!({
                     "id": id, "event": "shown", "at": now, "topic": s.topic, "card": sg::card_line(&s),
                     "questions": s.questions, "found": s.found, "handoff": s.handoff,
@@ -405,7 +448,7 @@ mod tests {
         sg::verify(&answer.to_string(), &[]).unwrap()
     }
     fn snap(now: u64) -> Snapshot {
-        Snapshot { now, excerpt: "[10:00 Sam] the CAD file from the laptop".into(), during_call: false, forced: false }
+        Snapshot { now, excerpt: "[10:00 Sam] the CAD file from the laptop".into(), during_call: false, forced: false, held: None }
     }
     fn answer(labels: &[&str], other: Option<&str>) -> Vec<ui::agent_notice::QuestionAnswer> {
         vec![ui::agent_notice::QuestionAnswer { question_id: "q1".into(), labels: labels.iter().map(|l| l.to_string()).collect(), other: other.map(str::to_owned) }]
@@ -485,6 +528,114 @@ mod tests {
         assert_eq!(decisions(&a)[1]["outcome"], "held_in_call_busy");
         assert_eq!(cards(&a).len(), 1);
         assert!(held_note("Look at it").contains("\"Look at it\""));
+    }
+
+    /// Bug note 2026-11-05T02-32-17 item 2 (night 1111): on 8 Nov 01:45:02 the user's "Okay, bro, sorry, run it in eight in
+    /// in four-bit. Just run it once…" (d1 send 0.99) was held in the call, and its pass answered "quiet: Transcription
+    /// report": no card, nothing reached Heimdall. A held line's pass that stays silent or fails now shows his own words
+    /// as the card (the pick hands them over); one whose words propose contacting someone stays silent.
+    #[test]
+    fn a_held_lines_silent_or_failed_pass_still_shows_his_words() {
+        let line = "Okay, bro, sorry, run it in four-bit. Just run it once and give me the transcript.";
+        let held = |now| Snapshot { forced: true, during_call: true, held: Some(line.into()), ..snap(now) };
+        let (_t, mut a) = app();
+        a.suggest_done(Ok(sg::Verdict::Silent("quiet: Transcription report".into())), held(agent::now_ms())).unwrap();
+        let shown = cards(&a);
+        assert_eq!(shown.len(), 1, "his words get a card");
+        let events = log(&a);
+        assert_eq!((events[0]["event"].as_str(), events[0]["held_fallback"].as_bool()), (Some("silent"), Some(true)));
+        assert_eq!(events[1]["event"], "shown");
+        assert!(events[1]["handoff"].as_str().unwrap().contains("run it in four-bit"), "{}", events[1]);
+        assert_eq!(events[1]["questions"][0]["options"], json!(["Do it", "Not now"]));
+        // The model call failed (8 Nov 10:54:36 "request failed: error sending request"): his words still show.
+        let (_t, mut a) = app();
+        a.suggest_done(Err(anyhow::anyhow!("request failed: error sending request")), held(agent::now_ms())).unwrap();
+        assert_eq!(cards(&a).len(), 1);
+        // A paced pass's silence stays silence; a held line that would contact someone gets no card of its own.
+        let (_t, mut a) = app();
+        a.suggest_done(Ok(sg::Verdict::Silent("quiet: small talk".into())), snap(agent::now_ms())).unwrap();
+        let contact = Snapshot { held: Some("Message Angel the transcript".into()), ..held(agent::now_ms()) };
+        a.suggest_done(Ok(sg::Verdict::Silent("quiet".into())), contact).unwrap();
+        assert!(cards(&a).is_empty());
+    }
+
+    /// Night 1112 lane G, the user's call of 11 Nov ("I don't think it triggered at any moment in the conversation"): the real
+    /// lines of 18:11:43-18:13:32. V5 gave "Yeah, I didn't know open code has image generation." 0.55, under the 0.7 bar,
+    /// and nothing started; the pass V5 started at 18:14:18 over the same talk answered "quiet: OpenCode image
+    /// generation". In a call the bar is now 0.5, so that line starts a pass, the pass sees the question, the look-up card
+    /// it should return shows on the call, and the same talk's outward offer (a friend's "can you send the GitHub…") is
+    /// still refused. Outside a call the bar stays 0.7. V5 and the model are fakes: no inference.
+    #[test]
+    fn an_open_question_on_a_real_call_starts_a_pass_and_its_look_up_card_shows() {
+        const CALL: &[(&str, &str)] = &[
+            ("User", "How though?"),
+            ("Speaker Wed 11 Nov 16h #2", "What do you mean how? It just can."),
+            ("User", "Like how did you connect the image generation? From where?"),
+            ("Speaker Wed 11 Nov 16h #2", "In open code?"),
+            ("Unknown", "I'm confused."),
+            ("User", "Yeah, I didn't know open code has image generation."),
+            ("Speaker Wed 11 Nov 16h #2", "Does it really generate though? I just don't understand."),
+            ("User", "Yeah, I didn't know that they have image generation on OpenCode. Can you double check that? Because if that's the case"),
+            ("Speaker Mon 26 Oct 18h #1", "Wait, you have a User, can you send the GitHub of your all-in-one Swiss knife?"),
+        ];
+        let question = "Yeah, I didn't know open code has image generation.";
+        let run = |in_call: bool| {
+            let (t, mut a) = app();
+            a.hooks.suggest_allowed = true;
+            let mic = crate::fake_source("mic", 0, 1);
+            let id = mic.id.0.clone();
+            a.source(mic);
+            if in_call {
+                a.tools.speech_policy.other_line(capture::host_now_ns());
+            }
+            for (speaker, text) in CALL {
+                a.suggest_heard(speaker, text, *speaker == "User");
+            }
+            a.hooks.suggest.push_back(0.55);
+            a.suggest_ask(&id, &line("User", question), &not_for());
+            (t, a)
+        };
+        let (_t, quiet) = run(false);
+        assert_eq!((decisions(&quiet)[0]["outcome"].as_str(), decisions(&quiet)[0]["threshold"].as_f64()), (Some("no"), Some(0.7f32 as f64)));
+        let (_t, mut a) = run(true);
+        let d = decisions(&a);
+        assert_eq!((d[0]["outcome"].as_str(), d[0]["in_call"].as_bool()), (Some("pass"), Some(true)), "{d:?}");
+        assert!(!a.suggest.pacer.may_call(agent::now_ms()), "the pass took the minute's model call");
+        // The pass sees the question in the transcript, under a system prompt that names this case.
+        let now = agent::now_ms();
+        let prompt = format!("{:?}", sg::prompt(&a.suggest.window, now, &[]));
+        assert!(prompt.contains("Can you double check that?"), "{prompt}");
+        assert!(sg::SYSTEM.contains("Can you double check that?"));
+        // The card a right pass returns shows on the call.
+        let look_up = json!({
+            "suggest": true, "topic": "OpenCode image generation",
+            "questions": [{"text": "Check whether OpenCode can generate images?", "options": ["Look it up", "Not now"], "multi_select": false}],
+            "found": [], "handoff": "On a call User wondered whether OpenCode has image generation and asked to double check it."
+        });
+        let verdict = sg::verify(&look_up.to_string(), &[]).unwrap();
+        assert!(matches!(verdict, sg::Verdict::Card(_)), "{verdict:?}");
+        a.suggest_done(Ok(verdict), Snapshot { during_call: true, ..snap(now) }).unwrap();
+        assert_eq!(cards(&a).len(), 1);
+        let shown = log(&a);
+        assert_eq!((shown[0]["event"].as_str(), shown[0]["during_call"].as_bool()), (Some("shown"), Some(true)));
+        // The same talk's outward offers are still refused: sending the friend the link, or sharing it.
+        for (text, option) in [("Send him the GitHub link?", "Send the link"), ("Share the Swiss knife repo?", "Share it")] {
+            let outward = json!({"suggest": true, "topic": "Swiss knife GitHub", "found": [], "handoff": "Share the repository.",
+                "questions": [{"text": text, "options": [option, "Not now"], "multi_select": false}]});
+            assert!(matches!(sg::verify(&outward.to_string(), &[]).unwrap(), sg::Verdict::Silent(_)), "{text}");
+        }
+    }
+
+    /// Night 1112 lane G: the held lines of 11 Nov that asked for nothing get no card when their pass is quiet.
+    #[test]
+    fn a_held_line_that_asks_for_nothing_stays_silent_with_its_pass() {
+        let (_t, mut a) = app();
+        for line in ["Okay, hi Doll, I'm back.", "But the scrolling is very smooth. I like the scrolling."] {
+            let held = Snapshot { forced: true, during_call: true, held: Some(line.into()), ..snap(agent::now_ms()) };
+            a.suggest_done(Ok(sg::Verdict::Silent("quiet: Call greeting".into())), held).unwrap();
+        }
+        assert!(cards(&a).is_empty());
+        assert!(log(&a).iter().all(|e| e["event"] == "silent" && e.get("held_fallback").is_none()), "{:?}", log(&a));
     }
 
     /// Below the bar (0.7) V5's answer is journalled and nothing starts.

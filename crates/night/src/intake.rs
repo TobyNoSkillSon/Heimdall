@@ -49,7 +49,7 @@ pub fn metadata(archive: &Path, output: &Path) -> Result<()> {
     }
     storage::atomic_write(
         &output.join("dataset.json"),
-        &serde_json::to_vec(&json!({"schema":3,"archive_root":archive,"night_native_blocks":true}))?,
+        &serde_json::to_vec(&json!({"schema":3,"archive_root":archive}))?,
     )?;
     let discovery = rusqlite::Connection::open_in_memory()?;
     let flags = crate::dataset::regions(output, &discovery)?;
@@ -86,7 +86,7 @@ pub fn metadata(archive: &Path, output: &Path) -> Result<()> {
     }
     storage::atomic_write(
         &output.join("dataset.json"),
-        &serde_json::to_vec(&json!({"schema":3,"archive_root":archive,"night_native_blocks":true,"uninspected_source_inventory":uninspected}))?,
+        &serde_json::to_vec(&json!({"schema":3,"archive_root":archive,"uninspected_source_inventory":uninspected}))?,
     )?;
     Ok(())
 }

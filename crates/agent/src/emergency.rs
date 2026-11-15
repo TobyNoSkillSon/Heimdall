@@ -45,7 +45,9 @@ impl Cause {
             Self::Quota { reset_ms: Some(at), .. } => format!("The agent's plan usage limit is used up; it resets at {}.", clock(*at)),
             Self::Quota { .. } => "The agent's plan usage limit or credit is used up; the provider gave no reset time.".into(),
             Self::Auth(e) => format!("The agent's provider rejected its sign-in: {}", bounded(e, 300)),
-            Self::Provider(e) => format!("The agent's provider failed {PROVIDER_FAILURES} requests in a row; the last error: {}", bounded(e, 300)),
+            // night1114 relay (bug note 2026-11-13T10-58-09): a relay run's one failure is a Provider cause too, so the
+            // sentence claims no count ("failed 3 requests in a row" was said of one failed run).
+            Self::Provider(e) => format!("The agent's provider failed: {}", bounded(e, 300)),
             Self::NoAnswer => format!("The agent gave no answer and no progress for {} minutes.", NO_ANSWER_MS / 60_000),
         }
     }
@@ -67,12 +69,26 @@ impl Cause {
         })
     }
 }
-/// Local `HH:MM` of a Unix time in milliseconds.
+/// Local time of a Unix time in milliseconds: `HH:MM` today, else with its day (`Mon 13:01`; a week or more away
+/// also its date, `Mon 9 Nov 13:01`). Bug note 2026-11-08T02-03-52: "next check at 13:01" meant Monday 9 Nov.
 pub fn clock(ms: u64) -> String {
-    use chrono::TimeZone;
-    chrono::Local.timestamp_millis_opt(ms as i64).single().map(|t| t.format("%H:%M").to_string()).unwrap_or_else(|| "?".into())
+    clock_from(ms, crate::now_ms())
 }
-fn bounded(s: &str, chars: usize) -> String {
+/// `clock` as seen at `now_ms` (tests pin the day).
+pub fn clock_from(ms: u64, now_ms: u64) -> String {
+    use chrono::TimeZone;
+    let local = |ms: u64| chrono::Local.timestamp_millis_opt(ms as i64).single();
+    let Some(t) = local(ms) else { return "?".into() };
+    let Some(now) = local(now_ms) else { return t.format("%a %-d %b %H:%M").to_string() };
+    let days = (t.date_naive() - now.date_naive()).num_days();
+    match days {
+        0 => t.format("%H:%M").to_string(),
+        -6..=6 => t.format("%a %H:%M").to_string(),
+        _ => t.format("%a %-d %b %H:%M").to_string(),
+    }
+}
+/// At most `chars` characters of `s` (trimmed), cut on a character boundary and marked "…" when cut.
+pub fn bounded(s: &str, chars: usize) -> String {
     let s = s.trim();
     if s.chars().count() <= chars { s.into() } else { format!("{}…", s.chars().take(chars).collect::<String>()) }
 }
@@ -87,11 +103,15 @@ pub enum Failure {
     /// Anything else the provider or transport returned (a 5xx, an overload, a request that never started).
     Other,
 }
+/// The abort reason of the user's Stop, naming them as Personalise does ("Stopped by the user" for the user's profile).
+pub fn stopped_by() -> String {
+    format!("Stopped by {}", crate::identity::user())
+}
 /// The kind of a failed turn's error, `None` when it is not the agent failing (the user's Stop, an abort, a reload).
 pub fn classify(error: &str) -> Option<Failure> {
     let lower = error.to_ascii_lowercase();
     // Not the provider failing: the user's Stop, aborts, the loop guard, a reply cut by its own length (review 27 Oct).
-    if lower.trim().is_empty() || ["stopped by user", "aborted", "cancelled", "canceled", "interrupted", "repeating loop", "settled without a successful reply"].iter().any(|p| lower.contains(p)) {
+    if lower.trim().is_empty() || lower.contains(&stopped_by().to_lowercase()) || ["stopped by owner", "stopped by the user", "aborted", "cancelled", "canceled", "interrupted", "repeating loop", "settled without a successful reply"].iter().any(|p| lower.contains(p)) {
         return None;
     }
     // The quota task's own test (notice::quota_exhausted), plus a spent prepaid balance (26 Oct 22:02: "credit balance is
@@ -105,7 +125,7 @@ pub fn classify(error: &str) -> Option<Failure> {
         let digit = |b: Option<&u8>| b.is_some_and(u8::is_ascii_digit);
         !digit(i.checked_sub(1).and_then(|j| lower.as_bytes().get(j))) && !digit(lower.as_bytes().get(i + c.len()))
     });
-    if code("401") || (code("403") && lower.contains("forbidden")) || ["unauthorized", "invalid api key", "invalid x-api-key", "authentication_error", "authentication failed", "sign in again", "signed out", "invalid_api_key", "--provider-token"]
+    if code("401") || (code("403") && lower.contains("forbidden")) || ["unauthorized", "invalid api key", "invalid x-api-key", "authentication_error", "authentication failed", "failed to authenticate", "sign in again", "signed out", "invalid_api_key", "--provider-token"]
         .iter().any(|p| lower.contains(p)) {
         return Some(Failure::Auth);
     }
@@ -149,6 +169,40 @@ pub fn cause_of(error: &str) -> Option<Cause> {
         Failure::Auth => Cause::Auth(error.into()),
         Failure::Other => Cause::Provider(error.into()),
     })
+}
+// The cause in plain words (bug notes 2026-11-13T10-57-01, 2026-11-13T10-58-09)
+/// What failed, in a few plain words for the recovery card, the island and Heimdall's voice: "sign-in failed: 403 from
+/// Cloudflare", never the raw provider text. `None` for a spent quota (the card says it its own way).
+pub fn short_cause(cause: &Cause) -> Option<String> {
+    match cause {
+        Cause::Quota { .. } => None,
+        Cause::Auth(e) => Some(format!("sign-in failed: {}", error_gist(e))),
+        Cause::Provider(e) => Some(format!("provider error: {}", error_gist(e))),
+        Cause::NoAnswer => Some(format!("no answer for {} minutes", NO_ANSWER_MS / 60_000)),
+    }
+}
+/// A provider error's gist: its HTTP status and who sent it ("403 from Cloudflare", "529 overloaded"), else its first
+/// words.
+pub fn error_gist(error: &str) -> String {
+    let lower = error.to_ascii_lowercase();
+    let b = lower.as_bytes();
+    let code = (0..b.len().saturating_sub(2)).find_map(|i| {
+        // Bytes first: three ASCII digits are always on character boundaries (an em dash before a code is not).
+        let edge = |j: Option<usize>| j.and_then(|j| b.get(j)).is_none_or(|x| !x.is_ascii_digit());
+        (b[i..i + 3].iter().all(u8::is_ascii_digit) && matches!(b[i], b'4' | b'5') && edge(i.checked_sub(1)) && edge(Some(i + 3))).then(|| lower[i..i + 3].to_owned())
+    });
+    let phrase = |c: &str| match c {
+        "400" => "bad request", "401" => "unauthorized", "402" => "payment required", "403" => "forbidden", "404" => "not found",
+        "408" => "timed out", "429" => "rate limited", "500" => "server error", "502" => "bad gateway", "503" => "unavailable",
+        "504" => "gateway timeout", "529" => "overloaded", _ => "",
+    };
+    match (code, lower.contains("cloudflare")) {
+        (Some(c), true) => format!("{c} from Cloudflare"),
+        (None, true) => "blocked by Cloudflare".into(),
+        (Some(c), false) if !phrase(&c).is_empty() => format!("{c} {}", phrase(&c)),
+        (Some(c), false) => format!("error {c}"),
+        (None, false) => bounded(error.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("unknown error"), 80),
+    }
 }
 /// A relay run's failure as a cause: a spent limit or balance T3 reported (`limits::parse`, with its window and reset,
 /// named for `who`, the account), else as `cause_of` reads it (bug note 2026-11-02T14-47-37: "run failed" was all).
@@ -252,40 +306,6 @@ pub fn shares_subscription(provider: &str, driver: &str) -> bool {
         _ => false,
     }
 }
-/// The harnesses to try, in `order` (docs/claude-relay.md, "Which T3 harness"): each entry a driver-kind substring,
-/// `*` every other harness in T3's order, `-x` never. Each with the first model T3 lists for it (its live catalog, never a
-/// remembered id). Left out: disabled instances, ones without models or without full access, and those on the failed
-/// provider's subscription. T3 tells an outside client nothing about plans, quota or sign-in health, so the order is all
-/// there is to rank on; the first run's reply is the health check.
-pub fn cover_harnesses(catalog: &Value, failed_provider: Option<&str>, order: &[String]) -> Vec<Harness> {
-    let never: Vec<String> = order.iter().filter_map(|o| o.strip_prefix('-')).map(str::to_ascii_lowercase).collect();
-    let wanted: Vec<String> = order.iter().filter(|o| !o.starts_with('-')).map(|o| o.to_ascii_lowercase()).collect();
-    let rest = wanted.iter().position(|o| o == "*");
-    let mut out: Vec<(usize, Harness)> = Vec::new();
-    for p in catalog["providers"].as_array().into_iter().flatten() {
-        let disabled = p["constraints"].as_array().into_iter().flatten().any(|c| c.as_str().is_some_and(|c| c.to_ascii_lowercase().contains("disabled")));
-        let full = p["runtimeModes"].as_array().is_none_or(|m| m.iter().any(|x| x == "full-access"));
-        let (Some(instance), Some(model)) = (p["providerInstanceId"].as_str(), p["models"].as_array().and_then(|m| m.first()).and_then(|m| m["id"].as_str())) else { continue };
-        let driver = p["driverKind"].as_str().unwrap_or(instance).to_owned();
-        if disabled || !full || failed_provider.is_some_and(|f| shares_subscription(f, &driver)) { continue; }
-        let lower = driver.to_ascii_lowercase();
-        if never.iter().any(|n| lower.contains(n.as_str())) { continue; }
-        let Some(rank) = wanted.iter().position(|o| o != "*" && lower.contains(o.as_str())).or(rest) else { continue };
-        out.push((rank, Harness { instance: instance.into(), name: p["displayName"].as_str().unwrap_or(instance).into(), driver, model: model.into() }));
-    }
-    out.sort_by_key(|(rank, _)| *rank);
-    out.into_iter().map(|(_, h)| h).collect()
-}
-/// Relay mode's chosen model: each harness whose T3 instance lists `model` runs it instead of its first model.
-pub fn prefer_model(harnesses: &mut [Harness], catalog: &Value, model: &str) {
-    for h in harnesses {
-        let lists = catalog["providers"].as_array().into_iter().flatten()
-            .filter(|p| p["providerInstanceId"].as_str() == Some(h.instance.as_str()))
-            .flat_map(|p| p["models"].as_array().into_iter().flatten())
-            .any(|m| m["id"].as_str() == Some(model));
-        if lists { h.model = model.into(); }
-    }
-}
 /// The Claude models relay mode can run: the models of T3's first Claude instance, as (id, name).
 pub fn relay_models(catalog: &Value) -> Vec<(String, String)> {
     catalog["providers"].as_array().into_iter().flatten()
@@ -309,7 +329,7 @@ pub fn relay_accounts(catalog: &Value) -> Vec<(String, String)> {
 /// delegate:, allows Claude → Codex (and back) for it when no account of the failed provider works
 /// (Assistant/Plans/relay-account-routing-2026-10-30.md). Delegates stay Claude only (27 Oct 03:25: "do not spawn
 /// Codex subagents like ever"; `delegate_task` is untouched by this order).
-pub fn default_order(_public: bool) -> Vec<String> {
+pub fn default_order() -> Vec<String> {
     let order: &[&str] = &["claude", "codex", "*"];
     order.iter().map(|s| s.to_string()).collect()
 }
@@ -317,12 +337,21 @@ pub fn default_order(_public: bool) -> Vec<String> {
 /// A harness that could not run ends its turn with the provider's error as the whole reply ("API Error: 429 …",
 /// "Claude AI usage limit reached|…", "Credit balance is too low"). Only such a reply counts: a cover agent that
 /// answered will talk about the quota too (lab 27 Oct 00:50: "Emergency mode since 00:50: The agent's plan usage
-/// limit…" was taken for the harness failing, and three working harnesses were archived).
+/// limit…" was taken for the harness failing, and three working harnesses were archived). Codex prints its own the
+/// same way, sometimes after "Error: " ("Error: stream disconnected before completion: …", "unexpected status 401 …");
+/// a bare "Error: …" is no such shape: the relay's real answer "Error: the linker failed, I'm fixing it." is a reply.
+/// After "Error: " the transport and retry failures count too ("Error: connect ECONNREFUSED 127.0.0.1:443",
+/// "Error: Request timed out.", "Error: exceeded retry limit, last status: 429 …"): review 14 Nov should-fix 1.
 pub fn harness_error_reply(reply: &str) -> bool {
-    let lower = reply.trim().to_ascii_lowercase();
-    lower.len() < 400 && ["api error", "claude ai usage limit", "credit balance is too low", "invalid api key", "please run /login",
-        "you've hit your", "you have hit your", "usage limit reached", "error:", "unexpected status", "stream error"]
-        .iter().any(|p| lower.starts_with(p))
+    let lower = reply.trim().to_ascii_lowercase().replace('\u{2019}', "'");
+    let after_error = lower.strip_prefix("error:").map(str::trim_start);
+    let shape = after_error.unwrap_or(lower.as_str());
+    lower.len() < 400 && (["api error", "claude ai usage limit", "credit balance is too low", "invalid api key", "please run /login",
+        "you've hit your", "you have hit your", "usage limit reached", "stream disconnected", "unexpected status", "stream error"]
+        .iter().any(|p| shape.starts_with(p))
+        || after_error.is_some_and(|s| ["connect ", "getaddrinfo", "request timed out", "connection error", "exceeded retry limit",
+            "quota exceeded", "fetch failed", "socket hang up", "read econnreset", "econnrefused", "econnreset", "etimedout"]
+            .iter().any(|p| s.starts_with(p))))
 }
 /// The CLI's grant: 256 random bits as hex (two v4 UUIDs).
 pub fn new_token() -> String {
@@ -384,10 +413,17 @@ pub struct Brief<'a> {
     pub tail: &'a str,
     /// The plan lists, already bounded.
     pub plan: &'a str,
+    /// Relay mode only: a switch the user asked for (relay on, or another relay model or account) that this thread
+    /// completes, named as the model or account it now runs on. The thread confirms it once instead of NO_REPLY
+    /// (bug note 2026-11-10T06-19-44). With whether the user asked for it: a change the agent (or a settings.json edit)
+    /// made itself is confirmed without saying he asked (review 1111).
+    pub switched: Option<(&'a str, bool)>,
 }
 /// The first message's opening, word for word: emergency mode, then relay mode.
 pub const OPENING: &str = "This is Heimdall's emergency protocol. Heimdall's agent failed, and you now act as Heimdall: continue his work.";
-pub const OPENING_RELAY: &str = "You are Heimdall's agent now. User chose to run Heimdall through you, a T3 Code thread, instead of his built-in agent.";
+pub const OPENING_RELAY: &str = "You are Heimdall's agent now.";
+/// The relay opening's second sentence (`{user}`: the configured name, `identity::tokens`).
+const RELAY_CHOICE: &str = "{user} chose to run Heimdall through you, a T3 Code thread, instead of his built-in agent.";
 /// The delimiters around the system prompt at the top of the first message.
 pub const PROMPT_START: &str = "<system_prompt>";
 pub const PROMPT_END: &str = "</system_prompt>";
@@ -409,15 +445,24 @@ impl Brief<'_> {
                 if matches!(c, Cause::Quota { line: Some(_), .. }) { "\nHeimdall already said that sentence aloud: don't repeat it." } else { "" }),
             _ => String::new(),
         };
+        // The fixed words name the user as Personalise does; the context, tail and plan are data and are not filled.
+        let names = crate::identity::current();
+        let user = crate::identity::user_of(&names);
         let end = if emergency { " Hand back early with emergency_end; Heimdall checks his agent first and tells you if it still fails." } else { "" };
-        let now = if emergency {
-            "Now: find in the context what User and Heimdall were doing and left unfinished, pick it up, and tell User in one \
+        let now: String = if emergency {
+            "Now: find in the context what {user} and Heimdall were doing and left unfinished, pick it up, and tell {user} in one \
 short message (your reply to this message): what broke, that you have it, and what you are continuing. After that, speak \
-only when he talks to you or must act. Heimdall checks his agent by himself and tells you here when to wrap up."
+only when he talks to you or must act. Heimdall checks his agent by himself and tells you here when to wrap up.".into()
+        } else if let Some((what, by_owner)) = self.switched {
+            let who = if by_owner { "{user} asked for this switch" } else { "Heimdall's settings were switched to this relay (not by {user}'s click)" };
+            format!("Now: read the context. {who} and it just completed: reply to this message with \
+one short line confirming it, naming the model or account you now run on ({what}). Then act for Heimdall until {user} \
+switches back; you will be told here.")
         } else {
-            "Now: read the context. Reply NO_REPLY to this message unless something in the context needs User now. \
-You act for Heimdall until User switches back; you will be told here."
+            "Now: read the context. Reply NO_REPLY to this message unless something in the context needs {user} now. \
+You act for Heimdall until {user} switches back; you will be told here.".into()
         };
+        let now = crate::identity::tokens(&now, &names);
         let text = format!("{opening}{cause}
 You are the only agent acting for Heimdall now.
 
@@ -430,9 +475,9 @@ plan_edit, delegate_task ...); emergency_status says who you are, since when, an
 mcp__heimdall__ tools in your list, run the same tools from bash: `{cli} tools` lists them, `{cli} call <tool> '<json>'` \
 runs one by its name (images come back as file paths).
 
-Everything that would wake Heimdall arrives here as a message headed [For Heimdall, …]: User said, typed or clicked, a
-task finished, a T3 thread asks, a scheduled wake, User pressed Stop. Answer it as Heimdall would. Your final reply to
-each message is spoken to User in Heimdall's voice and shown on the island, exactly like his own replies: short spoken
+Everything that would wake Heimdall arrives here as a message headed [For Heimdall, …]: {user_s} said, typed or clicked, a
+task finished, a T3 thread asks, a scheduled wake, {user} pressed Stop. Answer it as Heimdall would. Your final reply to
+each message is spoken to {user} in Heimdall's voice and shown on the island, exactly like his own replies: short spoken
 words, no markdown, never what you already said with `speak`. Reply NO_REPLY when nothing should be said. Everything you
 do with his tools is written into Heimdall's conversation, so he knows it when he is back. Protocol: {docs}
 
@@ -443,7 +488,8 @@ Heimdall's recent conversation, the last part (the whole context is in the file)
 
 Plan:
 {plan}",
-            opening = if emergency { OPENING } else { OPENING_RELAY },
+            opening = if emergency { OPENING.to_string() } else { format!("{OPENING_RELAY} {}", crate::identity::tokens(RELAY_CHOICE, &names)) },
+            user_s = crate::identity::user_start(),
             context = self.context, docs = self.docs,
             tail = if self.tail.trim().is_empty() { "(nothing recent)" } else { self.tail },
             plan = if self.plan.trim().is_empty() { "(empty)" } else { self.plan });
@@ -494,6 +540,18 @@ pub const HELD: &str = "[Relayed: this reached the relay agent (a T3 thread acti
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clock_names_the_day_when_it_is_not_today() {
+        use chrono::TimeZone;
+        let at = |d, h, m| chrono::Local.with_ymd_and_hms(2026, 11, d, h, m, 0).single().unwrap().timestamp_millis() as u64;
+        let now = at(8, 0, 48);
+        // Bug note 2026-11-08T02-03-52: Saturday 00:48, the next check is Monday 13:01.
+        assert_eq!(super::clock_from(at(9, 13, 1), now), "Mon 13:01");
+        assert_eq!(super::clock_from(at(8, 13, 1), now), "13:01");
+        assert_eq!(super::clock_from(at(6, 12, 8), now), "Fri 12:08");
+        assert_eq!(super::clock_from(at(20, 9, 0), now), "Fri 20 Nov 09:00");
+    }
+
     use super::*;
 
     const QUOTA: &str = "The ChatGPT user has reached their Subscription Sharing usage limit. Ask the user to try again after their usage limit resets or use an API key instead.";
@@ -531,7 +589,7 @@ mod tests {
         assert_eq!(d.failed("401 Unauthorized", 0), None);
         assert!(matches!(d.failed("ChatGPT: sign in again", 1), Some(Cause::Auth(_))));
         let mut d = Detector::default();
-        for _ in 0..5 { assert_eq!(d.failed("Stopped by User", 0), None); assert_eq!(d.failed("Request was aborted", 0), None); }
+        for _ in 0..5 { assert_eq!(d.failed("Stopped by the user", 0), None); assert_eq!(d.failed("Request was aborted", 0), None); }
     }
 
     /// Ticks every 10 s, as the supervisor's.
@@ -623,7 +681,8 @@ mod tests {
         assert_eq!(classify("connect to 127.0.0.1:14010 refused"), Some(Failure::Other));
         assert_eq!(classify("Pi settled without a successful reply"), None);
         assert_eq!(cause_of("503 Service Unavailable"), Some(Cause::Provider("503 Service Unavailable".into())));
-        assert_eq!(cause_of("Stopped by User"), None);
+        assert_eq!(cause_of("Stopped by the user"), None);
+        assert_eq!(cause_of(&stopped_by()), None, "the configured user's Stop is not the provider failing");
     }
 
     #[test]
@@ -649,29 +708,18 @@ mod tests {
     }
 
     #[test]
-    fn claude_covers_first_then_codex_then_the_rest() {
-        // The main assistant may fall back to Codex; never on the failed ChatGPT subscription.
-        let order = |p: Option<&str>, public: bool| cover_harnesses(&catalog(), p, &default_order(public)).into_iter().map(|h| format!("{}/{}", h.instance, h.model)).collect::<Vec<_>>();
-        assert_eq!(order(Some("anthropic"), false), ["claudeAgent/claude-model-a", "codex/codex-model-a", "grok/grok-model"]);
-        assert_eq!(order(Some(crate::provider::CHATGPT), false), ["claudeAgent/claude-model-a", "grok/grok-model"]);
-        assert_eq!(order(None, false), ["claudeAgent/claude-model-a", "codex/codex-model-a", "grok/grok-model"]);
-        // The public edition (audit 27 Oct): Claude, Codex, the rest; the shared-subscription skip still holds.
-        assert_eq!(order(None, true), ["claudeAgent/claude-model-a", "codex/codex-model-a", "grok/grok-model"]);
-        assert_eq!(order(Some(crate::provider::CHATGPT), true), ["claudeAgent/claude-model-a", "grok/grok-model"]);
-        // Another user's set: no Claude at all, an unknown harness ranks with the rest.
-        let other = json!({"providers":[{"providerInstanceId":"zed","driverKind":"zed","displayName":"Zed","models":[{"id":"z1"}],"constraints":[]}]});
-        assert_eq!(cover_harnesses(&other, None, &default_order(false)).len(), 1);
-        assert!(cover_harnesses(&other, None, &["claude".into()]).is_empty(), "no `*`: only the named ones");
+    fn a_harness_on_the_failed_subscription_shares_it() {
         assert!(shares_subscription("opencode-go", "opencode") && !shares_subscription("anthropic", "claudeAgent"));
+        assert!(shares_subscription(crate::provider::CHATGPT, "codex"));
     }
 
     #[test]
     fn relay_accounts_are_the_claude_instances_that_can_run() {
         let mut c = catalog();
         let providers = c["providers"].as_array_mut().unwrap();
-        providers.push(json!({"providerInstanceId":"claudeAgent_claude_code_2","driverKind":"claudeAgent","displayName":"Claude (work)","models":[{"id":"claude-model-a"}],"constraints":[]}));
+        providers.push(json!({"providerInstanceId":"claudeAgent_2","driverKind":"claudeAgent","displayName":"Claude (work)","models":[{"id":"claude-model-a"}],"constraints":[]}));
         providers.push(json!({"providerInstanceId":"claudeAgent_old","driverKind":"claudeAgent","displayName":"Claude (old)","models":[],"constraints":["Provider instance is disabled."]}));
-        assert_eq!(relay_accounts(&c), [("claudeAgent".to_string(), "Claude".to_string()), ("claudeAgent_claude_code_2".to_string(), "Claude (work)".to_string())]);
+        assert_eq!(relay_accounts(&c), [("claudeAgent".to_string(), "Claude".to_string()), ("claudeAgent_2".to_string(), "Claude (work)".to_string())]);
         assert!(relay_accounts(&json!({})).is_empty());
     }
 
@@ -684,6 +732,22 @@ mod tests {
         let answer = "I ran both lab commands.\n\nThe speak command printed: \"Speech queued: 1.\" The status command printed: \"Emergency mode since 00:50: The agent's plan usage limit or credit is used up; the provider gave no reset time.\"";
         assert!(!harness_error_reply(answer));
         assert!(!harness_error_reply(&format!("API Error explained: {}", "x".repeat(500))));
+        // AGT-B2: a short real answer that starts with "Error:" is the relay talking, not the harness failing.
+        assert!(!harness_error_reply("Error: the linker failed on heimdall-app, I'm fixing it."));
+        assert!(harness_error_reply("Error: unexpected status 401 Unauthorized: token expired"));
+        assert!(harness_error_reply("You\u{2019}ve hit your weekly limit · resets 1pm (Europe/Warsaw)"), "curly apostrophe");
+        // Review 14 Nov should-fix 1: the transport and retry errors the old "error:" catch-all caught still count.
+        for failed in ["Error: connect ECONNREFUSED 127.0.0.1:443", "Error: Request timed out.", "Error: Connection error.",
+            "Error: getaddrinfo ENOTFOUND api.anthropic.com", "Error: exceeded retry limit, last status: 429 Too Many Requests",
+            "Error: Quota exceeded. Check your plan and billing details.", "Error: fetch failed", "Error: socket hang up",
+            "Error: read ECONNRESET"] {
+            assert!(harness_error_reply(failed), "{failed}");
+        }
+        // ...and only after "Error:": a reply that merely starts with those words is the relay talking.
+        for answer in ["Connect the phone again and I'll retry.", "Request timed out on the build server, so I'm rerunning it.",
+            "Error: the request to the bank timed out, I'll try again tomorrow."] {
+            assert!(!harness_error_reply(answer), "{answer}");
+        }
     }
     #[test]
     fn the_connection_file_is_private_and_goes_with_emergency_mode() {
@@ -707,18 +771,29 @@ mod tests {
     #[test]
     fn the_first_message_carries_the_whole_prompt_then_the_protocol_the_context_and_every_tool() {
         let cause = Cause::Quota { reset_ms: None, line: Some("ChatGPT's five-hour limit is used up; it resets at 03:04.".into()) };
-        let brief = |reason, prompt: &str, tail: &str, plan: &str| Brief { reason, cause: Some(&cause), since_ms: 0, cli: "/A/heimdall-emergency", docs: "/V/docs/emergency.md", prompt, context: "/D/emergency/context.md", tail, plan }.text();
+        let brief = |reason, prompt: &str, tail: &str, plan: &str| Brief { reason, cause: Some(&cause), since_ms: 0, cli: "/A/heimdall-emergency", docs: "/V/docs/emergency.md", prompt, context: "/D/emergency/context.md", tail, plan, switched: None }.text();
         let after = |text: &str| text.split_once(PROMPT_END).unwrap().1.trim_start().to_string();
         let text = brief(Reason::Emergency, "# Heimdall's relay\nPROMPT BODY", "User: are you there?", "To do: ship it");
         assert!(text.starts_with(&format!("{PROMPT_START}\n# Heimdall's relay\nPROMPT BODY\n{PROMPT_END}\n\n{OPENING}")), "{text}");
         assert!(after(&text).starts_with(OPENING));
         // The user, 19:50: the takeover continues the work in flight and tells the user once, in one short message.
-        assert!(text.contains("left unfinished, pick it up, and tell User in one\nshort message") || text.contains("left unfinished, pick it up, and tell User in one short message"), "{text}");
+        assert!(text.contains("left unfinished, pick it up, and tell the user in one\nshort message") || text.contains("left unfinished, pick it up, and tell the user in one short message"), "{text}");
         for part in ["ChatGPT's five-hour limit is used up", "mcp__heimdall__<tool>", "emergency_status", "emergency_end", "/A/heimdall-emergency tools", "/A/heimdall-emergency call", "/V/docs/emergency.md", "/D/emergency/context.md", "NO_REPLY", "User: are you there?", "To do: ship it"] {
             assert!(text.contains(part), "{part}");
         }
         let relay = after(&brief(Reason::Chosen, "P", "", ""));
         assert!(relay.starts_with(OPENING_RELAY) && !relay.contains("What failed") && !relay.contains("emergency_end") && !relay.contains("Down since"), "{relay}");
+        // Bug note 2026-11-10T06-19-44: a relay started or moved by a switch the user asked for confirms it once, naming
+        // what it runs on; a plain relay start keeps the quiet rule.
+        assert!(relay.contains("Reply NO_REPLY to this message unless something in the context needs the user now") && !relay.contains("confirming it"), "{relay}");
+        let switched = after(&Brief { reason: Reason::Chosen, cause: None, since_ms: 0, cli: "c", docs: "d", prompt: "P", context: "f", tail: "", plan: "", switched: Some(("claude-opus-5-5 on the claudeAgent account", true)) }.text());
+        assert!(switched.contains("The user asked for this switch and it just completed: reply to this message with\none short line confirming it") || switched.contains("The user asked for this switch and it just completed: reply to this message with one short line confirming it"), "{switched}");
+        assert!(switched.contains("(claude-opus-5-5 on the claudeAgent account)") && !switched.contains("Reply NO_REPLY to this message"), "{switched}");
+        // Review 1111: a switch the agent made itself is confirmed without saying the user asked.
+        let own = after(&Brief { reason: Reason::Chosen, cause: None, since_ms: 0, cli: "c", docs: "d", prompt: "P", context: "f", tail: "", plan: "", switched: Some(("claude-opus-5-5", false)) }.text());
+        assert!(own.contains("confirming it") && own.contains("not by the user's click") && !own.contains("The user asked for this switch"), "{own}");
+        let emergency = after(&Brief { reason: Reason::Emergency, cause: Some(&cause), since_ms: 0, cli: "c", docs: "d", prompt: "P", context: "f", tail: "", plan: "", switched: Some(("x", true)) }.text());
+        assert!(!emergency.contains("confirming it"), "an emergency takeover is not a switch User asked for");
         // The real prompt with the longest tail and plan still fits T3's first message.
         let d = tempfile::tempdir().unwrap();
         let prompt = crate::relay_prompt::text(std::path::Path::new("/nowhere/heimdall"), d.path(), "/Applications/Heimdall.app/Contents/MacOS/heimdall-emergency --data-dir /Users/someone/Library/Application Support/Heimdall");
@@ -740,5 +815,25 @@ mod tests {
         assert_eq!(tail_bytes("short", 10), "short");
         assert_eq!(Cause::from_json(&cause.to_json()), Some(cause));
         assert_eq!(Cause::from_json(&Cause::Auth("401".into()).to_json()), Some(Cause::Auth("401".into())));
+    }
+
+    /// Bug note 2026-11-13T10-58-09: the relay's 10:50 failure was a sign-in failure behind Cloudflare, read as a
+    /// provider failing "3 requests in a row" after one run. It reads as a sign-in failure now, named plainly.
+    #[test]
+    fn a_cloudflare_403_on_sign_in_is_a_sign_in_failure_named_plainly() {
+        let e = "Failed to authenticate. API Error: 403 Attention Required! | Cloudflare";
+        assert_eq!(classify(e), Some(Failure::Auth));
+        let cause = relay_cause(e, "Claude", 0).unwrap();
+        assert_eq!(cause, Cause::Auth(e.into()));
+        assert_eq!(short_cause(&cause).as_deref(), Some("sign-in failed: 403 from Cloudflare"));
+        assert!(!cause.sentence().contains("in a row"), "{}", cause.sentence());
+        let other = relay_cause("API Error: 529 Overloaded", "Claude", 0).unwrap();
+        assert_eq!(short_cause(&other).as_deref(), Some("provider error: 529 overloaded"));
+        assert!(!other.sentence().contains("in a row"), "one failed run is not three: {}", other.sentence());
+        assert_eq!(error_gist("request req_4012345 failed"), "request req_4012345 failed");
+        // Non-ASCII before the code never cuts a character (review: a panic on the controller's task).
+        assert_eq!(error_gist("Attention Required — “blocked” … 403 | Cloudflare"), "403 from Cloudflare");
+        assert_eq!(error_gist("Überlastet – bitte später"), "Überlastet – bitte später");
+        assert_eq!(short_cause(&Cause::Quota { reset_ms: None, line: None }), None);
     }
 }

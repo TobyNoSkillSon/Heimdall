@@ -32,7 +32,7 @@ fn versions_order_by_semver_with_prereleases() {
     for bad in ["01.0.0", "1.0", "1.0.0-", "1.0.0-a..b", "1.0.0+", "x.y.z", "1.0.0-al pha"] {
         assert!(Version::parse(bad).is_none(), "{bad}");
     }
-    assert_eq!(v(env!("CARGO_PKG_VERSION")).to_string(), "0.1.0-alpha.1");
+    assert_eq!(v(env!("CARGO_PKG_VERSION")).to_string(), "0.1.0-alpha.2");
 }
 
 #[test]

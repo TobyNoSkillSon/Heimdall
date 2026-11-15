@@ -6,9 +6,9 @@
 //!
 //! Limits: one scout per note (a note that has a cause is skipped); one at a time (`enqueue` feeds a single worker
 //! through a queue of `QUEUE` notes, and a full queue leaves the note for the night pass); `OUTPUT_TOKENS` of output,
-//! `MAX_USD` a call and `TIMEOUT` of wall time. The model gets no tools (`claude -p --tools ""`), so it cannot read or
-//! change files; the scout writes only the note's own two files. It never wakes the main agent: nothing here
-//! delivers to a thread.
+//! `MAX_USD` a call and `TIMEOUT` of wall time. With a repo the model may only read and search it (`READ_TOOLS`, at
+//! most `MAX_TOOL_CALLS` calls); without one it gets no tools (`--tools ""`). It cannot write files or run commands;
+//! the scout writes only the note's own two files. It never wakes the main agent: nothing here delivers to a thread.
 //!
 //! The model call is `ask`, passed in, so the tests run with a canned answer and no model.
 use crate::bug_notes::{self, CAUSE_CLASSES, DECIDER_LABELS};
@@ -506,7 +506,7 @@ mod tests {
 
     fn inbox_with_note(text: &str) -> (tempfile::TempDir, PathBuf, String) {
         let t = tempfile::tempdir().unwrap();
-        let inbox = t.path().join("bugs/inbox");
+        let inbox = t.path().join("bugs/notes");
         let id = bug_notes::write(&inbox, text, Some("evidence line"), NOW).unwrap()["id"].as_str().unwrap().to_owned();
         (t, inbox, id)
     }
@@ -519,7 +519,7 @@ mod tests {
         let cause = scout_note(&inbox, &id, &src, &mut canned(answer)).unwrap().expect("a cause");
         assert_eq!(cause["class"], "code");
         assert_eq!(cause["by"], "scout");
-        // No repo to check against here, so no suspected file survives (verify_suspects).
+        // No repo to check against here, so no suspected file survives (verify_sites).
         assert_eq!(cause["suspected_files"], json!([]));
         let note = bug_notes::get(&inbox, &id).unwrap();
         assert_eq!(note["cause"]["reasoning"], "The island state never clears on close. The log shows no end event.");
@@ -638,7 +638,20 @@ mod tests {
         let bare = claude_args("sys", false);
         assert_eq!(flag(&bare, "--tools").as_deref(), Some(""));
         assert!(flag(&bare, "--allowedTools").is_none());
-        assert!(TIMEOUT.as_secs() == 180 && MAX_TOOL_CALLS == 20);
+    }
+
+    /// A scout re-run (after a `SCOUT_VERSION` bump) rewrites the note's summary; a `## Shelved` section stays.
+    #[test]
+    fn a_rescout_keeps_a_shelved_section() {
+        let (_t, inbox, id) = inbox_with_note("Decider woke on a quiet line.");
+        let src = Sources { log: inbox.join("none.log"), archive: inbox.join("none.sqlite"), code: None };
+        bug_notes::set_cause(&inbox, &id, &json!({"class": "code", "reasoning": "Old scout.", "confidence": 0.4, "by": "scout", "scout_version": SCOUT_VERSION - 1})).unwrap();
+        let md = inbox.join(format!("{id}.md"));
+        std::fs::write(&md, std::fs::read_to_string(&md).unwrap() + "\n## Shelved: needs Decider v7\n").unwrap();
+        let answer = r#"{"class":"decider","reasoning":"It woke on talk not for it.","confidence":0.8}"#;
+        scout_note(&inbox, &id, &src, &mut canned(answer)).unwrap().expect("scouted again");
+        let md = std::fs::read_to_string(&md).unwrap();
+        assert!(md.contains("## Cause: decider") && bug_notes::kept_open(&md), "{md}");
     }
 
     #[test]

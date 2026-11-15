@@ -14,20 +14,19 @@ fn input() -> DecisionInput {
         pending_transcript: String::new(),
         agent_state: String::new(),
         media: DecisionMedia::Text,
-        questions: vec![Question::SendNow],
+        questions: vec![Question::CommandCheck(CommandSelection::LookAtThis)],
     }
 }
 #[test]
 fn bounded_inputs_and_closed_questions() {
     let mut i = input();
     assert!(i.validate().is_ok());
-    i.questions.push(Question::SendNow);
-    assert!(i.validate().is_err());
-    i.questions = vec![Question::PickCandidate(vec![Candidate {
-        id: "x".into(),
-        description: "item".into(),
-    }])];
-    assert!(i.validate().is_err());
+    i.questions.push(Question::CommandCheck(CommandSelection::LookAtThis));
+    assert!(i.validate().is_err(), "duplicate question");
+    i.questions = vec![Question::Legacy];
+    assert!(i.validate().is_err(), "a legacy question is never asked");
+    i.questions = vec![Question::CommandCheck(CommandSelection::OtherCommand)];
+    assert!(i.validate().is_err(), "a check names a listed command");
     i = input();
     i.current.audio.samples[0] = f32::NAN;
     assert!(i.current.audio.validate().is_err());
@@ -50,31 +49,19 @@ fn bounded_inputs_and_closed_questions() {
 #[test]
 fn media_exclusion_and_typed_question_serialization() {
     let mut i = input();
+    let tokens = |s: &str| Ok(s.len() / 3);
+    let text = i.fit_text(tokens).unwrap();
     i.media = DecisionMedia::Audio;
-    let req = D1::request(&i, 0.8).unwrap();
+    let req = i.fit_text(tokens).unwrap();
+    assert_eq!(req, text);
     assert!(req.get("files").is_none());
     assert!(req.get("images").is_none());
-    assert_eq!(req["questions"]["send_now"]["type"], "noul");
-    i.media = DecisionMedia::Text;
-    assert!(D1::request(&i, 0.8).unwrap().get("files").is_none());
-    i.questions = vec![
-        Question::FixedCommand,
-        Question::PickCandidate(vec![
-            Candidate {
-                id: "x".into(),
-                description: "first".into(),
-            },
-            Candidate {
-                id: "y".into(),
-                description: "second".into(),
-            },
-        ]),
-    ];
+    assert_eq!(req["questions"]["command_check"]["type"], "choice");
     let q = D1::questions(&i);
-    assert_eq!(q["fixed_command"]["criteria"].as_object().unwrap().len(), 6);
+    assert_eq!(q["command_check"]["criteria"].as_object().unwrap().len(), 3);
     assert_eq!(
-        q["pick_candidate"]["criteria"].as_object().unwrap().len(),
-        2
+        serde_json::to_value(&i.questions).unwrap(),
+        json!([{"question":"command_check","candidates":"look_at_this"}])
     );
 }
 #[test]
@@ -90,13 +77,13 @@ fn archive_round_trip_preserves_exact_audio_and_failures() {
     let v: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
     assert_eq!(v["error"], "model unavailable");
     let path = v["input"]["current"]["audio"]["path"].as_str().unwrap();
-    let actual = AudioClip::from_wav(tmp.path().join(path)).unwrap();
-    assert_eq!(actual.samples, i.current.audio.samples);
+    let actual: Vec<f32> = hound::WavReader::open(tmp.path().join(path)).unwrap().samples::<f32>().map(Result::unwrap).collect();
+    assert_eq!(actual, i.current.audio.samples);
     assert_eq!(
         std::fs::read_dir(tmp.path().join("audio")).unwrap().count(),
         1
     );
-    assert_eq!(v["d1_questions"]["send_now"]["type"], json!("noul"));
+    assert_eq!(v["d1_questions"]["command_check"]["type"], json!("choice"));
 }
 #[test]
 fn handmade_labels_cover_requests_context_and_human_speech() {
@@ -120,17 +107,21 @@ fn long_history_keeps_current_first_and_context_newest_first() {
             audio: AudioClip::new(vec![0.; 160]).unwrap(),
         })
         .collect();
-    let req = D1::request(&i, 0.9).unwrap();
-    let state = req["state"].as_str().unwrap();
+    // The JSON state (archived as `d1_state`): current first, context newest first.
+    let state = i.state_text(0.9).unwrap();
     assert!(
         state.starts_with(r#"{"utterance":"CURRENT: take a screenshot now","pending_transcript":"#)
     );
     assert!(state.find("history-19").unwrap() < state.find("history-18").unwrap());
     assert!(state.find("history-18").unwrap() < state.find("history-0").unwrap());
-    assert!(req["questions"]["send_now"]["instructions"]
-        .as_str()
-        .unwrap()
-        .contains("pending thought complete enough"));
+    // The request the decider reads (V5's layout) keeps the current sentence last and drops the oldest history first.
+    let req = i.fit_text(|s| Ok(s.len() / 3)).unwrap();
+    let state = req["state"].as_str().unwrap();
+    assert!(state.ends_with("User: CURRENT: take a screenshot now") && !state.contains("history-0 "), "{state}");
+    i.context.iter_mut().for_each(|t| t.transcript.truncate(40));
+    let state = i.fit_text(|s| Ok(s.len() / 3)).unwrap()["state"].as_str().unwrap().to_owned();
+    assert!(state.contains("history-19") && state.contains("history-0 "), "short history fits whole: {state}");
+    assert_eq!(req["questions"]["command_check"]["instructions"], "Did User, right now, ask Heimdall to look at his screen?");
 }
 
 #[test]

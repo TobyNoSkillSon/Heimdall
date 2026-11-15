@@ -51,6 +51,11 @@ impl Index {
             evidence,
         })
     }
+    /// Waits until every write handed over so far has landed (tests that read the archive on another connection).
+    #[cfg(test)]
+    pub(crate) fn settle_for_test(&self) -> bool {
+        self.queue.settle(std::time::Duration::from_secs(10))
+    }
     /// Live writes still queued behind a held lock.
     #[cfg(test)]
     pub(crate) fn pending_writes(&self) -> usize {
@@ -123,12 +128,25 @@ impl Index {
     /// False when the final is not archived. Queued behind a held lock, the final is assumed archived: it is
     /// normally one of the writes ahead in the queue, and the queued revision itself still checks.
     pub(crate) fn revise_transcript(&self,id:&str,source:&str,revision:u64,original:&[listen::Word],runs:&[crate::pipeline::speech_split::Run],model_recovery:bool) -> Result<bool> {
+        self.revise_transcript_with(id, source, revision, original, runs, model_recovery, true)
+    }
+    /// Night 8 Nov log sweep, finding 4: `revise_transcript` for a final already archived and projected (its earlier
+    /// revision found it), handed to the writer without waiting for its commit (a note's durability: committed with
+    /// its group, durable with the next full-sync commit). A voice rename re-projects every final of every call on
+    /// the live loop; each waited up to `COMMIT_WAIT` while the writer kept up slowly, and their sum silenced the
+    /// live loop 2.0 s (7 Nov 11:38:08 hang file). Always true: the final was found before.
+    #[allow(clippy::too_many_arguments)] // `revise_transcript`'s arguments.
+    pub(crate) fn revise_projected_transcript(&self,id:&str,source:&str,revision:u64,original:&[listen::Word],runs:&[crate::pipeline::speech_split::Run],model_recovery:bool) -> Result<bool> {
+        self.revise_transcript_with(id, source, revision, original, runs, model_recovery, false)
+    }
+    #[allow(clippy::too_many_arguments)] // `revise_transcript`'s arguments and whether it waits.
+    fn revise_transcript_with(&self,id:&str,source:&str,revision:u64,original:&[listen::Word],runs:&[crate::pipeline::speech_split::Run],model_recovery:bool,wait:bool) -> Result<bool> {
         ensure!(self.guard.allows(1024*1024),"transcript revision below disk floor");
         let (session, root, journal) = (self.session, self.root.clone(), self.evidence.session_id());
         let (id, source, original, runs) = (id.to_owned(), source.to_owned(), original.to_vec(), runs.to_vec());
         let found = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let seen = found.clone();
-        let written = self.queue.write(move |db| {
+        let job = move |db: &Connection| {
             heimdall_archive::timeline::transaction(db, || {
                 let row:Option<(i64,String,String,String)>=db.query_row("SELECT wall_ms,source,notes,decision FROM utterances WHERE session=?1 AND id=?2",params![session,id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
                 let Some((wall,label,notes,decision))=row else {return Ok(())};
@@ -158,7 +176,12 @@ impl Index {
                 }
                 Ok(())
             })
-        })?;
+        };
+        if !wait {
+            self.queue.enqueue(job)?;
+            return Ok(true);
+        }
+        let written = self.queue.write(job)?;
         Ok(match written {
             heimdall_archive::live::Written::Now => found.load(std::sync::atomic::Ordering::Acquire),
             heimdall_archive::live::Written::Queued => true,
@@ -236,7 +259,9 @@ impl Index {
             "speaker label archive stopped below free-space floor"
         );
         let (session, source, ids, name) = (self.session, source.to_owned(), ids.to_vec(), name.to_owned());
-        self.queue.write(move |db| heimdall_archive::timeline::transaction(db, || {
+        // Night 8 Nov log sweep, finding 4: a label change on the live loop never waits for its commit (see
+        // `revise_projected_transcript`); order with every other write is kept.
+        self.queue.enqueue(move |db| heimdall_archive::timeline::transaction(db, || {
             for id in &ids {
                 db.execute(
                     "UPDATE utterances SET speaker=?1 WHERE session=?4 AND source_id=?2 AND id=?3",
@@ -259,9 +284,11 @@ impl Index {
         );
         let lines: i64 = self.db.query_row("SELECT count(*) FROM utterances WHERE speaker=?1", params![from], |r| r.get(0))?;
         let (from, to) = (from.to_owned(), to.to_owned());
-        // The caller saves the speaker store after this: the archive must have the new label first. A rename is
-        // the user's own action, rare; it waits for its commit as on main (30 s), never for the writer's whole queue.
-        self.queue.call_within(std::time::Duration::from_secs(30), move |db| heimdall_archive::timeline::transaction(db, || {
+        // Night 8 Nov log sweep, finding 4: the rename runs on the live loop (`Pipeline::rename_voice`), so it is
+        // handed to the writer without waiting (it used to wait up to 30 s for its commit there). The writer keeps
+        // the job through a held lock and retries until it commits, in order with every later write; a rename cut
+        // short anyway is repeated the same way, since the archive's old label still counts as the voice.
+        self.queue.enqueue(move |db| heimdall_archive::timeline::transaction(db, || {
             let rows: Vec<(i64, String)> = db
                 .prepare("SELECT session, id FROM utterances WHERE speaker=?1")?
                 .query_map(params![from], |r| Ok((r.get(0)?, r.get(1)?)))?
@@ -272,8 +299,8 @@ impl Index {
                 heimdall_archive::timeline::utterance(db, *session, id)?;
             }
             heimdall_archive::timeline::rename_speaker_tag(db, &from, &to)
-        }))
-        .map_err(|e| anyhow::anyhow!("the archive is busy; the rename did not finish, try again ({e:#})"))?;
+        }).inspect_err(|e| eprintln!("{}", rename_not_archived(&from, &to, e))))
+        .map_err(|e| anyhow::anyhow!("the archive is full or stopped; the rename did not start, try again ({e:#})"))?;
         Ok(lines as usize)
     }
 }
@@ -395,12 +422,74 @@ pub(crate) struct SearchCancellation {
     pub(crate) active: Mutex<Option<rusqlite::InterruptHandle>>,
 }
 pub(crate) struct CancelSearch(pub(crate) Arc<SearchCancellation>);
-impl SearchCancellation { pub(crate) fn new()->Self{Self{cancelled:std::sync::atomic::AtomicBool::new(false),active:Mutex::new(None)}} }
+impl SearchCancellation {
+    pub(crate) fn new()->Self{Self{cancelled:std::sync::atomic::AtomicBool::new(false),active:Mutex::new(None)}}
+    /// The call that asked has stopped waiting (`CancelSearch` dropped).
+    pub(crate) fn cancelled(&self)->bool {self.cancelled.load(std::sync::atomic::Ordering::Acquire)}
+}
 impl Drop for CancelSearch {
     fn drop(&mut self) {
         self.0.cancelled.store(true, std::sync::atomic::Ordering::Release);
         if let Some(handle) = self.0.active.lock().unwrap().as_ref() { handle.interrupt(); }
     }
+}
+/// Load (or build) the memory-search vector copy on a background thread shortly after start, so the first search
+/// does not wait for it. Logs what it did and what it holds.
+pub fn warm_vector_copy(root: PathBuf) {
+    let _ = std::thread::Builder::new().name("heimdall-vector-copy".into()).spawn(move || {
+        let _ = heimdall_night::gate::background_thread();
+        std::thread::sleep(std::time::Duration::from_secs(20));
+        let index = root.join(heimdall_archive::store::INDEX);
+        if !index.is_file() { return; }
+        let m = heimdall_archive::embedding::model();
+        let key = heimdall_archive::vector_index::Key { model_id: m.id, model_version: m.version, dimensions: m.dimensions };
+        match heimdall_archive::vector_index::warm(&index, &key) {
+            Ok(line) => eprintln!("memory search: {line}"),
+            Err(e) => eprintln!("memory search: vector copy not loaded ahead ({e:#}); the first search loads it"),
+        }
+    });
+}
+/// The search log's first half (docs/chunk-index.md, "Search log"): how the candidates were found and what it cost.
+pub(crate) fn search_log(s:&heimdall_archive::timeline::SearchStats)->String {
+    let mut line=format!("memory search: {} candidates by {}",s.returned,s.path);
+    match s.path {
+        "memory"=>line.push_str(&format!(" ({} vectors scored in {:.1} ms, {} re-scored exactly in {:.1} ms, copy ready in {:.1} ms{})",
+            s.scored,s.scan_ms,s.rescored,s.verify_ms,s.prepare_ms,s.prepared.as_ref().map_or(String::new(),|e|format!(": {e}")))),
+        _=>line.push_str(&format!(" in {:.0} ms",s.scan_ms)),
+    }
+    if let Some(why)=&s.fallback {line.push_str(&format!("; vector copy unavailable, scanned instead: {why}"));}
+    line
+}
+/// Rerank the first `n` worded hits with `service`; every failure keeps the embedding order. Returns the rows and the
+/// log's second half.
+pub(crate) fn rerank(rows:Vec<heimdall_archive::timeline::Chunk>,query:&str,service:Option<&heimdall_archive::rerank::Service>,n:usize,more:&mut dyn FnMut()->bool)->(Vec<heimdall_archive::timeline::Chunk>,String) {
+    use heimdall_archive::rerank;
+    if n==0 {return (rows,"rerank off (memory_rerank 0)".into());}
+    let Some(service)=service else {return (rows,"rerank skipped: no reranker installed; embedding order".into())};
+    if speak::compute_flag::yield_asked() {return (rows,"rerank skipped: Arsenal asked for room; embedding order".into());}
+    let scored=rerank::plan(&rows,n);
+    if scored.is_empty() {return (rows,"rerank skipped: no hit has words".into());}
+    let documents:Vec<String>=scored.iter().map(|&i|rerank::document(&rows[i])).collect();
+    match service.score(query,&documents,more) {
+        Ok(s)=>{
+            let note=format!("reranked {} worded of {} in {:.0} ms{}, model peak {:.2} GB",scored.len(),rows.len(),s.seconds*1e3,
+                s.load_seconds.map_or(String::new(),|l|format!(" (model loaded in {:.2} s)",l)),s.peak_bytes as f64/1e9);
+            (rerank::apply(rows,&scored,&s.scores),note)
+        },
+        Err(e)=>(rows,format!("rerank fallback, embedding order: {e:#}")),
+    }
+}
+/// What the agent reads above literal hits that stand in for a paused meaning search.
+pub(crate) const MEANING_PAUSED: &str = "Meaning search is paused because this Mac is low on free memory. These hits come from a plain word search of the same archive instead: rows holding words of the question, the most words first, newest first.";
+/// `timeline_search` by the words of a semantic query (`mcp_timeline::literal_ranked`), marked as the stand-in.
+pub(crate) async fn literal_fallback(root:std::path::PathBuf,mut query:Value,permit:&agent::delivery::DeliveryPermit)->Result<Value> {
+    let words=query["vector"]["query"].clone();
+    if let Some(o)=query.as_object_mut() {o.remove("vector");}
+    query["_words"]=words;
+    let mut page=crate::mcp_timeline::search(root,timeline_pages(),query,permit).await?;
+    page["search_mode"]=json!("literal_fallback");
+    page["notice"]=json!(MEANING_PAUSED);
+    Ok(page)
 }
 pub(crate) fn install_search_cancellation(db: &Connection, cancellation: Arc<SearchCancellation>, permit: agent::delivery::DeliveryPermit) -> Result<()> {
     // InterruptHandle stops an already executing query. The progress hook also
@@ -412,13 +501,28 @@ pub(crate) fn install_search_cancellation(db: &Connection, cancellation: Arc<Sea
 impl agent::mcp::TranscriptSearch for ArchiveSearch {
     async fn timeline(&self, mut query:Value, permit:&agent::delivery::DeliveryPermit)->Result<Value>{
         if query.get("vector").is_some() {
-            // 100 candidates: merging the rows of one moment frees slots for the next distinct moments.
-            let mut legacy=json!({"vector":query["vector"],"limit":100});
+            // 100 candidates: merging the rows of one moment frees slots for the next distinct moments. With the
+            // reranker on, enough more that about `rerank::candidates()` of them have words.
+            let n=heimdall_archive::rerank::candidates();
+            let limit=if query["vector"]["query"].is_string() && n>0 {heimdall_archive::rerank::fetch_for(n,100)} else {100};
+            let mut legacy=json!({"vector":query["vector"],"limit":limit});
             for key in ["kinds","tags"] { if let Some(v)=query.get(key) { legacy[key]=v.clone(); } }
             if let Some(v)=query.get("query") { legacy["text"]=v.clone(); }
             for (key,field) in [("start","start_wall_ns"),("end","end_wall_ns")] { if let Some(v)=query[key].as_str(){legacy[field]=json!(agent::mcp_contract::wall_ns(v)?);} }
-            let ranked=self.chunks(legacy,permit).await?;
-            query["_ranked"]=json!(ranked.as_array().unwrap().iter().map(|r|json!([r["id"],r["similarity"]])).collect::<Vec<_>>());
+            let ranked=match self.chunks(legacy,permit).await {
+                Ok(ranked)=>ranked,
+                // Meaning search paused for memory (14 Nov VM run, 8 GiB Mac): the same archive by its words instead,
+                // and the answer says so.
+                Err(e) if heimdall_archive::embedding::memory_paused(&format!("{e:#}")) && query["vector"]["query"].is_string() => {
+                    eprintln!("memory search: meaning search paused for low memory ({e:#}); literal word search instead");
+                    return literal_fallback(self.root.clone(),query,permit).await;
+                },
+                Err(e)=>return Err(e),
+            };
+            let rows=ranked.as_array().unwrap();
+            query["_ranked"]=json!(rows.iter().map(|r|json!([r["id"],r["similarity"]])).collect::<Vec<_>>());
+            // Reranked: similarity no longer falls down the list, so the page's floor reads the best one (mcp_timeline).
+            if rows.iter().any(|r|r.get("rerank").is_some()) { query["_reranked"]=json!(true); }
         }
         crate::mcp_timeline::search(self.root.clone(), timeline_pages(),query,permit).await
     }
@@ -438,54 +542,31 @@ impl agent::mcp::TranscriptSearch for ArchiveSearch {
                 ensure!(query.vector.is_none(),"no archive embeddings available");
                 return Ok(json!([]));
             }
+            let mut query_text=None;
             if let Some(vector)=query.vector.as_ref().filter(|v|v.get("query").is_some()) {
                 ensure!(vector.as_object().is_some_and(|o|o.len()==1),"semantic vector accepts only query");
                 let text=vector["query"].as_str().ok_or_else(||anyhow::anyhow!("vector query must be text"))?;
+                query_text=Some(text.to_owned());
                 let values=embeddings.query(text,&mut || !cancellation.cancelled.load(std::sync::atomic::Ordering::Acquire) && permit.check().is_ok())?;
                 query.vector=Some(serde_json::to_value(values)?);
             }
-            let c = Connection::open_with_flags(root.join(heimdall_archive::store::INDEX), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-            c.busy_timeout(std::time::Duration::from_secs(5))?;
+            let c = heimdall_archive::store::read_index(&root)?;
             { let mut active=cancellation.active.lock().unwrap();
               ensure!(!cancellation.cancelled.load(std::sync::atomic::Ordering::Acquire), "archive search cancelled");
               permit.check()?; *active=Some(c.get_interrupt_handle()); }
             install_search_cancellation(&c,cancellation.clone(),permit.clone())?;
-            let rows=heimdall_archive::timeline::search(&c,&query)?;
+            let (mut rows,stats)=heimdall_archive::timeline::search_with_stats(&c,&query)?;
             permit.check()?;
             ensure!(!cancellation.cancelled.load(std::sync::atomic::Ordering::Acquire), "archive search cancelled");
-            Ok(serde_json::to_value(rows)?)
-        }).await?
-    }
-
-    async fn search(&self, query: &str, limit: usize, permit: &agent::delivery::DeliveryPermit) -> Result<Value> {
-        permit.check()?;
-        let root = self.root.clone();
-        let query = query.to_owned();
-        let permit = permit.clone();
-        let cancellation = Arc::new(SearchCancellation { cancelled: std::sync::atomic::AtomicBool::new(false), active: Mutex::new(None) });
-        let _cancel_on_drop = CancelSearch(cancellation.clone());
-        tokio::task::spawn_blocking(move||->Result<Value>{
-            let check = || -> Result<()> {
-                ensure!(!cancellation.cancelled.load(std::sync::atomic::Ordering::Acquire), "archive search cancelled");
-                permit.check()
-            };
-            let mut rows=vec![];
-            if heimdall_archive::store::exists(&root) {
-                // One query over every session's transcript in the store.
-                let c=Connection::open(root.join(heimdall_archive::store::INDEX))?;c.execute_batch("PRAGMA query_only=ON")?;
-                c.busy_timeout(std::time::Duration::from_secs(5))?;
-                {
-                    let mut active = cancellation.active.lock().unwrap();
-                    check()?;
-                    *active = Some(c.get_interrupt_handle());
-                }
-                install_search_cancellation(&c, cancellation.clone(), permit.clone())?;
-                let mut stmt=c.prepare("SELECT id,wall_ms,source,speaker,text,notes FROM utterances INDEXED BY utterance_time WHERE instr(lower(text),lower(?1))>0 ORDER BY wall_ms DESC LIMIT ?2")?;
-                for v in stmt.query_map(params![query,limit as i64],|r|Ok(json!({"id":r.get::<_,String>(0)?,"timestamp_ms":r.get::<_,i64>(1)?,"source":r.get::<_,String>(2)?,"speaker":r.get::<_,String>(3)?,"text":r.get::<_,String>(4)?,"notes":r.get::<_,String>(5)?})))? {check()?;rows.push(v?);}
-                cancellation.active.lock().unwrap().take();
+            let mut log=search_log(&stats);
+            if let Some(text)=&query_text {
+                let (reranked,note)=rerank(rows,text,heimdall_archive::rerank::installed().as_deref(),heimdall_archive::rerank::candidates(),
+                    &mut || !cancellation.cancelled.load(std::sync::atomic::Ordering::Acquire) && permit.check().is_ok() && !speak::compute_flag::yield_asked());
+                rows=reranked;log.push_str("; ");log.push_str(&note);
             }
-            check()?;
-            rows.sort_by_key(|v|std::cmp::Reverse(v["timestamp_ms"].as_i64().unwrap_or(0)));rows.truncate(limit);Ok(json!(rows))
+            if query.vector.is_some() {eprintln!("{log}");}
+            permit.check()?;
+            Ok(serde_json::to_value(rows)?)
         }).await?
     }
 }
@@ -643,5 +724,51 @@ mod live_lock_tests {
         assert!(index.queue.settle(Duration::from_secs(10)));
         assert_eq!(kinds(&index)?, ["listen_event", "transcript_segment", "listening_ready"]);
         Ok(())
+    }
+}
+
+/// The line a voice rename leaves when the archive's writer could not commit it after the rename was reported done
+/// (review, 8 Nov: the rename no longer waits for its commit, so the failure is named here instead).
+pub(crate) fn rename_not_archived(from: &str, to: &str, e: &impl std::fmt::Display) -> String {
+    format!("voice: rename {from} → {to} not archived ({e}); the archive keeps {from} until the rename is repeated")
+}
+
+#[cfg(test)]
+mod rerank_tests {
+    //! The search path's reranking without a model: off, not installed, failing, and the log line.
+    use super::*;
+    fn chunk(id: &str, text: &str) -> heimdall_archive::timeline::Chunk {
+        serde_json::from_value(json!({"id":id,"session":1,"kind":"text","role":"utterance","source":"mic","start_ns":0,"end_ns":1,
+            "start_wall_ns":0,"end_wall_ns":1,"text":text,"details":{},"tags":[],"links":[],"content_hash":"h","similarity":0.8})).unwrap()
+    }
+    fn ids(rows: &[heimdall_archive::timeline::Chunk]) -> Vec<&str> { rows.iter().map(|c| c.id.as_str()).collect() }
+
+    #[test]
+    fn every_way_the_reranker_is_unavailable_keeps_the_embedding_order_and_says_why() {
+        let rows = || vec![chunk("a", "one"), chunk("screen", ""), chunk("b", "two")];
+        let (out, note) = rerank(rows(), "q", None, 100, &mut || true);
+        assert_eq!((ids(&out), note.contains("no reranker installed")), (vec!["a", "screen", "b"], true));
+        let (out, note) = rerank(rows(), "q", None, 0, &mut || true);
+        assert_eq!((ids(&out), note.as_str()), (vec!["a", "screen", "b"], "rerank off (memory_rerank 0)"));
+        // A models folder without the helper or weights: the start fails, the order stays, the reason is logged.
+        let empty = tempfile::tempdir().unwrap();
+        let service = heimdall_archive::rerank::service(empty.path());
+        let (out, note) = rerank(rows(), "q", Some(&service), 100, &mut || true);
+        assert_eq!(ids(&out), ["a", "screen", "b"]);
+        assert!(note.starts_with("rerank fallback, embedding order:") && note.contains("missing"), "{note}");
+        assert!(out.iter().all(|c| c.rerank.is_none()));
+        let (_, note) = rerank(vec![chunk("s", "")], "q", Some(&service), 100, &mut || true);
+        assert_eq!(note, "rerank skipped: no hit has words");
+    }
+
+    #[test]
+    fn the_search_log_names_the_path_costs_and_fallback() {
+        let stats = heimdall_archive::timeline::SearchStats { path: "memory", scored: 402_337, rescored: 400, returned: 125,
+            scan_ms: 5.2, verify_ms: 19.8, prepare_ms: 0.1, prepared: Some("3 changed".into()), ..Default::default() };
+        let line = search_log(&stats);
+        assert!(line.starts_with("memory search: 125 candidates by memory (402337 vectors scored in 5.2 ms, 400 re-scored exactly in 19.8 ms"), "{line}");
+        assert!(line.contains(": 3 changed"), "{line}");
+        let scan = heimdall_archive::timeline::SearchStats { path: "scan", scan_ms: 27_000., returned: 100, fallback: Some("disk full".into()), ..Default::default() };
+        assert_eq!(search_log(&scan), "memory search: 100 candidates by scan in 27000 ms; vector copy unavailable, scanned instead: disk full");
     }
 }

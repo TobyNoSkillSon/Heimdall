@@ -94,13 +94,6 @@ pub(crate) fn draw_image(image: &NSImage, r: NSRect, color: Option<&NSColor>) {
     CGContext::restore_g_state(Some(&cg));
 }
 
-/// One line of text with its top-left at `(x, y)` (flipped views).
-pub(crate) fn draw_text(text: &str, font: &NSFont, color: &NSColor, x: f64, y: f64) -> NSSize {
-    let s = attributed(text, font, color);
-    s.drawAtPoint(NSPoint::new(x, y));
-    s.size()
-}
-
 /// One line in `r`, cut with an ellipsis where it would pass `r`'s right edge.
 pub(crate) fn draw_truncated(text: &str, font: &NSFont, color: &NSColor, r: NSRect) {
     let style = objc2_app_kit::NSMutableParagraphStyle::new();
@@ -416,13 +409,6 @@ impl Pad {
         self.redraw();
     }
 
-    pub(crate) fn set_primary(&self, primary: bool) {
-        if let Look::Button { primary: p, .. } = &mut *self.ivars().look.borrow_mut() {
-            *p = primary;
-        }
-        self.redraw();
-    }
-
     fn redraw(&self) {
         AsRef::<NSView>::as_ref(self).setNeedsDisplay(true);
     }
@@ -611,8 +597,6 @@ pub struct TileIvars {
     radial: Cell<bool>,
     /// The mark's share of the side.
     mark: Cell<f64>,
-    /// An image drawn in place of the mark (the Vella diagram's app icon).
-    image: RefCell<Option<Retained<NSImage>>>,
 }
 
 define_class!(
@@ -647,7 +631,6 @@ impl AppTile {
             margin: Cell::new(margin),
             radial: Cell::new(radial),
             mark: Cell::new(0.56),
-            image: RefCell::new(None),
         });
         unsafe { msg_send![super(this), initWithFrame: rect(x - margin, y - margin, side + 2.0 * margin, side + 2.0 * margin)] }
     }
@@ -660,10 +643,6 @@ impl AppTile {
     }
     pub(crate) fn set_mark_share(&self, share: f64) {
         self.ivars().mark.set(share);
-    }
-    pub(crate) fn set_image(&self, image: Option<Retained<NSImage>>) {
-        *self.ivars().image.borrow_mut() = image;
-        self.setNeedsDisplay(true);
     }
     pub(crate) fn margin(&self) -> f64 {
         self.ivars().margin.get()
@@ -702,11 +681,6 @@ impl AppTile {
             light.fill();
             NSGraphicsContext::restoreGraphicsState_class();
             ring(tile, radius, &white(0.22), 0.5);
-        }
-        if let Some(image) = self.ivars().image.borrow().as_ref() {
-            let s = side * self.ivars().mark.get();
-            draw_image(image, rect(m + (side - s) / 2.0, m + (side - s) / 2.0, s, s), Some(&NSColor::whiteColor()));
-            return;
         }
         let s = side * self.ivars().mark.get();
         super::super::helmet::draw_icon(&self.ivars().icon.borrow(), rect(m, m + (side - s) / 2.0, side, s), false, &NSColor::whiteColor());

@@ -30,6 +30,7 @@
         }
     }
     fn speakers_in_archive(a: &Pipeline) -> Vec<String> {
+        assert!(a.index.settle_for_test(), "the archive's writes landed");
         let c = heimdall_archive::store::open(&crate::archive::store_root(&a.session)).unwrap();
         let mut q = c.prepare("SELECT speaker FROM utterances ORDER BY session, id").unwrap();
         q.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
@@ -228,7 +229,7 @@
         archived(&a, 32, &code, false);
         archived(&a, 33, "Angel", false);
         let track = TrackId { source: "discord".into(), session: 1, speaker: 2 };
-        a.speaker_events(vec![SpeakerEvent::VoiceCoded { track: track.clone(), code: code.clone(), new: false }]).unwrap();
+        a.speaker_events(vec![SpeakerEvent::VoiceCoded { track: track.clone(), code: code.clone(), new: false, near: None }]).unwrap();
         let reply = a.rename_voice(&code, "John").unwrap();
         assert!(reply.contains("2 earlier line(s)"), "{reply}");
         assert_eq!(speakers_in_archive(&a), vec!["John", "John", "Angel"]);
@@ -237,6 +238,7 @@
         assert!(store.voices.is_empty() && store.names["John"].embeddings.len() == 2, "the samples became John's");
         // A name can be corrected the same way; an unknown voice is refused. A rename changes no moment's members.
         let members = |a: &Pipeline| -> Vec<(String, String)> {
+            assert!(a.index.settle_for_test());
             let c = heimdall_archive::store::open(&crate::archive::store_root(&a.session)).unwrap();
             let mut q = c.prepare("SELECT chunk_id, target FROM chunk_links WHERE relation='member' ORDER BY 1, 2").unwrap();
             q.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(Result::unwrap).collect()
@@ -258,6 +260,29 @@
         assert!(a.rename_voice("Unknown", "X").is_err());
         assert!(a.rename_voice("Speaker nobody", "X").is_err());
         assert!(a.rename_voice("Jon", " ").is_err());
+    }
+    /// Night 8 Nov log sweep, finding 4 (hang file 7 Nov 11:38:08: the live loop silent 2.0 s in a rename, waiting
+    /// on archive commits in `project_call`). With the archive's lock held by another connection (a slow writer),
+    /// a rename of a voice in an open call returns at once; its writes land in order once the lock is free.
+    #[test]
+    fn a_rename_never_waits_on_a_slow_archive_on_the_live_loop() {
+        let (_t, mut a) = app();
+        let code = coded(&a);
+        archived(&a, 41, &code, true);
+        archived(&a, 42, &code, false);
+        let track = TrackId { source: "discord".into(), session: 1, speaker: 2 };
+        a.speaker_events(vec![SpeakerEvent::VoiceCoded { track: track.clone(), code: code.clone(), new: false, near: None }]).unwrap();
+        assert!(a.index.settle_for_test());
+        let holder = heimdall_archive::store::open(&crate::archive::store_root(&a.session)).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let started = std::time::Instant::now();
+        let reply = a.rename_voice(&code, "John").unwrap();
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_millis(300), "the rename waited {took:?} on the live loop");
+        assert!(reply.contains("2 earlier line(s)"), "{reply}");
+        assert_eq!(a.speaker_names[&track], "John");
+        holder.execute_batch("COMMIT").unwrap();
+        assert_eq!(speakers_in_archive(&a), vec!["John", "John"]);
     }
     #[test]
     fn the_card_asks_once_and_yes_names_the_voice() {
@@ -322,4 +347,12 @@
         // The test pipeline is a replay one: no pass, ever.
         a.voice_namer_tick();
         assert!(!a.data.join("voice-namer.json").exists());
+    }
+
+    #[test]
+    fn a_rename_the_archive_did_not_take_is_named_in_the_log() {
+        // Review, 8 Nov: the rename no longer waits for its commit, so a failed commit must say which rename it was.
+        let line = crate::index::rename_not_archived("Speaker 2", "Angel", &"disk I/O error");
+        assert!(line.starts_with("voice: rename Speaker 2 → Angel not archived"), "{line}");
+        assert!(line.contains("disk I/O error") && line.contains("until the rename is repeated"), "{line}");
     }

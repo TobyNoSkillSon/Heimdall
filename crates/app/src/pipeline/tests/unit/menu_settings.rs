@@ -6,16 +6,14 @@
         let session=app.session.clone();
         app.sources.insert("mic".into(),crate::fake_source("mic",0,1));
         let mut next=app.settings.clone();next.speak_replies=false;next.paused=true;
-        next.free_space_floor_bytes=11*1024*1024*1024;next.tts_backend="cpu".into();next.parakeet_backend="coreml".into();next.turn_backend="cpu".into();next.speakers_backend="redimnet".into();
+        next.free_space_floor_bytes=11*1024*1024*1024;next.tts_backend="cpu".into();next.parakeet_backend="coreml".into();next.turn_backend="cpu".into();
         app.apply_settings(next.clone()).unwrap();
         assert_eq!(app.session,session);assert!(app.sources.contains_key("mic"));assert!(app.agent.is_none());
         assert!(!app.tools.enabled.load(Ordering::Acquire));assert!(!app.tools.agent_enabled.load(Ordering::Acquire));
         assert_eq!(app.tools.archive_floor.load(Ordering::Acquire),next.free_space_floor_bytes);
         assert_eq!(*app.tools.tts_backend.lock().unwrap(),"cpu");
         let mut invalid=next.clone();invalid.free_space_floor_bytes=0;assert!(app.apply_settings(invalid).is_err());assert_eq!(app.settings,next);
-        app.action(ui::UiAction::SetArchiveFormat(2)).unwrap();app.action(ui::UiAction::SetRetentionDays(7)).unwrap();
-        assert_eq!(app.session,session);assert!(app.sources.contains_key("mic"));assert_eq!(app.settings.retention_days,0);
-        app.action(ui::UiAction::RestartSession).unwrap();
+        app.restart_agent().unwrap();
         app.settings_result("Screen Recording",Some("injected failure".into()));assert!(app.pending_reload.contains_key("Screen Recording"));
         app.settings_result("Screen Recording",None);assert!(app.pending_reload.is_empty());
     }
@@ -146,7 +144,7 @@
     #[test]
     fn a_background_models_level_persists_and_reaches_the_menu_and_the_calls() {
         let (_temp,mut a)=app();
-        let t3="t3:claudeAgent_claude_code_2";
+        let t3="t3:claudeAgent_2";
         a.action(ui::UiAction::SetBackgroundModel{provider:t3.into(),id:"claude-haiku-5-5".into()}).unwrap();
         assert_eq!(crate::background_model::current().provider,t3);
         a.action(ui::UiAction::SetBackgroundEffort{provider:t3.into(),id:"claude-haiku-5-5".into(),level:"low".into()}).unwrap();
@@ -244,10 +242,6 @@
         assert_eq!((opus(&a).context_budget,opus(&a).limits().context),(Some(501_714),501_714));
         a.action(ui::UiAction::SetApiModelContext{provider:ANTHROPIC.into(),id:OPUS.into(),tokens:130_000}).unwrap();
         assert_eq!(opus(&a).context_budget,Some(128_000));
-        // Credits: $200 (Max 20x) is kept; a value the menu never offers is ignored.
-        a.action(ui::UiAction::SetProviderCredit{provider:ANTHROPIC.into(),usd:200}).unwrap();
-        a.action(ui::UiAction::SetProviderCredit{provider:ANTHROPIC.into(),usd:7}).unwrap();
-        assert_eq!(a.settings.anthropic_credit_usd,200);
         let _=ApiModel::haiku();
         agent::provider::forget_key(p).unwrap();
     }
@@ -373,12 +367,12 @@
         let (_temp,mut a)=app();
         let model=a.settings.agent_model.clone();
         a.action(ui::UiAction::SelectRelayModel("claude-sonnet-5-5".into())).unwrap();
-        a.action(ui::UiAction::SelectRelayAccount(Some("claudeAgent_claude_code_2".into()))).unwrap();
+        a.action(ui::UiAction::SelectRelayAccount(Some("claudeAgent_2".into()))).unwrap();
         assert!(a.settings.agent_relay && a.settings.agent_model==model);
-        assert_eq!((a.settings.agent_relay_account.as_deref(), a.settings.agent_relay_model.as_deref()), (Some("claudeAgent_claude_code_2"), Some("claude-sonnet-5-5")));
-        assert_eq!(a.ui_settings_value().agent_relay_account.as_deref(), Some("claudeAgent_claude_code_2"), "the menu draws its check");
+        assert_eq!((a.settings.agent_relay_account.as_deref(), a.settings.agent_relay_model.as_deref()), (Some("claudeAgent_2"), Some("claude-sonnet-5-5")));
+        assert_eq!(a.ui_settings_value().agent_relay_account.as_deref(), Some("claudeAgent_2"), "the menu draws its check");
         a.hooks.ui.lock().unwrap().clear();
-        a.action(ui::UiAction::SelectRelayAccount(Some("claudeAgent_claude_code_2".into()))).unwrap();
+        a.action(ui::UiAction::SelectRelayAccount(Some("claudeAgent_2".into()))).unwrap();
         assert!(a.hooks.ui.lock().unwrap().is_empty(), "the account it runs on: nothing to apply");
         a.action(ui::UiAction::SelectRelayAccount(None)).unwrap();
         assert_eq!(a.settings.agent_relay_account, None, "Automatic");
@@ -395,10 +389,10 @@
         let (_temp,mut a)=app();
         a.action(ui::UiAction::SelectRelayAccount(Some("claudeAgent".into()))).unwrap();
         a.hooks.ui.lock().unwrap().clear();
-        a.action(ui::UiAction::SelectRelayRoute { model: Some("claude-opus-5-5".into()), account: "claudeAgent_claude_code_2".into() }).unwrap();
-        assert_eq!((a.settings.agent_relay, a.settings.agent_relay_account.as_deref(), a.settings.agent_relay_model.as_deref()), (true, Some("claudeAgent_claude_code_2"), Some("claude-opus-5-5")));
+        a.action(ui::UiAction::SelectRelayRoute { model: Some("claude-opus-5-5".into()), account: "claudeAgent_2".into() }).unwrap();
+        assert_eq!((a.settings.agent_relay, a.settings.agent_relay_account.as_deref(), a.settings.agent_relay_model.as_deref()), (true, Some("claudeAgent_2"), Some("claude-opus-5-5")));
         a.hooks.ui.lock().unwrap().clear();
-        a.action(ui::UiAction::SelectRelayRoute { model: Some("claude-opus-5-5".into()), account: "claudeAgent_claude_code_2".into() }).unwrap();
+        a.action(ui::UiAction::SelectRelayRoute { model: Some("claude-opus-5-5".into()), account: "claudeAgent_2".into() }).unwrap();
         assert!(a.hooks.ui.lock().unwrap().is_empty(), "already so: nothing applied");
         a.action(ui::UiAction::SelectRelayRoute { model: None, account: "codex".into() }).unwrap();
         assert_eq!((a.settings.agent_relay_account.as_deref(), a.settings.agent_relay_model.as_deref()), (Some("codex"), Some("claude-opus-5-5")));
@@ -406,7 +400,7 @@
     /// VM run 5 Nov: the voice list reaches the UI at launch, before any agent start (Setup's Voice step comes first).
     #[test]
     fn the_voices_are_published_at_launch_before_the_agent_starts() {
-        let (_temp,mut a)=app();
+        let (_temp,a)=app();
         a.hooks.ui.lock().unwrap().clear();
         a.initial_ui();
         assert!(a.agent.is_none());
@@ -569,3 +563,28 @@
         assert_eq!(a.ui_settings_value().agent_relay_model.as_deref(),Some("claude-opus-5-5"));
     }
 
+
+    /// Review C1 (night 10-11 Nov): any shell can write settings.json, so a file edit never turns Control Apps or its
+    /// pointer clicks on; the user's click on the row does, and the file may still turn them off.
+    #[test]
+    fn settings_json_never_turns_control_apps_on() {
+        let (_temp, mut a) = app();
+        let mut edited = a.settings.clone();
+        edited.computer_control = true;
+        edited.computer_clicks = true;
+        a.apply_settings(edited).unwrap();
+        assert!(!a.settings.computer_control && !a.settings.computer_clicks, "a file edit kept both off");
+        assert!(!heimdall_computer::gate::enabled() && !heimdall_computer::gate::clicks(), "the tool's gate stays off");
+        // The user's click on Control Apps turns it on.
+        a.action(ui::UiAction::SetComputerControl(true)).unwrap();
+        assert!(a.settings.computer_control);
+        // With Control Apps on, the file still cannot add pointer clicks, but it can turn Control Apps off.
+        let mut clicks = a.settings.clone();
+        clicks.computer_clicks = true;
+        a.apply_settings(clicks).unwrap();
+        assert!(a.settings.computer_control && !a.settings.computer_clicks, "clicks stay off");
+        let mut off = a.settings.clone();
+        off.computer_control = false;
+        a.apply_settings(off).unwrap();
+        assert!(!a.settings.computer_control, "the file turns it off");
+    }

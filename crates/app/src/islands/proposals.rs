@@ -41,6 +41,8 @@ pub struct Draft {
     pub why: String,
     /// Who drafted it: heimdall, goals, refresher, slate.
     pub by: String,
+    /// A new goal that is open-ended (no end state; drawn with a loop, never asked "done?").
+    pub ongoing: bool,
 }
 
 /// Is this proposal past its two days? Only one the user has seen can be (`shown` absent: queued, or never drawn to him).
@@ -107,9 +109,16 @@ fn short_id(prefix: &str) -> String { format!("{prefix}-{}", &uuid::Uuid::new_v4
 /// queued proposal of the same words), it was archived or declined before, or it is malformed.
 fn refuse(o: &Map<String, Value>, d: &Draft, recorded: &[String], now: i64) -> Option<String> {
     if d.title.trim().is_empty() { return Some("no title".into()) }
-    if recorded.iter().any(|r| same(r, &d.title)) { return Some("proposed before and not taken (it stays in the record)".into()) }
-    if removed_here(o, &d.list, &d.title, now) { return Some("User removed it from this list; it does not come back".into()) }
-    if queue(o).iter().any(|p| same(s(p, "title"), &d.title)) { return Some("already proposed".into()) }
+    // "done?" cards all read "<goal> looks done: close it?", so the fuzzy title match would take one goal's card for
+    // another's (night review, 6 Nov): they are told apart by goal id (below) and by their exact title in the record.
+    let complete = d.list == "goals" && d.kind == "complete";
+    if complete {
+        if recorded.iter().any(|r| r.trim() == d.title.trim()) { return Some("asked before and not taken (it stays in the record)".into()) }
+    } else {
+        if recorded.iter().any(|r| same(r, &d.title)) { return Some("proposed before and not taken (it stays in the record)".into()) }
+        if removed_here(o, &d.list, &d.title, now) { return Some(format!("{} removed it from this list; it does not come back", crate::islands::files::user_cap())) }
+        if queue(o).iter().any(|p| s(p, "kind") != "complete" && same(s(p, "title"), &d.title)) { return Some("already proposed".into()) }
+    }
     match d.list.as_str() {
         "goals" => {
             let goals: Vec<&Map<String, Value>> = o.get("goals").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_object).collect();
@@ -122,7 +131,14 @@ fn refuse(o: &Map<String, Value>, d: &Draft, recorded: &[String], now: i64) -> O
                         return Some("that step is already under the goal".into());
                     }
                 }
-                k => return Some(format!("kind {k:?} is not goal or step")),
+                // A "done?" card (bug note 2026-11-06T11-42-43): only for an active goal with an end state.
+                "complete" => {
+                    let Some(g) = goals.iter().find(|g| s(g, "id") == d.goal) else { return Some(format!("no goal {:?} (show list goals for the ids)", d.goal)) };
+                    if ops::goal_state(g) == "done" { return Some("that goal is finished".into()) }
+                    if ops::ongoing(g) { return Some("an ongoing goal has no end".into()) }
+                    if queue(o).iter().any(|p| s(p, "kind") == "complete" && s(p, "goal") == d.goal) { return Some("already asked".into()) }
+                }
+                k => return Some(format!("kind {k:?} is not goal, step or complete")),
             }
         }
         "scheduled" => {
@@ -170,6 +186,7 @@ pub fn push_in(o: &mut Map<String, Value>, d: &Draft, recorded: &[String], now: 
     if let Some(due) = d.due { p["due"] = json!(due) }
     if let Some(i) = ops::symbol(&d.icon) { p["icon"] = json!(i) }
     if !d.about.trim().is_empty() { p["about"] = json!(ops::cap(&d.about, ops::ABOUT_CHARS)) }
+    if d.ongoing && d.kind == "goal" { p["ongoing"] = json!(true) }
     let shown_now = front(o, now).0.is_none();
     if shown_now { p["front"] = json!(now) }
     arr(o, "proposals").push(p);
@@ -247,9 +264,18 @@ pub fn accept(root: &Root, list: Option<&str>, reference: &str, yes: Yes, due: O
                 let active = o.get("goals").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_object).filter(|g| ops::goal_state(g) == "active").count();
                 ensure!(active < ops::MAX_ACTIVE, "{} active goals already: finish or pause one first", ops::MAX_ACTIVE);
                 let icon = ops::symbol(s(&p, "icon")).unwrap_or_else(|| ops::ICON.into());
-                let g = json!({"id": s(&p, "id"), "title": title, "icon": icon, "about": s(&p, "about"), "state": "active", "now": "", "moved": now,
+                let mut g = json!({"id": s(&p, "id"), "title": title, "icon": icon, "about": s(&p, "about"), "state": "active", "now": "", "moved": now,
                                "tasks": [], "expanded": false, "yes": yes});
+                if p.get("ongoing").and_then(Value::as_bool) == Some(true) { g["ongoing"] = json!(true) }
                 arr(&mut o, "goals").push(g);
+            }
+            ("goals", "complete") => {
+                let gid = s(&p, "goal").to_owned();
+                let g = arr(&mut o, "goals").iter_mut().filter_map(Value::as_object_mut).find(|g| s(g, "id") == gid)
+                    .ok_or_else(|| anyhow::anyhow!("its goal {gid} is gone"))?;
+                ops::finish(g, yes, now).map_err(anyhow::Error::msg)?;
+                // Steps proposed under it no longer fit.
+                prune_stale_in(root, &mut o, l, now);
             }
             ("goals", _) => {
                 let gid = s(&p, "goal").to_owned();
@@ -315,7 +341,7 @@ pub fn seen(root: &Root, list: &str, id: &str, now: i64) -> Result<bool> {
 
 /// What one sweep did on a list.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct Swept { pub archived: Vec<String>, pub shown: Option<Map<String, Value>> }
+pub struct Swept { pub archived: Vec<String>, pub shown: Option<Map<String, Value>>, pub stale: Vec<String> }
 
 /// The two-day rule, on both lists (under the folder lock): every proposal past 48 h since it showed goes to the
 /// record, and the next one shows from now. Writes only what changed. Returns per list what moved.
@@ -331,6 +357,7 @@ pub fn sweep(root: &Root, now: i64) -> Result<Vec<(&'static str, Swept)>> {
                 arr(&mut o, "proposals").retain(|p| !p.as_object().is_some_and(|p| expired(p, now)));
                 for g in &gone { record(root, l, g, "archived", now)?; w.archived.push(s(g, "title").to_owned()) }
             }
+            w.stale = prune_stale_in(root, &mut o, l, now);
             trim(root, &mut o, l, now);
             if stamp_front(&mut o, now).is_some() { w.shown = front(&o, now).0 }
             if o != before { write_list(root, l, &o)?; }
@@ -341,18 +368,54 @@ pub fn sweep(root: &Root, now: i64) -> Result<Vec<(&'static str, Swept)>> {
     Ok(out)
 }
 
+// ---- stale proposals (bug note 2026-11-06T11-42-43, item 4) ----
+
+/// The proposal as the draft it came from.
+fn draft_of(list: &str, p: &Map<String, Value>) -> Draft {
+    Draft { list: list.into(), kind: s(p, "kind").into(), title: s(p, "title").into(), goal: s(p, "goal").into(),
+            due: p.get("due").and_then(Value::as_i64), ..Draft::default() }
+}
+
+/// Proposals that no longer fit their list leave the queue for the record ("stale"), so no Yes shows for dropped
+/// work: one that would be refused if drafted now (its goal finished or gone, the step already under its goal or
+/// removed by the user, a goal of that title already there, a promise whose time has passed). The user's yes on one would
+/// fill in work nobody wants. Call holding the folder lock; the caller writes `o`. Returns the titles that left.
+pub fn prune_stale_in(root: &Root, o: &mut Map<String, Value>, list: &str, now: i64) -> Vec<String> {
+    let q = queue(o);
+    if q.is_empty() { return Vec::new() }
+    let mut stale = Vec::new();
+    let mut keep: Vec<Map<String, Value>> = Vec::new();
+    for (k, p) in q.iter().enumerate() {
+        // Judged against the list with the other proposals still waiting (but never against itself).
+        let others: Vec<Value> = keep.iter().cloned().chain(q[k + 1..].iter().cloned()).map(Value::Object).collect();
+        let saved = o.insert("proposals".into(), Value::Array(others));
+        let why = refuse(o, &draft_of(list, p), &[], now);
+        if let Some(v) = saved { o.insert("proposals".into(), v); }
+        match why {
+            Some(_) => stale.push(p.clone()),
+            None => keep.push(p.clone()),
+        }
+    }
+    if stale.is_empty() { return Vec::new() }
+    o.insert("proposals".into(), Value::Array(keep.into_iter().map(Value::Object).collect()));
+    stale.iter().map(|p| { let _ = record(root, list, p, "stale", now); s(p, "title").to_owned() }).collect()
+}
+
+// ---- end stale proposals ----
+
 /// The line Heimdall hears when a proposal comes on screen that it did not draft this turn: say it in one short line
 /// and take the user's answer.
 pub fn notice(list: &str, p: &Map<String, Value>) -> String {
     let what = match (list, s(p, "kind")) {
         ("goals", "goal") => "a new goal".to_owned(),
+        ("goals", "complete") => format!("closing the goal {} as done", s(p, "goal")),
         ("goals", _) => format!("a next step for {}", s(p, "goal")),
         _ => p.get("due").and_then(Value::as_i64).and_then(|d| chrono::DateTime::from_timestamp(d, 0))
             .map_or("a promise".into(), |d| format!("a promise for {}", d.with_timezone(&chrono::Local).format("%a %d %b %H:%M"))),
     };
     let why = s(p, "why");
-    format!("Proposed in {} ({what}): '{}' [{}]{}. It waits for User's yes: say it in one short line when it fits; his yes is plan_edit accept, his no plan_edit decline. Unanswered, it is archived in two days.",
-        crate::islands::plan::list_title(list), s(p, "title"), s(p, "id"), if why.is_empty() { String::new() } else { format!(", from: {why}") })
+    format!("Proposed in {} ({what}): '{}' [{}]{}. It waits for {}'s yes: say it in one short line when it fits; their yes is plan_edit accept, their no plan_edit decline. Unanswered, it is archived in two days.",
+        crate::islands::plan::list_title(list), s(p, "title"), s(p, "id"), if why.is_empty() { String::new() } else { format!(", from: {why}") }, crate::islands::files::user())
 }
 
 /// `plan_edit show`'s lines for a list's proposals: the one on screen, then the queue.
@@ -384,6 +447,30 @@ mod tests {
         r.ensure().unwrap();
         (d, r)
     }
+    /// Bug note 2026-11-06T11-42-43, item 4: proposals kept showing with a Yes for work the user had dropped. The sweep
+    /// takes out what would be refused now (its goal finished, the step there already or removed); the rest stay.
+    #[test]
+    fn the_sweep_takes_out_proposals_for_dropped_or_finished_work_and_keeps_the_rest() {
+        let (_d, r) = root();
+        let p = |id: &str, title: &str, goal: &str| json!({"id": id, "title": title, "kind": "step", "goal": goal, "proposed": 1, "front": 1, "shown": 100});
+        r.put("goals", json!({"preset": "todo", "list": "goals", "items": [], "removed": [{"title": "Describe-a-voice clone climb for Jarvis", "at": 1}],
+            "goals": [{"id": "g-done", "title": "Ship Arsenal", "state": "done", "tasks": []},
+                      {"id": "g-job", "title": "Get a job", "state": "active", "tasks": [{"id": "t1", "title": "Euro AGD CV sent", "state": "done"}]},
+                      {"id": "g-voice", "title": "Make Jarvis efficient", "state": "active", "tasks": []}],
+            "proposals": [p("a", "Arsenal 1.0.4 notes", "g-done"), p("b", "Euro AGD CV sent", "g-job"), p("c", "Describe-a-voice clone climb for Jarvis", "g-voice"),
+                          p("d", "Acme interview prep", "g-job"), p("e", "Step for a gone goal", "g-gone")]}).as_object().unwrap()).unwrap();
+        let out = sweep(&r, 200).unwrap();
+        let (_, w) = out.iter().find(|(l, _)| *l == "goals").unwrap();
+        assert_eq!(w.stale, ["Arsenal 1.0.4 notes", "Euro AGD CV sent", "Describe-a-voice clone climb for Jarvis", "Step for a gone goal"]);
+        assert!(w.archived.is_empty(), "none is past its two days");
+        let o = r.read("goals").unwrap();
+        let left: Vec<String> = queue(&o).iter().map(|p| s(p, "id").to_owned()).collect();
+        assert_eq!(left, ["d"]);
+        // Stale ones are in the record and never proposed again; a second sweep changes nothing.
+        assert!(recorded(&r, "goals").contains(&"Arsenal 1.0.4 notes".to_owned()));
+        assert!(sweep(&r, 201).unwrap().is_empty());
+    }
+
     fn goal(title: &str) -> Draft { Draft { list: "goals".into(), kind: "goal".into(), title: title.into(), icon: "briefcase".into(), by: "heimdall".into(), ..Draft::default() } }
     fn promise(title: &str, due: i64) -> Draft { Draft { list: "scheduled".into(), title: title.into(), due: Some(due), by: "heimdall".into(), ..Draft::default() } }
 
@@ -448,22 +535,22 @@ mod tests {
         g.insert("items".into(), json!([{"id": "arsenal-pick-next-ideas", "title": "Arsenal: pick next ideas", "kind": "pick"}]));
         write_list(&h.root, "goals", &g).unwrap();
         let mut sc = crate::islands::plan::fresh("scheduled");
-        sc.insert("items".into(), json!([{"id": "s-1", "title": "Review the JobRadar challenge", "due": 9_000_000_000_i64}]));
+        sc.insert("items".into(), json!([{"id": "s-1", "title": "Review the JobBoard challenge", "due": 9_000_000_000_i64}]));
         write_list(&h.root, "scheduled", &sc).unwrap();
         crate::islands::tools::plan_edit(&h, &json!({"action": "remove", "item": "Arsenal: pick next ideas"})).unwrap();
-        crate::islands::tools::plan_edit(&h, &json!({"action": "remove", "item": "Review the JobRadar challenge"})).unwrap();
+        crate::islands::tools::plan_edit(&h, &json!({"action": "remove", "item": "Review the JobBoard challenge"})).unwrap();
         let step = |t: &str| Draft { list: "goals".into(), kind: "step".into(), goal: "g-arsenal".into(), title: t.into(), by: "goals".into(), ..Draft::default() };
         for t in ["Arsenal: pick next ideas", "Pick the next Arsenal ideas"] {
             assert!(propose(&h.root, &step(t), 100).unwrap_err().to_string().contains("removed"), "{t}");
         }
         assert!(propose(&h.root, &goal("Pick next ideas for Arsenal"), 100).is_err());
-        assert!(propose(&h.root, &promise("Review the JobRadar challenge", 9_000_000_000), 100).unwrap_err().to_string().contains("removed"));
+        assert!(propose(&h.root, &promise("Review the JobBoard challenge", 9_000_000_000), 100).unwrap_err().to_string().contains("removed"));
         // Something else is still proposed.
         propose(&h.root, &step("Write the Arsenal release notes"), 100).unwrap();
         assert_eq!(queue(&h.root.read("goals").unwrap()).len(), 1);
         // Scheduled's memory lapses after two weeks (a promise may be made again; fresh review, 2 Nov); Goals' holds.
         let later = crate::islands::tools::now_s() as i64 + (crate::goals::settled::REMOVED_DAYS + 1) * 86_400;
-        propose(&h.root, &promise("Review the JobRadar challenge", 9_000_000_000), later).unwrap();
+        propose(&h.root, &promise("Review the JobBoard challenge", 9_000_000_000), later).unwrap();
         assert!(propose(&h.root, &step("Pick the next Arsenal ideas"), later).unwrap_err().to_string().contains("removed"));
     }
 

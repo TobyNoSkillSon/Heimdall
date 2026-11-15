@@ -1,30 +1,48 @@
 # Personalise: name, user name, mark, voice
 
-"Heimdall is just the default for me. Some people may want a different name, a different icon, a
-different wake-up call … they want a female voice and the name Ivy … you should know how to do it."
-No Wake Words field; the wake is the name ("Heimdall, hello", "Ivy, hello").
+The assistant's name (which is also its wake word), what it calls the user, the mark it shows in the menu bar and
+notch, and its voice. All of it changes live.
+
+Read this when: you want to rename the assistant, change the user's name or the mark, find out why another name wakes
+less reliably, or change how a rename reaches the agent.
+Code: `crates/ui/src/identity.rs` (`Identity`, `Icon`), `crates/app/src/identity.rs` (tool arguments, SVG marks),
+`crates/decide/src/names.rs` (wake spotting and decider names), `crates/agent/src/identity.rs` (the agent's prompt),
+`crates/ui/src/mac/personalise.rs` (Name & Icon ▸).
 
 ## Where it lives
 
-One setting in `<data>/settings.json`, written only when it is not Heimdall's own:
+One setting in `<data>/settings.json`, written only when it differs from Heimdall's own:
 
 ```json
 "identity": {"name": "Ivy", "user_name": "Evelyn", "icon": {"kind": "symbol", "name": "leaf"}}
 ```
 
-- The name is the wake word. The spotter adds the greetings ("Hey Ivy", "Ivy, hello") and, for Heimdall, its observed
-  misspellings. A file from before 16:43 with `wake_words` still loads; the field is ignored and dropped at the next save.
-- `icon`: missing (the helmet), `{"kind":"symbol","name":"…"}` (any SF Symbol), or `{"kind":"image","path":"/abs/mark.svg"}`
-  (PNG, PDF or SVG, drawn as a one-colour template).
-- The voice is the existing `speech_voice` setting.
-- In the menu: the Personalisation section (in place of Speaking): the voice caption, Model ▸, Speed, Wake Sound, then
-  Name & Icon ▸ (the mark grid, Name, Your Name).
+- `name`: the assistant's name and its wake word ("Ivy, hello"). There is no separate wake-word field; an older file's
+  `wake_words` loads and is dropped at the next save.
+- `user_name`: what the assistant calls the user.
+- `icon`: missing (the helmet), `{"kind": "symbol", "name": "…"}` (any SF Symbol), or
+  `{"kind": "image", "path": "/abs/mark.svg"}` (PNG, PDF or SVG, drawn as a one-colour template).
+- A hand-edited identity that does not validate is ignored with one log line and Heimdall's own takes its place; the
+  rest of the file still loads.
+- The voice is the separate `speech_voice` setting ([voices.md](voices.md)).
 
-The app, the bundle and the binaries keep the name Heimdall (`Heimdall.app`, `~/Library/Application Support/Heimdall`).
+The app, its bundle and its data folder keep the name Heimdall whatever the identity says.
+
+## Change it
+
+- In the menu: the Personalisation section holds Voice ▸, Speed, Wake Sound and Name & Icon ▸ (the mark grid, Name,
+  Your Name).
+- From the agent: the `settings` tool's keys `name`, `user_name`, `icon`, `speaking_model`, `voice`, `voice_speed` and
+  `wake_sound` ([settings.md](settings.md) has the tool). An `icon` value starting with `<` is SVG source the agent drew:
+  plain filled shapes in one colour on a square `viewBox`, no scripts, images or outside links. It is saved as
+  `<data>/identity/mark-<hash>.svg`, and only the mark in use is kept.
+- By hand: edit `identity` in `settings.json` ([settings.md](settings.md) has the procedure).
+
+Check: the menu's Quit row and tooltip name the new assistant, and the mark in the menu bar changes.
 
 ## How a change applies
 
-Everything is live. No change needs a Heimdall restart.
+No change needs a Heimdall restart.
 
 | Part | Reads | When |
 |---|---|---|
@@ -32,55 +50,45 @@ Everything is live. No change needs a Heimdall restart.
 | Wake spotter and decider context (`decide::names`) | name, user name | the next decision |
 | Speech recognizer's name bias (`listen::vocabulary`) | name | a speech-model reload the app starts |
 | Agent prompt (`agent::identity`, filled at each Pi start) | name, user name | a Pi reload after the running turn; the conversation is kept |
+| Task preamble (`prompt/worker.md`) | name, user name | the next start |
 | Voice | `speech_voice` | the next sentence |
 
-Transcript labels stay internal: the user's lines carry the user's configured name and the assistant's are `Heimdall` in the archive, the
-agent's transcripts and the decider's history. The decider reads them as the configured names (`decide::names`), and
-the agent's prompt says they are labels. Changing those labels would rewrite the archive and the training data.
+A new name or user name makes the `settings` tool answer "end the turn now"; Pi reloads after the turn.
 
-## For the agent: the `settings` tool
+No prompt, tool description or notice names a person. They say `{user}`, which `agent::identity::fill` replaces with the
+user name where the text is built ("the user" while no name is chosen). Text the user wrote and tool output are never
+rewritten. `crates/agent/tests/owner_name.rs` fails if a prompt or a message the agent reads carries a literal name.
 
-The agent changes these with `settings` (crates/app/src/settings_tool.rs), the tool for every menu setting:
-`settings {"action":"set","key":"name","value":"Ivy"}`, keys `name`, `user_name`, `icon` (`"helmet"`, an SF Symbol, an
-absolute PNG/PDF/SVG path, or SVG source it drew: one colour, a square `viewBox`, solid filled shapes, saved under
-`<data>/identity/`), `speaking_model`, `voice`, `voice_speed`, `wake_sound`, `ack_delay` (seconds: `2`, `2.5`). `personalise` stays as the older name and
-takes its old arguments (`wake_words` is ignored).
+## Transcript labels stay fixed
 
-A new name or user name answers "end the turn now": Pi reloads after the turn with the new prompt. Never quit, kill or
-restart Heimdall for any of it.
+The archive and the decider's history label the user's lines with `decide::names::USER_LABEL` and the assistant's with
+`ASSISTANT_LABEL`, whatever names are chosen. Changing those labels would rewrite the archive and the training data.
 
-## The settings tool
-
-"the agent can change any Heimdall setting … that's kind of the whole point".
-
-- `list`: every setting with its value, by menu section. `get key`: the value and the choices. `set key value`.
-- Keys (`SETTINGS_KEYS` in `crates/agent/src/mcp_contract.rs`, 27 on 27 Oct): tiles (`listening`, `seeing`, `speaking`, `agent`); Listening (`microphone`, `extra_microphone`,
-  `app_audio`); Seeing (`recording_resolution`, `recording_fps`, `islands_on_streams`); Agent (`agent_model`,
-  `agent_thinking`, `agent_speed` (standard or fast: the priority tier on the Codex subscription or the OpenAI API;
-  only when the user asks), `agent_context`); Personalisation (above); Background Tasks (`background_model`,
-  `background_task`); `show_islands`; `launch_at_login`.
-- `item` names the microphone, app or task; they go by the names the menu shows ("Ego" finds "Ego Browser"; an
-  ambiguous part is refused with the matches). An app is listed once it has played sound this session or is recorded.
-- A change is planned on the pipeline as the menu's own `UiAction`s and sent through the menu's callback
-  (`ui_action_callback`), so the latches, the live loop, `apply_menu_settings`, the save and the menu's redraw are a
-  click's. The tool then reads the value back for up to about three seconds and answers `key: before → after`.
-- `agent` false is refused unless `toby_asked` quotes
-  at least three of the user's words found in one of their last 30 lines (spoken or typed); an allowed one is logged
-  (`settings_tool` evidence record and the app log).
-- Launch at Login goes through the app's own `SMAppService` path, nothing else.
-- Not in the tool: provider sign-ins and API keys (secrets stay with the user), adding or removing API models, the Anthropic
-  credit, speakers (the agent has `name_voice` and `listen_to`), shortcuts (actions, not settings), and Quit.
-  There is no speaker-device setting: Heimdall plays to the Mac's default output.
+- The decider reads the labels as the configured names, after a header naming both (`decide::names`).
+- Everything that reaches the agent (deliveries, notices, tool results, background prompts) passes
+  `agent::identity::for_agent`. In this edition it always rewords: the user's label becomes the user's name, or `User`
+  while no name is chosen (`PUBLIC_USER`), and the prompt's note tells the agent how transcripts label each side.
 
 ## Wake spotting for other names
 
-Heimdall keeps its observed misspellings and edit budgets exactly (the names parity test). Other names: the exact name
-anywhere in a line wakes; at a sentence start a one-word name also wakes within an edit budget of 2 (7+
-letters), 1 (5–6) or 0 (shorter), so "Ivy" never wakes on "ivory". Short names miss more ASR variants. The decider model was trained mostly on the name Heimdall; with other names it sees the names header
-and swapped labels it has not learned well, so expect more waits and misses.
+- Heimdall keeps its observed misspellings and edit budgets exactly (`names_parity` test).
+- Any other name wakes when the exact name appears anywhere in a line. At a sentence start, a one-word name also wakes
+  within an edit distance of 2 (7 or more letters), 1 (5 or 6) or 0 (shorter), so "Ivy" never wakes on "ivory"
+  (`decide::send`).
+- Short names miss more speech-recognition variants.
+- The decider is sent the names header on every request. It was trained with names swapped, but how well it
+  generalises past the default names is unmeasured: expect more waits and misses with other names.
 
 ## Checks
 
-- `cargo test -p ui --lib identity`, `-p decide --test names_parity`, `-p agent --lib identity`,
-  `-p agent --test mcp_v2`, `-p app --bin heimdall identity`, `-p app --bin heimdall settings_tool`.
-- `heimdall-ui-demo --personalise <dir>`: renders and scenario checks of the menu, the submenu and the marks.
+- `cargo test -p ui --lib identity`, `cargo test -p decide --test names_parity`, `cargo test -p agent --lib identity`,
+  `cargo test -p agent --test mcp_v2`, `cargo test -p app --bin heimdall identity`,
+  `cargo test -p app --bin heimdall settings_tool`.
+- `heimdall-ui-demo --personalise <dir>`: offscreen renders and scenario checks of the menu, the submenu and the marks.
+
+## See also
+
+- [settings.md](settings.md): the `settings` tool and every other setting
+- [voices.md](voices.md): the voice picker
+- [decision-chain.md](decision-chain.md): the wake spotter and the decider
+- [listen-vocabulary.md](listen-vocabulary.md): the recognizer's name bias

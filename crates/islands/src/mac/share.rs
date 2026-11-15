@@ -14,7 +14,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{msg_send, AnyThread};
 use objc2_app_kit::{
-    NSDraggingItem, NSEvent, NSImage, NSPasteboard, NSPasteboardTypeFileURL, NSPasteboardWriting, NSTrackingArea, NSTrackingAreaOptions, NSView,
+    NSDraggingItem, NSEvent, NSImage, NSPasteboard, NSPasteboardWriting, NSTrackingArea, NSTrackingAreaOptions, NSView,
     NSWorkspace,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
@@ -39,8 +39,10 @@ pub const ROOM: f64 = 30.0;
 
 thread_local! {
     /// Lab: what the latest drag or copy handed over.
+    #[cfg(feature = "lab")]
     pub static LAB_LAST: RefCell<Option<(String, PathBuf)>> = const { RefCell::new(None) };
     /// Lab: where the latest drag session ended (screen point) and the operation the target took (0: none).
+    #[cfg(feature = "lab")]
     pub static LAB_ENDED: Cell<Option<(f64, f64, usize)>> = const { Cell::new(None) };
 }
 
@@ -250,6 +252,7 @@ impl Handle {
             return false;
         };
         s.setAnimatesToStartingPositionsOnCancelOrFail(true);
+        #[cfg(feature = "lab")]
         LAB_LAST.with(|l| *l.borrow_mut() = Some(("drag".into(), path)));
         self.set_hover(false);
         true
@@ -260,6 +263,7 @@ impl Handle {
         let path = self.shared();
         let pb = pasteboard();
         write_file(&pb, &path);
+        #[cfg(feature = "lab")]
         LAB_LAST.with(|l| *l.borrow_mut() = Some(("copy".into(), path)));
         fade(&self.icon, 0.0, 0.1, 0.0);
         fade(&self.check, 1.0, 0.1, 0.0);
@@ -303,12 +307,13 @@ pub fn write_file(pb: &NSPasteboard, path: &Path) {
 }
 
 /// The file URLs on a pasteboard, as a drop target or a paste reads them.
+#[cfg(feature = "lab")]
 pub fn read_files(pb: &NSPasteboard) -> Vec<PathBuf> {
     let Some(items) = pb.pasteboardItems() else { return vec![] };
     items
         .iter()
         // SAFETY: a framework constant.
-        .filter_map(|i| i.stringForType(unsafe { NSPasteboardTypeFileURL }))
+        .filter_map(|i| i.stringForType(unsafe { objc2_app_kit::NSPasteboardTypeFileURL }))
         .filter_map(|s| NSURL::URLWithString(&s))
         .filter_map(|u| u.path())
         .map(|p| PathBuf::from(p.to_string()))

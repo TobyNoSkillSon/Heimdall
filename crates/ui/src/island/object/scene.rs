@@ -189,7 +189,7 @@ struct ReplyView {
     /// The pointer is over its bottom band.
     hot: bool,
     /// The user pulled it down (it stays until he pulls it up); otherwise an agent's note opened it.
-    owner: bool,
+    user: bool,
     /// Open on screen without the pointer over it since this time (one an agent's note opened pulls itself up
     /// `NOTE_UNATTENDED` later).
     unattended: Option<f64>,
@@ -283,6 +283,13 @@ pub(super) struct Model {
     composer_empty: bool,
     /// What was dropped on the pull-down while he wrote: it goes with the composer's next send.
     composer_attached: Vec<crate::island::drop::DropItem>,
+    /// Night 1111 [input]: the composer is locked: a secure field for one secret (`Target::ComposerLock`).
+    composer_secret: bool,
+    /// Review nit "Lock toggle and typed text" (night 1111): whether the plain composer holds no text. It keeps its text
+    /// while the secret field shows, so `composer_empty` (the field on screen) comes back to this on unlock.
+    composer_plain_empty: bool,
+    /// The secret field's Return came with nothing in it: its placeholder says so until he types or the lock switches.
+    secret_empty_said: bool,
     pub cues: Cues,
     /// Wall-clock milliseconds at island time 0 (questions expire on the wall clock).
     pub wall0: f64,
@@ -369,6 +376,9 @@ impl Model {
         Model {
             composer_empty: true,
             composer_attached: Vec::new(),
+            composer_secret: false,
+            composer_plain_empty: true,
+            secret_empty_said: false,
             cues: Cues::default(),
             wall0: 0.0,
             voice: Voice::default(),
@@ -446,6 +456,17 @@ impl Model {
     // ------------------------------------------------------------------ events
 
     pub fn apply(&mut self, ev: Event, t: f64) {
+        self.apply_event(ev, t);
+        // Night 1111 [input]: the pull-down closed while the composer was locked: the next one opens unlocked and
+        // empty (the secure field's text is cleared as it leaves the screen, `field.rs`).
+        if self.composer_secret && self.reply_open.is_none() {
+            self.composer_secret = false;
+            self.secret_empty_said = false;
+            self.composer_empty = self.composer_plain_empty;
+        }
+    }
+
+    fn apply_event(&mut self, ev: Event, t: f64) {
         self.expire(t);
         match ev {
             Event::Speaking(true) => {
@@ -544,7 +565,7 @@ impl Model {
                 // 2026-10-26T19-14-48, reversing 2026-10-21T18-50-16); a pull-down an agent's note opened pulls itself
                 // up, and the turn's send arrow, then its thinking dots, show. The notch still opens the last turn.
                 match &mut self.reply_open {
-                    Some(v) if v.owner => {
+                    Some(v) if v.user => {
                         v.scrolled = false;
                         v.tail = true;
                     }
@@ -654,14 +675,36 @@ impl Model {
                 if !text.is_empty() || !self.composer_attached.is_empty() {
                     let items = std::mem::take(&mut self.composer_attached);
                     self.outputs.push(if items.is_empty() { Output::Typed(text.to_string()) } else { Output::TypedDrop { text: text.to_string(), items } });
-                    if let Some(v) = self.reply_open.as_mut().filter(|v| v.owner) {
+                    if let Some(v) = self.reply_open.as_mut().filter(|v| v.user) {
                         v.scrolled = false;
                         v.tail = true;
                     }
                 }
                 self.composer_empty = true;
+                self.composer_plain_empty = true;
             }
-            Event::ComposerEmpty(empty) => self.composer_empty = empty,
+            // The field on screen reports; the plain composer's own emptiness is kept for when the lock lets go.
+            Event::ComposerEmpty(empty) => {
+                self.composer_empty = empty;
+                if self.composer_secret {
+                    self.secret_empty_said = false;
+                } else {
+                    self.composer_plain_empty = empty;
+                }
+            }
+            // Night 1111 [input]: the locked composer's Return: the secret goes to the app alone (no drop rides with
+            // it, nothing joins the conversation), and the composer unlocks.
+            // An empty one stays locked and says so in its placeholder (it used to vanish without a word).
+            Event::SecretSent(secret) => {
+                if self.composer_secret && !secret.is_empty() {
+                    self.outputs.push(Output::Secret(secret));
+                    self.composer_secret = false;
+                    self.composer_empty = self.composer_plain_empty;
+                } else {
+                    self.secret_empty_said = self.composer_secret;
+                    self.composer_empty = if self.composer_secret { true } else { self.composer_plain_empty };
+                }
+            }
             Event::ComposerAttach(items) => {
                 // The same file dropped twice rides once.
                 for item in items {
@@ -672,8 +715,8 @@ impl Model {
             }
             Event::OpenChat => {
                 self.peek = false;
-                if !self.reply_open.is_some_and(|v| v.owner) {
-                    self.reply_open = Some(ReplyView { owner: true, keys: true, ..ReplyView::default() });
+                if !self.reply_open.is_some_and(|v| v.user) {
+                    self.reply_open = Some(ReplyView { user: true, keys: true, ..ReplyView::default() });
                 }
             }
             Event::Command(cue) => {
@@ -845,7 +888,7 @@ impl Model {
         self.sealed = false;
         self.run_over = false;
         self.notes.clear();
-        if self.reply_open.is_some_and(|v| !v.owner) {
+        if self.reply_open.is_some_and(|v| !v.user) {
             self.reply_open = None;
         }
     }
@@ -1060,7 +1103,14 @@ impl Model {
                 self.questions.tab(&id, question);
             }
             // The window's field takes the keyboard (Other, the composer); nothing to decide here.
-            Target::AskOther { .. } | Target::Composer => {}
+            Target::AskOther { .. } | Target::Composer | Target::ComposerSecret => {}
+            // Night 1111 [input]: the lock turns the composer into the secret field (it starts empty), or back to the
+            // plain composer, whose typed text waited off screen (review nit: the placeholder showed over it).
+            Target::ComposerLock => {
+                self.composer_secret = !self.composer_secret;
+                self.secret_empty_said = false;
+                self.composer_empty = if self.composer_secret { true } else { self.composer_plain_empty };
+            }
             Target::ComposerDetach(k) => {
                 if k < self.composer_attached.len() {
                     self.composer_attached.remove(k);
@@ -1110,7 +1160,7 @@ impl Model {
                 if self.tucked_pending() {
                     self.tucked.clear();
                 } else if self.reply_available() {
-                    self.reply_open = Some(ReplyView { owner: true, ..ReplyView::default() });
+                    self.reply_open = Some(ReplyView { user: true, ..ReplyView::default() });
                 }
             }
             Target::ReplyBand => self.reply_open = None,
@@ -1287,7 +1337,7 @@ impl Model {
         self.expired_at.retain(|id, _| self.questions.items.iter().any(|i| &i.notice.id == id));
         self.answered_at.retain(|id, _| self.questions.items.iter().any(|i| &i.notice.id == id));
         // A pull-down an agent's note opened, left unattended, pulls itself up (nothing stays beside the notch).
-        if self.reply_open.is_some_and(|v| !v.owner && v.unattended.is_some_and(|s| t >= s + NOTE_UNATTENDED)) {
+        if self.reply_open.is_some_and(|v| !v.user && v.unattended.is_some_and(|s| t >= s + NOTE_UNATTENDED)) {
             self.reply_open = None;
         }
         // Reader.
@@ -1370,7 +1420,7 @@ impl Model {
         }
         d.extend(self.answered_at.values().map(|a| a + ANSWERED));
         d.extend(self.expired_at.values().map(|a| a + EXPIRED_HOLD));
-        if let Some(v) = self.reply_open.filter(|v| !v.owner) {
+        if let Some(v) = self.reply_open.filter(|v| !v.user) {
             d.extend(v.unattended.map(|s| s + NOTE_UNATTENDED));
         }
         if let Some(r) = &self.reader {
@@ -1550,7 +1600,7 @@ impl Model {
         let shown = matches!(s, Scene::Reply { .. });
         let over = self.pointer;
         if let Some(v) = &mut self.reply_open {
-            if shown && !v.owner && !over && !v.hot {
+            if shown && !v.user && !over && !v.hot {
                 v.unattended.get_or_insert(t);
             } else {
                 v.unattended = None;
@@ -1612,7 +1662,7 @@ impl Model {
         let question = self.question_scene(false);
         // The user's pulled-down conversation stays; a question docks at its bottom (a tucked one too: it is still his to
         // answer).
-        let docked = self.reply_shows() && self.reply_open.is_some_and(|v| v.owner) && matches!(question, Some(Scene::Question { .. }) | None);
+        let docked = self.reply_shows() && self.reply_open.is_some_and(|v| v.user) && matches!(question, Some(Scene::Question { .. }) | None);
         if let (Some(q), false) = (question, docked) {
             let status = self.moment_row(t, true);
             return match q {
@@ -1644,8 +1694,8 @@ impl Model {
             let paragraphs = self.turn_paragraphs();
             // The conversation around the turn only when the user pulled it down: a pull-down a note opened stays the
             // note's (it pulls itself up again).
-            let chat = if v.owner { crate::island::chat::split(&self.history, &paragraphs.join("\n"), &self.note_ids()) } else { Default::default() };
-            return Scene::Reply { paragraphs, notes, chat, follow: !v.scrolled, tail: v.tail, ask, status, level, flat: !speaking, scroll: v.scroll, hot: v.hot, composer_empty: self.composer_empty, attached: self.composer_attached.clone(), working: v.owner && self.turn.activity == Some(Activity::Thinking), copied: v.copied };
+            let chat = if v.user { crate::island::chat::split(&self.history, &paragraphs.join("\n"), &self.note_ids()) } else { Default::default() };
+            return Scene::Reply { paragraphs, notes, chat, follow: !v.scrolled, tail: v.tail, ask, status, level, flat: !speaking, scroll: v.scroll, hot: v.hot, composer_empty: self.composer_empty, secret: self.composer_secret, secret_empty_said: self.secret_empty_said, attached: self.composer_attached.clone(), working: v.user && self.turn.activity == Some(Activity::Thinking), copied: v.copied };
         }
         // The voice: its sentences accumulate below the ears; a moment rides above them as a status row (the
         // words never leave for it).
@@ -1933,7 +1983,7 @@ impl Model {
     /// The card on screen: docked in the user's pulled-down conversation, the oldest; otherwise the oldest he has not
     /// tucked away.
     fn card_item(&self) -> Option<&crate::agent_notice::Item> {
-        if self.reply_open.is_some_and(|v| v.owner) {
+        if self.reply_open.is_some_and(|v| v.user) {
             return self.questions.items.first();
         }
         self.questions.items.iter().find(|i| !self.is_tucked(i))
@@ -2027,7 +2077,7 @@ impl Model {
     }
     /// Whether the pulled-down reply shows (open, with a reply to show).
     fn reply_shows(&self) -> bool {
-        self.reply_open.is_some_and(|v| self.turn_available() || (v.owner && (v.keys || !self.history.is_empty())))
+        self.reply_open.is_some_and(|v| self.turn_available() || (v.user && (v.keys || !self.history.is_empty())))
     }
     /// The pulled-down reply's scroll, kept within its body (the engine knows the body's length once laid out); while
     /// it follows the latest exchange, where that put it (`at`), so the user's first scroll starts from what he sees.
@@ -2041,7 +2091,7 @@ impl Model {
     /// A new message (a reply, a row of the conversation): the user's open conversation follows it to the end, unless
     /// he scrolled up on purpose (away from the end).
     fn follow_new_message(&mut self) {
-        if let Some(v) = self.reply_open.as_mut().filter(|v| v.owner) {
+        if let Some(v) = self.reply_open.as_mut().filter(|v| v.user) {
             if !v.scrolled || v.at_end {
                 v.scrolled = false;
                 v.tail = true;
@@ -2050,8 +2100,8 @@ impl Model {
     }
 
     /// Whether the open pull-down is the user's (he pulled it down: ⌃⌘H or a click), not one an agent's note opened.
-    pub fn owners_reply_open(&self) -> bool {
-        self.reply_open.is_some_and(|v| v.owner)
+    pub fn user_reply_open(&self) -> bool {
+        self.reply_open.is_some_and(|v| v.user)
     }
     /// Where a drop goes now (`drop::route`): into the composer while the pull-down shows it and he writes there
     /// (`focused`: the composer has the keyboard, which only the window knows).

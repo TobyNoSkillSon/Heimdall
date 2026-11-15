@@ -2,17 +2,17 @@
 //! tasks. Then we choose what model we want to use for background tasks"): the one model every cheap background job
 //! runs on, and which jobs are on. The menu writes `Settings::background_model` and `Settings::background_off`; the
 //! app publishes them here on every settings change, and each job reads them at each pass:
-//! - Islands, the plan refresher (`plan_refresher::Config::endpoint`, `call`);
-//! - Voice Names, the voice namer (`voice_namer::ask_model`, `call`).
-//! - Day Timeline, the left island of where the day went (`day_timeline::spawn_live`).
-//! A new job (proactive offers) adds a `ui::BackgroundTask` and reads `endpoint`, `anthropic_model` and `enabled`.
+//! the six of `ui::BackgroundTask::ALL`: Island Agent (`island_agent`), Plan Lists (`plan_refresher`), Goals (`goals`),
+//! Voice Names (`pipeline::voice_names`, `voice_namer`), Day Timeline (`day_timeline::spawn_live`) and Suggestions
+//! (`pipeline::suggest`, `suggester`). A new job adds a `ui::BackgroundTask` and reads `task_endpoint` and `enabled`.
 //! Every job's model call goes through `background_call` (the one-hour prompt cache, `max_tokens` at the model's
 //! maximum, the $0.50 limit a run, usage and cost into the spend ledger).
 //!
 //! The jobs run the chosen model on its own provider (`endpoint`): Anthropic, Sign in with
 //! ChatGPT, OpenCode Go, OpenRouter, a custom OpenAI-compatible URL, Own Engine or the built-in engine, each in its own
-//! request format (`background_call::Wire`). A provider that is not connected makes no call: a local choice never
-//! sends the plan or a transcript to the cloud, and no choice ever falls back to Anthropic or another paid provider.
+//! request format (`background_call::Wire`). A provider that is not connected makes no call. Where a task's pick is
+//! spent or unavailable, `background_fallback` routes its next call (other Claude accounts, Codex, OpenCode Go, the
+//! engine, and the Anthropic key only when a paid fallback is allowed); a local choice never falls back to the cloud.
 //! A harness T3 runs is a provider too ("t3:<instance>", `background_call::t3`): the Claude subscription through T3
 //! Code, one short-lived thread a call, no key.
 //!
@@ -23,8 +23,8 @@
 //! A task may run its own model instead (`Settings::task_models`, Background Tasks ▸ a task's Model):
 //! 03:37, the island agent on Claude Haiku 5.5 through T3 on the second Claude Code account (`ui::ISLANDS_DEFAULT`, the
 //! personal edition's default) while Background Tasks ▸ Model keeps driving the other jobs. Such a task reads
-//! `task_endpoint(task)`; the same rule holds there: no credential, a paused instance or a spent plan means no call,
-//! never a fallback to the shared model or any other provider.
+//! `task_endpoint(task)`: no credential means no call, and a spent or unavailable pick moves to the next backend of
+//! `background_fallback::chain`, never to the shared model.
 
 use serde::{Deserialize, Serialize};
 #[cfg(not(test))]
@@ -497,7 +497,7 @@ mod tests {
         // Before the first settings load: the edition's default.
         let islands = task_endpoint(Task::Islands);
         if crate::edition::PUBLIC { assert_eq!(islands.model.as_deref(), Some("gpt-6-luna")); }
-        else { assert_eq!((islands.provider, islands.model.as_deref()), ("t3:claudeAgent_claude_code_2", Some("claude-haiku-5-5"))); }
+        else { assert_eq!((islands.provider, islands.model.as_deref()), ("t3:claudeAgent_2", Some("claude-haiku-5-5"))); }
         publish_tasks(&default_task_models());
         assert_eq!(task_endpoint(Task::Plan).model.as_deref(), Some("gpt-6-luna"), "the other jobs keep the shared model");
         assert_eq!(task_endpoint(Task::DayTimeline).provider, endpoint().provider);

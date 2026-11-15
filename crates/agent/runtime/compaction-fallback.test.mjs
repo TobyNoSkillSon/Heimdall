@@ -135,3 +135,16 @@ test('a cut goes only to the history it was made for, never a new or rotated ses
   await r.command(SUPPLY_COMMAND, path);
   assert.equal((await r.hook({ preparation, branchEntries: branch() })).compaction.details.heimdall, 'cut');
 });
+
+test('a handover cut carries Heimdall\'s note: where the cut part of the relay can be read (bug note 2026-11-08T02-03-47)', async () => {
+  const r = rig();
+  const path = join(dir, 'handover.json');
+  const bare = { ...preparation, previousSummary: '## Goal\n- earlier', tokensBefore: visibleTokens(branch(), estimateTokens) + 5 };
+  const note = '[Heimdall, 8 Nov 01:55: switched back from the relay; the older part is in T3 thread mcp:abc]';
+  writeFileSync(path, JSON.stringify({ mode: 'cut', keepTokens: 320, tokensBefore: 334007, previous: null, at: '8 Nov 01:55', note }));
+  await r.command(SUPPLY_COMMAND, path);
+  const out = await r.hook({ preparation: bare, branchEntries: branch() });
+  assert.equal(out.compaction.firstKeptEntryId, 'u2', 'the newest turns that fit stay');
+  assert.equal(out.compaction.summary, `## Goal\n- earlier\n\n${note}`);
+  assert.ok(!out.compaction.summary.includes('could summarise'));
+});

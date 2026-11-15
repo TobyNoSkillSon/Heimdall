@@ -4,7 +4,7 @@ pub mod notice;
 /// Emergency mode: the agent failed, a T3 thread covers (docs/emergency.md).
 pub mod emergency;
 pub mod accounts; // subscription accounts and their quota: which account has quota left, which renews soonest
-#[cfg(any(test, feature = "sim"))]
+#[cfg(test)]
 pub mod sim;
 pub mod delivery;
 pub mod harness;
@@ -32,6 +32,7 @@ pub mod wakes;
 pub mod taste;
 /// Heimdall's own skills: the bundled defaults and Pi's skill folder (docs/skills.md).
 pub mod skills;
+pub mod environment;
 /// The skills index as Pi shows it; shared with build.rs.
 pub mod skill_index;
 /// The relay's system prompt: Heimdall's own, composed at build time (docs/claude-relay.md).
@@ -39,7 +40,7 @@ pub mod relay_prompt;
 pub mod routing;
 /// A spent plan limit or prepaid balance as T3 reports a failed run (bug note 2026-11-02T14-47-37).
 pub mod limits;
-use anyhow::{ensure, Context, Result};
+use anyhow::{ensure, Result};
 use harness::Harness;
 use protocol::{message, Attachment, Event, Observation};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -62,7 +63,6 @@ pub enum Status {
     WaitingProvider(String),
     ReloadPending,
     Working,
-    RateLimited { reset: Option<u64> },
     NeedsReconciliation(String),
     AuthBlocked(String),
     Stopped,
@@ -75,12 +75,6 @@ impl Status {
             Self::WaitingProvider(reason) => reason.clone(),
             Self::Idle => "Agent ready".into(),
             Self::Working => "Agent responding".into(),
-            Self::RateLimited { reset } => format!(
-                "Agent rate limited; collecting locally; reset {}",
-                reset
-                    .map(|x| x.to_string())
-                    .unwrap_or_else(|| "not supplied".into())
-            ),
             Self::NeedsReconciliation(_) => "Agent checking an interrupted reply".into(),
             Self::AuthBlocked(_) => "The agent is unavailable".into(),
             Self::Stopped => "Agent stopped".into(),
@@ -105,6 +99,18 @@ pub struct DeliveryReview {
     pub text_truncated: bool,
     pub attachments_truncated: bool,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DeliveryFate {
+    /// Still queued (or not known yet).
+    Waiting,
+    /// Folded into this delivery, which carries its words now (ask again for its own fate).
+    Moved(String),
+    /// The model has it (its run starts or runs).
+    Taken,
+    /// It never will run (failed, cancelled) or already ran to its end.
+    Ended,
+}
+
 /// How an interrupted or failed delivery resolved itself, for the host to report once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Resolved {
@@ -133,6 +139,19 @@ pub const REVIEW_ROWS: usize = 32;
 pub const REVIEW_TEXT_BYTES: usize = 32 * 1024;
 pub const REVIEW_ATTACHMENTS: usize = 32;
 
+/// What became of a wake (`Bridge::wake_keyed_outcome`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WakeOutcome {
+    /// Delivered now under this id.
+    Delivered(String),
+    /// Not delivered yet, and will be under this id: queued (compaction, behind an earlier undelivered message), held
+    /// (relay or emergency hold), or merged into a queued wake (that wake's id).
+    Pending(String),
+    /// Nothing new went: its words are already with the agent (or dropped as heard twice), or its key was used.
+    NothingNew,
+}
+
+
 /// SQLite keeps collection durable and RAM independent of the unconsumed archive size.
 /// One wake is built in memory (8 MiB maximum); later rows stay on disk.
 pub struct Bridge<H: Harness = harness::DryRun> {
@@ -140,7 +159,6 @@ pub struct Bridge<H: Harness = harness::DryRun> {
     db: Connection,
     pub session_id: String,
     pub status: Status,
-    reset: Option<u64>,
     active: VecDeque<String>,
     resolutions: Vec<Resolution>,
     /// Deliveries an abort ended (`heimdall_aborted` before their error completion): never resent.
@@ -271,27 +289,14 @@ impl<H: Harness> Bridge<H> {
             db.execute("UPDATE deliveries SET state='cancelled' WHERE state='queued' AND query=1 AND (json_type(wire,'$.delivery_epoch') IS NOT 'integer' OR json_extract(wire,'$.delivery_epoch')!=?1)", [epoch as i64])?;
         }
         let unresolved=db.query_row("SELECT id FROM deliveries WHERE (query=1 AND state IN ('submitted','echoed','effects_possible','effects_ambiguous')) OR state='needs_reconciliation' ORDER BY rowid LIMIT 1",[],|r|r.get::<_,String>(0)).optional()?;
-        let stored_reset = db
-            .query_row("SELECT value FROM meta WHERE key='rate_reset'", [], |r| {
-                r.get::<_, String>(0)
-            })
-            .optional()?;
-        let reset = stored_reset.as_ref().and_then(|s| s.parse::<u64>().ok());
-        let limited = stored_reset.is_some() && reset.map(|s| s > clock.now_ms() / 1000).unwrap_or(true);
-        let status = unresolved
-            .map(Status::NeedsReconciliation)
-            .unwrap_or(if limited {
-                Status::RateLimited { reset }
-            } else {
-                Status::Idle
-            });
+        let status = unresolved.map(Status::NeedsReconciliation).unwrap_or(Status::Idle);
         let active = {
             let mut stmt = db.prepare("SELECT id FROM deliveries WHERE (query=1 AND state IN ('submitted','echoed','effects_possible','effects_ambiguous')) OR state='needs_reconciliation' ORDER BY rowid")?;
             let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
             rows.collect::<std::result::Result<VecDeque<_>, _>>()?
         };
         let last_activity_ms = clock.now_ms();
-        let mut bridge = Self { harness, db, session_id: sid, status, reset, active, resolutions: Vec::new(), aborted: Default::default(),
+        let mut bridge = Self { harness, db, session_id: sid, status, active, resolutions: Vec::new(), aborted: Default::default(),
             clock, awaiting_owner: false, start_pending: false, last_notice_turn_ms: None, start_leftovers: Vec::new(), start_reason: None, start_since: None,
             start_claims: Default::default(), compaction: None, last_activity_ms, maintenance_checked: None, last_real_ms: None, restarts: 0, run_repaired: false, hold: None, hold_compacts: false };
         bridge.coalesce_queued_wakes()?;
@@ -355,10 +360,7 @@ impl<H: Harness> Bridge<H> {
                 | Status::WaitingEngine
                 | Status::WaitingProvider(_)
                 | Status::ReloadPending
-        ) || self
-            .reset
-            .map(|s| self.clock.now_ms() / 1000 < s)
-            .unwrap_or(matches!(self.status, Status::RateLimited { reset: None }))
+        )
     }
     fn queue_reason(&self) -> Option<String> {
         if self.blocked() { return Some(self.status.line()); }
@@ -396,6 +398,40 @@ impl<H: Harness> Bridge<H> {
     pub fn retry_deadline(&self) -> Option<u64> {
         let at: Option<i64> = self.db.query_row("SELECT MIN(json_extract(wire,'$.retry_at_ms')) FROM deliveries WHERE state='queued' AND json_extract(wire,'$.retry_at_ms') IS NOT NULL", [], |r| r.get(0)).ok().flatten();
         at.map(|at| at as u64).filter(|at| *at > self.clock.now_ms())
+    }
+    /// What became of delivery `id` that its caller still waits on: merged into another (a wake folded into a queued
+    /// one, or coalesced), followed to the end; `Ended` when it failed, was cancelled with no held copy, or completed;
+    /// `Taken` when a tool of its run may have acted (its run is under way); `Waiting` while queued, sent but not
+    /// taken in, or unknown.
+    pub fn delivery_fate(&self, id: &str) -> Result<DeliveryFate> {
+        let mut at = id.to_owned();
+        for _ in 0..8 {
+            let row: Option<(String, bool)> = self.db.query_row("SELECT state,query FROM deliveries WHERE id=?1", [&at], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            // Held input (emergency relay mode, `query=0`) is appended as context and answered by the relay: only its
+            // failure or cancellation is its end here, never its append.
+            let held = row.as_ref().is_some_and(|(_, query)| !query);
+            let state = row.map(|(state, _)| state);
+            let alias = || -> Result<Option<String>> {
+                Ok(self.db.query_row("SELECT delivery_id FROM wake_keys WHERE id=?1", [&at], |r| r.get::<_, String>(0)).optional()?.filter(|t| *t != at))
+            };
+            let fate = match state.as_deref() {
+                None | Some("coalesced") => match alias()? { Some(next) => { at = next; continue; } None => DeliveryFate::Waiting },
+                Some("failed") => DeliveryFate::Ended,
+                // Emergency mode re-files a queued turn as `<id>:held`: it still waits.
+                Some("cancelled") => {
+                    let held: bool = self.db.query_row("SELECT EXISTS(SELECT 1 FROM deliveries WHERE id=?1 AND state NOT IN ('cancelled','failed'))", [format!("{at}:held")], |r| r.get(0))?;
+                    if held { DeliveryFate::Waiting } else { DeliveryFate::Ended }
+                }
+                Some(_) if held => DeliveryFate::Waiting,
+                Some("completed") => DeliveryFate::Ended,
+                // Sent, not yet taken: only `Consumed` says the model has it (review: a Deferred one goes back to
+                // the queue, a steer may wait behind another run).
+                Some("queued" | "submitted" | "echoed") => DeliveryFate::Waiting,
+                Some(_) => DeliveryFate::Taken,
+            };
+            return Ok(if at != id { DeliveryFate::Moved(at) } else { fate });
+        }
+        Ok(DeliveryFate::Waiting)
     }
     fn is_queued(&self, id: &str) -> Result<bool> {
         Ok(self.db.query_row("SELECT state='queued' FROM deliveries WHERE id=?1", [id], |r|r.get(0))?)
@@ -574,6 +610,19 @@ impl<H: Harness> Bridge<H> {
         &mut self, key:Option<&str>, instruction:&str, images:&[Attachment], urgent:bool,
         permit:Option<delivery::DeliveryPermit>, observation:Option<&str>, speaker:Speaker,
     ) -> Result<Option<String>> {
+        Ok(match self.wake_keyed_outcome(key,instruction,images,urgent,permit,observation,speaker).await? {
+            WakeOutcome::Delivered(id) => Some(id),
+            WakeOutcome::Pending(_) | WakeOutcome::NothingNew => None,
+        })
+    }
+    /// `wake_keyed_through`, saying what became of the wake: delivered now, waiting under an id it will be delivered
+    /// under (queued behind compaction or an earlier message, held, or merged into a queued wake), or nothing new
+    /// (its words are already with the agent, or the key was used).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn wake_keyed_outcome(
+        &mut self, key:Option<&str>, instruction:&str, images:&[Attachment], urgent:bool,
+        permit:Option<delivery::DeliveryPermit>, observation:Option<&str>, speaker:Speaker,
+    ) -> Result<WakeOutcome> {
         let ceiling=observation.map(|id|self.db.query_row("SELECT seq FROM observations WHERE id=?1",[id],|r|r.get::<_,i64>(0))).transpose()?.unwrap_or(i64::MAX);
         let epoch = permit.as_ref().map(|p|p.generation()).or_else(||self.harness.delivery_epoch());
         if let Some(p) = &permit {
@@ -594,7 +643,7 @@ impl<H: Harness> Bridge<H> {
                     WHERE d.query=1 AND j.value=?1 AND d.state!='cancelled') FROM observations WHERE id=?1",
                 params![o, HEARD_TWICE], |r| r.get(0))?;
             if with_agent {
-                return Ok(None);
+                return Ok(WakeOutcome::NothingNew);
             }
         }
         let id = key
@@ -608,7 +657,7 @@ impl<H: Harness> Bridge<H> {
             .optional()?
             .is_some()
         {
-            return Ok(None);
+            return Ok(WakeOutcome::NothingNew);
         }
         // The user addressed Heimdall (a repeated wake is not new input): notices may wake it again (E1.16) and an idle
         // compaction gives way. A wake for someone else's line does neither (`Speaker`, night review 9).
@@ -619,7 +668,7 @@ impl<H: Harness> Bridge<H> {
         }
         if self.hold.is_some() {
             self.hold_input(&id, "wake", &text, images, &ids, last_seq, epoch).await?;
-            return Ok(None);
+            return Ok(WakeOutcome::Pending(id));
         }
         let mut wire = message(&id, &text, images, true, urgent)?;
         wire["timestamp_ms"] = serde_json::json!(self.clock.now_ms());
@@ -667,7 +716,7 @@ impl<H: Harness> Bridge<H> {
             tx.commit()?;
             if let Some(reason) = self.queue_reason() { self.record_queue(&pending_id, &reason)?; }
             else { self.flush_queued().await?; }
-            return Ok(None);
+            return Ok(WakeOutcome::Pending(pending_id));
         }
         protocol::bound_wake_images(&mut wire);
         self.db.execute(
@@ -678,12 +727,12 @@ impl<H: Harness> Bridge<H> {
             "INSERT INTO deliveries VALUES(?1,?2,1,?3,'queued')",
             params![id, wire.to_string(), last_seq],
         )?;
-        if let Some(reason) = self.queue_reason() { self.record_queue(&id, &reason)?; return Ok(None); }
+        if let Some(reason) = self.queue_reason() { self.record_queue(&id, &reason)?; return Ok(WakeOutcome::Pending(id)); }
         if self.earlier_queued(&id)? { self.record_queue(&id, "Waiting for an earlier undelivered message")?; self.flush_queued().await?; }
         else { self.deliver_permitted(&id, wire, true, last_seq, permit).await?; }
-        if self.is_queued(&id)? { return Ok(None); }
+        if self.is_queued(&id)? { return Ok(WakeOutcome::Pending(id)); }
         self.status = Status::Working;
-        Ok(Some(id))
+        Ok(WakeOutcome::Delivered(id))
     }
     /// Typed messages/notices are their own durable input, not another voice
     /// wake: they do not silently attach or acknowledge pending recorded speech.
@@ -777,7 +826,8 @@ impl<H: Harness> Bridge<H> {
         let id = format!("cache-ping-{}", uuid::Uuid::new_v4());
         // After a start, until the user talks, the agent does nothing on its own (the restart message): the ping asks only
         // for NO_REPLY then.
-        let text = if self.awaiting_owner { maintenance::PING_TEXT_AFTER_START } else { maintenance::PING_TEXT };
+        let after_start = maintenance::ping_text_after_start();
+        let text = if self.awaiting_owner { after_start.as_str() } else { maintenance::PING_TEXT };
         let mut wire = message(&id, text, &[], true, false)?;
         wire["timestamp_ms"] = serde_json::json!(self.clock.now_ms());
         wire["cache_ping"] = serde_json::json!(true);
@@ -1033,9 +1083,6 @@ impl<H: Harness> Bridge<H> {
                             // Ended on purpose: never auto-retried, its speech settled with it.
                             self.settle_after_error(id, text_of(e))?;
                             if let Some(last) = self.resolutions.last_mut() { last.outcome = Resolved::Stopped; }
-                        } else if *error && untouched && matches!(self.status, Status::RateLimited { .. }) {
-                            self.db.execute("UPDATE deliveries SET state='queued' WHERE id=?1", [id])?;
-                            self.active.retain(|a| a != id);
                         } else if *error && untouched && wake && notice::provider_rejection(text_of(e), self.run_repaired).is_some() {
                             // The provider refused this request as invalid: the same request fails again, so it is
                             // not resent; its speech rides the next wake once, without this delivery's images.
@@ -1065,8 +1112,7 @@ impl<H: Harness> Bridge<H> {
                             // A different delivery's outcome cannot clear an unresolved one.
                             if !matches!(
                                 self.status,
-                                Status::RateLimited { .. }
-                                    | Status::NeedsReconciliation(_)
+                                Status::NeedsReconciliation(_)
                                     | Status::AuthBlocked(_)
                                     | Status::ReloadPending
                             ) {
@@ -1076,28 +1122,6 @@ impl<H: Harness> Bridge<H> {
                         }
                     }
                 }
-            }
-            Event::Limit {
-                rejected: true,
-                reset,
-                ..
-            } => {
-                self.db.execute("INSERT INTO meta VALUES('rate_reset',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[reset.map(|s|s.to_string()).unwrap_or_else(||"unknown".into())])?;
-                self.reset = *reset;
-                if !matches!(
-                    self.status,
-                    Status::NeedsReconciliation(_) | Status::AuthBlocked(_)
-                ) {
-                    self.status = Status::RateLimited { reset: *reset };
-                }
-            }
-            Event::Limit {
-                rejected: false, ..
-            } if matches!(self.status, Status::RateLimited { reset: None }) => {
-                self.db
-                    .execute("DELETE FROM meta WHERE key='rate_reset'", [])?;
-                self.reset = None;
-                self.status = Status::Idle;
             }
             Event::Other(v) if v["type"] == "heimdall_aborted" => {
                 if let Some(id) = v["id"].as_str() { self.aborted.insert(id.into()); }
@@ -1121,29 +1145,6 @@ impl<H: Harness> Bridge<H> {
             _ => {}
         }
         Ok(())
-    }
-    /// Convenience for offline callers. Live hosts select on reset_deadline instead,
-    /// then call flush_queued so observation collection is never held across a timer.
-    pub async fn wait_for_reset(&mut self) -> Result<()> {
-        let reset = self
-            .reset
-            .context("reset time absent; wait for a harness status update")?;
-        tokio::time::sleep(std::time::Duration::from_secs(
-            reset.saturating_sub(self.clock.now_ms() / 1000),
-        ))
-        .await;
-        self.db
-            .execute("DELETE FROM meta WHERE key='rate_reset'", [])?;
-        self.reset = None;
-        // Expiry restores inference availability, not certainty about tool effects.
-        if matches!(
-            self.status,
-            Status::NeedsReconciliation(_) | Status::AuthBlocked(_)
-        ) {
-            return Ok(());
-        }
-        self.status = Status::Idle;
-        self.flush_queued().await
     }
     pub fn engine_ready(&mut self) {
         if matches!(self.status, Status::WaitingEngine) {
@@ -1185,10 +1186,6 @@ impl<H: Harness> Bridge<H> {
         }
         self.refresh_unresolved()
     }
-    pub fn reset_deadline(&self) -> Option<std::time::SystemTime> {
-        self.reset
-            .map(|s| std::time::UNIX_EPOCH + std::time::Duration::from_secs(s))
-    }
     pub async fn flush_queued(&mut self) -> Result<()> {
         if let Some(epoch) = self.harness.delivery_epoch() {
             self.db.execute("UPDATE deliveries SET state='cancelled' WHERE state='queued' AND query=1 AND (json_type(wire,'$.delivery_epoch') IS NOT 'integer' OR json_extract(wire,'$.delivery_epoch')!=?1)", [epoch as i64])?;
@@ -1200,12 +1197,6 @@ impl<H: Harness> Bridge<H> {
             // Held input is context: it needs Pi, not the provider (emergency mode).
             if self.hold_appends() { return self.flush_notices().await; }
             return Ok(());
-        }
-        if matches!(self.status, Status::RateLimited { .. }) {
-            self.db
-                .execute("DELETE FROM meta WHERE key='rate_reset'", [])?;
-            self.reset = None;
-            self.status = Status::Idle;
         }
         loop {
             // Notices never steer: they go out below, once the turn has settled.
@@ -1834,7 +1825,7 @@ impl<H: Harness> Bridge<H> {
             let Some(kind) = notice::stored_kind(&wire).filter(|k| k.wakes()) else { continue };
             self.db.execute("UPDATE deliveries SET state='cancelled' WHERE id=?1", [&id])?;
             // A hand-back's "while you were down" a restart left queued is Heimdall's own: a later probe writes a new one.
-            if id.starts_with(notice::EMERGENCY_BACK) || id.starts_with(notice::EMERGENCY_BACK_OLD) { continue; }
+            if id.starts_with(notice::EMERGENCY_BACK) { continue; }
             let text = wire["message"]["content"][0]["text"].as_str().unwrap_or("").to_owned();
             self.hold_input(&format!("{id}:held"), kind.as_str(), &text, &[], &[], 0, wire["delivery_epoch"].as_u64()).await?;
         }
@@ -1912,3 +1903,41 @@ impl Bridge<harness::DryRun> {
 pub use process_owner::guardian_mode;
 
 pub use process_owner::spawn_relaunch;
+
+#[cfg(test)]
+mod delivery_fate_tests {
+    use super::*;
+    /// The phone turn asks what became of the delivery it waits on: still queued, merged (followed to its end),
+    /// taken by the model, held for the relay, or over (failed, cancelled with no held copy, completed).
+    #[test]
+    fn a_waiting_delivery_reports_its_fate() {
+        let b = Bridge::dry_run(":memory:").unwrap();
+        let row = |id: &str, query: i64, state: &str| { b.db.execute("INSERT INTO deliveries VALUES(?1,'{}',?2,0,?3)", params![id, query, state]).unwrap(); };
+        row("q", 1, "queued");
+        row("s", 1, "submitted");
+        row("e", 1, "effects_possible");
+        row("hf", 1, "cancelled");
+        row("hf:held", 0, "failed");
+        row("f", 1, "failed");
+        row("c", 1, "cancelled");
+        row("done", 1, "completed");
+        row("h", 1, "cancelled");
+        row("h:held", 0, "completed");
+        row("ctx", 0, "completed");
+        row("merged", 1, "coalesced");
+        b.db.execute("INSERT INTO wake_keys VALUES('merged','q')", []).unwrap();
+        b.db.execute("INSERT INTO wake_keys VALUES('key','merged')", []).unwrap();
+        assert_eq!(b.delivery_fate("q").unwrap(), DeliveryFate::Waiting);
+        assert_eq!(b.delivery_fate("s").unwrap(), DeliveryFate::Waiting, "sent, not yet taken in");
+        assert_eq!(b.delivery_fate("e").unwrap(), DeliveryFate::Taken);
+        assert_eq!(b.delivery_fate("hf").unwrap(), DeliveryFate::Ended, "its held copy failed");
+        assert_eq!(b.delivery_fate("f").unwrap(), DeliveryFate::Ended);
+        assert_eq!(b.delivery_fate("c").unwrap(), DeliveryFate::Ended, "cancelled with nothing held");
+        assert_eq!(b.delivery_fate("done").unwrap(), DeliveryFate::Ended);
+        assert_eq!(b.delivery_fate("h").unwrap(), DeliveryFate::Waiting, "re-filed for the relay");
+        assert_eq!(b.delivery_fate("ctx").unwrap(), DeliveryFate::Waiting, "held input appended: the relay answers it");
+        assert_eq!(b.delivery_fate("merged").unwrap(), DeliveryFate::Moved("q".into()));
+        assert_eq!(b.delivery_fate("key").unwrap(), DeliveryFate::Moved("q".into()), "a key through a coalesced wake");
+        assert_eq!(b.delivery_fate("unknown").unwrap(), DeliveryFate::Waiting);
+    }
+}

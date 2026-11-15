@@ -1,52 +1,6 @@
 {
   "files": [
     {
-      "repo": "LiquidAI/d1-omni-600M-GGUF",
-      "revision": "04397145ed8381350403aa556db0ec6a49dd8c07",
-      "path": "d1/d1-omni-600M-F16.gguf",
-      "bytes": 764049056,
-      "sha256": "d5dca201170e98fad783ddf65c1dd94244accccbffce4a2746255cbd21b6a21c",
-      "url": "https://huggingface.co/LiquidAI/d1-omni-600M-GGUF/resolve/04397145ed8381350403aa556db0ec6a49dd8c07/d1-omni-600M-F16.gguf",
-      "bundle": false
-    },
-    {
-      "path": "d1/d1-omni-600M-heimdall-F16.gguf",
-      "bytes": 764048160,
-      "sha256": "00f348a7ee36ac3a37a8fa965b13cf8b6c97cb5bb82d4554656fa1a7acdefeed",
-      "provenance": "local fine-tune, training-material/d1/runs/v1, base HF 02b55d70",
-      "bundle": false
-    },
-    {
-      "path": "d1/d1-omni-600M-heimdall-v2-F16.gguf",
-      "bytes": 764048160,
-      "sha256": "ce097d3b074c93cc85c46deb71e980a9d5c9e508f746ca8102083ab2c7e3c72d",
-      "provenance": "local fine-tune v2 from v1, training-material/d1/runs/v2 (17 Oct 2026)",
-      "bundle": false
-    },
-    {
-      "path": "d1/d1-omni-600M-heimdall-v3-F16.gguf",
-      "bytes": 764048160,
-      "sha256": "9f97c7e84d06d802f72ba0e0b457ecbd8da147aabc5069bcfdc2b7ec49c07b40",
-      "provenance": "local fine-tune v3 from v2 (dispatch question with ack lines), training-material/d1/runs/v3 (24 Oct 2026)",
-      "bundle": false
-    },
-    {
-      "path": "d1/d1-omni-600M-heimdall-v4-F16.gguf",
-      "bytes": 764048160,
-      "sha256": "2ba69f67bed685e1f734f4c4a782033c8dbb0258fc12ea4aa10e8508af5050cd",
-      "provenance": "local fine-tune v4 from the d1-train base (sha 0713bb05), same dispatch question as v3, training-material/d1/runs/v4 (25 Oct 2026)",
-      "bundle": false
-    },
-    {
-      "repo": "LiquidAI/d1-omni-600M-GGUF",
-      "revision": "04397145ed8381350403aa556db0ec6a49dd8c07",
-      "path": "d1/mmproj-d1-omni-600M-F16.gguf",
-      "bytes": 441262144,
-      "sha256": "77e4a6b626847876a98fd242756921024b54e608e166b562f3f3596ff29eda53",
-      "url": "https://huggingface.co/LiquidAI/d1-omni-600M-GGUF/resolve/04397145ed8381350403aa556db0ec6a49dd8c07/mmproj-d1-omni-600M-F16.gguf",
-      "bundle": false
-    },
-    {
       "path": "d1/d1-2B-heimdall-v5/config.json",
       "bytes": 2903,
       "sha256": "ffdc4c996152d23dbe8a2659a8c6aabe2992aa3fa3a41601dd0fca8771d6f332",
@@ -257,5 +211,5 @@
       "bundle": true
     }
   ],
-  "download_bytes": 1205311200
+  "download_bytes": 0
 }

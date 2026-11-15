@@ -62,7 +62,7 @@ impl AgentHealth {
                 .into_iter()
                 .collect(),
             agent::Status::ReloadPending => vec![],
-            agent::Status::WaitingEngine | agent::Status::RateLimited { .. } => self
+            agent::Status::WaitingEngine => self
                 .health
                 .dropped(KEY, part, "Agent waiting for the engine")
                 .into_iter()

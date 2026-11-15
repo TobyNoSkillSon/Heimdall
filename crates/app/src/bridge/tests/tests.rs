@@ -201,7 +201,7 @@
         let shown=tools.test_island.lock().unwrap().clone();
         let bubble=shown.iter().find_map(|u|match u {ui::UiUpdate::AgentWindow(ui::AgentWindowUpdate::Entries(e))=>e.first().cloned(),_=>None}).expect("the bubble shows at once");
         assert!(bubble.queued && !bubble.sent && !bubble.error && bubble.kind==ui::AgentLiveKind::Prompt);
-        assert_eq!(ui::agent_view::display(&ui::agent_view::Row::Live(bubble.clone())).unwrap().heading,"User · queued");
+        assert_eq!(ui::agent_view::display(&ui::agent_view::Row::Live(bubble.clone())).unwrap().heading,format!("{} · queued",ui::identity::user_heading()));
         assert_eq!(ui::agent_view::typed(&bubble).as_deref(),Some("helo aparenly you recovered"));
         match blocked.try_recv()? {
             Command::Scoped{command,..}=>assert!(matches!(*command,Command::Typed{ref echo,ref text,steer:false} if *echo==bubble.id && text=="helo aparenly you recovered")),
@@ -211,7 +211,7 @@
         drop(blocked);
         assert!(tools.window_action(ui::AgentWindowAction::Send{text:"second".into(),steer:false}).is_err());
         let last=tools.test_island.lock().unwrap().iter().rev().find_map(|u|match u {ui::UiUpdate::AgentWindow(ui::AgentWindowUpdate::Entries(e))=>e.first().cloned(),_=>None}).unwrap();
-        assert!(last.error && !last.queued && !last.sent && last.owner_text.as_deref()==Some("second"));
+        assert!(last.error && !last.queued && !last.sent && last.user_text.as_deref()==Some("second"));
         Ok(())
     }
 
@@ -410,10 +410,9 @@
         let tools = Tools::new(&t.path().join("no-models"), t.path());
         tools.screen_off.store(true, Ordering::Release);
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
-        let result = runtime.block_on(tools.screenshot_now(&tools.agent_enabled.permit().unwrap())).unwrap();
-        assert!(result.images.is_empty() && result.warnings.is_empty());
-        assert_eq!(result.notes, [SCREEN_OFF]);
-        assert_eq!(tools.screenshot_status(), None, "a chosen screen-off is not a failure");
+        // Bug note 2026-11-10T15-35-42: an error that says Seeing is off, never a success.
+        let err = runtime.block_on(tools.look(None, &tools.agent_enabled.permit().unwrap())).err().expect("Seeing off is an error");
+        assert!(err.to_string().starts_with(SCREEN_OFF), "{err}");
     }
     #[test]
     fn unavailable_tools_publish_status_without_permissions_or_playback() {
@@ -423,9 +422,6 @@
         tools.enabled.store(false, Ordering::Release);
         assert!(tools.speak("Hello.", "en", &tools.agent_enabled.permit().unwrap()).is_err());
         assert_eq!(tools.speech_status().as_deref(), Some("Speech replies off"));
-        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
-        assert!(runtime.block_on(tools.screenshot_now(&tools.agent_enabled.permit().unwrap())).is_err());
-        assert_eq!(tools.screenshot_status().as_deref(), Some("Screenshot unavailable"));
     }
     /// Review 23 Oct, finding 12: one failed spoken line does not put "Heimdall can't speak right now" up; two in a
     /// row do, and it clears with the next line that plays, Speaking off, or ten minutes after the last failure.
@@ -525,7 +521,7 @@
         tools.shutdown(); // Joins the worker, so the count includes all queued work.
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-        assert!(runtime.block_on(tools.screenshot_now(&permit)).is_err());
+        assert!(runtime.block_on(tools.look(None, &permit)).is_err());
         Ok(())
     }
     #[test]

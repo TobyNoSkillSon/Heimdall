@@ -508,6 +508,7 @@ fn tint(image: &NSImage, color: &NSColor) -> Retained<NSImage> {
 
 /// `heimdall-ui-demo --bug-notes <dir>`: the window offscreen (never ordered in) with synthesized notes, every state
 /// at its real size, and a click on a card's evidence row through the window's own event path. Returns what failed.
+#[cfg(feature = "lab")]
 pub(crate) fn render(dir: &std::path::Path) -> Vec<String> {
     use objc2_app_kit::{NSAppearance, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationPolicy, NSEventType};
     let mtm = MainThreadMarker::new().expect("the Bug Notes renders run on the main thread");

@@ -1,106 +1,126 @@
 # What an island can show
 
-For the island agent, the plan refresher, the island checker (`scripts/refresher-check`) and any agent that puts
-islands on the user's screen. Thread-bound job islands are code-driven (stage, clock, progress, the band) and made rich by
-the island agent (`docs/background-jobs.md`). Sources: the `islands_put` schema in `crates/agent/src/mcp_contract.rs`, `crates/app/src/islands/tools.rs`, the
-helper's renderer `crates/islands/src/mac/parts.rs`, and `islands/docs/island-style.md`. The island file format in
-full: `islands/README.md`.
+The fields and parts an island carries, how a job island follows its work, and when it leaves. For the island agent,
+the plan refresher, the island checker (`scripts/refresher-check` reads this page) and any agent that puts islands on
+the user's screen.
+
+Read this when: you want to put or update an island with `islands_put`, pick a part for the work, bind an island to a
+T3 thread, know why an island left or stayed, or read what is up with `islands_list`.
+Code: `crates/agent/src/mcp_contract.rs` (`islands_put`, `islands_list`, `islands_remove` schemas),
+`crates/app/src/islands/tools.rs`, `crates/app/src/islands/binding.rs`, `crates/app/src/islands/kept_report.rs`,
+`crates/app/src/islands/list.rs`, `crates/islands/src/mac/parts.rs` (the renderer).
 
 ## Two kinds of island
 
-- **Job island** (right side, default): one piece of work. Its thread, the thread's sub-agents and the background work
-  it started are one job; the island shows that job's live state and progress. One per thread, with that thread's
-  items as its steps.
-- **Plan island** (left side): Goals, Scheduled and Settled, docked as fixed lists (`preset` todo, `list` set). They
-  have fixed icons and no thread.
+- **Job island** (right side, the default): one piece of work. A thread, its sub-agents and the background work it
+  started are one job; the island shows that job's live state and progress, one per thread.
+- **Plan island** (left side): Goals, Scheduled and Settled, fixed lists with fixed icons and no thread
+  ([one-system.md](one-system.md)).
 
-## Job island fields (`islands_put`)
+The viewer is a separate island for one file: [viewer.md](viewer.md).
 
-Fields marked *file* are not tool arguments: the app or the refresher sets them in the island file.
+## Job island fields
 
-| Field | What it is | Rule |
+Tool arguments of `islands_put` (only `id` is required; it merges into the island with that id, and an empty list
+clears it). Rows marked *file* are not arguments: the app writes them into the island file. How the words must read:
+[island-style.md](../islands/docs/island-style.md).
+
+| Field | What it is | Limit or rule |
 |---|---|---|
-| `id` | stable key (`task-…`, a plain name) | never shown; no ids in any text |
-| `title` | the thing, 1–3 words (40 characters) | names the thing for the user, not its id (refused otherwise) |
-| `state` | `running`, `waiting`, `done`, `failed` | colour: white, orange, green, red. Green only when finished and nothing still runs |
-| `stage` | 1–2 words, what it is doing now | specific ("B-29 test"), not the mechanism ("Rendering"); refused over 2 words |
-| `summary` | one plain line, 110 characters at most (refused beyond) | what it is and what comes next; no ids, paths or model internals |
-| `steps` | a timeline of the current phase | states `done`, `now`, `todo`, `failed`; several `now` when parallel; schema 20, refresher prompt 7 |
-| `items` | a plain list of lines (30 at most) | for lists, not for steps |
-| `kv` | label/value pairs (8 at most) | a few, worth a glance |
-| `image` | a picture of the result | must be a real file; a missing one is left out and the result says so |
-| `open` | a URL or file, shown as a button | what a click opens: the page, file or folder of the result |
-| `icon` | an SF Symbol name (`ipad`), or a tiny SVG of plain shapes | SVG: path, circle, ellipse, rect, line, polyline, polygon, g; no text, styles, links or images; 2,048 bytes at most (`ICON_SVG_MAX`; the refresher prompt asks for 1.5 KB) |
-| `parts` | a list of up to 20 parts (below) | the picture of the work |
-| `thread` | binds the island to a T3 thread | the app keeps its state, stage, clock, progress, band and the thread's questions in sync, also through new runs; the island agent writes its now line, graphic, icon, title, helper names and open target |
-| `helpers` (*file*) | the island agent's short names for the thread's sub-agents | the band draws them; names only |
-| `attention` (*file*) | `waiting` or `question` | pulses the closed island every 6 s until the user opens it |
-| `side` | `left`, `right` or `top` | running work docks right; leave a place the user chose alone |
-| `expanded` | whether the island is open | the user's clicks and the app change it too |
-| `progress` (*file*) | 0 to 1 | code's measured share (a training run's step of its total, "3 of 8" in the agent's line); absent when there is no count |
+| `id` | stable key (`task-…`, a plain name) | 64 characters; never shown |
+| `title` | the thing, 1–3 words | 40 characters; checked |
+| `state` | `running`, `waiting`, `done`, `failed` | |
+| `stage` | 1–2 words, what it is doing now | checked |
+| `summary` | one plain line | 110 characters; checked |
+| `steps` | `{title, state}` timeline of the current phase | 20; states `done`, `now`, `todo`, `failed`; several `now` when parallel |
+| `items` | `{title, group, done}` plain list | 30; groups `running`, `waiting`, `discussed` |
+| `kv` | `{label, value}` pairs | 8 |
+| `image` | a picture of the result | must be a real file; a missing one is left out and the answer says so |
+| `open` | a URL or file, shown as a button | what a click opens |
+| `icon` | an SF Symbol name or a tiny SVG | 2,048 bytes (`ICON_SVG_MAX`); see island-style.md |
+| `parts` | the open island's content (below) | 20 |
+| `side` | `left`, `right` or `top` | running work docks right |
+| `expanded` | whether it is open | the user's clicks change it too |
+| `thread` | binds it to a T3 thread | see below |
+| `sent` | what the job was sent to do | one line, 110 characters; written once, never replaced |
+| `goal` | the Goals id it serves (`plan_edit show`) | a chip; lights that goal while it runs |
+| `progress` (*file*) | 0 to 1 | code's measured share; absent when there is no count |
+| `helpers` (*file*) | the island agent's short names for the thread's sub-agents | the band draws them |
+| `attention` (*file*) | `waiting` or `question` | pulses the closed island every 6 s until opened |
 
-Open, a job island shows its content and one bottom row: the open chip left, then stage, a live graphic and the duration right. A `kv` value that is a share (`7/12`, `42%`) gets a bar; a number the agent rewrites (`41 GB`, `31 it/s`) grows a sparkline. Keep such values numeric with a short unit so they earn a graphic.
+Open, a job island shows its content and one bottom row: the open target's chip on the left; the stage, a live graphic
+and the duration on the right. A `kv` value that is a share (`7/12`, `42%`) gets a bar; a number the agent rewrites
+(`41 GB`, `31 it/s`) grows a sparkline. The full file format: [islands/README.md](../islands/README.md).
 
-A bound job island leaves by itself: at once when its thread is archived (`task_cancel`) or deleted in T3, and when done, 10 minutes after the user could see it closed or a minute after they opened and closed it. Failed and waiting islands stay. An archived thread's open question is not read (it could fail the sync and freeze the island on its last stage). A message sent to a task (`t3_thread_send`, the relay's too) that starts a new run brings its job island back.
+## Bound to a thread
 
-A thread-bound island follows its thread live, including new runs after it finished: the binding's reducer names the
-stage within 30 s (a new run starts over), and a picture the work produced is copied into the islands folder
-(`pictures/`), since pictures in /tmp vanish. A picture opens full size in the island viewer. A new thread-bound
-island drops out of the notch.
+- `thread` binds an island to a T3 thread. Every task Heimdall starts gets its job island before the call returns:
+  running, docked right, titled from the task title as a placeholder, id `task-<title>`.
+- The binding then keeps state, stage, clock, progress, the band and the thread's questions in sync, through new runs
+  too (a new run starts over). The island agent writes the now line, the graphic, the icon, the title (over the
+  placeholder and its own earlier name, never over a name `islands_put` gave), the helpers' names and the open target.
+  Cadence and triggers: [one-system.md](one-system.md).
+- A picture the work produced is copied into the islands folder (`pictures/`), since files in `/tmp` vanish.
+- A message sent to a task (`t3_thread_send`) that starts a new run brings its job island back.
 
-The viewer island zooms (bug note 2026-11-04T19-07-48): pinch, ⌘+ / ⌘− / ⌘0 once the viewer has a click in it, two fingers pan when zoomed. Markdown and text, pictures, PDF and HTML zoom; audio, video and Quick Look files do not. The zoom is remembered per file in `viewer-zoom.json` in the islands folder. The viewer can't be resized by hand; when its width changes, text and PDF scale to the new width instead of reflowing.
+## When a job island leaves
+
+- At once when its thread is archived (`task_cancel`) or deleted in T3.
+- Done, 60 s after its result reached the user (`binding::RESULT_GRACE`): the run's final notice was delivered to
+  Heimdall, which spoke it or showed it on the island. That minute counts whether the user is at the Mac or islands are
+  hidden; it waits while the user has the island open and restarts when it is closed. A result told before the
+  island's current run started does not count.
+- Done without a told result: after 2 min shown closed (`DONE_SHOWN_FOR`), or 30 s after the user opened and closed it
+  (`DONE_AFTER_OPENED`). Hidden time does not count.
+- Failed and waiting islands stay.
+- A done island that delivered a file (its `open` target, else the page, document, picture or recording its final reply
+  named, else its picture) turns in place into a report island (`kept_report.rs`): its title and icon, the green check
+  (`preset: "result"`), its open button, unbound. It stays until the user opens or closes it; at most 3
+  (`KEPT_AT_MOST`), the oldest going first. A file the user already opened from it after it finished, or a job with no
+  file, goes as before. Every such file is also written to Settled as its proof.
+- Viewers and report islands are never bound, so none of this closes them.
+
+## What is up: `islands_list`
+
+Read-only (`crates/app/src/islands/list.rs`): one line per job, viewer, kept report or other island with its id (for
+`islands_remove`), kind, bound task, state, time up, time since it finished, open or closed on screen, and for a done
+job whether its result was told and when it leaves. Hidden islands are left out; the shown plan lists come in one line.
+
+```
+job 'Voice isolation' (id task-voice-isolation, task mcp:…): done 23 min ago, up 41 min, closed on screen, result told 22 min ago; leaves 1 min after that unless the user has it open.
+```
+
+`islands_remove` closes islands by id; on a plan list it hides the list instead.
 
 ## Parts
 
-The `islands_put` description names these nine; the helper also draws `timeline` (the Day Timeline, `islands/README.md`).
+The `islands_put` description names the first nine; the renderer also draws `progress`, `html`, `band` and `timeline`.
+Consecutive buttons share a row, at most three.
 
-| Part | Shape in the code | Use it for |
+| Part | Shape | Use it for |
 |---|---|---|
-| `text` | `{"type":"text","value":…}` | a question or a line the thread asks (with `t3q: true`) |
-| `stat` | `{"type":"stat","value":…,"unit":…,"baseline":{label,value}}` | one big number |
-| `bars` | items of `label` and `value`, at most 6, one unit | a comparison |
-| `line` | `points` (2 to 40 numbers) and a unit | a trend |
-| `list` | `{"type":"list","items":[{id,title,value}],"selected":…}`, 6 shown; the user's pick comes back as a notice (`kind: list`) | a choice among several |
-| `image` | `{"type":"image","path":…}` | the latest result |
-| `button` | `{"type":"button","label":…,"action":…}` | a one-click answer; the action comes back as a notice |
-| `toggle` | `{"type":"toggle","id":…,"label":…,"on":…}` | an on/off setting; the change comes back as a notice |
-| `slider` | `{"type":"slider","id":…,"min","max","step","value","unit"}` | a value; the change comes back as a notice |
-| `band` (code only) | `{"type":"band","code":true,"state":…,"helpers":[{title,state}],"segments":[{title,secs}]}` | a thread island's helper rows and stage ribbon (round 3): past stages dimmed and named, the current one lit with its length, orange only while the user must answer, a red Failed stage, a done ribbon ends in a green check |
+| `text` | `{type, value}` | a question or a line the thread asks (with `t3q: true`) |
+| `stat` | `{type, value, unit, baseline: {label, value}}` | one big number |
+| `bars` | `{type, items: [{label, value, highlight}], unit, max}`, 6 drawn | a comparison |
+| `line` | `{type, points, unit}`, at least 2 points | a trend |
+| `list` | `{type, items: [{id, title, value}], selected}`, 6 drawn | a choice; the pick comes back as a notice (`kind: list`) |
+| `image` | `{type, path}` | the latest result |
+| `button` | `{type, label, action}` | a one-click answer; comes back as a notice |
+| `toggle` | `{type, id, label, on}` | an on/off setting; the change comes back as a notice |
+| `slider` | `{type, id, min, max, step, value, unit}` | a value; the change comes back as a notice |
+| `progress` | `{type, value}` | a bar from 0 to 1 |
+| `html` | a fragment with a `fallback` | a model-drawn body ([model-html.md](../islands/docs/model-html.md)) |
+| `band` (code only) | `{type, code: true, state, helpers: [{title, state}], segments: [{title, secs}]}` | a thread island's helper rows and stage ribbon |
+| `timeline` | `{type, from, now, blocks: [{start, end, kind, title, line}]}` | the Day Timeline (`crates/islands/src/model/timeline.rs`) |
 
-Parts are checked by the island style rules: a count is a progress bar or a stat; a sequence is a timeline; a result is
-an image or an open target; nothing repeats what another element shows.
+Pick by what the work is: a count is a progress bar or a stat; a sequence is a timeline of steps; a result is an image
+or an open target; nothing repeats what another element shows.
 
-## Plan lists
+## See also
 
-One system (`docs/one-system.md`): nothing enters Goals or Scheduled without the user's yes, by voice
-(`plan_edit` accept) or one click (Yes on the proposal); nothing settles without proof. Each list's `proposals` queue
-shows one at a time (the rest as "+N"); unanswered for two days it is archived to `record/` and never comes back.
-- **Goals**: a few big aims a week or a month ahead, each with its steps (`tasks`); a background job moves them
-  (docs/goals.md), proposing new goals and steps. Its `items` are the asks, what needs the user now: shown on Scheduled's
-  guarantee line, not in Goals. A goal lights blue only while a job island with its `goal` runs. There is no to-do list.
-- **Scheduled**: promises with a time (`due`, an absolute local time, "2026-10-24T23:00"); no time, no promise. On top,
-  the guarantee line (`guarantee`, Heimdall's sweep every minute): what really waits on the user (an ask, a waiting or
-  failed job, a missed promise), "Not sure" when a running job went silent 15 min or the sweep is 30 min old, else
-  "Nothing waiting on you".
-- **Settled**: finished work with its proof (commit, test, install, output file, the user's quote); without one it is drawn
-  as claimed and not counted. Counted since the clean slate (`slate`).
-
-Items carry `id`, `title` (the project first, one short line), `done`, `when` or `due`, `goal` and `kind` (asks), `detail` (what exactly,
-what next; a closed row shows its first line under the title, one line cut with an ellipsis, and the whole text when the user
-opens the row; the Rust build only, the Swift rollback still shows the title alone) and `proposal.actions`: one-click answers with effect `yes` (go ahead), `done` (settled by the click), `later`,
-`no` (drop).
-
-## Style rules (island-style.md, checked where marked)
-
-- Title 1–3 words, not an id. Checked.
-- Stage 1–2 present-tense words. Checked.
-- Summary one line, under 110 characters. Checked.
-- Icon: an SVG of plain shapes or an SF Symbol, drawn for what the island is about, readable at 19 points.
-- Show, don't tell: a timeline for a sequence, a progress bar for a count, bars for a comparison, a line for a trend,
-  one big number for one measure, the latest picture for visual work. Every element earns its place.
-- Running work lives on the right. The left holds only what waits on the user, what was discussed, Scheduled and Settled.
-- Motion: running shows a tiny sign of work; waiting is orange; done is the green check, and only done.
-
-## Open question
-
-- The icon size limit differs: 2,048 bytes in the code, "under 2 KB" in island-style.md, 1.5 KB in the refresher prompt.
+- [island-style.md](../islands/docs/island-style.md): how titles, stages, colours and icons must read
+- [one-system.md](one-system.md): the plan lists and how job islands stay current
+- [viewer.md](viewer.md): the viewer island
+- [model-html.md](../islands/docs/model-html.md): HTML bodies and the status file
+- [islands/README.md](../islands/README.md): the file protocol and CLI
+- [t3-orchestration.md](t3-orchestration.md): starting and following T3 tasks

@@ -45,7 +45,8 @@ JSON with four arrays. Every entry has every key; "" for a key it does not use.
     own words: `goal`, `title` naming the choice itself ("Wake by name, no wake words"), `quote` their words.
   - `progress` with state `now` or `next`: goal work started, or agreed for later (`goal`, `task` or `title`, `now`).
     Use `done` here only for finished work that is in neither list above (the user saying they did it themselves).
-  - `drop_task`: a task not done that the user dropped. `finish_goal`: a goal plainly reached (shipped, signed).
+  - `drop_task`: a task not done that the user dropped. `finish_goal`: a goal whose aim is plainly met (shipped, signed):
+    code asks the user "done?" with a card; never for a goal marked ongoing (it has no end).
     `pause_goal`: the user set a goal aside. `add_goal`: the user named a new big aim for weeks ahead.
   A new goal, and new work under a goal that is not done, wait for the user's yes: code proposes them (a
   started task they asked for in their own words goes straight in). Propose only what the lines plainly agree on.

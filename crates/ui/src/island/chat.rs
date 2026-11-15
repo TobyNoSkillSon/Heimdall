@@ -42,7 +42,7 @@ pub enum NoteShape {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ChatKind {
     /// The user's words delivered to Heimdall (his microphone's addressed turn, or a typed message).
-    Owner(String),
+    User(String),
     /// A reply or a spoken line, as written.
     Heimdall { text: String, heard: Heard },
     /// A task or question, one short line; `answer` is the option the user chose on a question card.
@@ -107,7 +107,7 @@ pub fn split(history: &[ChatEntry], reply: &str, notes: &[String]) -> Around {
     if reply.trim().is_empty() {
         found = history.iter().position(|e| note_of(&e.kind)).map(|i| (i, i, i));
     } else {
-        let mut bounds: Vec<usize> = history.iter().enumerate().filter(|(_, e)| matches!(e.kind, ChatKind::Owner(_))).map(|(i, _)| i + 1).collect();
+        let mut bounds: Vec<usize> = history.iter().enumerate().filter(|(_, e)| matches!(e.kind, ChatKind::User(_))).map(|(i, _)| i + 1).collect();
         bounds.insert(0, 0);
         let mut end = history.len();
         for &start in bounds.iter().rev().take(TURNS_BACK + 1) {
@@ -135,7 +135,7 @@ mod tests {
         ChatEntry { at_ms, kind }
     }
     fn owner(s: &str) -> ChatKind {
-        ChatKind::Owner(s.into())
+        ChatKind::User(s.into())
     }
     fn him(s: &str) -> ChatKind {
         ChatKind::Heimdall { text: s.into(), heard: Heard::Whole }

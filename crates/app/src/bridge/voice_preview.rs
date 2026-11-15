@@ -56,6 +56,7 @@ pub(crate) struct Around {
     pub ended: Box<dyn Fn() + Send>,
 }
 impl Around {
+    #[cfg(test)]
     pub(crate) fn none() -> Self { Self { started: Box::new(|| {}), ended: Box::new(|| {}) } }
 }
 
@@ -152,6 +153,7 @@ impl super::Tools {
     }
 
     /// The echo guard's reference for the sample through speakers (`speech_policy`), without the island's spoken text.
+    #[cfg_attr(test, allow(dead_code))] // tests never reach the speaker
     fn preview_around(self: &Arc<Self>) -> Around {
         let (a, b) = (Arc::downgrade(self), Arc::downgrade(self));
         Around {
@@ -207,6 +209,7 @@ impl super::Tools {
 
     /// Speaking ▸ Voice clicked (the choice already applied): its sample, from the cache or rendered now, at the user's
     /// speed; the sample before it stops. Nothing plays while he talks or a reply speaks.
+    #[cfg_attr(test, allow(dead_code))] // tests never reach the speaker
     pub(crate) fn preview_voice(self: &Arc<Self>) {
         // One sample at a time: the Speed slider's stops for this one.
         if let Some(q) = self.sample_queue.lock().unwrap().as_ref() { q.interrupt(); }
@@ -310,6 +313,21 @@ impl super::Tools {
         }
         Ok(out)
     }
+    /// ---- phone endpoint (remote.rs) ----
+    /// A reply line for the phone (`remote::speak_on_phone`): the chosen voice at the user's speed (Speaking ▸ Speed, the
+    /// `settings` item `speed`), rendered silently and never played here; the phone plays it as it is, at rate 1.0.
+    /// night1112 phone speech parts: each sentence goes to `on_part` as soon as it is rendered (`remote::parts_from_packets`),
+    /// and `cancel` (the user's stop on the phone) cancels the synthesis itself.
+    #[cfg(feature = "phone")]
+    pub(crate) fn render_for_phone_parts(self: &Arc<Self>, text: &str, language: &str, cancel: &dyn Fn() -> bool,
+        on_part: &mut dyn FnMut(crate::remote::PhonePart) -> Result<()>) -> Result<()> {
+        // The Mac's own reply synthesizer (`reply_synth`): the same voice, route, load wait and fallback as a line said
+        // here ("the voice is wrong"; the phone had Jarvis's render without the Mac's fallback).
+        let mut synth = self.reply_synth()?;
+        let said = agent::reply::for_speech(text);
+        crate::remote::parts_from_packets(|emit| speak::Synthesizer::stream_packets(&mut synth, &said, language, cancel, emit), on_part)
+    }
+    /// ---- end phone endpoint ----
     /// A line in this voice can be rendered now without touching a resident model. ElevenLabs never: each render
     /// spends account credit.
     pub(crate) fn voice_renderable(&self, route: &Route) -> bool {

@@ -187,14 +187,24 @@ impl Writer {
             let mut audio_formats = vec![];
             for (rate, channels, title) in &layout.audio {
                 let format = lpcm_format(*rate, *channels)?;
-                // AVFAudio's AVFormatIDKey / AVSampleRateKey / AVNumberOfChannelsKey; the encoder picks the AAC bitrate
-                // that suits the rate (a fixed 192 kb/s is refused at 16 kHz).
+                // AVFAudio's AVFormatIDKey / AVSampleRateKey / AVNumberOfChannelsKey. At 44.1 kHz and up AAC runs at
+                // 192 kb/s mono or 256 kb/s stereo (AVEncoderBitRateKey), transparent for the capture-rate audio the
+                // archive keeps of voice sources since 13 Nov; the default (about 64 kb/s mono) was audibly worse
+                // (bug note 2026-11-12T13-49-07). Below that the encoder picks the bitrate that suits the rate (a fixed
+                // 192 kb/s is refused at 16 kHz).
                 let (aac, r, c) = (int(0x6161_6320), number(*rate as f64), int(*channels as i64));
-                let settings = dictionary(&[
-                    (&NSString::from_str("AVFormatIDKey"), &aac),
-                    (&NSString::from_str("AVSampleRateKey"), &r),
-                    (&NSString::from_str("AVNumberOfChannelsKey"), &c),
-                ]);
+                let bitrate = int(if *channels > 1 { 256_000 } else { 192_000 });
+                let (aac, r, c, bitrate): (&AnyObject, &AnyObject, &AnyObject, &AnyObject) = (&aac, &r, &c, &bitrate);
+                let mut entries = vec![
+                    (NSString::from_str("AVFormatIDKey"), aac),
+                    (NSString::from_str("AVSampleRateKey"), r),
+                    (NSString::from_str("AVNumberOfChannelsKey"), c),
+                ];
+                if *rate >= 44_100 {
+                    entries.push((NSString::from_str("AVEncoderBitRateKey"), bitrate));
+                }
+                let refs: Vec<_> = entries.iter().map(|(k, v)| (&**k, *v)).collect();
+                let settings = dictionary(&refs);
                 let input = AVAssetWriterInput::initWithMediaType_outputSettings_sourceFormatHint(AVAssetWriterInput::alloc(), AVMediaTypeAudio.context("audio")?, Some(&settings), Some(&format));
                 input.setExpectsMediaDataInRealTime(false);
                 track_name(&input, title);

@@ -168,7 +168,7 @@ pub fn run(cmd: &str, args: Vec<String>) {
     // `ISLANDS_LAB_PLAN_WRITES=1`: the CLI's own tests and lab fixtures only.
     let lab = std::env::var("ISLANDS_LAB_PLAN_WRITES").as_deref() == Ok("1");
     if !lab && (verb == "add" && matches!(id.as_str(), "scheduled" | "settled")) || (!lab && verb == "move" && to_list.as_ref().is_some_and(|t| t != &id) && matches!(into.as_str(), "scheduled" | "settled")) {
-        fail(&format!("islands {cmd}: {into} takes nothing from here: a promise is proposed for User's yes and Settled fills from proof, both through Heimdall's plan_edit"));
+        fail(&format!("islands {cmd}: {into} takes nothing from here: a promise is proposed for the user's yes and Settled fills from proof, both through Heimdall's plan_edit"));
     }
     if verb == "move" && group_flag.is_none() && to_list.is_none() && when.is_none() && due.is_none() {
         fail(&format!("islands {cmd} move N|ID|\"TEXT\" --running|--waiting|--discussed | --to goals|scheduled|settled [--when W]"));

@@ -1,8 +1,6 @@
 //! Agent-run causal replay. Inputs/outputs are private QA; never captures or grants permissions.
 use anyhow::{Result, ensure};
 use speakers::{
-    live::LiveStrategy,
-    online::OnlineConfig,
     pipeline::Diarization,
     scoring::{Annotation, parse_rttm, score_der},
 };
@@ -170,16 +168,8 @@ fn main() -> Result<()> {
             finished: false,
         })
     } else {
-        LiveStrategy::parse(strategy)?.load_enrolled(
-            &models,
-            0,
-            OnlineConfig {
-                window_seconds: window,
-                cosine_threshold: threshold,
-                ..Default::default()
-            },
-            Some(&store),
-        )?
+        ensure!(strategy == "nemotron", "unknown live diarization strategy: {strategy} (nemotron or replay)");
+        Box::new(speakers::diar::Diarizer::load(&models.join("Nemotron-3-Diarization.q8_0.gguf"), 0)?.stream(16000)?)
     };
     let encoder = speakers::embedding::ReDimNet::load(&models.join("ReDimNet2B6.onnx"))?;
     let mut pipeline = speakers::pipeline::SpeakerPipeline::new(

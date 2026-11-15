@@ -30,53 +30,45 @@ pub struct Output {
     pub separation_seconds: f64,
     pub total_seconds: f64,
 }
-pub struct CpuModels {
-    models: PathBuf,
-}
-impl CpuModels {
-    pub fn load(models: &Path) -> Result<Self> {
-        Ok(Self {
-            models: models.into(),
-        })
+/// One request: separate the region into two tracks, then identify each. The models load for this request and
+/// unload before it returns.
+pub fn run(models: &Path, input: &Input) -> Result<Output> {
+    ensure!(
+        input.region.speakers == 2
+            && input.region.end_ns > input.region.start_ns
+            && input.region.end_ns - input.region.start_ns <= 6_000_000_000,
+        "unsupported correction region"
+    );
+    let cpu = cpu_seconds();
+    let start = Instant::now();
+    let mut separator =
+        crate::separator::Separator::load(&models.join("night/model.int8.onnx"))?;
+    let separating = Instant::now();
+    let tracks = separator.separate(&input.samples)?;
+    let separation_seconds = separating.elapsed().as_secs_f64();
+    drop(separator);
+    release_cpu_pages();
+    // Model arenas/weights must not coexist: the parent already owns live
+    // Parakeet. Reloading these smaller CPU models trades latency for bounded RSS.
+    let mut encoder =
+        speakers::embedding::ReDimNet::load(&models.join("speakers/ReDimNet2B6.onnx"))?;
+    let mut output = vec![];
+    for samples in tracks {
+        let identity = if samples.len() >= 32000 {
+            serde_json::to_value(input.enrollments.identify(&encoder.embed(&samples)?))?
+        } else {
+            serde_json::json!({"Unknown":{"reason":"short_context_uncalibrated"}})
+        };
+        output.push(Track { samples, identity });
     }
-    pub fn run(&mut self, input: &Input) -> Result<Output> {
-        ensure!(
-            input.region.speakers == 2
-                && input.region.end_ns > input.region.start_ns
-                && input.region.end_ns - input.region.start_ns <= 6_000_000_000,
-            "unsupported correction region"
-        );
-        let cpu = cpu_seconds();
-        let start = Instant::now();
-        let mut separator =
-            crate::separator::Separator::load(&self.models.join("night/model.int8.onnx"))?;
-        let separating = Instant::now();
-        let tracks = separator.separate(&input.samples)?;
-        let separation_seconds = separating.elapsed().as_secs_f64();
-        drop(separator);
-        release_cpu_pages();
-        // Model arenas/weights must not coexist: the parent already owns live
-        // Parakeet. Reloading these smaller CPU models trades latency for bounded RSS.
-        let mut encoder =
-            speakers::embedding::ReDimNet::load(&self.models.join("speakers/ReDimNet2B6.onnx"))?;
-        let mut output = vec![];
-        for samples in tracks {
-            let identity = if samples.len() >= 32000 {
-                serde_json::to_value(input.enrollments.identify(&encoder.embed(&samples)?))?
-            } else {
-                serde_json::json!({"Unknown":{"reason":"short_context_uncalibrated"}})
-            };
-            output.push(Track { samples, identity });
-        }
-        drop(encoder);
-        release_cpu_pages();
-        Ok(Output {
-            tracks: output,
-            cpu_seconds: cpu_seconds() - cpu,
-            separation_seconds,
-            total_seconds: start.elapsed().as_secs_f64(),
-        })
-    }
+    drop(encoder);
+    release_cpu_pages();
+    Ok(Output {
+        tracks: output,
+        cpu_seconds: cpu_seconds() - cpu,
+        separation_seconds,
+        total_seconds: start.elapsed().as_secs_f64(),
+    })
 }
 fn release_cpu_pages() {
     #[cfg(target_os = "macos")]
@@ -95,6 +87,18 @@ pub fn cpu_seconds() -> f64 {
         + r.ru_stime.tv_sec as f64
         + r.ru_stime.tv_usec as f64 / 1e6
 }
+/// Swap in use, read in this process (`vm.swapusage` through sysctlbyname). The helper runs in Darwin background,
+/// which its children inherit: a spawned `sysctl` or `ps` missed the probe's 2 s deadline under load and the helper
+/// stopped itself (night 10 Nov, check run; bug note 2026-11-08T11-30-09).
+#[cfg(target_os = "macos")]
+pub fn swap_bytes() -> Result<u64> {
+    let mut usage: libc::xsw_usage = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::xsw_usage>();
+    let rc = unsafe { libc::sysctlbyname(c"vm.swapusage".as_ptr(), (&raw mut usage).cast(), &mut len, std::ptr::null_mut(), 0) };
+    anyhow::ensure!(rc == 0 && len == std::mem::size_of::<libc::xsw_usage>(), "vm.swapusage unreadable");
+    Ok(usage.xsu_used)
+}
+#[cfg(not(target_os = "macos"))]
 pub fn swap_bytes() -> Result<u64> {
     let value = crate::gate::bounded_output(
         std::process::Command::new("/usr/sbin/sysctl").args(["-n", "vm.swapusage"]),
@@ -176,28 +180,36 @@ pub fn guard(
     }
     None
 }
-fn own_rss_kib() -> Option<u64> {
-    let rss = crate::gate::bounded_output(
-        std::process::Command::new("/bin/ps").args(["-o", "rss=", "-p", &std::process::id().to_string()]),
-    )
-    .ok()?;
+/// Resident memory of process `pid` (this one or a child), read in process (`proc_pidinfo`), for the reason
+/// `swap_bytes` gives.
+#[cfg(target_os = "macos")]
+pub fn rss_kib(pid: u32) -> Option<u64> {
+    let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_taskinfo>() as i32;
+    let n = unsafe { libc::proc_pidinfo(pid as i32, libc::PROC_PIDTASKINFO, 0, (&raw mut info).cast(), size) };
+    (n == size).then_some(info.pti_resident_size / 1024)
+}
+#[cfg(not(target_os = "macos"))]
+pub fn rss_kib(pid: u32) -> Option<u64> {
+    let rss = crate::gate::bounded_output(std::process::Command::new("/bin/ps").args(["-o", "rss=", "-p", &pid.to_string()])).ok()?;
     rss.trim().parse().ok()
 }
 /// Only the dedicated CPU child calls this. Battery, input and speech do not veto
 /// this path. Parent death, the helper's own RSS, zero swap growth and per-request
 /// deadlines do; the exit code names which one (`GuardExit`).
 pub fn helper(models: PathBuf) -> Result<()> {
-    crate::gate::background()?;
+    // Whole process, ORT's threads included (bug note 2026-11-08T11-30-09).
+    crate::gate::background_process()?;
     let parent = unsafe { libc::getppid() };
     let swap = swap_bytes()?;
-    let busy = std::sync::Arc::new(std::sync::Mutex::new(Some(Instant::now())));
+    let busy = std::sync::Arc::new(std::sync::Mutex::new(None::<Instant>));
     let observed = busy.clone();
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(2));
         let busy_for = observed.lock().unwrap().map(|at| at.elapsed());
         let verdict = guard(
             unsafe { libc::getppid() } == parent,
-            own_rss_kib(),
+            rss_kib(std::process::id()),
             swap,
             swap_bytes().ok(),
             busy_for,
@@ -206,10 +218,6 @@ pub fn helper(models: PathBuf) -> Result<()> {
             unsafe { libc::_exit(exit as i32) };
         }
     });
-    let load_cpu = cpu_seconds();
-    let mut models = CpuModels::load(&models)?;
-    let mut load_cpu = cpu_seconds() - load_cpu;
-    *busy.lock().unwrap() = None;
     let mut input = std::io::BufReader::new(std::io::stdin());
     let mut output = std::io::stdout().lock();
     loop {
@@ -227,13 +235,9 @@ pub fn helper(models: PathBuf) -> Result<()> {
         );
         *busy.lock().unwrap() = Some(Instant::now());
         let result =
-            (|| -> Result<Output> { models.run(&serde_json::from_str::<Input>(&line)?) })();
+            (|| -> Result<Output> { run(&models, &serde_json::from_str::<Input>(&line)?) })();
         let value = match result {
-            Ok(mut result) => {
-                result.cpu_seconds += load_cpu;
-                load_cpu = 0.;
-                serde_json::json!({"ok":result})
-            }
+            Ok(result) => serde_json::json!({"ok":result}),
             Err(error) => serde_json::json!({"error":format!("{error:#}")}),
         };
         serde_json::to_writer(&mut output, &value)?;
@@ -256,7 +260,6 @@ impl Client {
         let mut child = Command::new(executable)
             .arg("--speech-split-helper")
             .arg(models)
-            .env("HEIMDALL_SPEAKERS_METAL", "0")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -394,6 +397,28 @@ impl Drop for Client {
 
 #[cfg(test)]
 mod tests {
+    /// The helper's probes read in process and agree with the commands they replaced (night 10 Nov: spawned in
+    /// Darwin background, those missed their deadline under load).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn probes_read_in_process_and_match_the_commands() {
+        let ps_rss = |pid: u32| -> u64 { crate::gate::bounded_output(std::process::Command::new("/bin/ps").args(["-o", "rss=", "-p", &pid.to_string()])).unwrap().trim().parse().unwrap() };
+        let (rss, ps) = (super::rss_kib(std::process::id()).unwrap(), ps_rss(std::process::id()));
+        assert!(rss > 0 && rss.abs_diff(ps) < ps / 2 + 64 * 1024, "{rss} vs ps {ps}");
+        // A child's too (the night worker's supervisor reads its child's).
+        let mut child = std::process::Command::new("/bin/sleep").arg("5").spawn().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let (rss, ps) = (super::rss_kib(child.id()).unwrap(), ps_rss(child.id()));
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(rss > 0 && rss.abs_diff(ps) < ps / 2 + 1024, "child {rss} vs ps {ps}");
+        assert!(super::rss_kib(child.id()).is_none(), "a reaped child has no RSS");
+        let text = crate::gate::bounded_output(std::process::Command::new("/usr/sbin/sysctl").args(["-n", "vm.swapusage"])).unwrap();
+        let used = text.split_whitespace().skip_while(|w| *w != "used").nth(2).unwrap().to_owned();
+        let mib: f64 = used.trim_end_matches('M').parse().unwrap();
+        let swap = super::swap_bytes().unwrap() as f64 / 1048576.0;
+        assert!((swap - mib).abs() < 64.0, "{swap} MiB vs sysctl {used}");
+    }
     use super::*;
     const GIB_KIB: u64 = 1024 * 1024;
     #[test]

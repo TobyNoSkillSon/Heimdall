@@ -40,11 +40,10 @@ impl HelperRecovery {
     }
 }
 pub enum Work {
-    Backend(String),
     Audio(Vec<f32>, bool, Instant),
-    Ax(Vec<speakers::ax::AxSnapshot>),
     Activate(u64, Instant),
-    Observe(TrackId, f64, String, Vec<speakers::ax::AxSnapshot>),
+    /// A track's final transcript line: the quote kept with its clean voice samples.
+    Observe(TrackId, String),
     Finish,
     Store(EnrollmentStore),
     Forget(String),
@@ -86,7 +85,6 @@ pub struct Actor {
     latest_voice: Arc<Mutex<Instant>>,
 }
 impl Actor {
-    #[allow(clippy::too_many_arguments)] // Source clock, model/archive roots and actor resources travel together.
     pub fn start(
         source: String,
         origin: u64,
@@ -95,7 +93,6 @@ impl Actor {
         mut naming: NamingFlow,
         cpu: Arc<SpeakerCpu>,
         output: crossbeam_channel::Sender<Event>,
-        backend: String,
     ) -> Result<Self> {
         naming.enable_discord_ax(source.clone());
         let helper = std::env::current_exe()?.with_file_name("heimdall-speakers-worker");
@@ -109,7 +106,6 @@ impl Actor {
         let observed_voice = latest_voice.clone();
         std::thread::spawn(move || {
             let mut call = CallScopedSpeakers::new(helper, models, 0, naming);
-            if let Err(e) = call.set_metal_backend(&backend) { eprintln!("Speaker backend: {e:#}"); return; }
             let mut current_origin = origin;
             let mut last_frame = -1;
             let archive_evidence = heimdall_archive::Journal::open(&archive);
@@ -235,22 +231,6 @@ impl Actor {
                     }
                     let Some(work) = work else { return Ok(false); };
                     match work {
-                        Work::Backend(backend) => {
-                            let active = call.is_active();
-                            if active {
-                                let events = call.pipeline_mut().unwrap().finish()?;
-                                let segments = snapshot(&mut call)?;
-                                if let Some(p) = call.worker_pid() { scope.retire(p); }
-                                call.release(); child.store(0, Ordering::Release);
-                                emit(Update::Expired { origin:current_origin, segments, events })?;
-                            }
-                            call.set_metal_backend(&backend)?;
-                            if active {
-                                current_origin=audio_clock;last_frame = -1;
-                                activate(&mut call,audio_clock,Instant::now())?;
-                                emit(Update::Started {origin:current_origin})?;
-                            }
-                        },
                         Work::Activate(at, now) => {
                             if !call.is_active() && recovery.ready(Instant::now()) {
                                 current_origin = at;
@@ -285,26 +265,9 @@ impl Actor {
                                 })?;
                             }
                         }
-                        Work::Ax(items) => {
-                            for item in items {
-                                call.naming_mut().observe_ax(item);
-                            }
-                        }
-                        Work::Observe(track, end, text, ax) => {
-                            for item in ax {
-                                call.naming_mut().observe_ax(item);
-                            }
-                            let events = if let Some(p) = call.pipeline_mut() {
-                                p.observe_transcript(track.speaker, end, &text)
-                            } else {
-                                call.naming_mut().observe_transcript(track, end, &text)
-                            };
-                            if !events.is_empty() {
-                                emit(Update::Snapshot {
-                                    origin: current_origin,
-                                    segments: snapshot(&mut call)?,
-                                    events,
-                                })?;
+                        Work::Observe(track, text) => {
+                            if let Some(p) = call.pipeline_mut() {
+                                p.set_quote(track.speaker, text);
                             }
                         }
                         Work::Finish => {

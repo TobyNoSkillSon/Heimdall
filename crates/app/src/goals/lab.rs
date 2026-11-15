@@ -30,6 +30,7 @@ pub struct Replay {
 }
 
 /// A local or offset ISO time (`2026-10-27T09:00`, `2026-10-27 09:00:00`, `…Z`, `…+01:00`) as epoch ms.
+#[allow(dead_code)] // goals-lab's --from/--to; the app's tests do not use it
 pub fn parse_time(t: &str) -> Result<i64> {
     use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
     let t = t.trim();

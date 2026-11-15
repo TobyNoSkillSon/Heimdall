@@ -10,7 +10,7 @@
 //!
 //! - The island's Stop while Heimdall speaks (`UiAction::StopSpeaking`, 5 Nov: "a click-to-stop … A Stop press is also
 //!   training signal: this moment wasn't for Heimdall"): the voice stops at once, and the line whose `send` woke the
-//!   agent last is labelled `not_for_heimdall` (source `owner-stop`).
+//!   agent last is labelled `not_for_heimdall` (source `user-stop`); a reply no decider line woke leaves a `speak` row.
 //!
 //! Labels are JSON lines in the archive's `decider-v6-labels.jsonl` (`LABELS_FILE`; format in docs/decision-chain.md).
 //! A line whose send decision is still running when a key is pressed is labelled when it lands.
@@ -20,9 +20,9 @@ use serde_json::{json, Value};
 /// In the archive store, beside the index: the Decider V6 labels the user gives with the two keys.
 pub(crate) const LABELS_FILE: &str = "decider-v6-labels.jsonl";
 /// The labelled source, as the training data names it.
-pub(crate) const LABEL_SOURCE: &str = "owner-hotkey";
+pub(crate) const LABEL_SOURCE: &str = "user-hotkey";
 /// The island's Stop, as the training data names it.
-pub(crate) const STOP_SOURCE: &str = "owner-stop";
+pub(crate) const STOP_SOURCE: &str = "user-stop";
 /// Decided lines kept for a key press (a minute or two of talk).
 const KEPT: usize = 16;
 
@@ -106,6 +106,9 @@ impl Pipeline {
         let ack = self.ack_plan(None);
         self.dispatch_pending(&source, &last.text, last.seq, &id_of(&last), agent::Speaker::Owner, permit, true, ack)?;
         let woke = self.dispatched_through > before;
+        // His key is his address (bug note 2026-11-05T02-32-17, night 1111): on 9 Nov 14:16:14 and 14:23:36 the replies to his
+        // ⌃⌘\ wakes in a Discord call were held silent "in a call" and dropped stale; they may answer aloud, in a gap.
+        if woke { self.tools.speech_policy.addressed_wake(); }
         let others: Vec<String> = unsent.iter().filter(|t| t.seq != labelled.seq).map(id_of).collect();
         self.index.evidence.event("hotkey", "heimdall", &[id_of(&labelled)], capture::host_now_ns(),
             json!({"schema":1,"key":"wake","woke":woke,"through":last.seq,"lines":unsent.len()}))?;
@@ -137,9 +140,14 @@ impl Pipeline {
         let fresh = line.as_ref().is_some_and(|l| !self.hotkeys.stop_labelled.contains(l));
         let woke = line.filter(|_| fresh)
             .and_then(|l| self.hotkeys.decided.iter().rev().find(|d| d.id == l && d.record["outcome"].as_str() == Some("send")).cloned());
+        let again = !fresh && press.run.as_ref().is_some_and(|r| r.line.is_some());
+        // Bug note 2026-11-05T02-32-17 item 4 (night 1111): every press while Heimdall speaks is a training signal. 3 of
+        // the 4 presses from 7 to 10 Nov cut a reply no decider line woke (a held line replayed, a goals or T3 run) and
+        // left nothing in the labels store; such a press now leaves a `speak` row (the moment was not one to speak in).
+        let task = if woke.is_some() { Some("send") } else if press.playing && !again { Some("speak") } else { None };
         let ids: Vec<String> = woke.iter().map(|d| d.id.clone()).collect();
         self.index.evidence.event("hotkey", "heimdall", &ids, capture::host_now_ns(),
-            json!({"schema":1,"key":"stop","speaking":press.playing,"labelled":woke.is_some()}))?;
+            json!({"schema":1,"key":"stop","speaking":press.playing,"labelled":woke.is_some(),"label_task":task}))?;
         match woke {
             Some(d) => {
                 self.hotkeys.stop_labelled.push_back(d.id.clone());
@@ -151,8 +159,11 @@ impl Pipeline {
                 self.write_label(label);
             }
             None if !press.playing => eprintln!("hotkey: Stop pressed with nothing playing; nothing labelled"),
-            None if !fresh && press.run.as_ref().is_some_and(|r| r.line.is_some()) => eprintln!("hotkey: Stop pressed again on the same run; labelled once already"),
-            None => eprintln!("hotkey: Stop pressed; the speech cut was not an answer to a line the decider sent, nothing labelled"),
+            None if again => eprintln!("hotkey: Stop pressed again on the same run; labelled once already"),
+            None => {
+                eprintln!("hotkey: Stop pressed; the speech cut was not an answer to a line the decider sent; labelled as a moment not to speak");
+                self.write_label(speak_label(&press.spoken, press.in_call, press.run.as_ref().and_then(|r| r.line.clone()), self.tools.speech_policy.run_words()));
+            }
         }
         Ok(())
     }
@@ -201,6 +212,14 @@ impl Pipeline {
             eprintln!("hotkey: suggest label not asked: {e:#}");
         }
     }
+}
+
+/// A Stop that cut a reply no decider line woke (a T3 result, a notice, a typed message, a replayed held line): task
+/// `speak`, label `not_for_heimdall`, with what was cut, whether the user was in a call, the run's waking line (an id the
+/// archive knows, when one of his lines woke it without a decider `send`) and his words that woke it, if any.
+fn speak_label(spoken: &[String], in_call: bool, line: Option<String>, words: Option<String>) -> Value {
+    json!({"schema":1,"task":"speak","label":"not_for_heimdall","source":STOP_SOURCE,"at_ms":agent::now_ms(),"speaking":true,
+        "spoken":spoken,"in_call":in_call,"utterance_id":line,"words":words})
 }
 
 /// A `send` label for line `d` (None: its decision never came), and V5's own verdict on it.

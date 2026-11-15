@@ -38,7 +38,7 @@ fn probe(root: std::path::PathBuf, stop: Arc<AtomicBool>) -> std::thread::JoinHa
 }
 
 #[test]
-#[ignore]
+#[ignore = "lab: compaction step lock-hold timing"]
 fn lab_pack_evidence_hold() {
     if std::env::var("LAB_THROTTLE").is_ok() { support::throttle::install(); }
     let t = tempfile::tempdir().unwrap();
@@ -65,7 +65,7 @@ fn lab_pack_evidence_hold() {
 
 /// Lab: where a throttled compaction pass spends its time on the hardening world (branch code).
 #[test]
-#[ignore]
+#[ignore = "lab: where a throttled compaction pass spends its time"]
 fn lab_pass_timing() {
     support::throttle::install();
     support::throttle::set_io(Duration::from_micros(300));
@@ -99,7 +99,7 @@ fn lab_pass_timing() {
 /// Lab: what one screen frame costs through the writer when nothing else keeps it alive (screen's buffer opens a
 /// writer per frame).
 #[test]
-#[ignore]
+#[ignore = "lab: video frame write cost"]
 fn lab_video_frame_cost() {
     use heimdall_archive::video::{Format, Geometry, Sample, Writer};
     let t = tempfile::tempdir().unwrap();
@@ -118,5 +118,33 @@ fn lab_video_frame_cost() {
         let append = t2.elapsed();
         drop(w);
         eprintln!("round {round}: open {open:?} begin {begin:?} append {append:?}");
+    }
+}
+
+/// Lab only: which writer jobs of one compaction pass's audio and metadata steps fill the WAL, on a copy of a real
+/// archive (`LAB_ARCHIVE`, an APFS clone, never the live one). ARC-2, 13 Nov: the WAL crossed its 64 MB cap about 40
+/// times in 10 minutes.
+#[test]
+#[ignore = "lab: needs LAB_ARCHIVE, a copy of a real archive"]
+fn lab_wal_by_writer() {
+    let Ok(root) = std::env::var("LAB_ARCHIVE").map(std::path::PathBuf::from) else { return };
+    let queue = heimdall_archive::live::Queue::shared(&root).unwrap();
+    let now = wall_ns();
+    let report = |step: &str, started: Instant| {
+        queue.settle(Duration::from_secs(60));
+        eprintln!("{step}: {:.1} s; {}", started.elapsed().as_secs_f64(), queue.wal_writers().unwrap_or_else(|| "nothing written".into()));
+    };
+    let _ = queue.wal_writers();
+    let t = Instant::now();
+    let mut groups = compact::PASS_AUDIO_GROUPS;
+    let audio = compact::compact_audio_while(&root, now, &mut || { let go = groups > 0; groups = groups.saturating_sub(1); go });
+    eprintln!("audio groups: {:?}", audio.map(|r| r.audio_groups));
+    report("audio", t);
+    for audio in [true, false] {
+        let t = Instant::now();
+        let mut chunks = compact::PASS_CHUNKS;
+        let n = compact::compact_metadata_while(&root, now, audio, &mut || { let go = chunks > 0; chunks = chunks.saturating_sub(1); go });
+        eprintln!("{} chunks packed: {n:?}", if audio { "timeline" } else { "evidence" });
+        report(if audio { "timeline chunks" } else { "evidence chunks" }, t);
     }
 }

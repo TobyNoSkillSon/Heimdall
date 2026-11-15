@@ -46,6 +46,7 @@ fn main() -> Result<()> {
             links: vec![],
             content_hash: String::new(),
             similarity: None,
+            rerank: None,
         };
         match embedding::prepare_chunk(&root, &c, &destination) {
             Ok(inputs) => {

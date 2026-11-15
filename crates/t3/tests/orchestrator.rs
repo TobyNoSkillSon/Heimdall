@@ -404,6 +404,57 @@ async fn pairs_automatically_through_t3s_cli_and_again_after_revocation() {
     assert!(!client.expiry_notice().unwrap());
 }
 
+/// A pairing store that cannot answer (13 Nov: the login Keychain held by a password dialog nobody could answer).
+struct Unanswered;
+impl CredentialStore for Unanswered {
+    fn load(&self) -> anyhow::Result<Option<Credential>> {
+        anyhow::bail!("T3_UNAVAILABLE: The Keychain did not answer for \"dev.heimdall.t3\"")
+    }
+    fn save(&self, _: &Credential) -> anyhow::Result<()> {
+        anyhow::bail!("not saved")
+    }
+}
+
+#[tokio::test]
+async fn a_pairing_store_that_cannot_answer_is_unavailable_and_never_pairs_again() {
+    let l = Lab::new(false).await;
+    let client = Arc::new(Client::new(l.runtime.clone(), Arc::new(Unanswered)).unwrap().with_cli(l.cli()));
+    for _ in 0..3 {
+        let e = client.call("orchestrator_capabilities", json!({})).await.unwrap_err().to_string();
+        assert!(e.starts_with("T3_UNAVAILABLE"), "{e}");
+    }
+    assert_eq!(l.cli_log(), "", "unknown is not missing: no new pairing in T3");
+    assert!(l.s.decisions.lock().unwrap().is_empty());
+}
+
+/// The real store over a Keychain that never answers: an error within the read wait, never a hang.
+#[test]
+fn the_keychain_pairing_store_returns_unavailable_when_the_keychain_never_answers() {
+    struct Never;
+    impl keychain::Backend for Never {
+        fn read(&self, _: &str, _: &str) -> Result<Option<Vec<u8>>, keychain::Error> {
+            std::thread::sleep(Duration::from_secs(3600));
+            Ok(None)
+        }
+        fn write(&self, _: &str, _: &str, _: &str, _: &[u8]) -> Result<(), keychain::Error> {
+            std::thread::sleep(Duration::from_secs(3600));
+            Ok(())
+        }
+        fn delete(&self, _: &str, _: &str) -> Result<(), keychain::Error> {
+            Ok(())
+        }
+    }
+    let store = keychain::Store::custom(Arc::new(Never)).with_waits(Duration::from_millis(100), Duration::from_millis(100));
+    let started = std::time::Instant::now();
+    let Err(e) = keychain::scoped(&store, || t3::Keychain.load()) else { panic!("a blocked Keychain read must fail") };
+    let e = e.to_string();
+    assert!(e.starts_with("T3_UNAVAILABLE") && e.contains(t3::client::KEYCHAIN_SERVICE), "{e}");
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(store.degraded(), [t3::client::KEYCHAIN_SERVICE]);
+    // This test binary itself never has the Keychain.
+    assert_ne!(keychain::kind(), keychain::Kind::Keychain);
+}
+
 #[tokio::test]
 async fn closed_t3_is_reported_as_closed_not_as_a_sign_in_problem() {
     let l = Lab::new(false).await;
@@ -507,13 +558,15 @@ async fn a_send_that_wakes_a_task_calls_the_task_hook_again() {
         Some("Its job island is 'task-splash'.".into())
     }));
     l.s.threads.lock().unwrap().push(thread("t-splash", "Splash menu", "completed", "r1"));
-    l.s.threads.lock().unwrap().push(thread("t-owner", "User's own", "completed", "r1"));
+    l.s.threads.lock().unwrap().push(thread("t-owner", "the user's own", "completed", "r1"));
     rusqlite::Connection::open(l.dir.path().join("workers.db")).unwrap()
         .execute("INSERT INTO workers(thread,run,status,provider,family,model,project,path,title,kind) VALUES('t-splash','r1','completed','','','m','p1','','Splash menu','task')", []).unwrap();
     // The relay's way (t3_call) and Heimdall's own tool.
     let sent = w.execute("t3_call", json!({"tool":"t3_thread_send","args":{"threadId":"t-splash","message":"Add the engine row"}}), "op-1", &p).await.unwrap();
-    assert!(sent.ends_with(" Its job island is 'task-splash'."), "{sent}");
-    w.execute("t3_thread_send", json!({"threadId":"t-splash","message":"And the provider row"}), "op-2", &p).await.unwrap();
+    // Lane S (proposal 10): the reply promise and the island hint once per session, the island's id every time.
+    assert!(sent.ends_with(". Its reply arrives as a notice when this run ends. Its job island is 'task-splash'. Add details with islands_put on that id."), "{sent}");
+    let again = w.execute("t3_thread_send", json!({"threadId":"t-splash","message":"And the provider row"}), "op-2", &p).await.unwrap();
+    assert_eq!(again, "Sent to thread t-splash (started, running). Its job island is 'task-splash'.");
     assert_eq!(*started.lock().unwrap(), [
         ("t-splash".to_string(), "Splash menu".to_string(), "Add the engine row".to_string()),
         ("t-splash".to_string(), "Splash menu".to_string(), "And the provider row".to_string()),
@@ -551,13 +604,13 @@ async fn a_send_that_wakes_a_relay_s_t3_child_calls_the_task_hook() {
     {
         let mut threads = l.s.threads.lock().unwrap();
         threads.push(thread("relay", "Heimdall relay", "completed", "r9"));
-        threads.push(thread("t-owner", "User's own", "completed", "r1"));
+        threads.push(thread("t-owner", "the user's own", "completed", "r1"));
         threads.push(child(climb, "Heimdall menu: usability climb", "relay", "mcp"));
         threads.push(child("native", "Explore", "relay", "provider"));
         threads.push(child("thread:delegated-task:owner", "User's child", "t-owner", "mcp"));
     }
     let sent = w.execute("t3_thread_send", json!({"threadId":climb,"mode":"auto","message":"Next round"}), "op-1", &p).await.unwrap();
-    assert!(sent.ends_with(" Its job island is 'task-menu'."), "{sent}");
+    assert!(sent.ends_with(" Its job island is 'task-menu'. Add details with islands_put on that id."), "{sent}");
     assert_eq!(*started.lock().unwrap(), [(climb.to_string(), "Heimdall menu: usability climb".to_string(), "Next round".to_string())]);
     // Still a watched thread (its result reaches Heimdall as before), not one of Heimdall's tasks.
     assert_eq!(l.db(&format!("SELECT count(*) FROM workers WHERE thread='{climb}' AND kind='watch'")), 1);
@@ -682,6 +735,129 @@ async fn heimdall_s_relay_and_task_threads_from_earlier_sessions_archive_without
     assert_eq!(l.calls("t3_thread_organize").len(), 3, "User's threads wait for his click");
     // The other "unless yours" rules follow the same identity: interrupting it needs no card either.
     w.execute("t3_call", json!({"tool":"t3_thread_interrupt","args":{"threadId":"recorded-relay"}}), "op-own-int", &p).await.unwrap();
+}
+
+/// Bug note 2026-11-13T18-04-30: the user clicked "Archive them too" on one card for 46 of his finished threads, and the
+/// guard wanted one exact card per thread. One card now covers a named set for archiving only: his click archives
+/// exactly that set, once; a thread not on it is refused; deleting and every other guarded call still ask per target.
+#[tokio::test]
+async fn one_card_archives_exactly_its_set_of_owner_s_threads_once() {
+    use agent::actions::{AskItem, AskOption};
+    let l = Lab::new(true).await;
+    let w = l.workers(l.client(false));
+    let gate = Arc::new(DeliveryGate::new(true));
+    let p = gate.permit().unwrap();
+    for (id, title) in [("owner-a", "Greeting"), ("owner-b", "Resume Heimdall Project Work"), ("owner-c", "Not on the card")] {
+        l.s.threads.lock().unwrap().push(thread(id, title, "completed", "r1"));
+    }
+    let launched = w.execute("t3_call", json!({"tool":"t3_thread_launch","args":{"projectId":"p1","title":"Mine","message":"go"}}), "op-launch", &p).await.unwrap();
+    let mine = launched.split("Started thread ").nth(1).unwrap().split(' ').next().unwrap().to_owned();
+    let batch = |ids: &[&str], confirm: Option<&str>| {
+        let mut c = json!({"tool":"t3_thread_organize","args":{"action":"archive"},"threads":ids});
+        if let Some(id) = confirm { c["confirm"] = json!(id); }
+        c
+    };
+    let quoted = |e: &str, field: &str| e.split(&format!("{field}: \"")).nth(1).unwrap().split('"').next().unwrap().to_owned();
+    // The card as CONFIRM_REQUIRED words it: the question, and Yes showing the titles.
+    let card = |question: &str, description: &str| AskItem {
+        id: "q1".into(),
+        header: None,
+        question: question.into(),
+        multi_select: false,
+        allow_other: true,
+        options: vec![
+            AskOption { label: "Yes".into(), description: Some(description.into()), grant: None },
+            AskOption { label: "No".into(), description: None, grant: None },
+        ],
+    };
+    let mut n = 0;
+    let mut ask = |question: &str, description: &str| { n += 1; w.actions.ask(&format!("ask-batch-{n}"), &[card(question, description)], &p).unwrap() };
+    let set = ["owner-a", "owner-b", mine.as_str()];
+    let e = w.execute("t3_call", batch(&set, None), "op-1", &p).await.unwrap_err().to_string();
+    assert!(e.starts_with("CONFIRM_REQUIRED"), "{e}");
+    let (question, description) = (quoted(&e, "question"), quoted(&e, "description"));
+    assert!(question.starts_with("Archive these 2 T3 threads of yours, last active "), "only his two threads are on the card: {question}");
+    assert_eq!(description, "Greeting, Resume Heimdall Project Work", "the Yes option names his threads");
+    assert!(l.calls("t3_thread_organize").is_empty(), "nothing is archived before his click");
+    // A spoken yes, a No, and a card whose Yes shows other titles approve nothing.
+    let spoken = ask(&question, &description);
+    assert!(w.actions.needs_click(&spoken), "the batch card answers only to a click");
+    w.actions.close_question(&spoken, "yes", &p).unwrap();
+    assert!(w.execute("t3_call", batch(&set, Some(&spoken)), "op-spoken", &p).await.unwrap_err().to_string().starts_with("CONFIRM_NEEDS_CLICK"));
+    let no = ask(&question, &description);
+    w.actions.answer(&no, "No", &p).unwrap();
+    assert!(w.execute("t3_call", batch(&set, Some(&no)), "op-no", &p).await.unwrap_err().to_string().starts_with("CONFIRM_DECLINED"));
+    let other_titles = ask(&question, "Old scratch threads");
+    w.actions.answer(&other_titles, "Yes", &p).unwrap();
+    let e = w.execute("t3_call", batch(&set, Some(&other_titles)), "op-titles", &p).await.unwrap_err().to_string();
+    assert!(e.starts_with("CONFIRM_MISMATCH"), "{e}");
+    // An old click never revives: asking the set again issues a new question, and only a card asked after it counts.
+    let old = ask(&question, &description);
+    w.actions.answer(&old, "Yes", &p).unwrap();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let e = w.execute("t3_call", batch(&set, None), "op-1b", &p).await.unwrap_err().to_string();
+    assert_eq!(quoted(&e, "question"), question);
+    let e = w.execute("t3_call", batch(&set, Some(&old)), "op-old", &p).await.unwrap_err().to_string();
+    assert!(e.starts_with("CONFIRM_MISMATCH: that card was asked before"), "{e}");
+    let yes = ask(&question, &description);
+    w.actions.answer(&yes, "Yes", &p).unwrap();
+    // A thread not on the card, a subset, or a single archive: refused, nothing archived.
+    let e = w.execute("t3_call", batch(&["owner-a", "owner-b", "owner-c", mine.as_str()], Some(&yes)), "op-2", &p).await.unwrap_err().to_string();
+    assert!(e.starts_with("CONFIRM_MISMATCH"), "{e}");
+    let e = w.execute("t3_call", json!({"tool":"t3_thread_organize","args":{"threadId":"owner-c","action":"archive"},"confirm":yes}), "op-3", &p).await.unwrap_err().to_string();
+    assert!(e.starts_with("CONFIRM_MISMATCH"), "the batch click approves no single archive: {e}");
+    assert!(w.execute("t3_call", batch(&["owner-a"], Some(&yes)), "op-3b", &p).await.unwrap_err().to_string().starts_with("CONFIRM_MISMATCH"));
+    assert!(l.calls("t3_thread_organize").is_empty());
+    // His click archives exactly the set on the card (Heimdall's own thread in it needed none).
+    let done = w.execute("t3_call", batch(&set, Some(&yes)), "op-4", &p).await.unwrap();
+    assert_eq!(done, "Archived 3 of 3 threads.");
+    let archived: Vec<String> = l.calls("t3_thread_organize").iter().map(|c| c["threadId"].as_str().unwrap().to_owned()).collect();
+    assert_eq!(archived, ["owner-a", "owner-b", mine.as_str()]);
+    // The same operation replayed answers from its record; the click used again for a new call is refused.
+    assert_eq!(w.execute("t3_call", batch(&set, Some(&yes)), "op-4", &p).await.unwrap(), done);
+    let e = w.execute("t3_call", batch(&set, Some(&yes)), "op-5", &p).await.unwrap_err().to_string();
+    assert!(e.starts_with("CONFIRM_USED"), "{e}");
+    assert_eq!(l.calls("t3_thread_organize").len(), 3);
+    // A set of Heimdall's own threads only needs no card.
+    w.execute("t3_call", batch(&[mine.as_str()], None), "op-6", &p).await.unwrap();
+    assert_eq!(l.calls("t3_thread_organize").len(), 4);
+    // A question older than 30 minutes no longer takes a click.
+    let e = w.execute("t3_call", batch(&["owner-c"], None), "op-c", &p).await.unwrap_err().to_string();
+    let late = ask(&quoted(&e, "question"), &quoted(&e, "description"));
+    w.actions.answer(&late, "Yes", &p).unwrap();
+    rusqlite::Connection::open(l.dir.path().join("workers.db")).unwrap().execute("UPDATE batch_confirms SET created_ms=created_ms-31*60*1000", []).unwrap();
+    let e = w.execute("t3_call", batch(&["owner-c"], Some(&late)), "op-c2", &p).await.unwrap_err().to_string();
+    assert!(e.starts_with("CONFIRM_EXPIRED"), "{e}");
+    assert_eq!(l.calls("t3_thread_organize").len(), 4);
+    // Archive only: deleting and the other guarded calls take no set and keep their own question per target.
+    for (tool, args) in [("t3_project_delete", json!({"projectId":"p1"})), ("t3_thread_interrupt", json!({})), ("t3_thread_organize", json!({"action":"pin"}))] {
+        let e = w.execute("t3_call", json!({"tool":tool,"args":args,"threads":["owner-c"]}), &format!("op-7-{tool}"), &p).await.unwrap_err().to_string();
+        assert!(e.starts_with("INVALID_ARGUMENT: threads covers archiving only"), "{tool}: {e}");
+    }
+    let e = w.execute("t3_call", json!({"tool":"t3_project_delete","args":{"projectId":"p1"},"confirm":late}), "op-8", &p).await.unwrap_err().to_string();
+    assert!(e.starts_with("CONFIRM_MISMATCH: ask exactly \"Delete T3 project 'Vault'?\""), "an unused batch click approves no delete: {e}");
+    let e = w.execute("t3_call", json!({"tool":"t3_project_delete","args":{"projectId":"p1"}}), "op-9", &p).await.unwrap_err().to_string();
+    assert!(e.starts_with("CONFIRM_REQUIRED") && e.contains("Delete T3 project 'Vault'?"), "{e}");
+    assert!(l.calls("t3_project_delete").is_empty());
+}
+
+#[test]
+fn a_batch_question_names_count_days_and_a_tag_of_the_exact_set() {
+    use t3::orchestrator::{batch_question, batch_tag, BatchThread};
+    let t = |id: &str, title: &str, day: &str| BatchThread { id: id.into(), title: title.into(), updated: Some(format!("2026-{day}T10:00:00Z")) };
+    let many: Vec<BatchThread> = (0..46).map(|n| t(&format!("t{n}"), &format!("Finished thread number {n}"), if n == 0 { "10-12" } else { "11-11" })).collect();
+    let (question, description) = batch_question(&many);
+    assert!(question.starts_with("Archive these 46 T3 threads of yours, last active 12 Oct to 11 Nov (set "), "{question}");
+    assert!(question.chars().count() <= agent::mcp_contract::QUESTION_CHARS);
+    assert!(description.chars().count() <= agent::mcp_contract::DESCRIPTION_CHARS && description.ends_with(" more"), "{description}");
+    let ids: Vec<String> = many.iter().map(|t| t.id.clone()).collect();
+    let mut reversed = ids.clone();
+    reversed.reverse();
+    assert_eq!(batch_tag(&ids), batch_tag(&reversed), "the order does not matter");
+    assert_ne!(batch_tag(&ids), batch_tag(&ids[1..]), "one thread fewer is another set");
+    let (one, d) = batch_question(&[t("x", "Greeting", "11-13")]);
+    assert!(one.starts_with("Archive this T3 thread of yours, last active 13 Nov (set "), "{one}");
+    assert_eq!(d, "Greeting");
 }
 
 /// The observer's last completed pass (observer_meta.last_pass); 0 before the first one.
@@ -899,7 +1075,7 @@ async fn wake_budgets_follow_the_live_agent_message_limit() {
     let text = deliveries(&l)[0].1.clone();
     assert!(text.len() < 16 * 1024, "{} bytes", text.len());
     assert!(text.contains(&format!("(yours) completed. Its reply is over 13 KB, too long for a notice; read it with t3_thread_read. [thread {mine}]")), "{text}");
-    assert!(text.ends_with(t3::text::SILENCE_RULE), "{text}");
+    assert!(text.ends_with(&t3::text::silence_rule()), "{text}");
     // Paging stopped past the budget (minor 6): 21 KB in 4000-character pages would take five continuation reads.
     let continuations = l.calls("t3_thread_read").iter().filter(|a| a["textOffset"].as_u64().is_some()).count();
     assert!(continuations < 5, "{continuations} continuation pages read");
@@ -968,7 +1144,7 @@ async fn question_or_approval_on_any_thread_wakes_once_per_request() {
     // The harness reads the kind from the id: a batch with a question or approval is a question.
     assert!(got[0].0.starts_with("t3:batch:attention:"), "{}", got[0].0);
     assert!(got[0].1.contains("- 'Pick region' asks [thread t-ask, request req-1]:\nRegion: Which region should I deploy to? [question q]"), "{}", got[0].1);
-    assert!(got[0].1.contains("- 'Approve deploy' waits for an approval in T3; only User can give it there [thread t-approve]"), "{}", got[0].1);
+    assert!(got[0].1.contains("- 'Approve deploy' waits for an approval in T3; only the user can give it there [thread t-approve]"), "{}", got[0].1);
     assert!(!got[0].1.contains("(yours)"), "{}", got[0].1);
     // A new request on the same thread is a new question; the same one is not repeated.
     l.set("t-ask", |t| t["pending"] = json!(["req-2"]));
@@ -1212,4 +1388,39 @@ async fn live_readonly_smoke_against_running_t3() {
     let revoked = std::process::Command::new(&cli).args(["auth", "session", "revoke", &session]).output().unwrap();
     assert!(revoked.status.success(), "revoke failed: revoke session {session} by hand");
     outcome.unwrap();
+}
+
+/// Review 1110 item 3: the install's click on Heimdall's Quit item needs a grant only Heimdall writes, as it sends a
+/// task its `GO INSTALL` (15 minutes, once). Any other message writes none; a staged build alone never unlocks the click.
+#[tokio::test]
+async fn go_install_to_a_task_writes_the_one_quit_grant_and_nothing_else_does() {
+    use heimdall_emergency::grants::{Ledger, Scope, QUIT_LIFETIME_MS};
+    let l = Lab::new(true).await;
+    let data = l.dir.path().join("data");
+    let w = l.workers(Arc::new(Client::new(l.runtime.clone(), l.store.clone()).unwrap().with_launch_record(data.clone())));
+    let gate = Arc::new(DeliveryGate::new(true));
+    let p = gate.permit().unwrap();
+    l.s.threads.lock().unwrap().push(thread("integrator", "Night integration", "running", "r1"));
+    let quit = |at: u64| Ledger::load(&data, "click", at).covers(&Scope::QuitInstall);
+    for (n, m) in ["FYI: the build is ready", "Do not GO INSTALL yet", "go install"].iter().enumerate() {
+        w.execute("t3_call", json!({"tool":"t3_thread_send","args":{"threadId":"integrator","message":m}}), &format!("op-no-{n}"), &p).await.unwrap();
+    }
+    assert!(!quit(agent::now_ms()), "only GO INSTALL writes the quit grant");
+    w.execute("t3_call", json!({"tool":"t3_thread_send","args":{"threadId":"integrator","message":"GO INSTALL: The user said yes."}}), "op-go", &p).await.unwrap();
+    let now = agent::now_ms();
+    assert!(quit(now), "GO INSTALL writes it");
+    assert!(!quit(now + QUIT_LIFETIME_MS), "for 15 minutes only");
+    assert_eq!(Ledger::load(&data, "click", now).consume(&[Scope::QuitInstall]).unwrap(), vec!["go-install:integrator".to_string()]);
+    assert!(!Ledger::load(&data, "another command", now).covers(&Scope::QuitInstall), "and once");
+}
+
+/// Lane S (t3_call failures, 4 Nov 16:57): t3_pending_request without its action failed with "args.action: required"
+/// and the relay guessed. A missing field with fixed values now names them.
+#[test]
+fn a_missing_field_with_fixed_values_names_them() {
+    let schema = json!({"type":"object","properties":{"action":{"type":"string","enum":["list","read","respond"]},"threadId":{"type":"string"}},"required":["action"]});
+    let e = check(&schema, &json!({"threadId":"t"}), "args").unwrap_err().to_string();
+    assert_eq!(e, r#"args.action: required; one of ["list","read","respond"]"#);
+    let e = check(&schema, &json!({"action":"list","threadId":1}), "args").unwrap_err().to_string();
+    assert_eq!(e, "args.threadId: expected string");
 }

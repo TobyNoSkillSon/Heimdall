@@ -44,9 +44,9 @@ pub const REPEAT_MS: u64 = 2 * 60 * 1000;
 pub const MAX_PATHS: usize = 8;
 pub const MAX_LOGIN_ITEMS: usize = 4;
 
-pub const TOUCHES: &str = "Heimdall's deny list: only Heimdall writes User's grants, from his click on an ask card. Leave \
+pub const TOUCHES: &str = "Heimdall's deny list: only Heimdall writes the user's grants, from their click on an ask card. Leave \
 the approvals/grants folder alone.";
-const USED_UP: &str = "Heimdall's deny list: User's yes for this was already used. Ask him again in your final reply.";
+const USED_UP: &str = "Heimdall's deny list: The user's yes for this was already used. Ask them again in your final reply.";
 
 /// One thing a click approves.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -59,6 +59,9 @@ pub enum Scope {
     /// create-keychain, set-keychain-settings, unlock-keychain, import and set-key-partition-list on this file only
     /// (`deny::Ctx::keychain_grant`). Never the login keychain or one that existed before the click (`Ledger::covers`).
     Keychain(PathBuf),
+    /// One click on Heimdall's own Quit menu item while a build is staged (review 1110 item 3, `write_quit`): written
+    /// by the app itself when Heimdall sends a task `GO INSTALL`, never from a card. Lasts `QUIT_LIFETIME_MS`.
+    QuitInstall,
 }
 impl Scope {
     fn key(&self) -> String {
@@ -66,6 +69,7 @@ impl Scope {
             Scope::Delete(p) => format!("delete\n{}", p.display()),
             Scope::LoginItem(n) => format!("login-item\n{n}"),
             Scope::Keychain(p) => format!("keychain\n{}", p.display()),
+            Scope::QuitInstall => "quit-install".into(),
         }
     }
 }
@@ -176,6 +180,42 @@ pub fn grant_keychain(raw: &str, user: &Path, vault: &Path) -> Result<PathBuf, S
     if std::fs::canonicalize(&parent).is_ok_and(|real| real != parent) { return bad("has a symlinked folder on the way"); }
     Ok(path)
 }
+
+// --- Quit grant for an install (review 1110 item 3) ---
+/// How long Heimdall's `GO INSTALL` lets the install click Quit (once).
+pub const QUIT_LIFETIME_MS: u64 = 15 * 60 * 1000;
+/// Whether a message Heimdall sends a task is its install go-ahead: it starts with `GO INSTALL` (after the mark
+/// `t3::workers::from_heimdall` puts in front, which the caller strips).
+pub fn go_install(message: &str) -> bool {
+    message.trim_start().starts_with("GO INSTALL")
+}
+/// Writes the quit grant for Heimdall's `GO INSTALL` to `thread` (the app only, as it sends the message): one click on
+/// its own Quit menu item, within `QUIT_LIFETIME_MS`, while a build is staged (`deny::Ctx::installing`). Before this,
+/// anything that made the stage file unlocked the click, for as long as the file stayed (review 1110 item 3). Refused
+/// while grants are switched off (`ENABLED`): then the gate never lets the click through.
+pub fn write_quit(data: &Path, thread: &str, now_ms: u64) -> Result<PathBuf, String> {
+    if !on() { return Err("grants are switched off in this build (heimdall_emergency::grants::ENABLED)".into()); }
+    let card = format!("go-install:{}", quit_thread(thread));
+    let option = "GO INSTALL";
+    let scopes = [Scope::QuitInstall];
+    let dir = data.join(DIR);
+    private_dir(&dir)?;
+    prune(&dir, now_ms);
+    let key = key(&dir, true)?;
+    let expires_ms = now_ms + QUIT_LIFETIME_MS;
+    let mac = hex(&hmac(&key, signed_text(&card, option, now_ms, expires_ms, &scopes).as_bytes()));
+    let id = hex(&sha(format!("{card}\n{option}\n{now_ms}").as_bytes())[..12]);
+    let body = json!({"card": card, "option": option, "clickedMs": now_ms, "expiresMs": expires_ms, "quitInstall": true, "mac": mac});
+    let path = dir.join(format!("{id}.json"));
+    write_private(&dir, &path, (serde_json::to_string_pretty(&body).map_err(|e| e.to_string())? + "\n").as_bytes())?;
+    Ok(path)
+}
+/// A T3 thread id as a quit grant records it (and as the hook compares the caller's): no control characters, at most
+/// 1024 of them (a `delegate_task` child's id nests its parents' and runs past 200).
+pub fn quit_thread(thread: &str) -> String {
+    thread.trim().chars().filter(|c| !c.is_control()).take(1024).collect()
+}
+// --- end quit grant ---
 
 /// What one clicked option granted.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -299,6 +339,17 @@ impl Ledger {
         Ok(cards)
     }
     pub fn is_empty(&self) -> bool { self.grants.is_empty() }
+    /// Second review 1110, should-fix 1: keeps a quit grant only for the session that received its GO INSTALL.
+    /// `received(thread, clicked_ms)` answers for the grant written when Heimdall sent `thread` its GO INSTALL at
+    /// `clicked_ms`; any other session finds no quit grant at all (nor its repeat window).
+    pub fn quit_only_for(&mut self, received: &dyn Fn(&str, u64) -> bool) {
+        for g in &mut self.grants {
+            if !g.scopes.contains(&Scope::QuitInstall) { continue; }
+            let thread = g.card.strip_prefix("go-install:").unwrap_or("");
+            if !received(thread, g.clicked_ms) { g.scopes.retain(|s| *s != Scope::QuitInstall); }
+        }
+        self.grants.retain(|g| !g.scopes.is_empty());
+    }
 }
 
 /// Every valid grant in `dir` at `now_ms`: signed with `key`, clicked no later than now (a minute's grace), not expired,
@@ -317,9 +368,12 @@ fn read(dir: &Path, key: &[u8], now_ms: u64) -> Vec<Grant> {
         let mut scopes: Vec<Scope> = strings("delete").into_iter().map(|p| Scope::Delete(PathBuf::from(p))).collect();
         scopes.extend(strings("loginItems").into_iter().map(Scope::LoginItem));
         scopes.extend(strings("keychain").into_iter().map(|p| Scope::Keychain(PathBuf::from(p))));
+        let quit = v["quitInstall"] == true;
+        if quit { scopes.push(Scope::QuitInstall); }
         let expected = hex(&hmac(key, signed_text(card, option, clicked_ms, expires_ms, &scopes).as_bytes()));
         if !equal(expected.as_bytes(), mac.as_bytes()) { continue; }
-        if clicked_ms > now_ms + 60_000 || now_ms >= expires_ms || expires_ms.saturating_sub(clicked_ms) > LIFETIME_MS { continue; }
+        let longest = if quit { QUIT_LIFETIME_MS } else { LIFETIME_MS };
+        if clicked_ms > now_ms + 60_000 || now_ms >= expires_ms || expires_ms.saturating_sub(clicked_ms) > longest { continue; }
         out.push(Grant { card: card.into(), clicked_ms, mac: mac.to_owned(), scopes });
     }
     out

@@ -1,111 +1,131 @@
 # Heimdall architecture
 
-Heimdall is a Rust macOS assistant. It listens to the user's microphone and recorded apps, transcribes locally, decides
-locally when something is meant for it, hands those turns to an agent (Pi, on an API or local model), and answers
-through the notch island, speech and tools. One app binary (`crates/app`, bin `heimdall`), native AppKit UI through
-objc2; the Floating Islands helper is a second Rust app bundled inside it.
+Heimdall is a macOS menu-bar assistant written in Rust. It listens to the user's microphone and chosen apps,
+transcribes on the Mac, decides on the Mac when speech is meant for it, hands those turns to an agent (Pi, on an API
+model or the local engine), and answers by speaking, through the notch island and Floating Islands, and through the
+agent's tools. Everything it hears, sees and says goes into one local archive.
+
+Read this when: you are new to the code, you want to know which crate owns a behaviour, you want to follow audio from
+the microphone to a spoken reply, you are deciding where new code goes.
+Code: `Cargo.toml`, `crates/`, `crates/app/src/main.rs`, `crates/app/src/live_loop.rs`, `crates/app/src/pipeline/`.
+
+## The picture
+
+One app binary, `heimdall` (`crates/app`), with native AppKit UI through objc2 (no web views, no Swift). Helper
+processes it starts and owns: the Pi agent runtime (`crates/agent`), the speaker-identity worker
+(`heimdall-speakers-worker`), the local inference engine (`heimdall-splash`), and the Floating Islands helper app
+(`FloatingIslands.app`, `crates/islands`). The app talks to Pi over RPC; Pi calls Heimdall back through Heimdall's
+own MCP server.
+
+## The live path
+
+```mermaid
+flowchart LR
+  cap["capture: mic and app audio"] --> lis["listen: VAD, ASR, turn end"]
+  scr["screen: recording"] --> arc[("archive")]
+  cap --> arc
+  lis --> pipe["pipeline: utterances and commands"]
+  pipe --> dec["decide: send, wait or not for Heimdall"]
+  dec -- send --> agent["agent: Pi"]
+  agent -- "MCP tool calls" --> tools["Heimdall MCP tools"]
+  tools --> isl["notch island and Floating Islands"]
+  tools --> view["viewer"]
+  tools --> arc
+  agent --> spk["speak: TTS and playback"]
+  agent --> arc
+  ui["menu, island clicks"] -. UiAction .-> pipe
+```
+
+1. `crates/capture` delivers microphone and app-audio packets (`CaptureEvent::Audio`) to the live loop
+   (`crates/app/src/live_loop.rs`), which feeds `Pipeline::capture_event` and writes raw audio to the archive.
+2. The listen worker (`crates/listen`) runs voice activity detection, speech recognition and turn-end detection and
+   returns `listen::WorkerEvent`s to `Pipeline::worker_event`. Speaker identity comes from `crates/speakers`.
+3. The pipeline (`crates/app/src/pipeline/`) builds utterances, catches spoken commands, and at a turn end asks the
+   decider (`crates/decide`, `pipeline/send_worker.rs`) whether to send it. See [decision-chain.md](decision-chain.md).
+4. A sent turn goes to the agent supervisor (`crates/app/src/bridge/`) as a wake; `crates/agent` owns the one Pi
+   process, its durable delivery ledger and the MCP host. Every payload is archived before it is sent.
+5. Pi's tool calls arrive at Heimdall's MCP server ([mcp.md](mcp.md)): island notes and questions, Floating Islands,
+   the viewer, timeline search, screenshots, speech, T3 workers ([t3-orchestration.md](t3-orchestration.md)).
+6. Replies are spoken by `crates/speak` ([voices.md](voices.md)) and shown by `crates/ui` through `ui::Ui::send`.
+   Clicks and menu choices come back as `ui::UiAction` to `Pipeline::action` (`pipeline/actions.rs`).
+
+When the agent cannot answer, emergency mode hands turns to a cover thread ([emergency.md](emergency.md),
+[claude-relay.md](claude-relay.md)).
+
+## Crate map
+
+Each crate below is a workspace member (`Cargo.toml`). The personal edition adds crates of its own, which the public
+export leaves out.
+
+| Folder | Package | What it is | Workspace | Behaviour lives in |
+|---|---|---|---|---|
+| `crates/agent` | `agent` | Pi process and its ownership, delivery ledger, runtime pins, MCP host and tool contract, providers | member | [crates/agent/README.md](../crates/agent/README.md), [mcp.md](mcp.md) |
+| `crates/app` | `app` | the `heimdall` binary: CLI, live loop, pipeline, agent glue, settings, background jobs | member | [crates/app/README.md](../crates/app/README.md) |
+| `crates/archive` | `heimdall-archive` | the single archive store, timeline chunks, compaction, `heimdall-clip` | member | [archive.md](archive.md), [archive-clip.md](archive-clip.md) |
+| `crates/capture` | `capture` | microphone and app-audio taps, host clock, raw archive writes | member | [capture.md](capture.md) |
+| `crates/computer` | `heimdall-computer` | the agent's `computer` tool: acting on other apps through Accessibility | member | [mcp.md](mcp.md) |
+| `crates/decide` | `decide` | the native decider model: send, wait, not for Heimdall, command verdicts | member | [decision-chain.md](decision-chain.md) |
+| `crates/emergency-cli` | `heimdall-emergency` | the `heimdall-emergency` CLI and its scoped MCP server; approval and grant checks | member | [emergency.md](emergency.md) |
+| `crates/eval` | `heimdall-eval` | offline evaluation binary | member | [crates/eval/README.md](../crates/eval/README.md) |
+| `crates/home` | `heimdall-home` | the home folder: the agent's working folder and `<home>/.heimdall` | member | [home.md](home.md) |
+| `crates/islands` | `islands` | `FloatingIslands.app` helper and `islands` CLI | member | [islands-capabilities.md](islands-capabilities.md), [islands/README.md](../islands/README.md) |
+| `crates/listen` | `listen` | VAD, speech recognition, turn end, vocabulary biasing | member | [crates/listen/README.md](../crates/listen/README.md), [listen-vocabulary.md](listen-vocabulary.md) |
+| `crates/night` | `heimdall-night` | night-time audio jobs and the `heimdall-night` CLI | member | [crates/night/README.md](../crates/night/README.md) |
+| `crates/rsvp` | `rsvp` | fast-reading planner: chunking and per-unit timing for the island's reader | member | [crates/rsvp/README.md](../crates/rsvp/README.md) |
+| `crates/screen` | `screen` | screen recording and spoken screen commands | member | [screen.md](screen.md) |
+| `crates/speak` | `speak` | text to speech and playback | member | [voices.md](voices.md) |
+| `crates/speakers` | `speakers` | diarization and voice identity (`heimdall-speakers-worker`) | member | [speakers.md](speakers.md) |
+| `crates/splash` | `splash` | `heimdall-splash`, the local inference engine's server | member | [inference-engine.md](inference-engine.md) |
+| `crates/t3` | `t3` | T3 Code control: pairing, worker threads, orchestrator pass-through, wakes | member | [t3-orchestration.md](t3-orchestration.md) |
+| `crates/ui` | `ui` | menu bar, menu, windows, the notch island, offscreen renders (`heimdall-ui-demo`) | member | [crates/ui/README.md](../crates/ui/README.md), [agent-window.md](agent-window.md) |
+| `crates/update` | `heimdall-update` | the in-app updater and its signed checksum file | member | [updates.md](updates.md) |
+| `crates/voicebank` | `voicebank` | pre-generated voice lines and the clip store | member | [crates/voicebank/README.md](../crates/voicebank/README.md) |
+
+Crate dependencies (`path` dependencies in each `Cargo.toml`; arrows point at the dependency). Most crates also
+depend on `heimdall-home`, left out here. `app` starts `islands` and `splash` as separate processes; neither is a
+Cargo dependency.
+
+```mermaid
+flowchart TD
+  app --> agent & t3 & ui & decide & speak & voicebank & night & screen & capture & speakers & listen & archive & update & computer & emergency-cli
+  t3 --> agent & emergency-cli
+  agent --> emergency-cli
+  ui --> rsvp
+  voicebank --> speak & archive
+  night --> listen & speakers & archive
+  screen --> capture & archive
+  screen -. "feature listen-adapter" .-> listen
+  capture --> archive
+  eval --> listen & screen
+```
 
 ## Repository layout
 
-- `crates/` — shipping source, one crate per domain where the boundary is clean (table below).
-- `islands/` — the Swift Floating Islands app, kept as the rollback for the Rust port in `crates/islands`
-  (`ISLANDS_HELPER=swift` in `scripts/bundle_islands.sh`); `islands/README.md` is the file protocol both follow.
-- `skills/` — the skills bundled into the app (`heimdall`, `public`, `shared`, `workers` sets; `docs/skills.md`).
-- `scripts/` — build, check and release: `bundle.sh` (editions, `docs/editions.md`), `check.sh` (full check,
-  `docs/install.md`), `verify_release_candidate.py`, `bundle_models.py` and its locks, `bundle_islands.sh`,
-  `check_public_bundle.py`, `install_watchdog.sh`, and their tests.
-- `docs/` — current reference; `docs/README.md` indexes it.
-- `lab/` — experiments: prototypes, renders, research and measurement scripts. Not part of the public tree; nothing in `lab/` is built or shipped.
-- `bugs/` — bug notes (`docs/bugs.md`). `models/` (ignored) — pinned model files. `target/`, `dist/` (ignored) —
-  build output and signed candidates.
+- `crates/`: shipping source, one crate per domain where the boundary is clean.
+- `islands/`: the Floating Islands file protocol ([islands/README.md](../islands/README.md)) and its rules
+  (`islands/docs/`); the app is `crates/islands`.
+- `skills/`: skills bundled into the app, in four sets (`heimdall`, `public`, `shared`, `workers`); see
+  [skills.md](skills.md).
+- `scripts/`: build, check and release (`bundle.sh`, `check.sh`, `affected_crates.py`, `verify_release_candidate.py`,
+  `bundle_models.py`, `check_public_bundle.py`) and their tests. How to use them: [contributing.md](contributing.md).
+- `docs/`: current reference, indexed by [README.md](README.md).
+- `lab/`: experiments, renders, measurement scripts and evidence. Nothing in `lab/` is built or shipped.
+- `packaging/`, `assets/`, `licenses/`: packaging, shared assets, third-party licences.
+- `models/`, `target/`, `dist/` (ignored): pinned model files, build output, signed candidates.
 
-Rules for working here: each domain keeps few dependencies; duplicating a small helper beats a shared utility
-crate; a domain's tests run on their own (`cargo nextest run -p <crate>`); every fixed bug leaves a test.
-Heimdall runs in Rust; remove Python wherever it can go.
+## Where data lives
 
-## Domains
+The user picks a home folder; Heimdall's own files live in `<home>/.heimdall`. Paths, layout and moving it:
+[home.md](home.md). The archive's store and retention: [archive.md](archive.md).
 
-| Domain | Home | Owns |
-|---|---|---|
-| Capture | `crates/capture`, `crates/screen` | microphone and app-audio taps, host clock, raw archive writes; screen recording and screen commands |
-| Transcription | `crates/listen`, `crates/speakers` | Silero VAD → Parakeet ASR (Core ML + Metal) → Smart Turn; diarization and voice identity (`heimdall-speakers-worker`) |
-| Decider | `crates/decide` | the native d1 model: send / wait / not-for-Heimdall and command decisions |
-| Conductor | `crates/app/src/pipeline/` | the live state machine from audio to turns: sources, utterances, commands, acks, echo guard, speech split, UI actions |
-| Agent harness | `crates/agent`, `crates/app/src/bridge/` | the Pi process and its ownership, durable delivery ledger, runtime pins, MCP host, skills, wakes; app glue: supervisor, tools, delivery, speech glue, window feed |
-| Providers | `crates/agent/src/{provider,console,chatgpt}.rs`, `crates/app/src/api_providers.rs` | API model catalog, keys, limits, ChatGPT sign-in |
-| Background jobs | `crates/app/src/{background_*,plan_refresher,suggester,voice_namer,day_timeline}.rs` | Messages API calls outside Pi (`background_call.rs`): plan refresher, suggester cards, voice namer, day timeline; their quota gate |
-| Emergency mode | `crates/emergency-cli`, `crates/{app,agent}/src/emergency.rs` | when the agent cannot answer, a T3 cover thread takes the turns through the `heimdall-emergency` CLI (bundled in `Contents/MacOS`) and a scoped MCP server (`docs/emergency.md`) |
-| T3 orchestration | `crates/t3` | outside-client T3 Code control: pairing, worker threads, orchestrator pass-through, wakes |
-| Speech | `crates/speak`, `crates/voicebank` | Phonon S TTS, playback; `voicebank` (pre-generated voice lines and the clip store) is personal edition only |
-| Island | `crates/ui/src/island/`, `crates/rsvp` | the notch object: pill, notes, questions, pull-down, fast reader (timing from `rsvp`), drawing overlay, pointing |
-| Floating Islands | `crates/islands`, `crates/app/src/islands/` | the `FloatingIslands.app` helper and `islands` CLI; the app's side: tools, plan lists, helper supervisor, notch nudge |
-| Menu and windows | `crates/ui` (outside `src/island/`) | menu bar item and menu, setup, transcript, speakers, agent window, offscreen renders (`heimdall-ui-demo`) |
-| Archive and search | `crates/archive`, `crates/app/src/{archive,index,embeddings,mcp_timeline,mcp_frames,mcp_clip}.rs` | the single archive store, timeline chunks, compaction, export, migration, `heimdall-clip`; search for the agent |
-| Night | `crates/night`, `crates/app/src/{night_*,speech_split}.rs` | personal edition only: overlap separation and training export; the bug-note CLI (`docs/bugs.md`) |
-| App shell | `crates/app/src/{main,live_loop,replay_modes,settings,diagnostics*,health,watchdog,edition}.rs` | CLI, the live loop, offline replay modes, settings file, diagnostics, freeze watchdog, edition switch |
-| Evaluation | `crates/eval` | offline evaluation binary, writes only under `lab/eval/data` (`crates/eval/README.md`) |
+## Editions
 
-Crate dependency graph from the `Cargo.toml` path dependencies (arrows point at dependencies):
+One source tree builds two editions: public (the default build of `scripts/bundle.sh`, Cargo feature `app/public`)
+and personal (plain `cargo build`). What differs and how each is built: [editions.md](editions.md).
 
-```
-app (bin heimdall)
- ├─► ui ────────► rsvp
- ├─► t3 ────────► agent
- ├─► agent
- ├─► decide
- ├─► speak
- ├─► voicebank ─► speak, archive   (personal edition only)
- ├─► night ─────► listen, speakers, archive   (personal edition only)
- ├─► screen ────► capture, archive, listen (feature listen-adapter)
- ├─► capture ───► archive
- ├─► speakers
- ├─► listen
- ├─► archive
- └─► emergency-cli (dev-dependency only: tests drive the real CLI)
-eval ───────────► listen, decide, screen
-leaves: agent, archive, decide, emergency-cli, islands, listen, rsvp, speak, speakers
-```
+## See also
 
-## Data flow: microphone → decider → agent → island
-
-```
-Core Audio tap / mic ──CaptureEvent::Audio──► live_loop pump ──► Pipeline::capture_event      (capture → conductor)
-        │                                                     └─► raw archive (capture)
-        ▼
-listen worker: Silero VAD → Parakeet ASR → Smart Turn ──ListenEvent──► Pipeline::listen       (transcription)
-Parakeet partial / window / final text ──phrase match──► pipeline::commands (proposal + screen hold → island "heard" cue)
-        │
-        ▼
-pipeline::utterances: turn text + context window
-        ├── spoken command ──► decide (d1 command verdict) ──► execute: screenshot / cancel
-        └── turn end ──► send_worker: d1 send / wait / not_for_heimdall                         (decider)
-                              │ send
-                              ▼
-bridge::AgentRuntime ◄── Command::Observe / Wake ──  admit_agent_final                          (agent harness)
-        │  agent::Bridge<RecordedAdapter> → Pi RPC → provider (API model)
-        │  every payload archived before transport; delivery ledger is durable
-        ▼
-Pi tool calls ──MCP──► bridge::Tools (screenshot, timeline search, island notices/questions, speak,
-                                      drawing/pointing, floating islands, T3 workers via crates/t3)
-        │
-        ├──► ui::Ui.send(UiUpdate::…) ──► island (pill, note, question, pull-down, reader)       (island)
-        └──► speak (Phonon S) ──► playback, level tap ──► island voice dots (speech)
-```
-
-UI actions travel back the other way: `ui::UiAction` (menu, island clicks, drawing Send) → `Pipeline::action`
-(`pipeline/actions.rs`) or the agent supervisor.
-
-## Testing
-
-- Fast and static first: unit and scenario tests run in milliseconds (`cargo nextest run -p <crate>`); offscreen
-  renders and frame checks for UI (`heimdall-ui-demo --render/--gallery` write to `lab/`); fake providers and fake
-  T3/Pi fixtures instead of paid calls.
-- `#[ignore]` tests are explicit lab runs (real models, real Pi, real T3) that need an environment variable or local
-  assets; each crate's README names them. Pi-dependent tests find the runtime through `HEIMDALL_AGENT_RUNTIME`, else
-  `target/agent-runtime/current` (`crates/agent/README.md`).
-- `scripts/check.sh --tests` runs every workspace test under nextest with a RAM-disk `TMPDIR`; `scripts/check.sh`
-  also builds, signs and verifies the personal candidate (`docs/install.md`). Pipeline and archive tests depend on
-  that RAM disk: the archive commits with `F_FULLFSYNC`, and on the SSD some exceed nextest's 120 s limit. The
-  conductor (`app` pipeline) is the slowest domain.
-
-Each domain's README has its own "Testing" lines. Start there.
+- [contributing.md](contributing.md): build, test, where code goes, the docs standard
+- [README.md](README.md): every doc, by task
+- [crates/app/src/pipeline/README.md](../crates/app/src/pipeline/README.md): the conductor, file by file
+- [resilience.md](resilience.md): failures, recovery and logs

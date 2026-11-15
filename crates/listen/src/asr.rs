@@ -38,7 +38,8 @@ pub struct Token {
     pub probability: f32,
 }
 /// SentencePiece word boundaries, with punctuation attached to its word.
-pub fn words_from_tokens(
+#[cfg(test)]
+fn words_from_tokens(
     tokens: &[Token],
     vocab: &[String],
     start_ns: u64,

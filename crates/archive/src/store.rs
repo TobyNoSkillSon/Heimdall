@@ -73,6 +73,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS clip_identity ON clips(object_id, origin, ifnu
 CREATE INDEX IF NOT EXISTS clip_bank ON clips(voice, generator, line_id) WHERE origin='bank';
 CREATE INDEX IF NOT EXISTS clip_object ON clips(object_id);
 CREATE TABLE IF NOT EXISTS gc_blobs(pack TEXT NOT NULL, key TEXT NOT NULL, PRIMARY KEY(pack, key)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS video_tier_failures(segment INTEGER PRIMARY KEY, failures INTEGER NOT NULL, reason TEXT NOT NULL, wall_ns INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS migrations(name TEXT PRIMARY KEY, session INTEGER, wall_ns INTEGER NOT NULL, receipt TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS store_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
 ";
@@ -513,13 +514,6 @@ pub fn ensure_blob(root: &Path, pack: &str, key: &str, data: &[u8]) -> Result<()
         put(root, pack, &[(key.to_owned(), data)])?;
     }
     Ok(())
-}
-/// Reads a referenced blob and checks its stored SHA-256.
-pub fn read_checked(root: &Path, pack: &str, key: &str, sha256: &str) -> Result<Vec<u8>> {
-    let bytes = get(root, pack, key)?
-        .with_context(|| format!("archive blob {pack}/{key} missing"))?;
-    ensure!(hash(&bytes) == sha256, "archive blob {pack}/{key} checksum mismatch");
-    Ok(bytes)
 }
 
 pub fn audio_key(id: &str) -> String {

@@ -295,14 +295,16 @@ impl Pipeline {
             false
         };
         // The archive first: a rename that stops halfway can be repeated (the store still has the old label), and
-        // a label only the archive still carries (an earlier rename cut short) is renamed there.
+        // a label only the archive still carries (an earlier rename cut short) is renamed there. The archive's part
+        // is handed to its writer, in order, without waiting on the live loop (`Index::relabel_speaker`).
         let lines = self.index.relabel_speaker(&from, &to)?;
         ensure!(in_store || lines > 0, "no voice is called {from}");
         if in_store {
             store.save(&self.data.join("speakers.json"))?;
         }
         drop(guard);
-        self.index.evidence.event("voice_named", "heimdall", &[], capture::host_now_ns(), json!({"from": from, "to": to, "lines": lines}))?;
+        // Night 8 Nov log sweep, finding 4: a note, so the rename never waits on the live loop for its commit.
+        self.index.evidence.note("voice_named", "heimdall", &[], capture::host_now_ns(), json!({"from": from, "to": to, "lines": lines}))?;
         self.rename_recovered(&from, &to)?;
         for d in self.discord.values() {
             d.actor.send(crate::speakers_runtime::Work::Store(store.clone()))?;

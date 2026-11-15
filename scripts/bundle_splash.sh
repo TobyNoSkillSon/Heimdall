@@ -1,5 +1,5 @@
 #!/bin/bash
-# The built-in engine (docs/splash-native.md): Splash's native engine, pinned by scripts/splash-engine.lock.json, and
+# The built-in engine (docs/inference-engine.md): Splash's native engine, pinned by scripts/splash-engine.lock.json, and
 # heimdall-splash, the Rust server that drives it. No Python ships.
 #
 #   scripts/bundle_splash.sh <Heimdall.app> <signing identity> <heimdall-splash binary> [helper id prefix]

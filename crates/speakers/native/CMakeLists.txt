@@ -20,7 +20,7 @@ target_include_directories(heimdall_nemo PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${NEMO}/include ${NEMO}/src/asr ${NEMO}/src/common
     ${NEMO}/src/runtime/ggml)
-foreach(DIR features encoder decoders vad diar postproc pnc)
+foreach(DIR features encoder diar)
     target_include_directories(heimdall_nemo PRIVATE ${NEMO}/src/asr/${DIR})
 endforeach()
 target_link_libraries(heimdall_nemo PRIVATE ggml ggml-cpu ggml-base opus)

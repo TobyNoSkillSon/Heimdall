@@ -74,6 +74,7 @@
         drop(hold);
     }
     #[test]
+    #[ignore = "model: loads the real decider (models/decide); run with --run-ignored"]
     fn foreground_preemption_resumes_pending_without_another_final() {
         let (_temp, mut app, mic) = rig(true);
         preempt_one_send(&mut app, &mic);
@@ -98,6 +99,7 @@
         );
     }
     #[test]
+    #[ignore = "model: loads the real decider (models/decide); run with --run-ignored"]
     fn preempted_send_does_not_retry_after_typed_or_explicit_barrier() {
         for typed in [true, false] {
             let (_temp, mut app, mic) = rig(true);
@@ -129,6 +131,7 @@
         }
     }
     #[test]
+    #[ignore = "model: loads the real decider (models/decide); run with --run-ignored"]
     fn real_native_lock_does_not_block_explicit_command_send() {
         let (_temp, mut app, mic) = rig(true);
         app.models = std::env::var_os("HEIMDALL_FIX2_MODELS")
@@ -191,6 +194,7 @@
         eprintln!("real 250ms native lock: explicit wake {ms:.1}ms");
     }
     #[test]
+    #[ignore = "model: loads the real decider (models/decide); run with --run-ignored"]
     fn ready_send_is_published_before_background_question_work_and_results_remain_bounded() {
         let (_temp, mut app, mic) = rig(true);
         app.models = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models");
@@ -248,6 +252,7 @@
         );
     }
     #[test]
+    #[ignore = "model: loads the real decider (models/decide); run with --run-ignored"]
     fn real_command_check_precedes_queued_sends_and_meets_main_latency_bound() {
         let (_temp, mut app, _) = rig(true);
         app.models = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models");

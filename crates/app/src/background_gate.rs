@@ -1,6 +1,8 @@
 //! The one check every background model request passes just before it goes out: with Agent off (or while quitting)
-//! none does. Background jobs are the plan refresher, the day timeline, the voice namer and the suggester (all through
-//! `background_call::post`), the bug scout (`heimdall_night::bug_scout`) and the friends guest (`friends::gated`).
+//! none does. Background jobs are the six tasks of `ui::BackgroundTask::ALL` (Island Agent, Plan Lists, Goals, Voice
+//! Names, Day Timeline, Suggestions; all through `background_call::post` or `background_call::t3`), deep search, the bug
+//! scout (`heimdall_night::bug_scout`) and the friends guest (`friends::gated`). Where a spent pick goes next is
+//! `background_fallback`'s; the episodes it reads are kept here.
 //! The app registers its Agent switch at launch (`set`); lab runs, replays and tests that register none are allowed.
 use std::sync::Arc;
 
@@ -81,6 +83,7 @@ pub async fn resumed() { RESUMED.notified().await }
 
 /// Why a background request did not go out: emergency mode's pause.
 #[derive(Debug)]
+#[cfg_attr(not(test), allow(dead_code))] // `reset_ms` is read by the tests
 pub struct Paused { pub reset_ms: Option<u64> }
 impl std::fmt::Display for Paused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("emergency mode: background tasks paused") }
@@ -409,13 +412,14 @@ mod tests {
         assert!(quota_check("anthropic", t + 3).unwrap_err().to_string().contains("usage is spent"), "a real limit inside the down wait");
         // T3 itself down: every instance waits; an instance's own success ends it.
         backend_down(T3_ALL, "T3 is not running", t);
-        assert!(!usable("t3:claudeAgent", t + 1) && !usable("t3:claudeAgent_claude_code_2", t + 1) && usable("openai", t + 1));
+        assert!(!usable("t3:claudeAgent", t + 1) && !usable("t3:claudeAgent_2", t + 1) && usable("openai", t + 1));
         quota_back("t3:claudeAgent");
-        assert!(usable("t3:claudeAgent_claude_code_2", t + 1));
+        assert!(usable("t3:claudeAgent_2", t + 1));
         // A bare "t3:" is the default instance: marking it never blocks the other instances.
+        let (default, other) = (format!("t3:{}", ui::T3_DEFAULT_INSTANCE), if ui::T3_DEFAULT_INSTANCE == "claudeAgent" { "t3:claudeAgent_2" } else { "t3:claudeAgent" });
         quota_spent("t3:", Some(t + 60_000), t);
-        assert!(!usable("t3:claudeAgent_claude_code_2", t + 1) && usable("t3:claudeAgent", t + 1));
-        quota_back("t3:claudeAgent_claude_code_2");
+        assert!(!usable(&default, t + 1) && usable(other, t + 1));
+        quota_back(&default);
         assert!(says_spent("The ChatGPT user has reached their Subscription Sharing usage limit.") && says_spent("Your credit balance is too low"));
         assert!(!says_spent("rate limit reached, retry in 20 s"));
     }

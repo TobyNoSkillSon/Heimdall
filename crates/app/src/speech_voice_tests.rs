@@ -2,7 +2,9 @@
 //! wiring with a fake synthesizer. No model inference, no network beyond 127.0.0.1.
 use super::*;
 use std::io::{BufRead, BufReader, Read, Write};
-use ui::speech_voice::{LocalVoice, SpeechVoiceAction as A};
+use ui::speech_voice::LocalVoice;
+#[cfg(not(feature = "public"))] // the personal edition's voices
+use ui::speech_voice::SpeechVoiceAction as A;
 
 /// The user's settings as installed builds wrote them before the menu revamp: no `speech_voice`, speed 160%, and the
 /// retired `voice` field some older files still carry.
@@ -134,7 +136,6 @@ fn elevenlabs_lists_voices_streams_pcm_and_reports_a_refused_key() -> Result<()>
 /// A stand-in Phonon S: 0.2 s of a constant at 24 kHz per sentence, recording the preset and the text.
 pub(crate) struct FakePhonon(pub Arc<Mutex<Vec<String>>>, pub String);
 impl speak::voice::StreamingVoice for FakePhonon {
-    fn label(&self) -> &str { "fake Phonon" }
     fn stream_sentence(&mut self, text: &str, _: &dyn Fn() -> bool, emit: &mut dyn FnMut(&[f32], u32) -> Result<()>) -> Result<()> {
         self.0.lock().unwrap().push(format!("{}: {text}", self.1));
         emit(&[0.5; 2_400], 24_000)?;

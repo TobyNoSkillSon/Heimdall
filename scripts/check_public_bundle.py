@@ -29,7 +29,15 @@ def macho(path):
 def otool(*args):
     return subprocess.run(['/usr/bin/otool', *args], capture_output=True, text=True, check=True).stdout
 
-def check(bundle, builder_home=None, source_root=None):
+def split_problems(bundle, private=()):
+    """The public/private split (check_public_split.py) on the bundle: every bundled skill declares `class: public`, no
+    private folder is inside, and none of the built-in private patterns (or a given private folder's text) is in it."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('check_public_split', Path(__file__).with_name('check_public_split.py'))
+    split = importlib.util.module_from_spec(spec); spec.loader.exec_module(split)
+    return [f'public split: {p}' for p in split.check(bundle, private, whole_tree=True)]
+
+def check(bundle, builder_home=None, source_root=None, private=()):
     home = (builder_home or os.path.expanduser('~')).rstrip('/')
     builder = home.encode()
     # The checkout's folders under the home, as a half-remapped path would keep them (/build/<folders>/<checkout>/...).
@@ -85,6 +93,7 @@ def check(bundle, builder_home=None, source_root=None):
             return n
     builder_files = [(rel(p), n) for p in files if (n := mentions(p))]
     problems += [f'names the build machine ({n}x): {f}' for f, n in builder_files[:20]]
+    problems += split_problems(bundle, private)
     frameworks = sorted({re.sub(r'.*/([^/]+)\.framework/.*', r'\1', l) for l in links if '.framework/' in l and l.startswith('/System/')})
     return problems, {
         'bundle': str(bundle), 'edition': info.get('HeimdallEdition'), 'files': len(files),
@@ -100,8 +109,10 @@ if __name__ == '__main__':
     parser.add_argument('bundle', type=Path)
     parser.add_argument('--report', type=Path)
     parser.add_argument('--source-root', help="the checkout the bundle was built from; its folders must not survive remapping")
+    parser.add_argument('--private', type=Path, action='append', default=[],
+                        help="a user's private folder (their layer and skills); none of its text may be in the bundle")
     args = parser.parse_args()
-    problems, report = check(args.bundle.resolve(strict=True), source_root=args.source_root)
+    problems, report = check(args.bundle.resolve(strict=True), source_root=args.source_root, private=args.private)
     text = json.dumps(report, indent=2)
     if args.report:
         args.report.write_text(text + '\n')

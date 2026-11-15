@@ -1,4 +1,4 @@
-//! The viewer island's content (Swift `Viewer.swift`): any file, rendered by type (`ViewerKind`): markdown rendered,
+//! The viewer island's content: any file, rendered by type (`ViewerKind`): markdown rendered,
 //! text and code monospaced with light colouring, images, PDF (every page, scrolling), audio (a player with a
 //! waveform), video (AVPlayerView), HTML (WebKit), anything else through QuickLook; proposed-action buttons on top.
 //! The size is known at once from cheap header reads; heavy loads (big text, PDF pages, waveforms) run off the main
@@ -6,7 +6,7 @@
 //!
 //! Viewer refresh (night 23 Oct, as Swift 9c9332a): a viewer remembers the file it loaded (`Stamp`: inode, size,
 //! modification time in ns) and is stale when the file no longer matches. The watch is not here: the controller
-//! watches the open viewer's file (`mac::filewatch`, Swift's `FileWatch`) and on a change, or on a new view of the same path, rebuilds a stale viewer: it reads
+//! watches the open viewer's file (`mac::filewatch`) and on a change, or on a new view of the same path, rebuilds a stale viewer: it reads
 //! `scroll_offset`, tears the old one down, makes a new one with `set_restore_offset`, and reopens it. The restore is
 //! applied once the content has a height (after layout, after async text, after the PDF document arrives), clamped
 //! to the new length.
@@ -21,7 +21,7 @@ use std::rc::{Rc, Weak};
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject};
-use objc2::{define_class, msg_send, AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
+use objc2::{define_class, msg_send, AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
 use objc2_app_kit::{
     NSAppearance, NSAppearanceCustomization, NSBezierPath, NSBitmapImageRep, NSEvent, NSGraphicsContext, NSImage, NSImageView, NSLineBreakMode,
     NSScrollView, NSTextField, NSTextView, NSView,
@@ -38,6 +38,7 @@ use super::sys::{self, Work1};
 use super::viewer_audio::{self, AudioPlayerView};
 use super::viewer_text;
 use crate::model::geometry::{Point, Rect, Size};
+use crate::model::page_pinch;
 use crate::model::zoom::{self, Range};
 use crate::model::{ViewerAction, ViewerKind};
 
@@ -133,7 +134,7 @@ pub fn viewer_path(raw: &str) -> PathBuf {
     p.map(|p| PathBuf::from(p.to_string())).unwrap_or_else(|| PathBuf::from(raw))
 }
 
-/// A file's identity and version as `stat` sees it (Swift `FileStamp`): a rename-replace changes the inode, an
+/// A file's identity and version as `stat` sees it: a rename-replace changes the inode, an
 /// in-place write the size or modification time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Stamp {
@@ -153,6 +154,8 @@ pub fn stamp(p: &Path) -> Option<Stamp> {
 pub struct RootIvars {
     /// ⌘+ / ⌘− / ⌘0 (the viewer's zoom): true when taken.
     on_key: RefCell<Option<Rc<dyn Fn(&NSEvent) -> bool>>>,
+    /// ⌘-scroll over the viewer (`command_scroll`), with the point in window coordinates: true when taken.
+    on_zoom_scroll: RefCell<Option<Rc<dyn Fn(&NSEvent, CGPoint) -> bool>>>,
 }
 
 define_class!(
@@ -174,6 +177,12 @@ define_class!(
             let f = self.ivars().on_key.borrow().clone();
             if f.is_some_and(|f| f(e)) {
                 true
+            } else if let Some(action) = edit_key(e) {
+                // No main menu, no Edit menu: ⌘C and ⌘A go down the key panel's responder chain from here
+                // (bug note 2026-11-05T03-17-56).
+                let mtm = MainThreadMarker::from(self);
+                let sel = objc2::runtime::Sel::register(&std::ffi::CString::new(action).unwrap());
+                unsafe { objc2_app_kit::NSApplication::sharedApplication(mtm).sendAction_to_from(sel, None, Some(self)) }
             } else {
                 unsafe { msg_send![super(self), performKeyEquivalent: e] }
             }
@@ -196,9 +205,132 @@ define_class!(
     }
 );
 
+pub struct PictureIvars {
+    /// A double-click at a point (document coordinates).
+    on_double: RefCell<Option<Rc<dyn Fn(CGPoint)>>>,
+}
+
+define_class!(
+    /// A picture's document (bug note 2026-11-10T10-52-07): y runs down, so a tall picture opens at its top; it takes
+    /// the clicks over the picture, a double-click zooms, a single click goes on as before.
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "FIViewerPictureDoc"]
+    #[ivars = PictureIvars]
+    pub struct PictureDoc;
+
+    impl PictureDoc {
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method(hitTest:))]
+        fn hit_test(&self, p: CGPoint) -> *mut NSView {
+            let r: *mut NSView = unsafe { msg_send![super(self), hitTest: p] };
+            if r.is_null() {
+                r
+            } else {
+                self as *const Self as *mut NSView
+            }
+        }
+
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, e: &NSEvent) {
+            if e.clickCount() == 2 {
+                let f = self.ivars().on_double.borrow().clone();
+                if let Some(f) = f {
+                    f(self.convertPoint_fromView(e.locationInWindow(), None));
+                    return;
+                }
+            }
+            unsafe { msg_send![super(self), mouseDown: e] }
+        }
+    }
+);
+
+impl PictureDoc {
+    pub fn new(frame: CGRect) -> Retained<PictureDoc> {
+        let this = Self::alloc(mtm()).set_ivars(PictureIvars { on_double: RefCell::new(None) });
+        unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+}
+
+define_class!(
+    /// A picture's clip view: zoomed out below the view, the picture sits in its middle instead of its corner.
+    #[unsafe(super(objc2_app_kit::NSClipView, NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "FIViewerCenteringClip"]
+    pub struct CenteringClip;
+
+    impl CenteringClip {
+        #[unsafe(method(constrainBoundsRect:))]
+        fn constrain_bounds_rect(&self, proposed: CGRect) -> CGRect {
+            let mut r: CGRect = unsafe { msg_send![super(self), constrainBoundsRect: proposed] };
+            if let Some(doc) = self.documentView() {
+                let f = doc.frame();
+                if r.size.width > f.size.width {
+                    r.origin.x = (f.size.width - r.size.width) / 2.0;
+                }
+                if r.size.height > f.size.height {
+                    r.origin.y = (f.size.height - r.size.height) / 2.0;
+                }
+            }
+            r
+        }
+    }
+);
+
+impl CenteringClip {
+    pub fn new(frame: CGRect) -> Retained<CenteringClip> {
+        unsafe { msg_send![Self::alloc(mtm()), initWithFrame: frame] }
+    }
+}
+
+/// ⌘-scroll in an island's window (bug note 2026-11-10T10-52-07): over an open viewer it zooms, before any view
+/// under it (a scroll view, PDFView, WebKit) takes it as a scroll. True when a viewer took it. Called from the
+/// panel's `sendEvent:`, so the island's own scrolling never sees it.
+pub fn command_scroll(window: &objc2_app_kit::NSWindow, e: &NSEvent) -> bool {
+    use objc2_app_kit::{NSEventModifierFlags as F, NSEventType};
+    if e.r#type() != NSEventType::ScrollWheel {
+        return false;
+    }
+    let f = e.modifierFlags();
+    if !f.contains(F::Command) || f.contains(F::Control) || f.contains(F::Option) {
+        return false;
+    }
+    let Some(content) = window.contentView() else { return false };
+    // An event made for another window (or none) carries a screen point.
+    let p = match e.window(MainThreadMarker::from(window)) {
+        Some(w) if std::ptr::eq(&*w, window) => e.locationInWindow(),
+        _ => window.convertPointFromScreen(e.locationInWindow()),
+    };
+    let q = match unsafe { content.superview() } {
+        Some(s) => s.convertPoint_fromView(p, None),
+        None => p,
+    };
+    let mut v: Option<Retained<NSView>> = content.hitTest(q);
+    while let Some(view) = v {
+        if let Some(root) = view.downcast_ref::<ViewerRootView>() {
+            let hook = root.ivars().on_zoom_scroll.borrow().clone();
+            return hook.is_some_and(|h| h(e, p));
+        }
+        v = unsafe { view.superview() };
+    }
+    false
+}
+
+/// The editing action a key equivalent means in the viewer (`viewer_edit::edit_action`).
+fn edit_key(e: &NSEvent) -> Option<&'static str> {
+    let chars = e.charactersIgnoringModifiers().map(|s| s.to_string()).unwrap_or_default();
+    let f = e.modifierFlags();
+    let other = f.contains(objc2_app_kit::NSEventModifierFlags::Control) || f.contains(objc2_app_kit::NSEventModifierFlags::Option);
+    super::viewer_edit::edit_action(&chars, f.contains(objc2_app_kit::NSEventModifierFlags::Command), other)
+}
+
 impl ViewerRootView {
     pub fn new(frame: CGRect) -> Retained<ViewerRootView> {
-        let this = Self::alloc(mtm()).set_ivars(RootIvars { on_key: RefCell::new(None) });
+        let this = Self::alloc(mtm()).set_ivars(RootIvars { on_key: RefCell::new(None), on_zoom_scroll: RefCell::new(None) });
         unsafe { msg_send![super(this), initWithFrame: frame] }
     }
 }
@@ -715,12 +847,9 @@ impl ActionRow {
         Point::new(q.x, q.y)
     }
 
-    /// The row's frame in its window's coordinates (AppKit, y up).
-    pub fn frame_in_window(&self) -> Rect {
-        look::rect_of(self.convertRect_toView(self.bounds(), None))
-    }
 
     /// Button `i`'s frame in this row's coordinates (y down).
+    #[cfg(feature = "lab")]
     pub fn button_frame(&self, i: usize) -> Option<Rect> {
         self.ivars().caps.borrow().get(i).map(|(_, c, _)| look::rect_of(c.frame()))
     }
@@ -739,7 +868,13 @@ pub struct FileViewer {
     bridge: RefCell<Option<Retained<ReportBridge>>>,
     on_resize: RefCell<Option<Rc<dyn Fn()>>>,
     web_height: Cell<Option<f64>>,
+    /// The size an HTML page asks for (`<meta name="heimdall-viewer">`, `model::viewer_size::page_ask`), read at `new`.
+    page_ask: Option<crate::model::viewer_size::PageAsk>,
     web_watcher: RefCell<Option<Retained<WebLoadWatcher>>>,
+    /// A page that takes its own pinch (`model::page_pinch`, read when the page is built): the gesture's route and
+    /// the magnify events held until the page answers a gesture's begin.
+    pinch: RefCell<page_pinch::Router>,
+    pinch_held: RefCell<Vec<Retained<NSEvent>>>,
 
     root: RefCell<Option<Retained<ViewerRootView>>>,
     content: RefCell<Option<Retained<NSView>>>,
@@ -776,6 +911,8 @@ pub struct FileViewer {
     image_scroll: RefCell<Option<Retained<NSScrollView>>>,
     /// Set while the zoom is applied to the view: its own scale notices are not a pinch.
     zoom_applying: Cell<bool>,
+    /// The lowest a picture zooms now: the zoom that shows it whole (`zoom::picture_range`; 1 when it fits whole).
+    picture_min: Cell<f64>,
 }
 
 impl FileViewer {
@@ -783,7 +920,10 @@ impl FileViewer {
         let p = viewer_path(path);
         let st = stamp(&p);
         let kind = ViewerKind::detect(&p);
-        let z = zoom_range(&kind).map(|r| r.clamp(zoom::remembered(&zoom::Memory::default_path(), &p))).unwrap_or(1.0);
+        // A picture may come back zoomed out (a tall one); its layout clamps it to the whole picture.
+        let first = |r: Range| if matches!(kind, ViewerKind::Image) { Range { min: zoom::PICTURE_FLOOR, ..r } } else { r };
+        let ask = if matches!(kind, ViewerKind::Html) { crate::model::viewer_size::page_ask_of(&p) } else { None };
+        let z = zoom_range(&kind).map(|r| first(r).clamp(zoom::remembered(&zoom::Memory::default_path(), &p))).unwrap_or(1.0);
         let v = Rc::new_cyclic(|me| FileViewer {
             me: me.clone(),
             path: p,
@@ -794,7 +934,10 @@ impl FileViewer {
             bridge: RefCell::new(None),
             on_resize: RefCell::new(None),
             web_height: Cell::new(None),
+            page_ask: ask,
             web_watcher: RefCell::new(None),
+            pinch: RefCell::new(page_pinch::Router::new(false)),
+            pinch_held: RefCell::new(vec![]),
             root: RefCell::new(None),
             content: RefCell::new(None),
             action_row: RefCell::new(None),
@@ -821,6 +964,7 @@ impl FileViewer {
             zoom_observer: RefCell::new(None),
             image_scroll: RefCell::new(None),
             zoom_applying: Cell::new(false),
+            picture_min: Cell::new(1.0),
         });
         v.read_now();
         v
@@ -937,12 +1081,25 @@ impl FileViewer {
         }
     }
 
-    /// The open island's size on a screen this size: chrome (title row, padding), the action rows, the content.
+    /// The size the page asks for (HTML only; `None` when it asks nothing).
+    pub fn page_ask(&self) -> Option<crate::model::viewer_size::PageAsk> {
+        self.page_ask
+    }
+
+    /// The open island's size on a screen this size: chrome (title row, padding), the action rows, the content. A page
+    /// that asks for a size (`page_ask`) gets it, up to the screen; the controller fits it under the menu bar.
     pub fn island_size(&self, screen: Size) -> Size {
         let chrome = look::BODY_TOP + look::BOTTOM_PAD;
         let kind = self.kind();
-        let max_w = Self::max_width(&kind, screen) - 2.0 * look::PAD;
-        let max_h = (screen.h * 0.78).max(240.0) - chrome - self.actions_height();
+        let extra = Size::new(2.0 * look::PAD, chrome + self.actions_height());
+        let lim = crate::model::viewer_size::content_limits(
+            self.page_ask,
+            Self::max_width(&kind, screen) - extra.w,
+            (screen.h * 0.78).max(240.0) - extra.h,
+            screen,
+            extra,
+        );
+        let (max_w, max_h) = (lim.w, lim.h);
         let c = self.content_size(max_w, max_h);
         let w = (c.w + 2.0 * look::PAD).max(if self.actions.is_empty() { 280.0 } else { 360.0 });
         Size::new(w.ceil(), (c.h + self.actions_height() + chrome).ceil())
@@ -979,10 +1136,10 @@ impl FileViewer {
                 let Some(px) = self.image_info.get().filter(|p| p.width > 0.0 && p.height > 0.0) else {
                     return Size::new(max_w, max_h * 0.6);
                 };
-                // Never larger than the image's own points (a 2× screen), never cut.
-                let (nw, nh) = (px.width / 2.0, px.height / 2.0);
-                let k = 1f64.min(max_w / nw).min(max_h / nh);
-                Size::new((nw * k).floor().max(240.0), (nh * k).floor().max(60.0))
+                // Never larger than the image's own points (a 2× screen); fitted to the width, a tall one scrolls
+                // (bug note 2026-11-10T10-52-07: a 1072×5559 strip was shrunk to the island's height, unreadable).
+                let (w, h) = zoom::picture_content(px.width / 2.0, px.height / 2.0, max_w, max_h);
+                Size::new(w, h)
             }
             ViewerKind::Pdf => {
                 if self.pdf_page_sizes.borrow().is_none() {
@@ -1008,6 +1165,8 @@ impl FileViewer {
                 }
                 Size::new(w.max(320.0).floor(), h.floor())
             }
+            // A page that asks a height gets it, whatever its body measures (a full-height layout measures its window).
+            ViewerKind::Html if self.page_ask.is_some_and(|a| a.h.is_some()) => Size::new(max_w, max_h),
             ViewerKind::Html => Size::new(max_w, max_h.min(self.web_height.get().map(|h| h * self.zoom.get()).unwrap_or(max_h).max(160.0))),
             ViewerKind::Other => Size::new(max_w.min(720.0), max_h.min(540.0)),
         }
@@ -1027,6 +1186,8 @@ impl FileViewer {
         }
         let me = self.me.clone();
         *r.ivars().on_key.borrow_mut() = Some(Rc::new(move |e: &NSEvent| me.upgrade().is_some_and(|m| m.handle_key(e))));
+        let me = self.me.clone();
+        *r.ivars().on_zoom_scroll.borrow_mut() = Some(Rc::new(move |e: &NSEvent, p: CGPoint| me.upgrade().is_some_and(|m| m.zoom_scroll(e, p))));
         *self.root.borrow_mut() = Some(r.clone());
         if !self.actions.is_empty() {
             let row = ActionRow::new(self.actions.clone());
@@ -1082,9 +1243,18 @@ impl FileViewer {
                 v.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown);
                 v.setAnimates(false);
                 self.set_image(&v);
-                // In a magnifying scroll view: pinch and ⌘+ zoom in, two fingers pan (the picture fills it at 1).
+                // In a magnifying scroll view: pinch, ⌘-scroll, ⌘+ and a double-click zoom, two fingers pan; at 1 the
+                // picture fits the width and a tall one scrolls (bug note 2026-11-10T10-52-07).
                 let sv = zoom_scroll_view(mtm);
-                sv.setDocumentView(Some(&v));
+                let doc = PictureDoc::new(CGRect::ZERO);
+                let me = self.me.clone();
+                *doc.ivars().on_double.borrow_mut() = Some(Rc::new(move |p: CGPoint| {
+                    if let Some(m) = me.upgrade() {
+                        m.double_click(p);
+                    }
+                }));
+                doc.addSubview(&v);
+                sv.setDocumentView(Some(&doc));
                 sv.setWantsLayer(true);
                 if let Some(l) = sv.layer() {
                     l.setCornerRadius(10.0);
@@ -1178,7 +1348,12 @@ impl FileViewer {
     }
 
     fn set_image(&self, v: &NSImageView) {
-        let img = draw::thumbnail(&self.path, 2400, false).map(|i| {
+        // At its own size (a tall strip at 2400 px was half its width, soft when fitted to the width and zoomed).
+        if self.image_info.get().is_none() {
+            self.image_info.set(draw::image_pixel_size(&self.path));
+        }
+        let side = self.image_info.get().map(|p| zoom::picture_load_side(p.width, p.height)).unwrap_or(2400);
+        let img = draw::thumbnail(&self.path, side, false).map(|i| {
             NSImage::initWithCGImage_size(NSImage::alloc(), i.cg(), CGSize::new(0.0, 0.0))
         });
         v.setImage(img.as_deref());
@@ -1223,7 +1398,8 @@ impl FileViewer {
                 let _: () = msg_send![&*cfg, setMediaTypesRequiringUserActionForPlayback: usize::MAX];
             }
         }
-        let cls = class(c"WKWebView").expect("WebKit");
+        // Its context menu's web search opens the default browser (`viewer_edit`).
+        let cls = super::viewer_edit::web_view_class();
         let w: Retained<NSView> = unsafe { msg_send![msg_send![cls, alloc], initWithFrame: CGRect::ZERO, configuration: &*cfg] };
         unsafe {
             let _: () = msg_send![&*w, setValue: &*NSNumber::new_bool(false), forKey: &*ns("drawsBackground")];
@@ -1231,6 +1407,15 @@ impl FileViewer {
             // Pinch magnifies (two fingers pan); ⌘+ / ⌘− and the remembered zoom are the page zoom (it reflows).
             let _: () = msg_send![&*w, setAllowsMagnification: true];
             let _: () = msg_send![&*w, setPageZoom: self.zoom.get()];
+        }
+        // A page that says `pinch=page` gets the pinch first (`model::page_pinch`); any other magnifies as before.
+        let takes = page_pinch::page_pinch_of(&self.path);
+        let renewed = self.pinch.borrow().renewed(takes);
+        *self.pinch.borrow_mut() = renewed;
+        self.pinch_held.borrow_mut().clear();
+        if takes {
+            let me = self.me.clone();
+            super::viewer_edit::set_pinch_hook(&w, Some(Rc::new(move |v: &NSView, e: &NSEvent, smart: bool| me.upgrade().is_some_and(|m| m.page_pinch(v, e, smart)))));
         }
         let me = self.me.clone();
         let web = objc2::rc::Weak::from_retained(&w);
@@ -1290,6 +1475,87 @@ impl FileViewer {
         w
     }
 
+    /// A magnify (or, `smart`, a two-finger double-tap) over a page that takes its own pinch: routed by the page's
+    /// answer to the gesture's begin (`page_pinch::Router`). False: WebKit's own magnify takes this event.
+    fn page_pinch(&self, view: &NSView, e: &NSEvent, smart: bool) -> bool {
+        let (x, y) = self.pinch_point(view, e);
+        if smart {
+            let Some(call) = self.pinch.borrow().double_tap(x, y) else { return false };
+            // Not taken: the viewer's own smart zoom, with the same event.
+            let (web, ev) = (objc2::rc::Weak::from_retained(&view.retain()), e.retain());
+            eval_bool(view, &call.script(), move |taken| {
+                if !taken {
+                    if let Some(w) = web.load() {
+                        unsafe { super::viewer_edit::webkit_magnify(&w, Retained::as_ptr(&ev) as *mut NSEvent, true) };
+                    }
+                }
+            });
+            return true;
+        }
+        let phase = page_pinch::Phase::from_bits(e.phase().0);
+        let steps = self.pinch.borrow_mut().event(phase, e.magnification(), x, y);
+        self.pinch_steps(view, Some(e), steps)
+    }
+
+    /// The page's answer to gesture `n`'s begin: the held events go to the side that has the gesture.
+    fn pinch_answer(&self, n: u64, taken: bool) {
+        let steps = self.pinch.borrow_mut().answer(n, taken);
+        if let Some(w) = self.web.borrow().clone() {
+            self.pinch_steps(&w, None, steps);
+        }
+    }
+
+    fn pinch_steps(&self, view: &NSView, e: Option<&NSEvent>, steps: Vec<page_pinch::Step>) -> bool {
+        use page_pinch::Step;
+        for s in steps {
+            match s {
+                Step::View => return false,
+                Step::Ask(call, n) => {
+                    self.pinch_held.borrow_mut().extend(e.map(|e| e.retain()));
+                    let me = self.me.clone();
+                    eval_bool(view, &call.script(), move |taken| {
+                        if let Some(m) = me.upgrade() {
+                            m.pinch_answer(n, taken);
+                        }
+                    });
+                }
+                Step::Hold => self.pinch_held.borrow_mut().extend(e.map(|e| e.retain())),
+                Step::Page(call) => unsafe {
+                    let _: () = msg_send![view, evaluateJavaScript: &*ns(&call.script()), completionHandler: std::ptr::null::<AnyObject>()];
+                },
+                Step::ReplayHeld => {
+                    let held = std::mem::take(&mut *self.pinch_held.borrow_mut());
+                    for ev in held {
+                        unsafe { super::viewer_edit::webkit_magnify(view, Retained::as_ptr(&ev) as *mut NSEvent, false) };
+                    }
+                }
+                Step::DropHeld => self.pinch_held.borrow_mut().clear(),
+            }
+        }
+        true
+    }
+
+    /// The event's pointer in the web view (points from its top-left) over the page zoom.
+    fn pinch_point(&self, view: &NSView, e: &NSEvent) -> (f64, f64) {
+        let p = view.convertPoint_fromView(e.locationInWindow(), None);
+        let y = if view.isFlipped() { p.y } else { view.bounds().size.height - p.y };
+        let pz: f64 = unsafe { msg_send![view, pageZoom] };
+        let pz = if pz > 0.0 && pz.is_finite() { pz } else { 1.0 };
+        (p.x / pz, y / pz)
+    }
+
+    /// Whether the pinch over this page goes to the page now (lab checks).
+    #[cfg(feature = "lab")]
+    pub fn page_has_pinch(&self) -> bool {
+        self.pinch.borrow().page_has_it()
+    }
+
+    /// Whether this page takes its own pinch (`pinch=page`; known once the page is built).
+    #[cfg(feature = "lab")]
+    pub fn page_takes_pinch(&self) -> bool {
+        self.pinch.borrow().takes()
+    }
+
     /// The page's height (CSS pixels; shown times the page zoom): the island grows or shrinks to it.
     fn measure_web(&self, w: &NSView) {
         let me = self.me.clone();
@@ -1324,7 +1590,7 @@ impl FileViewer {
         sv.setMinMagnification(zoom::MIN);
         sv.setMaxMagnification(zoom::MAX);
         // TextKit 1: code blocks and tables are text blocks (backgrounds, cells).
-        let tv = NSTextView::initUsingTextLayoutManager(NSTextView::alloc(mtm), false);
+        let tv = super::viewer_edit::text_view(mtm);
         tv.setDrawsBackground(false);
         tv.setEditable(false);
         tv.setSelectable(true);
@@ -1499,6 +1765,8 @@ impl FileViewer {
             }
         }
         if let Some(w) = self.web.borrow_mut().take() {
+            super::viewer_edit::set_pinch_hook(&w, None);
+            self.pinch_held.borrow_mut().clear();
             unsafe {
                 let _: () = msg_send![&*w, stopLoading];
                 let _: () = msg_send![&*w, setNavigationDelegate: std::ptr::null::<AnyObject>()];
@@ -1548,10 +1816,13 @@ impl FileViewer {
         self.stamp
     }
 
-    /// The content's scroll view (text, markdown, PDF).
+    /// The content's scroll view (text, markdown, PDF, a picture).
     pub fn scroll_view(&self) -> Option<Retained<NSScrollView>> {
         if let Some(tv) = self.text_view.borrow().as_ref() {
             return tv.enclosingScrollView();
+        }
+        if let Some(sv) = self.image_scroll.borrow().as_ref() {
+            return Some(sv.clone());
         }
         if let Some(p) = self.pdf.borrow().as_ref() {
             let doc: Option<Retained<NSView>> = unsafe { msg_send![&**p, documentView] };
@@ -1618,9 +1889,11 @@ impl FileViewer {
     pub fn action_row(&self) -> Option<Retained<ActionRow>> {
         self.action_row.borrow().clone()
     }
+    #[cfg(feature = "lab")]
     pub fn audio_player(&self) -> Option<Retained<AudioPlayerView>> {
         self.audio.borrow().clone()
     }
+    #[cfg(feature = "lab")]
     pub fn has_text(&self) -> bool {
         self.loaded_text.borrow().is_some()
     }
@@ -1630,28 +1903,36 @@ impl FileViewer {
         Some(tv.string().to_string().chars().take(n).collect())
     }
     /// Whether the root holds a scroll view (text and markdown render in one).
+    #[cfg(feature = "lab")]
     pub fn has_scroll_view(&self) -> bool {
         let Some(r) = self.root.borrow().clone() else { return false };
         let cls = objc2::class!(NSScrollView);
         r.subviews().iter().any(|v| unsafe { msg_send![&*v, isKindOfClass: cls] })
     }
+    #[cfg(feature = "lab")]
     pub fn web_view(&self) -> Option<Retained<NSView>> {
         self.web.borrow().clone()
     }
-    pub fn is_web_loaded(&self) -> bool {
-        match self.web.borrow().as_ref() {
-            Some(w) => !unsafe { msg_send![&**w, isLoading] },
-            None => true,
-        }
+    /// A picture's width in its document at zoom 1 and the zoom that shows it whole (`zoom::picture_fit`).
+    pub fn picture_fit(&self) -> Option<zoom::PictureFit> {
+        let sv = self.image_scroll.borrow().clone()?;
+        let px = self.image_info.get().filter(|p| p.width > 0.0 && p.height > 0.0)?;
+        let s = sv.frame().size;
+        Some(zoom::picture_fit(px.width / 2.0, px.height / 2.0, s.width, s.height))
     }
-    pub fn video_view(&self) -> Option<Retained<NSView>> {
-        self.video.borrow().clone()
-    }
-    pub fn poster_image(&self) -> Option<Image> {
-        self.poster.borrow().clone()
-    }
-    pub fn content_view(&self) -> Option<Retained<NSView>> {
-        self.content.borrow().clone()
+}
+
+/// Runs `js` in the web view `w`; `done` hears whether it returned exactly `true` (an error or anything else: false).
+fn eval_bool(w: &NSView, js: &str, done: impl Fn(bool) + 'static) {
+    let block = block2::RcBlock::new(move |v: *mut AnyObject, _e: *mut AnyObject| {
+        let taken = !v.is_null() && unsafe {
+            let is_num: bool = msg_send![&*v, isKindOfClass: objc2::class!(NSNumber)];
+            is_num && { let b: bool = msg_send![&*v, boolValue]; b }
+        };
+        done(taken);
+    });
+    unsafe {
+        let _: () = msg_send![w, evaluateJavaScript: &*ns(js), completionHandler: &*block];
     }
 }
 
@@ -1666,9 +1947,13 @@ pub fn zoom_range(kind: &ViewerKind) -> Option<Range> {
     }
 }
 
-/// A picture's scroll view: it magnifies (pinch, ⌘+) and pans; nothing shows at rest.
+/// A picture's scroll view: it magnifies (pinch, ⌘-scroll, ⌘+) and pans; nothing shows at rest. Zoomed out below
+/// the width, the picture sits in the middle (`CenteringClip`).
 fn zoom_scroll_view(mtm: MainThreadMarker) -> Retained<NSScrollView> {
     let sv = NSScrollView::new(mtm);
+    let clip = CenteringClip::new(CGRect::ZERO);
+    clip.setDrawsBackground(false);
+    sv.setContentView(&clip);
     sv.setDrawsBackground(false);
     sv.setHasVerticalScroller(true);
     sv.setHasHorizontalScroller(true);
@@ -1698,6 +1983,13 @@ fn set_magnification(sv: &NSScrollView, m: f64, centered: bool, anchor_top_left:
 }
 
 impl FileViewer {
+    /// Resized by hand (night 1107, bug note 2026-11-07T01-40-23): text is laid out again at the new width, so it
+    /// rewraps there instead of scaling (`apply_text_zoom` takes the next width as its own); the zoom stays.
+    pub fn reflow(&self) {
+        self.natural_w.set(None);
+        *self.measured.borrow_mut() = None;
+    }
+
     /// The zoom the user chose for this file (1: as first laid out).
     pub fn zoom(&self) -> f64 {
         self.zoom.get()
@@ -1736,10 +2028,6 @@ impl FileViewer {
         }
     }
 
-    /// The text view's width in its own points (lab checks: natural zoomed in, wider zoomed out).
-    pub fn text_layout_width(&self) -> Option<f64> {
-        self.text_view.borrow().as_ref().map(|tv| tv.frame().size.width)
-    }
 
     /// ⌘+ / ⌘− / ⌘0 while the viewer's panel is key.
     fn handle_key(&self, e: &NSEvent) -> bool {
@@ -1754,7 +2042,7 @@ impl FileViewer {
 
     /// A zoom key: from what the view shows now (a pinch included), one step. False for kinds that do not zoom.
     pub fn zoom_key(&self, k: zoom::Key) -> bool {
-        let Some(r) = zoom_range(&self.kind()) else { return false };
+        let Some(r) = self.range() else { return false };
         self.zoom_from_view(false);
         self.set_zoom(zoom::apply(self.zoom.get(), k, r))
     }
@@ -1762,7 +2050,7 @@ impl FileViewer {
     /// Zoom to `z` (within the kind's range), remember it for the file, and let the island follow the height.
     pub fn set_zoom(&self, z: f64) -> bool {
         let kind = self.kind();
-        let Some(r) = zoom_range(&kind) else { return false };
+        let Some(r) = self.range() else { return false };
         self.zoom.set(r.clamp(z));
         self.apply_zoom(true);
         self.remember_zoom();
@@ -1820,17 +2108,112 @@ impl FileViewer {
         }
     }
 
-    /// A picture fills its scroll view at 1; zoomed, it is magnified there and pans.
+    /// A picture at 1 fits its scroll view's width (`zoom::picture_fit`): a tall one is a taller document that
+    /// scrolls from the top; zoomed in, it is magnified and pans; zoomed out, down to the whole picture.
     fn apply_image_zoom(&self, centered: bool) {
         let (Some(sv), Some(iv)) = (self.image_scroll.borrow().clone(), self.image_view.borrow().clone()) else { return };
+        let Some(doc) = sv.documentView() else { return };
         let size = sv.frame().size;
         if size.width <= 0.0 || size.height <= 0.0 {
             return;
         }
-        if iv.frame().size != size {
-            iv.setFrame(CGRect::new(CGPoint::new(0.0, 0.0), size));
+        let px = self.image_info.get().filter(|p| p.width > 0.0 && p.height > 0.0);
+        let fit = match px {
+            Some(px) => zoom::picture_fit(px.width / 2.0, px.height / 2.0, size.width, size.height),
+            None => zoom::picture_fit(0.0, 0.0, size.width, size.height),
+        };
+        let want = CGSize::new(fit.doc_w, fit.doc_h.ceil());
+        if doc.frame().size != want {
+            doc.setFrame(CGRect::new(CGPoint::new(0.0, 0.0), want));
         }
+        if iv.frame().size != want {
+            iv.setFrame(CGRect::new(CGPoint::new(0.0, 0.0), want));
+        }
+        let r = zoom::picture_range(fit.whole);
+        self.picture_min.set(r.min);
+        sv.setMinMagnification(r.min);
+        sv.setMaxMagnification(r.max);
+        self.zoom.set(r.clamp(self.zoom.get()));
         set_magnification(&sv, self.zoom.get(), centered, false);
+    }
+
+    /// The zoom range for this viewer: a picture's goes out to the whole picture (`zoom::picture_range`).
+    fn range(&self) -> Option<Range> {
+        let kind = self.kind();
+        let r = zoom_range(&kind)?;
+        Some(if matches!(kind, ViewerKind::Image) { Range { min: self.picture_min.get(), ..r } } else { r })
+    }
+
+    /// A picture's double-click at `p` (document points): at its fit, in to 2× there; zoomed, back to the fit.
+    pub fn double_click(&self, p: CGPoint) {
+        let Some(sv) = self.image_scroll.borrow().clone() else { return };
+        let Some(r) = self.range() else { return };
+        self.zoom_from_view(false);
+        self.zoom.set(r.clamp(zoom::double_click_zoom(self.zoom.get())));
+        self.zoom_applying.set(true);
+        if zoom::same(self.zoom.get(), 1.0) {
+            set_magnification(&sv, 1.0, true, false);
+        } else {
+            sv.setMagnification_centeredAtPoint(self.zoom.get(), p);
+        }
+        self.zoom_applying.set(false);
+        self.remember_zoom();
+    }
+
+    /// ⌘-scroll over the viewer (`command_scroll`; `p` in window coordinates): zooms about the pointer where the view
+    /// can (text, pictures, pages), else about the middle (PDF). True when taken: nothing under it scrolls.
+    pub fn zoom_scroll(&self, e: &NSEvent, p: CGPoint) -> bool {
+        let kind = self.kind();
+        let Some(r) = self.range() else { return false };
+        let (phase, momentum) = (e.phase(), e.momentumPhase());
+        let ended = phase.contains(objc2_app_kit::NSEventPhase::Ended) || phase.contains(objc2_app_kit::NSEventPhase::Cancelled);
+        let precise = e.hasPreciseScrollingDeltas();
+        // Momentum after the fingers lift does not keep zooming (it is hard to stop where you meant).
+        let f = if momentum.is_empty() { zoom::scroll_factor(e.scrollingDeltaY(), precise) } else { 1.0 };
+        if !zoom::same(f, 1.0) {
+            match kind {
+                ViewerKind::Image | ViewerKind::Markdown | ViewerKind::Text(_) => {
+                    let sv = if matches!(kind, ViewerKind::Image) {
+                        self.image_scroll.borrow().clone()
+                    } else {
+                        self.text_view.borrow().as_ref().and_then(|t| t.enclosingScrollView())
+                    };
+                    let Some(sv) = sv else { return false };
+                    let m = (sv.magnification() * f).clamp(sv.minMagnification(), sv.maxMagnification());
+                    let at = sv.contentView().convertPoint_fromView(p, None);
+                    sv.setMagnification_centeredAtPoint(m, at);
+                    self.zoom_from_view(false);
+                    if !matches!(kind, ViewerKind::Image) {
+                        if let Some(tv) = self.text_view.borrow().clone() {
+                            self.fit_text_width(&tv, &sv);
+                        }
+                    }
+                }
+                ViewerKind::Html => {
+                    let Some(w) = self.web.borrow().clone() else { return false };
+                    let (pz, m): (f64, f64) = unsafe { (msg_send![&*w, pageZoom], msg_send![&*w, magnification]) };
+                    let pz = if pz > 0.0 { pz } else { 1.0 };
+                    let to = r.clamp(pz * m * f) / pz;
+                    let at: CGPoint = w.convertPoint_fromView(p, None);
+                    let _: () = unsafe { msg_send![&*w, setMagnification: to, centeredAtPoint: at] };
+                    self.zoom_from_view(false);
+                }
+                ViewerKind::Pdf => {
+                    self.zoom_from_view(false);
+                    self.zoom.set(r.clamp(self.zoom.get() * f));
+                    self.apply_zoom(false);
+                }
+                _ => return false,
+            }
+        }
+        if ended || !precise {
+            self.remember_zoom();
+            // Text's island follows its height once, at the end (as after a pinch), not on every step.
+            if matches!(kind, ViewerKind::Markdown | ViewerKind::Text(_)) {
+                self.resized();
+            }
+        }
+        true
     }
 
     /// PDF: at 1 PDFView fits the page width itself (`autoScales`); zoomed, the scale is that fit times the zoom.
@@ -1883,7 +2266,7 @@ impl FileViewer {
         if self.zoom_applying.get() {
             return;
         }
-        let Some(r) = zoom_range(&self.kind()) else { return };
+        let Some(r) = self.range() else { return };
         if let Some((shown, fit)) = self.zoom_state() {
             self.zoom.set(zoom::user_zoom(shown, fit, r));
         }

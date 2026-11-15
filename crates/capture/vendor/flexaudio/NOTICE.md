@@ -4,8 +4,9 @@ Upstream: https://github.com/Studio-Sadola/flexaudio
 Revision: d3fe9bdb75fc883371757a780fb20b5efc39317a (workspace 0.5.1).
 Copyright (c) 2026 tubome / Studio Sadola. MIT license in LICENSE.
 
-The original tap, buffer, mic, process-list and common sources are retained here
-as provenance; they are not separate workspace crates or compiled unchanged.
+The original tap, buffer, mic, process-list and common sources were kept here as
+provenance, never compiled, until 14 Nov 2026; they are in git history and at the
+upstream revision above.
 Heimdall's src/macos/tap.rs and hal.rs adapt the process-tap/aggregate dictionary,
 native callback, property reads and teardown primitives. The microphone owner
 and callback-to-raw-sink pattern from flexaudio-mic is adapted to a HAL device

@@ -40,6 +40,11 @@ impl RelayCatalog {
             }
         });
     }
+    /// Whether the supervisor connected it to T3 (never in a lab run, `McpActions::lab`).
+    #[cfg(test)]
+    pub fn connected(&self) -> bool {
+        self.source.lock().unwrap().is_some()
+    }
     #[cfg(test)]
     pub fn set(&self, models: Vec<ui::RelayModel>, accounts: Vec<ui::RelayAccount>) {
         *self.lists.lock().unwrap() = (models, accounts);

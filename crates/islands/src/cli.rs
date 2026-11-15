@@ -1,5 +1,5 @@
-//! The `islands` command: writes the island files the app watches (Swift: `islands/Sources/islands/main.swift`).
-//! Every command prints one short line; the output, exit codes and files match the Swift CLI's.
+//! The `islands` command: writes the island files the app watches.
+//! Every command prints one short line.
 
 mod plan;
 mod put;

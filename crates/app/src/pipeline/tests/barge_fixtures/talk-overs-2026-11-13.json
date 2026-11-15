@@ -1,0 +1,761 @@
+{
+"source": "Heimdall archive barge_in evidence, 12-13 Nov 2026 (window scores only)",
+"talk_overs": [
+{
+"mic": "Shure MV7i",
+"output": "headphones",
+"windows": [
+[
+0.571,
+0.332
+],
+[
+0.586,
+0.248
+],
+[
+0.651,
+0.251
+],
+[
+0.631,
+0.238
+]
+],
+"outcome": "stopped",
+"reason": "user_voice"
+},
+{
+"mic": "Shure MV7i",
+"output": "headphones",
+"windows": [
+[
+0.206,
+0.243
+]
+],
+"outcome": "heimdall_finished",
+"reason": null
+},
+{
+"mic": "Shure MV7i",
+"output": "headphones",
+"windows": [
+[
+0.637,
+0.321
+],
+[
+0.566,
+0.232
+]
+],
+"outcome": "continued",
+"reason": "quiet"
+},
+{
+"mic": "Shure MV7i",
+"output": "headphones",
+"windows": [
+[
+0.521,
+0.264
+],
+[
+0.506,
+0.259
+],
+[
+0.496,
+0.208
+]
+],
+"outcome": "continued",
+"reason": "voice_other"
+},
+{
+"mic": "Shure MV7i",
+"output": "headphones",
+"windows": [
+[
+0.395,
+0.276
+],
+[
+0.56,
+0.265
+],
+[
+0.617,
+0.281
+],
+[
+0.615,
+0.252
+]
+],
+"outcome": "stopped",
+"reason": "user_voice"
+},
+{
+"mic": "Shure MV7i",
+"output": "speakers",
+"windows": [
+[
+0.156,
+0.685
+],
+[
+0.184,
+0.676
+],
+[
+0.202,
+0.797
+],
+[
+0.239,
+0.785
+],
+[
+0.199,
+0.766
+],
+[
+0.221,
+0.746
+]
+],
+"outcome": "heimdall_finished",
+"reason": null
+},
+{
+"mic": "Shure MV7i",
+"output": "headphones",
+"windows": [
+[
+0.108,
+0.176
+],
+[
+0.142,
+0.22
+],
+[
+0.166,
+0.232
+]
+],
+"outcome": "continued",
+"reason": "voice_other"
+},
+{
+"mic": "Shure MV7i",
+"output": "headphones",
+"windows": [
+[
+0.7,
+0.216
+],
+[
+0.724,
+0.25
+]
+],
+"outcome": "stopped",
+"reason": "user_voice"
+},
+{
+"mic": "Shure MV7i",
+"output": "headphones",
+"windows": [
+[
+0.249,
+0.162
+],
+[
+0.376,
+0.154
+],
+[
+0.273,
+0.16
+],
+[
+0.244,
+0.186
+]
+],
+"outcome": "continued",
+"reason": "voice_other"
+},
+{
+"mic": "Shure MV7i",
+"output": "headphones",
+"windows": [
+[
+0.048,
+0.165
+],
+[
+0.084,
+0.157
+],
+[
+0.105,
+0.155
+]
+],
+"outcome": "continued",
+"reason": "voice_other"
+},
+{
+"mic": "Shure MV7i",
+"output": "headphones",
+"windows": [
+[
+0.105,
+0.126
+],
+[
+0.22,
+0.212
+]
+],
+"outcome": "continued",
+"reason": "voice_other"
+},
+{
+"mic": "Shure MV7i",
+"output": "headphones",
+"windows": [
+[
+0.057,
+0.162
+],
+[
+0.045,
+0.075
+],
+[
+0.004,
+0.113
+],
+[
+0.022,
+0.173
+]
+],
+"outcome": "continued",
+"reason": "voice_other"
+},
+{
+"mic": "Shure MV7i",
+"output": "headphones",
+"windows": [
+[
+0.756,
+0.294
+]
+],
+"outcome": "heimdall_finished",
+"reason": null
+},
+{
+"mic": "Shure MV7i",
+"output": "headphones",
+"windows": [
+[
+0.531,
+0.248
+],
+[
+0.118,
+0.311
+]
+],
+"outcome": "continued",
+"reason": "voice_other"
+},
+{
+"mic": "Shure MV7i",
+"output": "headphones",
+"windows": [
+[
+0.386,
+0.376
+],
+[
+0.691,
+0.145
+],
+[
+0.656,
+0.107
+]
+],
+"outcome": "stopped",
+"reason": "user_voice"
+},
+{
+"mic": "Shure MV7i",
+"output": "headphones",
+"windows": [
+[
+0.572,
+0.277
+],
+[
+0.649,
+0.246
+],
+[
+0.669,
+0.236
+]
+],
+"outcome": "stopped",
+"reason": "user_voice"
+},
+{
+"mic": "Shure MV7i",
+"output": "headphones",
+"windows": [
+[
+0.664,
+0.195
+],
+[
+0.732,
+0.198
+]
+],
+"outcome": "stopped",
+"reason": "user_voice"
+},
+{
+"mic": "Shure MV7i",
+"output": "headphones",
+"windows": [
+[
+0.656,
+0.199
+],
+[
+0.738,
+0.274
+]
+],
+"outcome": "stopped",
+"reason": "user_voice"
+},
+{
+"mic": "Shure MV7i",
+"output": "headphones",
+"windows": [
+[
+0.709,
+0.265
+],
+[
+0.745,
+0.264
+]
+],
+"outcome": "stopped",
+"reason": "user_voice"
+},
+{
+"mic": "Shure MV7i",
+"output": "headphones",
+"windows": [
+[
+0.106,
+0.258
+]
+],
+"outcome": "continued",
+"reason": "voice_other"
+},
+{
+"mic": "Shure MV7i",
+"output": "headphones",
+"windows": [
+[
+0.68,
+0.224
+],
+[
+0.721,
+0.215
+]
+],
+"outcome": "stopped",
+"reason": "user_voice"
+},
+{
+"mic": "AirPods Pro",
+"output": "headphones",
+"windows": [
+[
+0.195,
+0.116
+],
+[
+0.457,
+0.174
+],
+[
+0.548,
+0.198
+],
+[
+0.506,
+0.261
+],
+[
+0.609,
+0.205
+],
+[
+0.596,
+0.161
+],
+[
+0.491,
+0.099
+],
+[
+0.424,
+0.068
+],
+[
+0.433,
+0.086
+],
+[
+0.217,
+0.077
+]
+],
+"outcome": "continued",
+"reason": "voice_other"
+},
+{
+"mic": "AirPods Pro",
+"output": "headphones",
+"windows": [
+[
+0.532,
+0.292
+]
+],
+"outcome": "continued",
+"reason": "voice_other"
+},
+{
+"mic": "AirPods Pro",
+"output": "headphones",
+"windows": [
+[
+0.704,
+0.173
+],
+[
+0.764,
+0.187
+]
+],
+"outcome": "stopped",
+"reason": "user_voice"
+},
+{
+"mic": "AirPods Pro",
+"output": "headphones",
+"windows": [
+[
+0.535,
+0.297
+],
+[
+0.632,
+0.23
+],
+[
+0.75,
+0.234
+]
+],
+"outcome": "stopped",
+"reason": "user_voice"
+},
+{
+"mic": "AirPods Pro",
+"output": "headphones",
+"windows": [
+[
+0.602,
+0.199
+],
+[
+0.602,
+0.178
+]
+],
+"outcome": "stopped",
+"reason": "user_voice"
+},
+{
+"mic": "AirPods Pro",
+"output": "headphones",
+"windows": [
+[
+0.488,
+0.356
+],
+[
+0.573,
+0.221
+],
+[
+0.613,
+0.306
+],
+[
+0.674,
+0.273
+]
+],
+"outcome": "stopped",
+"reason": "user_voice"
+},
+{
+"mic": "AirPods Pro",
+"output": "headphones",
+"windows": [
+[
+0.671,
+0.236
+],
+[
+0.78,
+0.222
+]
+],
+"outcome": "stopped",
+"reason": "user_voice"
+},
+{
+"mic": "AirPods Pro",
+"output": "headphones",
+"windows": [
+[
+0.706,
+0.176
+],
+[
+0.781,
+0.21
+]
+],
+"outcome": "stopped",
+"reason": "user_voice"
+},
+{
+"mic": "AirPods Pro",
+"output": "headphones",
+"windows": [
+[
+0.562,
+0.394
+],
+[
+0.692,
+0.208
+],
+[
+0.75,
+0.224
+]
+],
+"outcome": "stopped",
+"reason": "user_voice"
+},
+{
+"mic": "AirPods Pro",
+"output": "headphones",
+"windows": [
+[
+0.564,
+0.214
+],
+[
+0.688,
+0.282
+],
+[
+0.711,
+0.281
+]
+],
+"outcome": "stopped",
+"reason": "user_voice"
+},
+{
+"mic": "AirPods Pro",
+"output": "headphones",
+"windows": [
+[
+0.626,
+0.239
+],
+[
+0.727,
+0.134
+]
+],
+"outcome": "stopped",
+"reason": "user_voice"
+},
+{
+"mic": "AirPods Pro",
+"output": "headphones",
+"windows": [
+[
+0.206,
+0.151
+]
+],
+"outcome": "heimdall_finished",
+"reason": null
+},
+{
+"mic": "Shure MV7i",
+"output": "speakers",
+"windows": [
+[
+0.189,
+0.685
+]
+],
+"outcome": "continued",
+"reason": "quiet"
+},
+{
+"mic": "Shure MV7i",
+"output": "speakers",
+"windows": [
+[
+0.215,
+0.635
+],
+[
+0.157,
+0.61
+]
+],
+"outcome": "continued",
+"reason": "quiet"
+},
+{
+"mic": "Shure MV7i",
+"output": "speakers",
+"windows": [
+[
+0.122,
+0.659
+],
+[
+0.194,
+0.719
+]
+],
+"outcome": "continued",
+"reason": "quiet"
+},
+{
+"mic": "Shure MV7i",
+"output": "speakers",
+"windows": [
+[
+0.738,
+0.364
+],
+[
+0.707,
+0.311
+]
+],
+"outcome": "stopped",
+"reason": "user_voice"
+},
+{
+"mic": "Shure MV7i",
+"output": "speakers",
+"windows": [
+[
+0.26,
+0.662
+],
+[
+0.219,
+0.717
+],
+[
+0.143,
+0.677
+],
+[
+0.306,
+0.685
+],
+[
+0.749,
+0.24
+],
+[
+0.781,
+0.273
+]
+],
+"outcome": "stopped",
+"reason": "user_voice"
+},
+{
+"mic": "Shure MV7i",
+"output": "headphones",
+"windows": [
+[
+0.587,
+0.161
+],
+[
+0.647,
+0.183
+],
+[
+0.663,
+0.179
+]
+],
+"outcome": "stopped",
+"reason": "user_voice"
+},
+{
+"mic": "Shure MV7i",
+"output": "headphones",
+"windows": [
+[
+0.631,
+0.293
+],
+[
+0.769,
+0.288
+]
+],
+"outcome": "stopped",
+"reason": "user_voice"
+}
+]
+}

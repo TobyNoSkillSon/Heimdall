@@ -1,24 +1,19 @@
 //! Local diarization, voice identity and passive name suggestions. No permission requests.
 mod artifacts;
-pub mod ax;
 pub mod call;
 pub mod codec;
-#[cfg(target_os = "macos")]
-mod coreml;
 pub mod diar;
 pub mod embedding;
+// Shared with speak; its command-buffer helpers and `Recovery::retry_now` serve speak's own Metal encoders.
+#[allow(dead_code)]
 #[path = "../../speak/src/gpu_recovery.rs"]
 pub mod gpu_recovery;
 pub mod identity;
-pub mod live;
 #[cfg(target_os = "macos")]
 pub mod metal;
 pub mod naming;
-pub mod online;
 pub mod pipeline;
 pub mod scoring;
-#[cfg(target_os = "macos")]
-pub mod sortformer;
 
 #[cfg(not(target_os = "macos"))]
 mod native_fault_hooks {

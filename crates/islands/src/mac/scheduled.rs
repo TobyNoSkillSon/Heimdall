@@ -344,12 +344,12 @@ pub fn next_change(raw: &crate::model::Json, now: f64, cal: &Cal) -> Option<f64>
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::jobj;
 
-    #[test]
-    fn scheduled_draws_the_guarantee_the_strip_and_a_ghost_in_its_place() {
+    /// Run by `mac::tests::appkit_renders`, in one process with the other AppKit renders (TST-11).
+    pub(crate) fn scheduled_draws_the_guarantee_the_strip_and_a_ghost_in_its_place() {
         let now = time::now();
         let cal = Cal::current();
         let island = Island::new("scheduled", jobj! {"preset": "todo", "list": "scheduled",
@@ -367,8 +367,8 @@ mod tests {
         assert!(next_change(&island.raw, now, &cal).is_some_and(|t| t > now && t <= now + 60.0));
     }
 
-    #[test]
-    fn a_waiting_item_offers_its_choices_and_nothing_promised_says_so() {
+    /// Run by `mac::tests::appkit_renders`, in one process with the other AppKit renders (TST-11).
+    pub(crate) fn a_waiting_item_offers_its_choices_and_nothing_promised_says_so() {
         let now = time::now();
         let cal = Cal::current();
         let island = Island::new("scheduled", jobj! {"preset": "todo", "list": "scheduled",

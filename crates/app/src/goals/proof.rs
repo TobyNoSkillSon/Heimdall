@@ -54,11 +54,11 @@ fn window(entry: &str, quote: &str) -> String {
     }
 }
 
-/// The commit is in one of the project repositories under ~/Projects (read-only `git cat-file`).
+/// The commit is in one of the project repositories under Heimdall's home folder (`<home>/Projects`; the owner's home is
+/// `~/Vault`, docs/home.md), read-only `git cat-file`.
 pub fn commit_exists(sha: &str) -> bool {
     if sha.len() < 7 || !sha.chars().all(|c| c.is_ascii_hexdigit()) { return false }
-    let Some(home) = std::env::var_os("HOME") else { return false };
-    let projects = std::path::Path::new(&home).join("Projects");
+    let projects = heimdall_home::home_dir().join("Projects");
     let Ok(dirs) = std::fs::read_dir(&projects) else { return false };
     dirs.flatten().map(|e| e.path()).filter(|p| p.join(".git").is_dir()).take(80).any(|repo| {
         std::process::Command::new("git").arg("-C").arg(&repo).args(["cat-file", "-e", &format!("{sha}^{{commit}}")])
@@ -69,7 +69,7 @@ pub fn commit_exists(sha: &str) -> bool {
 /// The user's own words as the proof of a decision, with the time he said them.
 pub fn quote(q: &str, at: i64) -> Value {
     let when = chrono::DateTime::from_timestamp(at, 0).map(|d| d.with_timezone(&chrono::Local).format("%a %H:%M").to_string()).unwrap_or_default();
-    json!({"kind": "quote", "value": crate::goals::ops::cap(q, 200), "label": format!("User, {when}"), "at": at})
+    json!({"kind": "quote", "value": crate::goals::ops::cap(q, 200), "label": format!("{}, {when}", crate::islands::files::user_cap()), "at": at})
 }
 
 fn tokens(text: &str) -> Vec<&str> {
@@ -152,6 +152,15 @@ fn file(text: &str, at: Option<i64>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Cleanup 14 Nov (ISL-5): a quote's label in Settled names the user as Personalise sets it.
+    #[test]
+    fn a_quotes_label_names_the_configured_user() {
+        let label = |name: &str| crate::islands::files::with_user(name, || quote("ship it", 0)["label"].as_str().unwrap().to_owned());
+        assert!(label("Ada").starts_with("Ada, "), "{}", label("Ada"));
+        assert!(label("").starts_with("The user, "), "{}", label(""));
+        assert!(label("User").starts_with("The user, "), "the unchosen label reads as the user");
+    }
 
     #[test]
     fn a_commit_needs_its_word_and_a_hash_that_looks_like_one() {

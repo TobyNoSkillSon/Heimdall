@@ -70,7 +70,7 @@ impl Pipeline {
 
     /// Whether the user is dictating to Vella now, on this source (his microphone).
     pub(super) fn vella_dictating(&mut self, source: &str) -> bool {
-        if !self.owner(source) {
+        if !self.user_source(source) {
             return false;
         }
         self.vella_tick();
@@ -80,7 +80,7 @@ impl Pipeline {
     /// Whether these words (or, without words, `start..end`) on his microphone were dictated to Vella: dictation covers
     /// at least half of them.
     pub(super) fn vella_dictated(&mut self, source: &str, words: &[Word], start: u64, end: u64) -> bool {
-        if !self.owner(source) {
+        if !self.user_source(source) {
             return false;
         }
         self.vella_tick();
@@ -95,7 +95,7 @@ impl Pipeline {
     /// Whether a span on his microphone (a command phrase, `start..end`) was dictated: dictation covers half of it, or
     /// the instant itself when `end <= start`.
     pub(super) fn vella_span_dictated(&mut self, source: &str, start: u64, end: u64) -> bool {
-        if !self.owner(source) {
+        if !self.user_source(source) {
             return false;
         }
         self.vella_tick();
@@ -107,7 +107,7 @@ impl Pipeline {
     /// words outside it, which alone may trigger anything, and the line with the dictated runs marked for the agent.
     /// `None` when no word is dictated: everything is as it was.
     pub(super) fn vella_split(&mut self, source: &str, words: &[Word]) -> Option<VellaSplit> {
-        if !self.owner(source) || words.is_empty() {
+        if !self.user_source(source) || words.is_empty() {
             return None;
         }
         self.vella_tick();
@@ -170,7 +170,7 @@ impl Pipeline {
     /// A dictated final: archived as usual with its own status, given to the agent as context (`Command::Observe` and
     /// the conversation's pending text, marked), never decided on and never a wake.
     pub(super) fn give_dictated(&mut self, final_: AgentFinal) -> Result<()> {
-        if self.archive_heard_twice(&final_)? {
+        if self.archive_heard_twice(&final_, false)? {
             return Ok(());
         }
         let AgentFinal { audio_error, observation, source, start, end: end_ns, words, notes, .. } = final_;

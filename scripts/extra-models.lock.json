@@ -2,5 +2,21 @@
   {
     "path": "night/model.int8.onnx",
     "sha256": "1776c854784a2400feb7582ac4e9f922073cd706cb4fd216c98abad937d642b1"
+  },
+  {
+    "path": "qwen3-reranker-0.6b/config.json",
+    "sha256": "d479c427a9ca5295218063d4f9aca4f297ab4ac27487cca7af42c84643d51ef0"
+  },
+  {
+    "path": "qwen3-reranker-0.6b/model.safetensors",
+    "sha256": "27cd75a405b9c1b46b59abfd88aaa209e6fed2a1972cde9b70e7659537c5e65b"
+  },
+  {
+    "path": "qwen3-reranker-0.6b/tokenizer.json",
+    "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+  },
+  {
+    "path": "qwen3-reranker-0.6b/tokenizer_config.json",
+    "sha256": "253153d0738ceb4c668d2eff957714dd2bea0b56de772a9fdccd96cbf517e6a0"
   }
 ]

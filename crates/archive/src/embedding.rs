@@ -55,6 +55,17 @@ impl std::fmt::Display for Deferred {
 }
 impl std::error::Error for Deferred {}
 pub fn deferred(error:&anyhow::Error) -> bool {error.chain().any(|e|e.is::<Deferred>())}
+/// Free memory the worker needs to load, in GiB (`Worker.swift`'s `admissionBytes`; it exits 75 when short).
+pub const ADMISSION_GIB: u64 = 6;
+/// The worker's exit code for "too little free memory to load" (EX_TEMPFAIL).
+const LOW_MEMORY_EXIT: i32 = 75;
+/// The words a refusal to load for memory carries (the worker's own, kept for `memory_refusal` matchers).
+pub fn low_memory_refusal() -> String {
+    format!("EmbeddingGemma 2: embedding admission needs {ADMISSION_GIB} GiB free (memory search paused for low memory)")
+}
+/// Meaning search is paused for memory: the worker refused to load, or a loaded worker paused a request
+/// (low free memory, swap growth or its footprint bound).
+pub fn memory_paused(cause:&str) -> bool {cause.contains("admission needs") || cause.contains("embedding paused")}
 /// A fresh worker's self-test and weight load, counted from its spawn. Until it has answered
 /// once it is starting: a caller's cancel drops only that request, never the process.
 const STARTUP: Duration = Duration::from_secs(240);
@@ -85,9 +96,10 @@ impl Input {
 /// Caller owns `destination` for exactly the lifetime of the helper request/benchmark.
 /// Audio clips preserve every disjoint captured interval, never fill missing callbacks.
 pub fn prepare_chunk(root:&Path,c:&Chunk,destination:&Path) -> Result<Vec<Input>> {
-    prepare_chunk_while(root,c,destination,&mut ||true)
+    prepare_chunk_while(root,c,destination,&mut crate::video::Frames::default(),&mut ||true)
 }
-fn prepare_chunk_while(root:&Path,c:&Chunk,destination:&Path,more:&mut dyn FnMut()->bool) -> Result<Vec<Input>> {
+/// `frames` is shared by the chunks of one job: their screen frames decode forward through each epoch once.
+fn prepare_chunk_while(root:&Path,c:&Chunk,destination:&Path,frames:&mut crate::video::Frames,more:&mut dyn FnMut()->bool) -> Result<Vec<Input>> {
     ensure!(more(),"embedding media preparation cancelled");
     crate::private_dir(destination)?;
     let db=store::open(root)?;
@@ -169,15 +181,22 @@ fn prepare_chunk_while(root:&Path,c:&Chunk,destination:&Path,more:&mut dyn FnMut
         std::fs::write(&path,bytes)?;
         input.parts.push(Part::Image{path});
     }
+    // Parts keep the references' order; frames decode in time order within each epoch (`video::Frames`).
+    let mut wanted=vec![];
     for (i,reference) in video_frames.iter().enumerate() {
-        ensure!(more(),"embedding media preparation cancelled");
         let reference:Value=serde_json::from_str(reference).context("video frame reference")?;
         let segment=reference["segment"].as_i64().context("video segment reference")?;
         let host=reference["host_ns"].as_u64().context("video frame clock")?;
-        let path=destination.join(format!("video-frame-{i}.png"));
-        crate::video::representative_png(root,c.session,segment,host,&path,more)?;
-        input.parts.push(Part::Image{path});
+        wanted.push((segment,host,destination.join(format!("video-frame-{i}.png"))));
     }
+    let mut order:Vec<usize>=(0..wanted.len()).collect();
+    order.sort_by_key(|&i|(wanted[i].0,wanted[i].1));
+    for i in order {
+        ensure!(more(),"embedding media preparation cancelled");
+        let (segment,host,path)=&wanted[i];
+        frames.png(root,c.session,*segment,*host,path,more)?;
+    }
+    input.parts.extend(wanted.into_iter().map(|(_,_,path)|Part::Image{path}));
     let mut audio_index=0;
     if !spans.is_empty() {
         let name:String=db.query_row("SELECT name FROM main.sessions WHERE id=?1",[c.session],|r|r.get(0))?;
@@ -301,6 +320,18 @@ struct Process {
     child:Child,
     stdin:ChildStdin,
     replies:mpsc::Receiver<Result<Value,Fault>>,
+    /// The worker's refusal to load for memory, as its stderr worded it (`stderr_lines`).
+    refused:Arc<std::sync::Mutex<Option<String>>>,
+    stderr:Option<std::thread::JoinHandle<()>>,
+}
+/// The worker's stderr, passed on line by line to Heimdall's own (it used to be inherited), noting a refusal to
+/// load for memory: a helper built before exit code 75 says so only there.
+fn stderr_lines(stderr:std::process::ChildStderr,refused:Arc<std::sync::Mutex<Option<String>>>) {
+    for line in BufReader::new(stderr).lines() {
+        let Ok(line)=line else {break};
+        if line.contains("embedding admission needs") {*refused.lock().unwrap()=Some(line.trim().to_owned());}
+        eprintln!("{line}");
+    }
 }
 impl Drop for Process {fn drop(&mut self) {let _=self.child.kill();let _=self.child.wait();}}
 /// How a request ended, which decides whether the process survives.
@@ -439,15 +470,34 @@ impl MlxEmbedder {
     /// segfault). An orderly exit, such as the start-up memory refusal, is not.
     fn died_by_signal(&mut self) -> bool {
         use std::os::unix::process::ExitStatusExt;
-        let Some(p)=self.process.as_mut() else {return false;};
+        self.exit_status().is_some_and(|s|s.signal().is_some())
+    }
+    /// After the worker exited: its refusal to load for memory, if it gave one (exit 75, or the words on stderr from a
+    /// helper built before 75). Waits up to half a second for the stderr reader to reach the end.
+    fn refusal(&mut self,status:Option<std::process::ExitStatus>) -> Option<String> {
+        let p=self.process.as_mut()?;
+        let started=Instant::now();
+        while p.stderr.as_ref().is_some_and(|t|!t.is_finished()) && started.elapsed()<Duration::from_millis(500) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let line=p.refused.lock().unwrap().clone();
+        match (line,status.and_then(|s|s.code())) {
+            (Some(line),_)=>Some(format!("{line} (memory search paused for low memory)")),
+            (None,Some(LOW_MEMORY_EXIT))=>Some(low_memory_refusal()),
+            _=>None,
+        }
+    }
+    /// The closed worker's exit status, waiting up to a second for it.
+    fn exit_status(&mut self) -> Option<std::process::ExitStatus> {
+        let p=self.process.as_mut()?;
         for _ in 0..100 {
             match p.child.try_wait() {
-                Ok(Some(status))=>return status.signal().is_some(),
+                Ok(Some(status))=>return Some(status),
                 Ok(None)=>std::thread::sleep(Duration::from_millis(10)),
-                Err(_)=>return false,
+                Err(_)=>return None,
             }
         }
-        false
+        None
     }
     fn start(&mut self) -> Result<()> {
         if self.process.is_some() {return Ok(());}
@@ -465,9 +515,13 @@ impl MlxEmbedder {
             }
         }
         if self.crashes.safe {command.env("HEIMDALL_EMBED_SAFE","1");}
-        let mut child=command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn().context("start offline embedding worker")?;
+        let mut child=command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().context("start offline embedding worker")?;
         let stdin=child.stdin.take().context("worker stdin")?;
         let stdout=child.stdout.take().context("worker stdout")?;
+        let refused=Arc::new(std::sync::Mutex::new(None));
+        let stderr=child.stderr.take().context("worker stderr")?;
+        let seen=refused.clone();
+        let stderr=Some(std::thread::Builder::new().name("embedding-stderr".into()).spawn(move||stderr_lines(stderr,seen))?);
         let (tx,replies)=mpsc::sync_channel(1);
         std::thread::Builder::new().name("embedding-replies".into()).spawn(move|| {
             let mut reader=BufReader::new(stdout);
@@ -484,7 +538,7 @@ impl MlxEmbedder {
         })?;
         self.pid.store(child.id() as i32,Ordering::SeqCst);
         self.fresh=true;self.spawned=Instant::now();self.abandoned.clear();
-        self.process=Some(Process{child,stdin,replies});Ok(())
+        self.process=Some(Process{child,stdin,replies,refused,stderr});Ok(())
     }
     /// One request/reply. Only crashes, timeouts, protocol faults and cancellations of a started
     /// worker end the process; a reply carrying `error` leaves the worker resident. A cancel
@@ -541,8 +595,14 @@ impl MlxEmbedder {
             Err(Failure::Drop(e))=>{self.stop();Err(e)},
             Err(Failure::Abandon(e))=>{self.abandoned.push_back((id,base));Err(e)},
             Err(Failure::Crash(e))=>{
-                let signal=self.died_by_signal();
-                self.stop();self.last_crash=true;
+                use std::os::unix::process::ExitStatusExt;
+                let status=self.exit_status();
+                let signal=status.is_some_and(|s|s.signal().is_some());
+                let refusal=if signal {None} else {self.refusal(status)};
+                self.stop();
+                // Too little free memory to load: no crash, and the caller hears why instead of "disconnected".
+                if let Some(refusal)=refusal {return Err(anyhow::anyhow!(refusal));}
+                self.last_crash=true;
                 if signal && self.count_crashes {self.crashed();}
                 Err(e)
             },
@@ -653,7 +713,7 @@ impl Embedder for MlxEmbedder {
         let started=Instant::now();
         let result=(|| {
             let temp=tempfile::tempdir()?;
-            let inputs=prepare_chunk_while(root,c,temp.path(),more)?;
+            let inputs=prepare_chunk_while(root,c,temp.path(),&mut crate::video::Frames::default(),more)?;
             self.single(&inputs,true,more)
         })();
         let results=vec![result];self.account(std::slice::from_ref(c),&results,started);
@@ -662,13 +722,16 @@ impl Embedder for MlxEmbedder {
     fn batch_size(&self,kind:&str) -> usize {batch_size(kind)}
     fn embed_many_while(&mut self,root:&Path,chunks:&[Chunk],more:&mut dyn FnMut()->bool) -> Vec<Result<Vec<f32>>> {
         let started=Instant::now();
-        // Each chunk owns its media directory until the request returns.
+        // Each chunk owns its media directory until the request returns. A group runs newest first
+        // (`timeline::embed_selected`); preparing it oldest first lets its screen frames share one forward decode.
         let mut temps=vec![];
-        let items=chunks.iter().map(|c| {
+        let mut frames=crate::video::Frames::default();
+        let mut items:Vec<Result<Vec<Input>>>=chunks.iter().rev().map(|c| {
             let temp=tempfile::tempdir()?;
-            let inputs=prepare_chunk_while(root,c,temp.path(),more);
+            let inputs=prepare_chunk_while(root,c,temp.path(),&mut frames,more);
             temps.push(temp);inputs
         }).collect();
+        items.reverse();
         let results=self.embed_inputs_many(items,more);
         drop(temps);
         self.account(chunks,&results,started);
@@ -729,6 +792,14 @@ impl Service {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The host's words and the worker's floor stay the same number (Setup's row and the tool's notice quote it).
+    #[test]
+    fn the_admission_floor_matches_the_worker() {
+        let swift=include_str!("../embedding/native/Sources/EmbeddingWorker/Worker.swift");
+        assert!(swift.contains(&format!("static let admissionBytes: UInt64 = {ADMISSION_GIB} << 30")));
+        assert!(swift.contains("? 75 : 1)") && LOW_MEMORY_EXIT==75);
+        assert!(memory_paused(&low_memory_refusal()));
+    }
     #[test]
     fn oversized_single_audio_block_splits_without_losing_samples_or_tail() -> Result<()> {
         let t=tempfile::tempdir()?;

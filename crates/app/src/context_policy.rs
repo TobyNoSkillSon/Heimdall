@@ -27,7 +27,7 @@ pub fn is_call(source: &SourceInfo) -> bool {
     }
 }
 pub fn agent_context(source: &SourceInfo) -> bool {
-    matches!(source.kind, SourceKind::InputDevice { .. }) || is_call(source)
+    matches!(source.kind, SourceKind::InputDevice { .. } | SourceKind::Phone { .. }) || is_call(source)
 }
 #[cfg(test)]
 mod tests {

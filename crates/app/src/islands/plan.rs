@@ -6,7 +6,7 @@
 //! back. Contract: `docs/archive/briefs/night-1022-islands.md`, `docs/goals.md`.
 
 use super::files::Root;
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use serde_json::{json, Map, Value};
 
 /// The three lists: island id (also the `list` key), title, dock order.
@@ -58,106 +58,149 @@ pub fn unique_id(title: &str, taken: &[Map<String, Value>]) -> String {
     (2..).map(|n| format!("{base}-{n}")).find(|c| !used(c)).unwrap()
 }
 
-/// Where an item is: list id and index.
-#[derive(Debug)]
-pub struct Found { pub list: &'static str, pub index: usize, pub item: Map<String, Value> }
+/// What a reference names: an item of a list (in Goals: an ask), a goal, or a step under a goal (bug note
+/// 2026-11-06T11-42-43: `plan_edit` tick and remove refused goal ids and step ids, so stale steps stayed on screen).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Kind { Item, Goal, Task { goal: String } }
 
-/// Find an item by id, then exact title, then a unique case-insensitive title match, across the three lists (in
-/// Goals: its asks).
+/// Where an item is: list id, index (in its list's items, Goals' goals, or its goal's tasks) and what it is.
+#[derive(Debug)]
+pub struct Found { pub list: &'static str, pub index: usize, pub item: Map<String, Value>, pub kind: Kind }
+
+/// Find an item by id, then exact title, then a unique case-insensitive title fragment, across the three lists: their
+/// items (in Goals: its asks), Goals' goals and their steps. A fragment never matches a finished goal or step (they
+/// are the memory, and would make every fragment ambiguous).
 pub fn find(root: &Root, reference: &str) -> Result<Found> {
-    let all: Vec<(&'static str, Vec<Map<String, Value>>)> =
-        LISTS.iter().map(|l| (l.0, root.read(l.0).map(|o| items(&o)).unwrap_or_default())).collect();
+    let mut all: Vec<Found> = Vec::new();
+    for l in LISTS {
+        for (k, i) in root.read(l.0).map(|o| items(&o)).unwrap_or_default().into_iter().enumerate() {
+            all.push(Found { list: l.0, index: k, item: i, kind: Kind::Item });
+        }
+    }
+    let goals = crate::goals::ops::current(root, "goals").and_then(|o| o.get("goals").and_then(Value::as_array).cloned()).unwrap_or_default();
+    for (k, g) in goals.iter().enumerate() {
+        let Some(g) = g.as_object() else { continue };
+        let gid = g.get("id").and_then(Value::as_str).unwrap_or("").to_owned();
+        all.push(Found { list: "goals", index: k, item: g.clone(), kind: Kind::Goal });
+        for (n, t) in g.get("tasks").and_then(Value::as_array).into_iter().flatten().enumerate() {
+            let Some(t) = t.as_object() else { continue };
+            all.push(Found { list: "goals", index: n, item: t.clone(), kind: Kind::Task { goal: gid.clone() } });
+        }
+    }
     let title = |i: &Map<String, Value>| i.get("title").and_then(Value::as_str).unwrap_or("").to_string();
+    let finished = |f: &Found| f.kind != Kind::Item && f.item.get("state").and_then(Value::as_str) == Some("done");
     for pass in 0..3 {
-        let mut hits = Vec::new();
-        for (list, its) in &all {
-            for (k, i) in its.iter().enumerate() {
-                let hit = match pass {
-                    0 => i.get("id").and_then(Value::as_str) == Some(reference),
-                    1 => title(i) == reference,
-                    _ => title(i).to_lowercase().contains(&reference.to_lowercase()),
-                };
-                if hit { hits.push(Found { list, index: k, item: i.clone() }) }
-            }
+        let mut hits: Vec<usize> = Vec::new();
+        for (k, f) in all.iter().enumerate() {
+            let hit = match pass {
+                0 => f.item.get("id").and_then(Value::as_str) == Some(reference),
+                1 => title(&f.item) == reference,
+                _ => !finished(f) && title(&f.item).to_lowercase().contains(&reference.to_lowercase()),
+            };
+            if hit { hits.push(k) }
         }
         match hits.len() {
             0 => continue,
-            1 => return Ok(hits.pop().unwrap()),
-            _ if pass == 2 => bail!("several plan items match '{reference}'; use its exact title"),
-            _ => return Ok(hits.remove(0)),
+            1 => return Ok(all.swap_remove(hits[0])),
+            _ if pass == 2 => bail!("several plan items match '{reference}'; use its exact title or id"),
+            _ => return Ok(all.swap_remove(hits[0])),
         }
     }
-    bail!("no item '{reference}' in Goals' asks, Scheduled or Settled")
+    bail!("no item '{reference}' in Goals (asks, goals, steps), Scheduled or Settled; {}", closest(&all, reference))
 }
 
-/// True when a plan island on disk predates the night-1022 shape: no `preset: "todo"` or `list` key, or items
-/// that are plain strings or lack an id (the user's Settled list before night 1022 was nine plain strings).
-pub fn needs_migration(list: &str, o: &Map<String, Value>) -> bool {
-    o.get("preset").and_then(Value::as_str) != Some("todo")
-        || o.get("list").and_then(Value::as_str) != Some(list)
-        || o.get("items").and_then(Value::as_array).into_iter().flatten()
-            .any(|v| v.get("id").and_then(Value::as_str).is_none_or(str::is_empty))
+// "no item" names the closest items and their ids (proposal 6: 11 such failures in two weeks, each followed by a show
+// or a guess).
+/// The three items whose titles share the most words with `reference`, as "'Title' (id)", or where to look.
+fn closest(all: &[Found], reference: &str) -> String {
+    let words = |s: &str| s.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|w| w.chars().count() >= 3 && !["and", "the", "for", "with", "from", "into", "then", "plus", "this", "that"].contains(w)).map(str::to_owned).collect::<std::collections::HashSet<_>>();
+    let want = words(reference);
+    let mut scored: Vec<(usize, bool, String)> = all.iter().filter_map(|f| {
+        let title = f.item.get("title").and_then(Value::as_str).unwrap_or("");
+        let shared = words(title).intersection(&want).count();
+        let id = f.item.get("id").and_then(Value::as_str).unwrap_or("");
+        let done = f.item.get("state").and_then(Value::as_str) == Some("done") || f.item.get("done").and_then(Value::as_bool) == Some(true);
+        (shared > 0 && !title.is_empty()).then(|| (shared, done, if id.is_empty() { format!("'{title}'") } else { format!("'{title}' ({id})") }))
+    }).collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    scored.dedup_by(|a, b| a.2 == b.2);
+    if scored.is_empty() { return "plan_edit show lists what is there, with ids".into() }
+    format!("closest: {}; pass the id or the exact title", scored.iter().take(3).map(|x| x.2.as_str()).collect::<Vec<_>>().join(", "))
 }
+// ---- end lane T ----
 
-/// The plan shape, in place: `preset: "todo"`, `list`, and every item an object with an id (strings keep their
-/// text as the title). Every other key, and every item's text and keys, are kept.
-pub(crate) fn migrate_object(list: &str, o: &mut Map<String, Value>) {
-    o.insert("preset".into(), json!("todo"));
-    o.insert("list".into(), json!(list));
-    if o.contains_key("items") {
-        let its = items(o);
-        o.insert("items".into(), Value::Array(its.into_iter().map(Value::Object).collect()));
-    }
-}
+// ---- goals: finish, reopen, steps removed, ongoing (bug note 2026-11-06T11-42-43) ----
 
-/// Before the first migration ever writes: the whole `islands/` folder copied once to
-/// `<root>/backup-<YYYYMMDD-HHMMSS>/` (beside `islands/`, so the helper never shows it). Nothing when any
-/// `backup-*` folder exists already. Call holding the folder lock.
-pub fn backup_once(root: &Root) -> Result<Option<std::path::PathBuf>> {
-    let taken = std::fs::read_dir(&root.0).into_iter().flatten().flatten()
-        .any(|e| { let n = e.file_name().to_string_lossy().into_owned(); n.starts_with("backup-") && !n.starts_with("backup-goals-") && e.path().is_dir() });
-    if taken { return Ok(None) }
-    let dir = root.0.join(format!("backup-{}", chrono::Local::now().format("%Y%m%d-%H%M%S")));
-    std::fs::create_dir_all(&dir)?;
-    for e in std::fs::read_dir(root.islands())?.flatten() {
-        let name = e.file_name();
-        if name.to_string_lossy().starts_with('.') || !e.path().is_file() { continue }
-        std::fs::copy(e.path(), dir.join(&name))?;
-    }
-    eprintln!("islands: plan lists migrated to the night-1022 shape; the islands folder was backed up to {}", dir.display());
-    Ok(Some(dir))
-}
-
-/// Migrate the existing plan islands (`todo`, `scheduled`, `settled`, recognised by id) in place on first contact,
-/// after the one-time backup. Returns the lists rewritten.
-pub fn migrate_all(root: &Root) -> Result<Vec<&'static str>> {
-    // Cheap check first: nothing to do needs no lock.
-    if !LISTS.iter().any(|l| root.read(l.0).is_some_and(|o| needs_migration(l.0, &o))) { return Ok(Vec::new()) }
+/// Goals' file as a writer starts from it, its goals array, and the goal with this id (call holding the lock).
+fn with_goal<T>(root: &Root, id: &str, now: i64, change: impl FnOnce(&mut Map<String, Value>) -> Result<T>) -> Result<Option<T>> {
     root.locked(|| {
-        let mut done = Vec::new();
-        for (list, _, _) in LISTS {
-            let Some(mut o) = root.read(list) else { continue };
-            if !needs_migration(list, &o) { continue }
-            backup_once(root)?;
-            migrate_object(list, &mut o);
-            write_list(root, list, &o)?;
-            done.push(list);
-        }
-        Ok(done)
+        let Some(mut o) = crate::goals::ops::current(root, "goals") else { return Ok(None) };
+        let Some(g) = o.get_mut("goals").and_then(Value::as_array_mut)
+            .and_then(|gs| gs.iter_mut().filter_map(Value::as_object_mut).find(|g| g.get("id").and_then(Value::as_str) == Some(id))) else { return Ok(None) };
+        let out = change(g)?;
+        // What no longer fits (a step under a finished goal, a "done?" card for a goal now closed) leaves the queue.
+        crate::islands::proposals::prune_stale_in(root, &mut o, "goals", now);
+        o.insert("updated".into(), json!(now));
+        write_list(root, "goals", &o)?;
+        Ok(Some(out))
     })
 }
 
-/// Read-modify-write one list's items; the caller holds the folder lock. An old-shape island is migrated on the way
-/// (after the one-time backup).
+/// A goal finished on the user's yes (`yes`: how he said it): state done, `finished` stamped. An ongoing goal has no end.
+/// Returns its title; `None` when there is no such goal.
+pub fn finish_goal(root: &Root, id: &str, yes: Value, now: i64) -> Result<Option<String>> {
+    with_goal(root, id, now, |g| crate::goals::ops::finish(g, yes, now).map_err(anyhow::Error::msg))
+}
+
+/// A finished (or paused) goal back to active (`undo` on a goal), within the active cap.
+pub fn reopen_goal(root: &Root, id: &str, now: i64) -> Result<Option<String>> {
+    let active = crate::goals::ops::current(root, "goals").map_or(0, |o| o.get("goals").and_then(Value::as_array).into_iter().flatten()
+        .filter_map(Value::as_object).filter(|g| crate::goals::ops::goal_state(g) == "active").count());
+    with_goal(root, id, now, |g| {
+        if crate::goals::ops::goal_state(g) != "active" {
+            ensure!(active < crate::goals::ops::MAX_ACTIVE, "{} active goals already: finish or pause one first", crate::goals::ops::MAX_ACTIVE);
+            g.insert("state".into(), json!("active"));
+            g.remove("finished");
+            g.insert("moved".into(), json!(now));
+        }
+        Ok(g.get("title").and_then(Value::as_str).unwrap_or(id).to_owned())
+    })
+}
+
+/// A goal marked open-ended (`ongoing`: no end state, drawn with a loop and no completion ring) or given an end again.
+pub fn set_ongoing(root: &Root, id: &str, ongoing: bool, now: i64) -> Result<Option<String>> {
+    with_goal(root, id, now, |g| {
+        if ongoing { g.insert("ongoing".into(), json!(true)); } else { g.remove("ongoing"); }
+        Ok(g.get("title").and_then(Value::as_str).unwrap_or(id).to_owned())
+    })
+}
+
+/// A step taken off its goal (stale, dropped, a duplicate). A finished step stays (it is the memory). Its title is
+/// remembered as removed, so neither the Goals job nor a proposal brings it back. Returns its title.
+pub fn remove_task(root: &Root, goal: &str, id: &str, now: i64) -> Result<Option<String>> {
+    root.locked(|| {
+        let Some(mut o) = crate::goals::ops::current(root, "goals") else { return Ok(None) };
+        let Some(g) = o.get_mut("goals").and_then(Value::as_array_mut)
+            .and_then(|gs| gs.iter_mut().filter_map(Value::as_object_mut).find(|g| g.get("id").and_then(Value::as_str) == Some(goal))) else { return Ok(None) };
+        let Some(tasks) = g.get_mut("tasks").and_then(Value::as_array_mut) else { return Ok(None) };
+        let Some(k) = tasks.iter().position(|t| t["id"] == id) else { return Ok(None) };
+        ensure!(tasks[k]["state"] != "done", "a finished step stays under its goal (it is the memory)");
+        let t = tasks.remove(k);
+        let title = t["title"].as_str().unwrap_or(id).to_owned();
+        crate::goals::settled::remember_removed(&mut o, &title, "", now);
+        crate::islands::proposals::prune_stale_in(root, &mut o, "goals", now);
+        o.insert("updated".into(), json!(now));
+        write_list(root, "goals", &o)?;
+        Ok(Some(title))
+    })
+}
+
+// ---- end goals: finish, reopen, steps removed, ongoing ----
+
+/// Read-modify-write one list's items; the caller holds the folder lock.
 fn edit_locked<T>(root: &Root, list: &str, change: impl FnOnce(&mut Vec<Map<String, Value>>) -> Result<T>) -> Result<T> {
     // A closed or vanished list is written on from its kept copy, never from nothing (`goals::ops::current`).
-    let mut o = match crate::goals::ops::current(root, list) {
-        Some(mut o) => {
-            if needs_migration(list, &o) { backup_once(root)?; migrate_object(list, &mut o); }
-            o
-        }
-        None => fresh(list),
-    };
+    let mut o = crate::goals::ops::current(root, list).unwrap_or_else(|| fresh(list));
     let mut its = items(&o);
     let out = change(&mut its)?;
     o.insert("items".into(), Value::Array(its.into_iter().map(Value::Object).collect()));
@@ -412,7 +455,7 @@ pub fn tick(root: &Root, list: &str, id: &str, done: bool) -> Result<Option<Stri
 
 fn tick_goals(root: &Root, id: &str, done: bool) -> Result<Option<String>> {
     root.locked(|| {
-        let Some(mut o) = root.read("goals") else { return Ok(None) };
+        let Some(mut o) = crate::goals::ops::current(root, "goals") else { return Ok(None) };
         let mut title = None;
         if let Some(items) = o.get_mut("items").and_then(Value::as_array_mut) {
             if let Some(k) = items.iter().position(|i| i["id"] == id) {
@@ -457,54 +500,6 @@ pub(crate) const REAL_SETTLED: &str = r#"{
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn real_settled(r: &Root) -> Map<String, Value> {
-        let o: Map<String, Value> = serde_json::from_str(REAL_SETTLED).unwrap();
-        r.ensure().unwrap();
-        std::fs::write(r.file("settled"), REAL_SETTLED).unwrap();
-        o
-    }
-
-    #[test]
-    fn owner_s_old_settled_list_is_migrated_in_place_once_after_one_backup() {
-        let (_d, r) = root();
-        let before = real_settled(&r);
-        assert_eq!(migrate_all(&r).unwrap(), ["settled"]);
-        let o = r.read("settled").unwrap();
-        assert_eq!((o["preset"].as_str(), o["list"].as_str()), (Some("todo"), Some("settled")));
-        let its = items(&o);
-        let titles: Vec<&str> = its.iter().map(|i| i["title"].as_str().unwrap()).collect();
-        let was: Vec<&str> = before["items"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
-        assert_eq!(titles, was, "every item's text kept, in order");
-        assert!(o["items"].as_array().unwrap().iter().all(|v| v["id"].as_str().is_some_and(|id| !id.is_empty())));
-        assert_eq!(its[0]["id"], "islands-into-heimdall-bound-to-threads");
-        for k in ["edgeY", "expanded", "icon", "order", "side", "stage", "started", "state", "summary", "title", "updated"] {
-            assert_eq!(o[k], before[k], "{k} kept");
-        }
-        // One backup beside islands/, holding the original bytes.
-        let backups: Vec<_> = std::fs::read_dir(&r.0).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("backup-")).collect();
-        assert_eq!(backups.len(), 1);
-        assert_eq!(std::fs::read_to_string(backups[0].path().join("settled.json")).unwrap(), REAL_SETTLED);
-        // Second contact: nothing to migrate, no second backup; a later old-shape write migrates without one.
-        assert!(migrate_all(&r).unwrap().is_empty());
-        r.put("goals", json!({"items": ["Plain"]}).as_object().unwrap()).unwrap();
-        assert_eq!(migrate_all(&r).unwrap(), ["goals"]);
-        assert_eq!(std::fs::read_dir(&r.0).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("backup-")).count(), 1);
-    }
-
-    #[test]
-    fn a_plan_edit_on_an_old_shape_list_migrates_it_and_keeps_the_strings() {
-        let (_d, r) = root();
-        real_settled(&r);
-        let f = find(&r, "Arsenal note in my prompt").unwrap();
-        assert_eq!(f.list, "settled");
-        tick(&r, "settled", f.item["id"].as_str().unwrap(), true).unwrap();
-        let o = r.read("settled").unwrap();
-        assert_eq!((o["preset"].as_str(), o["list"].as_str(), o["title"].as_str()), (Some("todo"), Some("settled"), Some("Scheduled")));
-        assert_eq!(items(&o).len(), 9);
-        assert_eq!(items(&o)[4]["done"], true);
-        assert!(std::fs::read_dir(&r.0).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with("backup-")));
-    }
 
     #[test]
     fn a_move_is_never_seen_half_done_by_a_locked_reader() {

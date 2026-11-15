@@ -116,6 +116,9 @@ pub struct Enrollment {
     /// window's switch or `listen_to`). Absent in older files and not written while off.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub listening: bool,
+    /// Near misses that widened this person's set (`WidenedSample`). Absent in older files and not written while empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub widened: Vec<WidenedSample>,
 }
 /// Names whose listening never changes: the user is always listened to (his microphone), Heimdall never (its own voice).
 pub const NOT_GUESTS: [&str; 2] = ["User", "Heimdall"];
@@ -190,6 +193,57 @@ pub struct CodedVoice {
     /// The user chose Forget: never proposed for naming again. It keeps its code label and samples.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub irrelevant: bool,
+    /// Near misses that widened this voice's set (`WidenedSample`). Absent in older files and not written while empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub widened: Vec<WidenedSample>,
+}
+/// Speaker identity across microphones (~08:15): "microphones really change the voice… we should have a
+/// little bit of a wiggle room, and if it's right within the wiggle room, on the edge of what the recognisable voice
+/// is, we should probably just add another point to expand that circle a little bit."
+///
+/// A sample that missed every voice by at most `WIGGLE` against one person's own samples (their anchors: a name's
+/// enrolled samples, a coded voice's kept ones), and is `WIDEN_MARGIN` closer to that person than to anyone else,
+/// joins that person's set here, tagged with where it was heard. Drift guards:
+/// - The wiggle is measured against anchors only, never against widened samples, so near misses in a row cannot walk
+///   the set away from the person: the widened ring is at most `WIGGLE` wide around what was first known.
+/// - A voice recognised only through a widened sample is labelled, but its samples are never kept (no second hop).
+/// - Never the user (his print lives in `user-voice.json` and is never widened on voice alone, ~08:25: "I
+///   should have much tighter tolerance"), never Heimdall, and never a guest Heimdall listens to (being taken for
+///   them lets someone command Heimdall).
+/// - At most `WIDENED_PER_DEVICE` per person per device; the oldest of that device leaves first.
+///
+/// Measured on the live store of 12 Nov (17 names, 38 coded voices, read-only copy): every sample treated as a stranger
+/// against all other voices (Heimdall's included), 4 of 124 (3%) would have widened someone else's set at these settings (two named people,
+/// Mo and kurgan, are 0.447 apart). The split voices the user noticed ("Wed 11 Nov 16h #2/#4/#5") score 0.12-0.40 against
+/// each other: no wiggle that keeps strangers out joins those; they need his answer (`NearMiss::Ask`, `name_voice`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WidenedSample {
+    pub embedding: Embedding,
+    /// Where it was heard: "Discord", "Call", or the microphone's name.
+    #[serde(default)]
+    pub device: String,
+    #[serde(default)]
+    pub at_ms: u64,
+    /// Its best cosine against the person's anchors when it joined.
+    #[serde(default)]
+    pub anchor: f32,
+}
+/// How far below the calibrated threshold a sample may fall, against one person's anchors, and still join their set.
+pub const WIGGLE: f32 = 0.05;
+/// How much closer to that person than to anyone else (every other voice's full set, Heimdall's included) it must be.
+pub const WIDEN_MARGIN: f32 = 0.10;
+/// Widened samples kept per person per device.
+pub const WIDENED_PER_DEVICE: usize = 3;
+/// A named voice this close below the threshold (and not widened) is worth asking the user about: "was that John?".
+/// Measured on the live store of 12 Nov: 6 of 38 coded voices arrived this close to a named person (0.15: 19 of 38).
+pub const ASK_BAND: f32 = 0.08;
+/// What a sample no voice matched is, by its nearest person (`EnrollmentStore::near_miss`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum NearMiss {
+    /// Just outside `label`'s set: it joins it (`widen`). `named`: a name, else a coded voice.
+    Widen { label: String, anchor: f32, named: bool },
+    /// Not sure: a new voice that sounds somewhat like named `name`. Worth asking the user who it was.
+    Ask { name: String, cosine: f32 },
 }
 /// A voice not to be asked about: its clean samples and where and when it was heard (for the Speakers window).
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -257,6 +311,7 @@ impl EnrollmentStore {
             .or_insert_with(|| Enrollment {
                 embeddings: Vec::new(),
                 listening: false,
+                widened: Vec::new(),
             })
             .embeddings
             .push(embedding);
@@ -268,8 +323,12 @@ impl EnrollmentStore {
             .names
             .iter()
             .filter_map(|(name, e)| {
+                // Widened samples never speak for the user, Heimdall or a listened guest (review 12 Nov: listening turned
+                // on after a widening would otherwise let a stranger command Heimdall as them).
+                let widened = !(e.listening || NOT_GUESTS.iter().any(|g| g.eq_ignore_ascii_case(name.trim())));
                 e.embeddings
                     .iter()
+                    .chain(e.widened.iter().filter(|_| widened).map(|w| &w.embedding))
                     .map(|x| x.cosine(query))
                     .max_by(f32::total_cmp)
                     .map(|score| (name, score))
@@ -334,7 +393,7 @@ impl EnrollmentStore {
             version: self.version,
             model_id: self.model_id.clone(),
             calibration: self.calibration.clone(),
-            names: self.ignored.iter().map(|(id, v)| (id.clone(), Enrollment { embeddings: v.embeddings.clone(), listening: false })).collect(),
+            names: self.ignored.iter().map(|(id, v)| (id.clone(), Enrollment { embeddings: v.embeddings.clone(), listening: false, widened: vec![] })).collect(),
             ignored: BTreeMap::new(),
             voices: BTreeMap::new(),
             heimdall: BTreeMap::new(),
@@ -353,7 +412,7 @@ impl EnrollmentStore {
             version: self.version,
             model_id: self.model_id.clone(),
             calibration: self.calibration.clone(),
-            names: self.voices.iter().map(|(code, v)| (code.clone(), Enrollment { embeddings: v.embeddings.clone(), listening: false })).collect(),
+            names: self.voices.iter().map(|(code, v)| (code.clone(), Enrollment { embeddings: v.embeddings.clone(), listening: false, widened: v.widened.clone() })).collect(),
             ignored: BTreeMap::new(),
             voices: BTreeMap::new(),
             heimdall: BTreeMap::new(),
@@ -389,6 +448,7 @@ impl EnrollmentStore {
             calls: 1,
             days: BTreeSet::from([day.to_string()]),
             irrelevant: false,
+            widened: Vec::new(),
         });
         Ok(code)
     }
@@ -413,6 +473,11 @@ impl EnrollmentStore {
         let mut next = self.clone();
         for e in v.embeddings {
             next.enroll(name, e)?;
+        }
+        // Its widened samples join a name that may be widened, within the per-device cap; never the user, Heimdall or a
+        // listened guest.
+        for w in v.widened {
+            let _ = next.widen(name.trim(), w.embedding, &w.device, w.at_ms, w.anchor);
         }
         next.voices.remove(code);
         *self = next;
@@ -454,6 +519,81 @@ impl EnrollmentStore {
     pub fn unignore(&mut self, id: &str) -> bool {
         self.ignored.remove(id).is_some()
     }
+    /// Whether `query` reaches the calibrated threshold against coded voice `code`'s own kept samples (not only
+    /// through a widened one): only then are its samples kept with the voice.
+    pub fn anchored(&self, code: &str, query: &Embedding) -> bool {
+        let Some(cal) = &self.calibration else { return false };
+        self.voices.get(code).is_some_and(|v| v.embeddings.iter().any(|e| e.cosine(query) >= cal.threshold))
+    }
+    /// What a sample that matched no name and no coded voice is, by its nearest person (`WidenedSample`): just outside
+    /// one person's set (`Widen`), somewhat like a named person (`Ask`), or nobody near (None).
+    pub fn near_miss(&self, query: &Embedding) -> Option<NearMiss> {
+        let cal = self.calibration.as_ref().filter(|c| c.validate().is_ok())?;
+        if query.validate().is_err() {
+            return None;
+        }
+        let best = |v: &[Embedding]| v.iter().map(|e| e.cosine(query)).fold(f32::NEG_INFINITY, f32::max);
+        let widened = |v: &[WidenedSample]| v.iter().map(|w| w.embedding.cosine(query)).fold(f32::NEG_INFINITY, f32::max);
+        // (label, named, may widen, anchor score, full score)
+        let people: Vec<(&String, bool, bool, f32, f32)> = self
+            .names
+            .iter()
+            .map(|(n, e)| {
+                let guarded = NOT_GUESTS.iter().any(|g| g.eq_ignore_ascii_case(n.trim())) || e.listening;
+                let a = best(&e.embeddings);
+                (n, true, !guarded, a, a.max(widened(&e.widened)))
+            })
+            .chain(self.voices.iter().map(|(c, v)| {
+                let a = best(&v.embeddings);
+                (c, false, true, a, a.max(widened(&v.widened)))
+            }))
+            .filter(|p| p.3.is_finite())
+            .collect();
+        let (i, top) = people.iter().enumerate().max_by(|a, b| a.1 .3.total_cmp(&b.1 .3).then_with(|| b.1 .0.cmp(a.1 .0)))?;
+        let runner_up = people
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != i)
+            .map(|(_, p)| p.4)
+            .chain(self.heimdall_similarity(query).map(|(_, c)| c))
+            .fold(f32::NEG_INFINITY, f32::max);
+        let (label, named, may_widen, anchor, _) = *top;
+        if anchor >= cal.threshold {
+            // A match is not a near miss (identify or voice_match takes it).
+            return None;
+        }
+        if may_widen && anchor >= cal.threshold - WIGGLE && anchor - runner_up >= WIDEN_MARGIN {
+            return Some(NearMiss::Widen { label: label.clone(), anchor, named });
+        }
+        // Not sure: ask only about a named person (a code means nothing to the user), never about Heimdall.
+        let ask = people
+            .iter()
+            .filter(|p| p.1 && !NOT_GUESTS.iter().any(|g| g.eq_ignore_ascii_case(p.0.trim())))
+            .max_by(|a, b| a.3.total_cmp(&b.3))
+            .filter(|p| p.3 >= cal.threshold - ASK_BAND);
+        ask.map(|p| NearMiss::Ask { name: p.0.clone(), cosine: p.3 })
+    }
+    /// Adds a near miss to `label`'s set (a name or a coded voice), heard on `device`. The user, Heimdall and listened
+    /// guests are refused (`WidenedSample`).
+    pub fn widen(&mut self, label: &str, embedding: Embedding, device: &str, at_ms: u64, anchor: f32) -> Result<()> {
+        embedding.validate()?;
+        ensure!(!NOT_GUESTS.iter().any(|g| g.eq_ignore_ascii_case(label.trim())), "{label}'s set is never widened by voice");
+        let set = match (self.names.get_mut(label), self.voices.get_mut(label)) {
+            (Some(n), _) => {
+                ensure!(!n.listening, "a listened guest's set is never widened by voice");
+                &mut n.widened
+            }
+            (None, Some(v)) => &mut v.widened,
+            (None, None) => anyhow::bail!("unknown voice"),
+        };
+        let device = device.trim().to_string();
+        while set.iter().filter(|w| w.device == device).count() >= WIDENED_PER_DEVICE {
+            let oldest = set.iter().enumerate().filter(|(_, w)| w.device == device).min_by_key(|(_, w)| w.at_ms).map(|(i, _)| i).unwrap();
+            set.remove(oldest);
+        }
+        set.push(WidenedSample { embedding, device, at_ms, anchor });
+        Ok(())
+    }
     pub fn load(path: &Path) -> Result<Self> {
         let value: Self = serde_json::from_slice(&fs::read(path)?)?;
         ensure!(
@@ -468,7 +608,7 @@ impl EnrollmentStore {
                 !name.trim().is_empty() && !e.embeddings.is_empty(),
                 "invalid enrollment"
             );
-            for x in &e.embeddings {
+            for x in e.embeddings.iter().chain(e.widened.iter().map(|w| &w.embedding)) {
                 x.validate()?;
             }
         }
@@ -480,7 +620,7 @@ impl EnrollmentStore {
         }
         for (code, v) in &value.voices {
             ensure!(!code.trim().is_empty() && !v.embeddings.is_empty(), "invalid coded voice");
-            for x in &v.embeddings {
+            for x in v.embeddings.iter().chain(v.widened.iter().map(|w| &w.embedding)) {
                 x.validate()?;
             }
         }

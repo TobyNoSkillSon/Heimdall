@@ -62,7 +62,7 @@ pub(crate) fn relay_title(title: &str) -> bool {
 }
 /// A sub-agent thread T3's own `delegate_task` made (id `thread:delegated-task:…`, created over MCP), not one of a
 /// provider's native sub-agents (Claude's Agent tool: `creationSource` "provider").
-fn delegated_child(row: &Value) -> bool {
+pub(crate) fn delegated_child(row: &Value) -> bool {
     row["relationshipToParent"] == "subagent"
         && (row["creationSource"] == "mcp" || row["threadId"].as_str().is_some_and(|t| t.starts_with("thread:delegated-task:")))
 }
@@ -537,7 +537,7 @@ impl Workers {
             return Ok(format!("- '{name}'{yours} asks [thread {thread}, request {id}]:\n{}", crate::text::question(&q)));
         }
         let asks = approval.and_then(|a| a.text.as_deref()).map(|t| format!(" It asks: {t}")).unwrap_or_default();
-        Ok(format!("- '{name}'{yours} waits for an approval in T3; only User can give it there [thread {thread}].{asks}"))
+        Ok(format!("- '{name}'{yours} waits for an approval in T3; only {} can give it there [thread {thread}].{asks}", agent::identity::user()))
     }
     /// Queue lines and send one message when the last T3 wake is at least `WAKE_GAP_MS` old.
     fn deliver_lines(&self, lines: Vec<Line>, now: u64, permit: &DeliveryPermit) -> Result<()> {
@@ -594,7 +594,7 @@ impl Workers {
         }
         let pending: Vec<(String, String)> = if deferred { pending.into_iter().take(take).collect() } else { pending };
         text.push('\n');
-        text.push_str(crate::text::SILENCE_RULE);
+        text.push_str(&crate::text::silence_rule());
         // Deterministic from the lines it carries, so a retry of the same batch is one outbox row. A batch that
         // carries a question or approval says so in its id: the agent harness classifies notices by id
         // (agent::notice::NoticeKind::classify), and a question waits for the user after a start where a finished run
@@ -607,7 +607,7 @@ impl Workers {
         let short = format!(
             "T3 update:\n{}\nThe replies were too long for one message; read them with t3_thread_read.\n{}",
             pending.iter().map(|(_, l)| l.lines().next().unwrap_or("").trim_end_matches(" Final reply:").trim_end_matches(" Last reply:")).collect::<Vec<_>>().join("\n"),
-            crate::text::SILENCE_RULE
+            crate::text::silence_rule()
         );
         self.actions.enqueue_with_short(&id, &text, Some(&short), permit)?;
         {

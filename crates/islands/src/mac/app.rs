@@ -1,5 +1,5 @@
 //! The app: the islands folder's watcher, one controller per island, the docks and their layout, the state readback
-//! (`state.json`), drops, and Scheduled items' due times (Swift `App.swift`, plus night 1023's due countdown).
+//! (`state.json`), drops, and Scheduled items' due times (night 1023's due countdown).
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -18,7 +18,7 @@ use super::sys;
 use crate::model::due::{Cal, Due};
 use crate::model::geometry::{Point, Rect, Size, Vector};
 use crate::model::flash::{self, Cmd, Flash};
-use crate::model::{edge_column, edge_drop, j, left_edge_column, time, top_row, Island, IslandFile, Json, Paths, PlanList, Visibility};
+use crate::model::{edge_column, edge_drop, j, left_edge_column, time, top_row, DisplayLock, Island, IslandFile, Json, Paths, PlanList, Visibility};
 
 thread_local! {
     static APP: RefCell<Option<Rc<App>>> = const { RefCell::new(None) };
@@ -71,6 +71,17 @@ pub struct App {
     /// While hidden, the islands back on screen for news (`model/flash.rs`), and its one one-shot timer.
     flash: RefCell<Flash>,
     flash_timer: RefCell<Option<sys::Work1>>,
+    // ---- islands display (night 1107, bug note 2026-11-07T02-02-35) ----
+    /// Heimdall's Islands Display (`display.json`): the display the islands stay on, by name; `None` follows the pointer.
+    locked: RefCell<Option<String>>,
+    /// The connected displays' names, in `NSScreen::screens` order (refreshed in `screens_changed`).
+    screen_names: RefCell<Vec<String>>,
+    display_watch: RefCell<Option<Rc<super::filewatch::FileWatch>>>,
+    // ---- end islands display ----
+    /// The displays are awake and this user's session is the active one (`model::toggle::seen`): while either is false
+    /// no island arms a repeating timer.
+    pub screens_awake: Cell<bool>,
+    pub session_active: Cell<bool>,
 }
 
 impl App {
@@ -95,6 +106,11 @@ impl App {
             visibility_watch: RefCell::new(None),
             flash: RefCell::new(Flash::new()),
             flash_timer: RefCell::new(None),
+            locked: RefCell::new(None),
+            screen_names: RefCell::new(vec![]),
+            display_watch: RefCell::new(None),
+            screens_awake: Cell::new(true),
+            session_active: Cell::new(true),
         });
         APP.with(|x| *x.borrow_mut() = Some(a.clone()));
         a
@@ -105,6 +121,9 @@ impl App {
         // Hidden before the first island is made, so a launch while hidden never flashes them.
         self.hidden.set(Visibility::hidden());
         *self.visibility_watch.borrow_mut() = Some(super::filewatch::FileWatch::new(&Paths::visibility(), Box::new(|| app().set_hidden(Visibility::hidden()))));
+        // Islands Display: read before the first layout, then watched.
+        *self.locked.borrow_mut() = DisplayLock::locked();
+        *self.display_watch.borrow_mut() = Some(super::filewatch::FileWatch::new(&Paths::display(), Box::new(|| app().set_locked(DisplayLock::locked()))));
         let store = Store::new(
             Paths::islands(),
             Box::new(|up, rm| {
@@ -131,10 +150,24 @@ impl App {
         });
         let ws = NSWorkspace::sharedWorkspace().notificationCenter();
         observe(&ws, "NSWorkspaceDidWakeNotification", || app().clock_changed());
+        // Nobody sees the islands while the displays sleep or another user's session is in front: no breath, no pulse.
+        observe(&ws, "NSWorkspaceScreensDidSleepNotification", || app().set_seen(&app().screens_awake, false));
+        observe(&ws, "NSWorkspaceScreensDidWakeNotification", || app().set_seen(&app().screens_awake, true));
+        observe(&ws, "NSWorkspaceSessionDidResignActiveNotification", || app().set_seen(&app().session_active, false));
+        observe(&ws, "NSWorkspaceSessionDidBecomeActiveNotification", || app().set_seen(&app().session_active, true));
         self.screens_changed();
         self.review_due(false);
         self.arm_day();
         super::streams::watch();
+    }
+
+    /// The displays woke or slept, or the session switched: every island's repeating timers follow.
+    fn set_seen(&self, flag: &Cell<bool>, on: bool) {
+        if flag.replace(on) != on {
+            for c in self.all() {
+                c.refresh_timers();
+            }
+        }
     }
 
     /// Whether every island is off screen now.
@@ -143,8 +176,9 @@ impl App {
     }
 
     /// Every island's window out of (or back onto) the screen at once. Nothing else changes: open stays open, places
-    /// and files stay, timers run; islands that arrive or change meanwhile are laid out as usual and appear with the
-    /// rest. Shown again, the layout is redone for the display the pointer is on now.
+    /// and files stay (hidden islands arm no timers, `model::toggle::timers`); islands that arrive or change meanwhile
+    /// are laid out as usual and appear with the rest. Shown again, the layout is redone for the display the pointer is
+    /// on now.
     pub fn set_hidden(&self, hidden: bool) {
         if hidden == self.hidden.replace(hidden) {
             return;
@@ -314,10 +348,12 @@ impl App {
         self.relayout();
         // What an island reads of the others may have changed (a job island ran or stopped under a goal, a goal was
         // renamed): those open bodies are drawn again; then the one label timer is set for the next change.
-        for c in self.all() {
+        // Scheduled's are redrawn by `review_due` (once, not twice per folder scan; audit ISL-21).
+        let running = self.running.get();
+        for c in self.all().into_iter().filter(|c| !(running && c.id == "scheduled")) {
             c.refresh_due_labels();
         }
-        if self.running.get() {
+        if running {
             self.review_due(false);
         }
     }
@@ -368,10 +404,29 @@ impl App {
         let _ = IslandFile::write_atomic(&st, &Paths::state());
     }
 
-    /// The display the islands live on: the one with the pointer.
+    /// Islands Display changed: every island is laid out again on the display it names (or the pointer's).
+    fn set_locked(&self, locked: Option<String>) {
+        if *self.locked.borrow() == locked {
+            return;
+        }
+        super::island::debug(&format!("islands display {locked:?}"));
+        *self.locked.borrow_mut() = locked;
+        self.watch_pointer();
+        self.relayout();
+    }
+
+    /// The display the islands live on: the one Islands Display locks them to while it is connected, else the one with
+    /// the pointer.
     pub fn active_screen(&self) -> Option<Retained<NSScreen>> {
         let p = NSEvent::mouseLocation();
         let screens = NSScreen::screens(mtm());
+        if let Some(l) = self.locked.borrow().as_deref() {
+            let names = self.screen_names.borrow();
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
+            if let Some(i) = DisplayLock::find(&names, l).filter(|i| *i < screens.count()) {
+                return Some(screens.objectAtIndex(i));
+            }
+        }
         for s in screens.iter() {
             let f = rect_from(s.frame());
             // NSMouseInRect for an unflipped rect: x in [minX, maxX), y in (minY, maxY].
@@ -473,16 +528,30 @@ impl App {
     }
 
     fn screens_changed(&self) {
-        let now: Vec<(Rect, Rect, f64)> = NSScreen::screens(mtm()).iter().map(|s| (rect_from(s.frame()), rect_from(s.visibleFrame()), s.backingScaleFactor())).collect();
-        if *self.screens_seen.borrow() == now {
+        let screens = NSScreen::screens(mtm());
+        let names: Vec<String> = screens.iter().map(|s| s.localizedName().to_string()).collect();
+        let now: Vec<(Rect, Rect, f64)> = screens.iter().map(|s| (rect_from(s.frame()), rect_from(s.visibleFrame()), s.backingScaleFactor())).collect();
+        if *self.screens_seen.borrow() == now && *self.screen_names.borrow() == names {
             return;
         }
         *self.screens_seen.borrow_mut() = now;
+        *self.screen_names.borrow_mut() = names;
+        self.watch_pointer();
+        self.relayout();
+    }
+
+    /// Pointer moves are watched only while the islands follow the pointer between displays (`follows_pointer`).
+    fn watch_pointer(&self) {
         for m in self.monitors.borrow_mut().drain(..) {
             // SAFETY: monitors we added.
             unsafe { NSEvent::removeMonitor(&m) };
         }
-        if NSScreen::screens(mtm()).count() > 1 {
+        let follows = {
+            let names = self.screen_names.borrow();
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
+            DisplayLock::follows_pointer(&names, self.locked.borrow().as_deref())
+        };
+        if follows {
             let check = || {
                 let a = app();
                 if let Some(s) = a.active_screen() {
@@ -504,7 +573,6 @@ impl App {
                 self.monitors.borrow_mut().push(m);
             }
         }
-        self.relayout();
     }
 
     // MARK: Scheduled due times: the app counts down; a due item stays in Scheduled, drawn as due now.
@@ -544,7 +612,8 @@ impl App {
         let now = time::now();
         // Each due item is told once per due time: Heimdall stamps `told: <due>` on it when it handles the response (the
         // islands app only reads it); until the stamp arrives, this run's own set keeps it from being told twice.
-        let sched = IslandFile::read(&Paths::file("scheduled")).unwrap_or_default();
+        // Scheduled's island holds the file as last read; the file itself only while no island shows it.
+        let sched = self.ctl("scheduled").map(|c| c.island().raw).or_else(|| IslandFile::read(&Paths::file("scheduled"))).unwrap_or_default();
         let untold = Due::untold(&sched, now);
         {
             let mut told = self.due_told.borrow_mut();

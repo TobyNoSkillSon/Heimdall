@@ -33,7 +33,6 @@ fn main() -> Result<()> {
         use std::io::{self, BufRead, Write};
         let mut model = listen::onnx::Silero::load(&root.join("models/silero/silero_vad.onnx"))?;
         let audio = listen::file::read_wav(&root.join("crates/listen/tests/fixtures/en-2.wav"))?;
-        let batched = std::env::var("HEIMDALL_VAD_BATCH").as_deref() == Ok("1");
         println!("{{\"ready\":true}}");
         io::stdout().flush()?;
         for line in io::stdin().lock().lines() {
@@ -54,12 +53,8 @@ fn main() -> Result<()> {
                             audio[off..off + 512].try_into().unwrap()
                         })
                         .collect();
-                    if batched {
-                        model.probabilities(&chunks, &mut states)?;
-                    } else {
-                        for (a, s) in chunks.iter().zip(&mut states) {
-                            model.probability(a, s)?;
-                        }
+                    for (a, s) in chunks.iter().zip(&mut states) {
+                        model.probability(a, s)?;
                     }
                 }
                 println!(
@@ -206,25 +201,6 @@ fn main() -> Result<()> {
             rows.push(serde_json::json!({"model":"silero","streams":streams,"seconds_per_tick":start.elapsed().as_secs_f64()/steps as f64}));
         }
 
-        for streams in [1, 3, 6] {
-            let mut states = vec![listen::onnx::VadState::default(); streams];
-            let mut singles = states.clone();
-            let mut max_error = 0f32;
-            let start = std::time::Instant::now();
-            let mut seconds = 0.;
-            for i in 0..32 {
-                let chunk: [f32; 512] = a[(i * 512) % (a.len() - 512)..][..512].try_into()?;
-                let batch = vec![chunk; streams];
-                let t = std::time::Instant::now();
-                let p = vad.probabilities(&batch, &mut states)?;
-                seconds += t.elapsed().as_secs_f64();
-                for j in 0..streams {
-                    let q = vad.probability(&chunk, &mut singles[j])?;
-                    max_error = max_error.max((p[j] - q).abs());
-                }
-            }
-            rows.push(serde_json::json!({"model":"silero_batch_cpu","streams":streams,"seconds_per_tick":seconds/32.,"max_abs_probability":max_error,"probe_seconds":start.elapsed().as_secs_f64()}));
-        }
         let start = std::time::Instant::now();
         let mut probabilities = vec![];
         for _ in 0..4 {

@@ -1,8 +1,8 @@
 //! Write-lock contention on the shared archive index (19 Oct: "Pipeline error: database is locked"
 //! dropped live finals and set "Listening interrupted"; "timeline backfill delayed: database is
 //! locked" ×36). Every projection write must wait for a concurrent writer, never fail at once.
-use anyhow::Result;
-use heimdall_archive::{compact, store, timeline, Journal, Record, DAY_NS};
+use anyhow::{Context, Result};
+use heimdall_archive::{compact, live, store, timeline, Journal, Record, DAY_NS};
 use rusqlite::params;
 use serde_json::json;
 use std::{
@@ -134,17 +134,26 @@ fn backfill_completes_while_a_live_writer_commits_continuously() -> Result<()> {
     let progress = written.clone();
     let writer = std::thread::spawn(move || -> Result<usize> {
         let live = Journal::open(&root.join("session-live"))?;
-        let db = store::open(&root)?;
+        // Every live write goes through the store's writer, as in the app. This loop once ran the projection on its
+        // own connection, which hid the app's case: the writer takes the lock again microseconds after each commit,
+        // SQLite queues nobody for it, and the backfill's `BEGIN IMMEDIATE` on its own connection lost every poll for
+        // `store::BUSY`, then failed with "database is locked". Seen once in the full check (10 Nov 22:37); with the
+        // writes routed like the app's it failed every run until the backfill took the writer's turn (`Queue::turn`).
+        let queue = live::Queue::shared(&root)?;
         let live_sid = live.session_id();
         let mut n = 0;
         while !flag.load(Ordering::Relaxed) {
-            event(&live, "listen_event", n as u64, json!({"n": n}))?;
-            // The live final projection: read-then-write, as Index::revise_transcript does.
-            timeline::transaction(&db, || {
-                let _: i64 = db.query_row("SELECT count(*) FROM utterances WHERE session=?1", [live_sid], |r| r.get(0))?;
-                final_row(&db, live_sid, &format!("live{n}"), n as u64 * S, "live")?;
-                timeline::utterance(&db, live_sid, &format!("live{n}"))
-            })?;
+            event(&live, "listen_event", n as u64, json!({"n": n})).context("live evidence write")?;
+            // The live final projection: read-then-write inside a writer job, as Index::revise_transcript does.
+            queue
+                .call(move |db| {
+                    timeline::transaction(db, || {
+                        let _: i64 = db.query_row("SELECT count(*) FROM utterances WHERE session=?1", [live_sid], |r| r.get(0))?;
+                        final_row(db, live_sid, &format!("live{n}"), n as u64 * S, "live")?;
+                        timeline::utterance(db, live_sid, &format!("live{n}"))
+                    })
+                })
+                .context("live final projection")?;
             n += 1;
             progress.store(n, Ordering::Relaxed);
         }
@@ -165,7 +174,7 @@ fn backfill_completes_while_a_live_writer_commits_continuously() -> Result<()> {
         Ok(commands >= 300 && finals >= 200)
     };
     let result = (|| -> Result<()> {
-        while !old_done(&db)? && timeline::backfill(t.path(), &mut || true)? > 0 {
+        while !old_done(&db).context("progress read")? && timeline::backfill(t.path(), &mut || true).context("backfill")? > 0 {
             passes += 1;
             anyhow::ensure!(passes < 10_000, "backfill does not converge");
         }
@@ -180,5 +189,24 @@ fn backfill_completes_while_a_live_writer_commits_continuously() -> Result<()> {
     assert_eq!(commands, 300);
     let old_finals: i64 = db.query_row("SELECT count(*) FROM timeline_chunks WHERE role='utterance' AND kind='text' AND session=?1", [sid], |r| r.get(0))?;
     assert_eq!(old_finals, 200);
+    Ok(())
+}
+
+/// Inside a writer's turn the writer stands aside, so a write handed to it would wait for itself: refused at once.
+#[test]
+fn a_write_handed_over_inside_a_turn_is_refused_not_deadlocked() -> Result<()> {
+    let t = tempfile::tempdir()?;
+    let db = store::open(t.path())?;
+    let queue = live::Queue::shared(t.path())?;
+    let started = Instant::now();
+    let inner = queue.turn(|| {
+        anyhow::ensure!(live::in_turn());
+        Ok(queue.call(|db| Ok(db.execute("INSERT INTO sessions(name,started_wall_ns) VALUES('session-x',0)", [])?)).is_err())
+    })?;
+    assert!(inner, "the write inside the turn was refused");
+    assert!(!live::in_turn() && started.elapsed() < Duration::from_secs(5));
+    // The writer goes on after the turn.
+    queue.call(|db| Ok(db.execute("INSERT INTO sessions(name,started_wall_ns) VALUES('session-y',0)", [])?))?;
+    assert!(store::find_session(&db, "session-y")?.is_some());
     Ok(())
 }

@@ -121,6 +121,29 @@ impl Watch {
     }
 }
 
+// ---- Lane S (night 10–11 Nov, proposal 4): the relay's most-used tools are always loaded. ----
+/// Claude Code defers MCP tools behind ToolSearch; the relay fetched Heimdall's own one by one, 152 times in two weeks
+/// (107 steps on their own), again after every compaction. These carry Claude Code's per-tool marker
+/// `_meta["anthropic/alwaysLoad"]` (Claude Code 2.1, read from its MCP client), so they are in the relay's context
+/// from its first turn; the rest stay deferred. Ranked by relay calls, 27 Oct – 10 Nov
+/// (Assistant/Research/tool-calls-2026-11-10/notes.md, proposal 4).
+pub const ALWAYS_LOADED: &[&str] = &[
+    "t3_thread_send", "delegate_task", "task_cancel", "taste_note", "t3_thread_read", "ask", "bug_note",
+    "islands_view", "plan_edit", "task_status", "settings", "schedule_wake",
+];
+fn eager(mut tools: Value) -> Value {
+    for t in tools.as_array_mut().into_iter().flatten() {
+        if t["name"].as_str().is_some_and(|n| ALWAYS_LOADED.contains(&n)) {
+            if !t["_meta"].is_object() {
+                t["_meta"] = json!({});
+            }
+            t["_meta"]["anthropic/alwaysLoad"] = json!(true);
+        }
+    }
+    tools
+}
+// ---- end lane S ----
+
 /// One JSON-RPC message from Claude: the answer, or `None` for a notification.
 pub fn handle(msg: &Value, data: &Path, caller: Option<&str>) -> Option<Value> {
     let id = msg.get("id")?.clone();
@@ -136,7 +159,7 @@ pub fn handle(msg: &Value, data: &Path, caller: Option<&str>) -> Option<Value> {
         // Only the grant's thread (or the one being launched) lists them: every other session pays nothing for them.
         "tools/list" => {
             let tools = listable(data, caller).and_then(|c| rpc(&c, "tools/list", json!({})).ok()).map_or(json!([]), |r| r["tools"].clone());
-            ok(json!({"tools":tools}))
+            ok(json!({"tools":eager(tools)}))
         }
         "tools/call" => ok(call_tool(data, caller, &msg["params"], SETTLE)),
         "resources/list" => ok(json!({"resources":[]})),
@@ -302,6 +325,12 @@ mod tests {
         let (url, _seen) = server(tools.clone());
         grant(d.path(), &url, "t-relay");
         assert_eq!(handle(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}), d.path(), Some("t-relay")).unwrap()["result"], tools);
+        // Lane S: the most-used tools carry Claude Code's always-load marker; the others stay deferred.
+        let (url, _seen) = server(json!({"tools":[{"name":"speak","inputSchema":{"type":"object"}},{"name":"t3_thread_send","inputSchema":{"type":"object"},"_meta":{"x":1}}]}));
+        grant(d.path(), &url, "t-relay");
+        let listed = handle(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}), d.path(), Some("t-relay")).unwrap()["result"]["tools"].clone();
+        assert!(listed[0].get("_meta").is_none(), "{listed}");
+        assert_eq!(listed[1]["_meta"], json!({"x":1,"anthropic/alwaysLoad":true}));
     }
 
     /// The launch's first seconds: the grant says `pending` until T3 answers with the thread's id; a call meanwhile

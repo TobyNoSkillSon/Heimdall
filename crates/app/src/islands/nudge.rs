@@ -13,10 +13,10 @@
 
 use super::files::{safe_id, Root};
 use super::IslandsEvent;
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use ui::agent_notice::Detail;
 
@@ -137,7 +137,8 @@ pub fn pull_out(root: &Root, text: &str, now_ms: u128) -> Result<(String, PathBu
 fn keep(root: &Root, id: &str, title: &str, ext: &str, bytes: &[u8]) -> Result<(String, PathBuf)> {
     let id = safe_id(id);
     let path = root.docs().join(format!("{id}.{ext}"));
-    write_atomic(&path, bytes)?;
+    // The document through a hidden temp file and rename (the helper may be watching the folder).
+    super::files::write_bytes_atomic(&path, bytes)?;
     let island = json!({
         "preset": "viewer",
         "title": title,
@@ -213,19 +214,6 @@ pub fn pull_out_turn(root: &Root, text: &str, notes: &[(String, Detail)], now_ms
         out.push(keep(root, &format!("note-{now_ms}-{k}"), &title, ext, &bytes)?);
     }
     Ok(out)
-}
-
-/// The document through a hidden temp file and rename (the helper may be watching the folder).
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let dir = path.parent().context("document path has no folder")?;
-    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-    let name = path.file_name().and_then(|n| n.to_str()).context("document path has no name")?;
-    let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
-    })?;
-    Ok(())
 }
 
 #[cfg(test)]

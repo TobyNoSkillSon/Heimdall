@@ -311,14 +311,7 @@ impl RuntimeGuard {
                     break;
                 }
                 let eligible = gate::state().map(|s| s.eligible()).unwrap_or(false);
-                let rss = gate::bounded_output(Command::new("/bin/ps").args([
-                    "-o",
-                    "rss=",
-                    "-p",
-                    &std::process::id().to_string(),
-                ]))
-                .ok()
-                .and_then(|s| s.trim().parse::<u64>().ok());
+                let rss = crate::correction::rss_kib(std::process::id());
                 if started.elapsed() >= deadline
                     || unsafe { libc::getppid() } != parent
                     || !eligible
@@ -341,7 +334,19 @@ impl Drop for RuntimeGuard {
 /// Resource check sampled every 250ms; idle/power every two seconds. Caller injects the gate for tests.
 pub fn supervise(
     command: &mut Command,
+    eligible: impl FnMut() -> Result<bool>,
+    max_rss_kib: u64,
+    deadline: Duration,
+) -> Result<()> {
+    supervise_with(command, eligible, crate::correction::rss_kib, max_rss_kib, deadline)
+}
+/// `supervise` with the RSS probe injected (tests). An unreadable RSS from a worker that exited after `try_wait` is
+/// its exit, not a failure: the loop collects it (review 14 Nov should-fix 5; `proc_pidinfo` fails for an exited,
+/// uncollected child where `ps` read 0 KB).
+pub fn supervise_with(
+    command: &mut Command,
     mut eligible: impl FnMut() -> Result<bool>,
+    mut rss_kib: impl FnMut(u32) -> Option<u64>,
     max_rss_kib: u64,
     deadline: Duration,
 ) -> Result<()> {
@@ -361,16 +366,12 @@ pub fn supervise(
             ensure!(start.elapsed() < deadline, "night worker deadline");
             if probe.elapsed() >= Duration::from_secs(2) {
                 ensure!(eligible()?, "night paused: user active or power removed");
-                let rss = gate::bounded_output(Command::new("/bin/ps").args([
-                    "-o",
-                    "rss=",
-                    "-p",
-                    &child.id().to_string(),
-                ]))?;
-                ensure!(
-                    rss.trim().parse::<u64>()? <= max_rss_kib,
-                    "night worker RAM ceiling"
-                );
+                let Some(rss) = rss_kib(child.id()) else {
+                    // Exited between `try_wait` and the probe: the next turn collects its status.
+                    ensure!(child.try_wait()?.is_some(), "night worker RSS unreadable");
+                    continue;
+                };
+                ensure!(rss <= max_rss_kib, "night worker RAM ceiling");
                 probe = Instant::now();
             }
             std::thread::sleep(Duration::from_millis(250));
@@ -603,8 +604,7 @@ pub fn run(
                 let mut command = Command::new(std::env::current_exe()?);
                 command
                     .arg("worker")
-                    .arg(&request_path)
-                    .env("HEIMDALL_SPEAKERS_METAL", "0");
+                    .arg(&request_path);
                 supervise(
                     &mut command,
                     || Ok(gate::state()?.eligible()),
@@ -759,7 +759,8 @@ mod tests {
     #[test]
     #[ignore = "helper launched by abrupt_exit_resume test"]
     fn checkpoint_writer_helper() {
-        let path = PathBuf::from(std::env::var("HEIMDALL_NIGHT_CHECKPOINT_TEST").unwrap());
+        // Run directly (`--run-ignored all`) it has nothing to write into.
+        let Some(path) = std::env::var_os("HEIMDALL_NIGHT_CHECKPOINT_TEST").map(PathBuf::from) else { return };
         let db = db(&path);
         let (audio, sha) = save_audio(&path, &[0.1, 0.2, -0.4]).unwrap();
         checkpoint(

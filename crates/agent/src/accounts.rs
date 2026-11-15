@@ -56,7 +56,7 @@ pub const CODEX: &str = "codex";
 /// T3's Claude instances and their `CLAUDE_CONFIG_DIR`: the user's first account in `~/.claude`, the second in
 /// `~/.claude-account2`. A caller with more accounts passes its own list.
 pub fn default_config_dirs(home: &Path) -> Vec<(String, PathBuf)> {
-    vec![("claudeAgent".into(), home.join(".claude")), ("claudeAgent_claude_code_2".into(), home.join(".claude-account2"))]
+    vec![("claudeAgent".into(), home.join(".claude")), ("claudeAgent_2".into(), home.join(".claude-account2"))]
 }
 
 /// T3's Claude instances and their config folders as T3's settings name them (`providerInstances.*.config.homePath`,
@@ -313,7 +313,7 @@ mod tests {
     fn the_scripts_json_is_read_with_t3_instances() {
         let a = parse(&sample(), &default_config_dirs(&home()), &home());
         assert_eq!(a.iter().map(|a| (a.instance.as_str(), a.kind)).collect::<Vec<_>>(),
-            [("claudeAgent", Kind::Claude), ("claudeAgent_claude_code_2", Kind::Claude), ("codex", Kind::Codex)]);
+            [("claudeAgent", Kind::Claude), ("claudeAgent_2", Kind::Claude), ("codex", Kind::Codex)]);
         assert_eq!(a[0].windows[1], Window { name: "weekly".into(), used_percent: Some(94.0), resets_at_ms: Some(at("2026-11-02T13:00+01:00")) });
         assert_eq!(a[1].windows[0].resets_at_ms, Some(at("2026-10-30T12:10:00+01:00")));
         assert!(a.iter().all(|a| a.error.is_none()));
@@ -330,7 +330,7 @@ mod tests {
         assert!(a.iter().all(|a| usable(a, now)), "94% is not spent");
         // Account 1's 5-hour window renewed at 07:50, so its next reset is the weekly one (2 Nov); account 2's is 09:00;
         // Codex's 08:13.
-        assert_eq!(earliest_reset_first(&a, now), ["codex", "claudeAgent_claude_code_2", "claudeAgent"]);
+        assert_eq!(earliest_reset_first(&a, now), ["codex", "claudeAgent_2", "claudeAgent"]);
         let mut spent = a.clone();
         spent[1].windows[1].used_percent = Some(100.0);
         assert_eq!(spent_until(&spent[1], now), Some(at("2026-10-30T09:00+01:00")));
@@ -380,11 +380,11 @@ mod tests {
         let f = d.path().join("settings.json");
         std::fs::write(&f, serde_json::json!({"providerInstances":{
             "grok":{"driver":"grok","enabled":true,"config":{}},
-            "claudeAgent_claude_code_2":{"driver":"claudeAgent","enabled":true,"config":{"homePath":"~/.claude-account2"}},
+            "claudeAgent_2":{"driver":"claudeAgent","enabled":true,"config":{"homePath":"~/.claude-account2"}},
             "claudeAgent_3":{"driver":"claudeAgent","enabled":false,"config":{"homePath":"/x"}}
         }}).to_string()).unwrap();
         assert_eq!(config_dirs_from_t3(&f, &home()), [("claudeAgent".to_string(), home().join(".claude")),
-            ("claudeAgent_claude_code_2".to_string(), home().join(".claude-account2"))]);
+            ("claudeAgent_2".to_string(), home().join(".claude-account2"))]);
         assert_eq!(config_dirs_from_t3(&d.path().join("missing.json"), &home()), default_config_dirs(&home()));
     }
 

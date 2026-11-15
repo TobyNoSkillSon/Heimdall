@@ -1,98 +1,121 @@
 # Archive clips
 
-Beta: clip export has had little live use; check a clip before relying on it.
+`heimdall-clip` and the `archive_clip` tool turn one time window of the archive into one movie file: the screen of
+one display, every audio source on its own track, and the transcript as subtitles.
 
-The `archive_clip` tool brings back movie export, dropped on 14 October.
+Read this when: you want footage, audio or the transcript of a past time window as a movie, you are changing how a
+clip is planned, placed or encoded, or a clip came out black, silent or out of sync.
+Code: `crates/archive/src/clip.rs` (plan, placement, cues, time parsing), `crates/archive/src/clip_writer.rs`
+(AVAssetWriter), `crates/archive/src/bin/heimdall-clip.rs` (the command), `crates/app/src/mcp_clip.rs` (the tool).
 
-One time window of the archive becomes one movie file:
+Native only: AVAssetWriter, VideoToolbox and CoreMedia. No ffmpeg, no Python.
 
-- **Video**: the screen recording of one display (default: the display with the most recorded frames in the window),
-  each archived frame at its own capture time, re-encoded with the hardware H.264 encoder (HEVC on request).
-  Where nothing was recorded the picture is black; a frame is never held across a hole.
-- **Audio**: every archived source with sound in the window on its own AAC track, named after the source
-  (`Mic: Shure MV7i`, `Call: Discord Helper`, `App: ego lite (ego Helper)`, `Heimdall`), in the order mic, calls,
-  apps, Heimdall. A source that was exact digital silence for the whole window gets no track and is listed as
-  left out. All tracks are enabled, so QuickTime plays them together; editors see them separately.
-- **Transcript**: speaker-labelled subtitles ("You: …", "Guest: …", the source when nobody is named), short lines cut
-  at word times, overlapping speakers stacked. They go in as a soft subtitle track (3GPP timed text) and as
-  `FILE.srt` beside the movie.
+## What the movie holds
 
-Native only: AVAssetWriter, VideoToolbox and CoreMedia (`crates/archive/src/clip_writer.rs`). No ffmpeg, no Python.
+- Video: the screen recording of one display, by default the display with the most recorded frames in the window.
+  Each archived frame sits at its own capture time, re-encoded with the hardware H.264 encoder (HEVC with `--hevc`).
+  Where nothing was recorded the picture is black; a frame is never held across a hole longer than `VIDEO_GAP_NS`
+  (250 ms).
+- Audio: every archived source with sound in the window gets its own AAC track named after the source (`Mic: <device>`,
+  `Call: <app>`, `App: <app>`, `Heimdall`), ordered mic, calls, apps, other, Heimdall (`describe_source`). A call is
+  an app whose bundle id is in `CALL_APPS`. A source that was exact digital silence for the whole window gets no
+  track and is listed as left out (`--include-silent` keeps it). All tracks are enabled, so QuickTime plays them
+  together and editors see them apart.
+- Transcript: speaker-labelled subtitles (the speaker's name, else the source), short lines cut at word times
+  (`CUE_NS` 5.5 s, `CUE_CHARS` 84), overlapping speakers stacked. They go in as a soft 3GPP timed-text track and as
+  `NAME.srt` beside the movie whenever there is speech (`--no-subtitles` drops only the soft track).
+- The answer: the file, then what each track holds, black gaps, silent sources and any damaged stretch.
 
-## Calling it
+## Make a clip as the agent
 
-- **Heimdall's agent**: MCP tool `archive_clip` with `start`, `end` (RFC 3339 with an offset, at most two hours
-  apart), optional `display_id`, `width`, `fps` and `path` (absolute `.mp4`/`.mov`). Without `path` the movie goes
-  to `~/Library/Application Support/Heimdall/clips/heimdall-YYYY-MM-DD-HHMM-HHMM.mp4`. The answer is plain lines:
-  the file, then what each track holds. A build still running after 55 s keeps going; the answer says where the file
-  will appear.
-- **T3 tasks and sub-agents**: the same library as a command at a stable path inside the installed app:
+Call `archive_clip` ([mcp.md](mcp.md) lists every tool):
 
-  ```sh
-  ~/Applications/Heimdall.app/Contents/MacOS/heimdall-clip --from "2026-10-24 00:40" --to "00:47" --out ~/clip.mp4
-  ```
+- `start`, `end`: RFC 3339 with an offset; `end` after `start`, at most `CLIP_MAX_NS` (two hours) apart.
+- `display_id` (numeric string), `width` (64..4096; height keeps the aspect), `fps` (1..60, a constant rate instead
+  of capture times).
+- `path`: absolute, ending `.mp4`, `.mov` or `.m4v`. Default: `<home>/.heimdall/clips/heimdall-YYYY-MM-DD-HHMM-HHMM.mp4`
+  in local time, with `-2`, `-3` … when taken ([home.md](home.md)).
 
-  Times are local: `"2026-10-24 00:40"`, `"00:47"` (on the `--from` day; past midnight rolls to the next day),
-  RFC 3339, `now`, `-10m`, or `+90s` after `--from`. Options: `--display N`, `--width PX`, `--fps N` (constant rate
-  instead of capture times), `--hevc`, `--no-subtitles`, `--include-silent`, `--force` (replace an existing file),
-  `--json` (the report as JSON), `--archive DIR` (another store). It refuses an existing file without `--force`.
-- Both refuse while Seeing is off ("no screen frames are available"), as `screen_frames` does, and a build stops when
-  Seeing goes off: the command reads the switch from `settings.json` beside the archive every ten seconds of clip.
+Behaviour:
 
-## Safety beside the running app
+- The installed app runs the bundled `heimdall-clip` beside its own executable as a child process, so an AVFoundation
+  failure or a long window's memory stays out of Heimdall. A development build without the helper builds in process.
+- At most `MOST_AT_ONCE` (2) builds run at once (`CLIP_BUSY` beyond). Agent off kills the child.
+- A build still running after `ANSWER_WITHIN` (55 s) keeps going; the answer says where the file will appear.
+  Why: the MCP connection closes after 75 s.
+- Errors: `PATH_EXISTS` (the file, its `.srt` or a build of it exists), `ARCHIVE_UNAVAILABLE`, `CLIP_FAILED`, and
+  the Seeing-off refusal below. A path inside the archive is refused.
 
-The build only reads. The index is opened `SQLITE_OPEN_READ_ONLY` with `query_only`; the whole plan (sessions,
-frames, callbacks, cold chunks, transcript) is read in one read transaction, so a row the compactor moves into a cold
-chunk meanwhile is seen exactly once. Content packs are opened read-only. The shared lifetime lock (a `flock` on the
-store's existing `.compact.lock`) is held for the whole build, so nothing the plan references can be collected or
-re-tiered; the compactor skips its passes until the build ends. A live writer holding the index write lock does not
-block the build (WAL). Nothing is written to the store. The movie is written to a hidden partial file beside the
-destination and renamed into place only when complete; a `.NAME.building` claim (holding the builder's pid) keeps
-two builds off one file, across processes. Inside the app, `archive_clip` runs the bundled `heimdall-clip` as a
-child process, so an AVFoundation failure or a long window's memory stays out of Heimdall; Agent off kills it, at
-most two run at once, and a development build without the helper builds in process. A damaged frame or audio object
-costs its own stretch (black for the rest of that one-minute epoch, silence for that second) and the answer says so.
+## Make a clip from a task or a shell
+
+1. Run the command inside the installed app:
+
+   ```sh
+   "$HOME/Applications/Heimdall.app/Contents/MacOS/heimdall-clip" --from "2026-10-24 00:40" --to "00:47" --out "$PWD/clip.mp4"
+   ```
+
+2. Times are local: `"2026-10-24 00:40"`, `"00:47"`, RFC 3339 with an offset, `now`, or relative `-10m`, `+90s`, `-2h`
+   (`s`, `m`, `h`). A clock-only `--from` later than now means yesterday. A clock-only `--to` is on the `--from` day,
+   or the next day when that would not be after `--from` (`23:50` to `00:10`). A relative `--to` counts from `--from`.
+3. The options: `--display N`, `--width PX`, `--fps N`, `--hevc`, `--no-subtitles`, `--include-silent`, `--force`
+   (replace an existing movie and its `.srt`), `--json` (the report as JSON), `--archive DIR` (default
+   `<home>/.heimdall/archive`). Without `--out` the file goes to the clips folder as above.
+4. Check: the command prints the report and exits 0; the movie and its `.srt` exist at the printed path.
+
+It refuses an existing file without `--force`, a window over two hours, and an output inside the archive.
+
+## Seeing off
+
+Both refuse while Seeing is off with `CAPTURE_UNAVAILABLE: no screen frames are available` (`clip::SEEING_OFF`, the
+same words as `screen_frames`). The app checks its own flag; the command reads `screen_off` from `settings.json`
+beside the archive, and re-reads it every ten seconds of clip, so a build stops when Seeing goes off
+([settings.md](settings.md), [screen.md](screen.md)).
+
+## Safe beside the running app
+
+- The build only reads. The index is opened `SQLITE_OPEN_READ_ONLY`; the whole plan is read in one read transaction,
+  so a row the compactor moves into a cold container meanwhile is seen exactly once. Content packs open read-only.
+- It holds the archive's shared reader lock (`compact::reader_lock`) for the whole build, so nothing the plan
+  references is collected or re-tiered meanwhile ([archive.md](archive.md)). A writer holding the index write lock
+  does not block it.
+- The movie is written to a hidden `.NAME.partial-…` file beside the destination and renamed when complete. A
+  `.NAME.building` claim holding the builder's pid keeps two builds off one file, across processes.
+- A damaged frame costs the rest of its video epoch (black, since later frames depend on it); a damaged audio object
+  costs its second (silence). The answer says so.
 
 ## Time and sync
 
-Video samples, audio callbacks and transcript words all carry capture's host clock within one app launch. Each item
-is placed at `offset + (host − host_from)` of its stretch, so sound and picture are in sync by construction. The host
-clock stops while the Mac sleeps, so wall − host jumps at each wake: the anchors that read both together (capture
-segments, precisely; video epochs, one a minute, to about 0.3 s) split a launch into stretches of unchanged offset,
-and the window is laid out by wall clock across stretches and across launches (a crashed launch ends where the next
-starts). Time asleep or between launches is black and silent.
+- Video samples, audio callbacks and transcript words share capture's host clock within one app launch. Each item
+  sits at `offset + (host − host_from)` of its stretch, so sound and picture are in sync by construction.
+- The host clock stops during sleep. Capture segments (precise) and video epochs (one a minute, about 0.3 s coarse)
+  anchor wall against host and split a launch into stretches of unchanged offset; the window is laid out by wall
+  clock across stretches and launches. Time asleep or between launches is black and silent.
+- Consecutive audio callbacks within `SNAP_NS` (4 ms) are joined sample for sample, so host-clock jitter never clicks;
+  a larger difference re-anchors the callback at its own timestamp. The report gives each track's largest placement
+  offset.
+- Each track keeps its source's most common capture rate when AAC takes it (8 to 48 kHz), else 48 kHz, and up to
+  two channels; other rates are linearly interpolated. AAC runs at 192 kb/s mono or 256 kb/s stereo at 44.1 kHz and
+  above; below that the encoder picks.
 
-Audio callbacks are joined sample for sample while their timestamps agree within 4 ms, so host-clock jitter never
-clicks; a larger difference (a gap, device-clock drift) re-anchors the callback at its own timestamp. The report
-gives each track's largest placement offset. The output keeps each source's capture rate (48 kHz when AAC does not
-take it) and up to two channels; other rates (cold 16 kHz audio) are linearly interpolated, with each callback's
-length rounded on its own timeline so consecutive callbacks abut exactly.
-
-## What the archive actually keeps
-
-- **Screen**: every connected display, half native size (1728 × 1116 on the built-in panel), HEVC, 5 fps, for about
-  24 hours; then each one-minute epoch is re-encoded to at most 1 fps, kept indefinitely. Idle screens extend the last
-  frame's coverage instead of storing new frames. Seeing off, lock, sleep and errors are holes.
-- **Audio**: raw audio is kept, every source separately (each microphone, each app's process tap, Heimdall's own
-  voice), as the native float stream, losslessly, for about 24 hours. Then speech becomes FLAC 16 kHz mono and the
-  rest Opus 12 kb/s 16 kHz mono; nothing is deleted. Exact digital silence is stored as duration markers.
-- **Microphone while Heimdall talks**: the raw microphone, also while echo cancellation runs (the cleaned copy goes
-  only to listen; `docs/capture.md`, "Echo guard").
-- **Transcript**: final utterances with word times, speaker and source; the clip uses the final projection.
-
-## Measured
-
-A 7:00 window of the live archive (24 Oct, M5 Max under normal load, build before the review fixes): 8.3 s wall,
-6.2 s CPU, 441 MB peak memory, a 134 MB H.264 1728 × 1116 movie. Read back by a lab check: all
-1,927 frame times within 0.006 ms of the archive's capture times, each AAC track at 0.00 ms lag and correlation
-0.997–1.000 against the placed PCM. The live rerun on the final build is still to do. The screen recording itself had
-seven unrecorded holes of 1–4.4 s in that window (fullscreen video; `crates/screen/src/gaps.rs` now logs them).
+What the archive keeps (rates, tiers, retention) belongs to [archive.md](archive.md); the clip shows what is there.
 
 ## Tests
 
-`cargo nextest run -p heimdall-archive -E 'test(clip)'`: the synthetic-store integration test (`tests/clip.rs`:
-hot and cold-packed audio, a silent source, HEVC epochs with a hole, a transcript line, a writer holding the index
-lock throughout, constant-fps resampling, cancellation leaving nothing behind, a damaged frame and audio object), the
-writer tests (both containers, 20 s of subtitles beside audio and video) and unit tests for cues, labels, times and
-the midnight roll, launches and sleeps, callback spans at mixed rates, and scaling. `crates/agent/tests/mcp_v2.rs` covers the tool's schema and validation; the app test
-covers the Seeing-off refusal.
+`cargo test -p heimdall-archive clip`:
+
+- `crates/archive/tests/clip.rs`: a synthetic store with hot and cold audio, a silent source, HEVC epochs with a hole,
+  a transcript line, a writer holding the index lock, constant-fps resampling, cancellation leaving nothing behind,
+  damaged frame and audio objects, and the command itself.
+- Unit tests in `clip.rs` and `clip_writer.rs`: cues, labels, times and the midnight roll, launches and sleeps,
+  mixed-rate callback spans, scaling, both containers.
+- `crates/agent/tests/mcp_v2.rs`: the tool's schema and validation; `crates/app/src/mcp_clip.rs`: the Seeing-off
+  refusal.
+
+## See also
+
+- [archive.md](archive.md): what the archive keeps and the reader lock
+- [screen.md](screen.md): the screen recorder and Seeing
+- [capture.md](capture.md): the audio sources behind each track
+- [chunk-index.md](chunk-index.md): finding the window to clip with `timeline_search`
+- [mcp.md](mcp.md): `archive_clip` and `timeline_search` output `clip`
+- [home.md](home.md): where `<home>/.heimdall` is

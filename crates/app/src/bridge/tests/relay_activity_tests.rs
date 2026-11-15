@@ -65,7 +65,7 @@ fn relay_rows() -> Vec<ChatEntry> {
 fn relay_tool_calls_make_the_same_rows_as_pi() {
     let pi = pi_rows();
     let kinds: Vec<&str> = pi.iter().map(|e| match &e.kind {
-        ChatKind::Owner(_) => "owner", ChatKind::Heimdall { .. } => "heimdall", ChatKind::Action { .. } => "action", ChatKind::Note { .. } => "note",
+        ChatKind::User(_) => "owner", ChatKind::Heimdall { .. } => "heimdall", ChatKind::Action { .. } => "action", ChatKind::Note { .. } => "note",
     }).collect();
     assert_eq!(kinds, ["owner", "heimdall", "note", "action", "action", "heimdall"], "Pi's turn: {pi:#?}");
     assert_eq!(relay_rows(), pi);

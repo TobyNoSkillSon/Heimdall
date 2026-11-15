@@ -21,6 +21,17 @@ pub enum SourceKind {
         owner: Option<AppOwner>,
         output_devices: Vec<String>,
     },
+    /// The user's iPhone microphone, streamed by the phone's bridge while he toggles the live mic on
+    /// (`PushSource`, the app's `phone_mic.rs`). `kind`: the phone's input (`iphone`, `airpods`, `bluetooth`,
+    /// `headset`, `usb`, `car`, `other`); `name`: that input's name; `capture`: `room` or `headset`. A new input is a
+    /// new source, so each archived frame's source names the microphone that heard it. `voice_processing`: Apple's
+    /// voice processing (echo cancellation, noise suppression) shaped the audio, which changes how his voice sounds.
+    Phone {
+        kind: String,
+        name: String,
+        capture: String,
+        voice_processing: bool,
+    },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeFormat {
@@ -65,6 +76,9 @@ impl SourceInfo {
                     format!("process:{pid}:{birth_us}:{generation}"),
                     format!("{app} / {name} [{bundle}, PID {pid}]"),
                 )
+            }
+            SourceKind::Phone { kind, name, capture, .. } => {
+                (format!("phone:{kind}:{generation}"), format!("Phone: {name} [{kind}, {capture}]"))
             }
         };
         Self {

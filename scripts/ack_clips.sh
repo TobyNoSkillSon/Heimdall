@@ -1,5 +1,5 @@
 #!/bin/bash
-# Generate the instant-acknowledgement clips (every current ack in acks.json, English and Polish, plain lines and
+# Generate the instant-acknowledgement clips (every current ack in acks.json, English only, plain lines and
 # delivery variants) in Jarvis's voice with Drama 3 into a
 # lab bank, then import them into Heimdall's data directory. Dry-run import by default; --apply writes.
 # Install time only: refuses while the installed Heimdall runs (it holds Jarvis and would unload him for RAM).
@@ -19,7 +19,7 @@ APP_PATTERN=${ACK_CLIPS_APP_PATTERN:-Heimdall\.app/Contents/}
 # Current acks (retired ones, with replaced_by, get no takes).
 ACKS=$(python3 -I -c 'import json,sys;print(sum("replaced_by" not in a for a in json.load(open(sys.argv[1]))))' "$ROOT/crates/voicebank/acks.json")
 GIB=$((1024 * 1024 * 1024))
-# docs/drama3-integration.md: ~27 GB Drama 3 resident (measured 26.1 GB footprint), 2 GB for the ASR check,
+# docs/personal/drama3-integration.md: ~27 GB Drama 3 resident (measured 26.1 GB footprint), 2 GB for the ASR check,
 # 2 GiB margin (the app's own admission). RTF ~0.48 (0.34-0.48 measured), load ~8.4 s.
 RESIDENT_GIB=29 ADMISSION_GIB=31 RAM_CEILING_GB=100
 

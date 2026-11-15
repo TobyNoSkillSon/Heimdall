@@ -112,7 +112,7 @@ fn the_check_has_the_microphone_row_and_one_decider_row() {
     assert_eq!((mic.state.as_str(), mic.why.as_deref(), mic.fix.as_deref()), ("needs_user", Some("No microphone found"), Some("Choose…")));
     assert_eq!(s.exit_code(), 2, "no microphone needs the user");
     // Memory search that can't run here is optional: reported, never waited for.
-    let memory = ui::SetupReadiness { rows: vec![row("memory", "Memory search", ui::ReadyState::Optional { why: "Needs 8 GB free memory".into(), fix: None })] };
+    let memory = ui::SetupReadiness { rows: vec![row("memory", "Memory search", ui::ReadyState::Optional { why: "Needs 6 GB free memory".into(), fix: None })] };
     let done = ui::ModelDownloads { rows: vec![ui::ModelDownload { title: "EmbeddingGemma 2".into(), state: ui::DownloadState::Done, total: 1, done: 1, ..Default::default() }] };
     let m = Status::of(&done, &memory, true);
     assert_eq!((m.rows.len(), m.rows[0].state.as_str(), m.exit_code()), (1, "optional", 0), "{:?}", m.rows);
@@ -130,5 +130,5 @@ fn without_a_running_heimdall_the_command_says_so() {
     assert_eq!(run(&["--plan".into(), "--provider".into(), "local".into()], dir.path(), |_| None), 0);
     let p = plan(&args(&["--provider", "local"]), Some("local"));
     assert!(p.iter().any(|(s, d)| s == "download:engine" && d.contains("17.4 GB")));
-    assert!(p.iter().any(|(s, d)| s == "download:total" && d == "21.2 GB"), "{p:?}");
+    assert!(p.iter().any(|(s, d)| s == "download:total" && d == "22.4 GB"), "{p:?}");
 }

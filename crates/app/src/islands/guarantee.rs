@@ -84,7 +84,9 @@ pub fn compute(all: &[(String, Map<String, Value>)], now: i64) -> (Vec<Value>, V
 /// Returns true when it wrote.
 pub fn write(root: &Root, now: i64) -> Result<bool> {
     root.locked(|| {
-        let (waiting, unsure) = compute(&root.all(), now);
+        let (waiting, mut unsure) = compute(&root.all(), now);
+        // The islands worker out of every account says so here, first (night 1111, lane I).
+        if let Some(l) = crate::island_agent::out_line(root) { unsure.insert(0, json!({"id": "island-agent", "title": "Island updates", "line": l})) }
         let mut o = crate::goals::ops::current(root, "scheduled").unwrap_or_else(|| plan::fresh("scheduled"));
         let old = o.get("guarantee").cloned().unwrap_or(Value::Null);
         let same = old["waiting"] == json!(waiting) && old["unsure"] == json!(unsure);
@@ -99,10 +101,11 @@ pub fn write(root: &Root, now: i64) -> Result<bool> {
 /// The user's click on a choice of the guarantee line (`kind: "waiting"`): applied to its source. Returns the line the
 /// agent hears.
 pub fn choose(root: &Root, waiting_id: &str, action: &str) -> Result<String> {
+    let who = super::user_cap();
     let sched = root.read("scheduled").unwrap_or_default();
     let entry = sched.get("guarantee").and_then(|g| g.get("waiting")).and_then(Value::as_array).into_iter().flatten()
         .find(|w| w["id"] == waiting_id).cloned();
-    let Some(w) = entry else { return Ok(format!("User chose {action} on '{waiting_id}', which no longer waits; nothing was done.")) };
+    let Some(w) = entry else { return Ok(format!("{who} chose {action} on '{waiting_id}', which no longer waits; nothing was done.")) };
     let title = w["title"].as_str().unwrap_or(waiting_id).to_owned();
     let label = w["choices"].as_array().into_iter().flatten().find(|c| c["action"] == action)
         .and_then(|c| c["label"].as_str()).unwrap_or(action).to_owned();
@@ -110,7 +113,7 @@ pub fn choose(root: &Root, waiting_id: &str, action: &str) -> Result<String> {
     let line = match w["source"]["list"].as_str() {
         Some("goals") => {
             plan::approve(root, "goals", &src_id, action)?;
-            format!("User chose {label} on '{title}' (it waited on him).")
+            format!("{who} chose {label} on '{title}' (it waited on him).")
         }
         Some("scheduled") => {
             let item = plan::items(&sched).into_iter().find(|i| i.get("id").and_then(Value::as_str) == Some(src_id.as_str()));
@@ -119,41 +122,72 @@ pub fn choose(root: &Root, waiting_id: &str, action: &str) -> Result<String> {
             if let (true, Some(i)) = (action == "done", item) {
                 let goal = i.get("goal").and_then(Value::as_str).unwrap_or("").to_owned();
                 let now = crate::islands::tools::now_s() as i64;
+                let quote = format!("Done, clicked by {}", super::user());
                 let e = crate::goals::settled::Entry { title: i.get("title").and_then(Value::as_str).unwrap_or("").into(), kind: "shipped", goal, task: String::new(),
-                    at: now, quote: "Done, clicked by User".into(), proof: Some(crate::goals::proof::quote("Done, clicked by User", now)) };
+                    at: now, proof: Some(crate::goals::proof::quote(&quote, now)), quote };
                 root.locked(|| crate::goals::settled::record_locked(root, &[e], now))?;
             }
-            if action == "done" { format!("User says the missed promise '{title}' is done; it left Scheduled.") }
-            else { format!("User dropped the missed promise '{title}'; it left Scheduled.") }
+            if action == "done" { format!("{who} says the missed promise '{title}' is done; it left Scheduled.") }
+            else { format!("{who} dropped the missed promise '{title}'; it left Scheduled.") }
         }
-        _ => format!("User chose {label} on '{title}'."),
+        _ => format!("{who} chose {label} on '{title}'."),
     };
     write(root, crate::islands::tools::now_s() as i64)?;
     Ok(line)
 }
 
+/// The sweep's stop, set once on the orderly quit: a sweep waiting out its period ends at once.
+#[derive(Default)]
+pub struct Stop { stopped: std::sync::Mutex<bool>, wake: std::sync::Condvar }
+impl Stop {
+    pub fn stop(&self) {
+        *self.stopped.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.wake.notify_all();
+    }
+    pub fn stopped(&self) -> bool { *self.stopped.lock().unwrap_or_else(|e| e.into_inner()) }
+    /// Waits `d` or until stopped; true when stopped.
+    pub fn wait(&self, d: std::time::Duration) -> bool {
+        let g = self.stopped.lock().unwrap_or_else(|e| e.into_inner());
+        *self.wake.wait_timeout_while(g, d, |s| !*s).unwrap_or_else(|e| e.into_inner()).0
+    }
+}
+
 /// The sweep, every `PERIOD` until `stop`: proposals past two days go to the record (the next one shows, and
 /// Heimdall hears of it), then the guarantee. Runs on its own thread in the live app (`islands::live::start`).
-pub fn run(host: std::sync::Arc<super::Host>, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
-    use std::sync::atomic::Ordering;
-    while !stop.load(Ordering::Acquire) {
+pub fn run(host: std::sync::Arc<super::Host>, stop: std::sync::Arc<Stop>) {
+    while !stop.stopped() {
         let now = crate::islands::tools::now_s() as i64;
         match super::proposals::sweep(&host.root, now) {
             Ok(moved) => for (list, w) in moved {
                 for t in &w.archived { eprintln!("islands: proposal '{t}' in {list} archived after two days unanswered") }
+                for t in &w.stale { eprintln!("islands: proposal '{t}' in {list} left: it no longer fits (its goal finished or gone, or the work is there or removed)") }
                 if let Some(p) = &w.shown { host.deliver(super::Class::Context, &super::proposals::notice(list, p)) }
             },
             Err(e) => eprintln!("islands: proposal sweep: {}", super::short_error(&e)),
         }
         if let Err(e) = write(&host.root, now) { eprintln!("islands: guarantee not written: {}", super::short_error(&e)) }
-        // Sleep in short steps so a quit is prompt.
-        for _ in 0..PERIOD.as_secs() { if stop.load(Ordering::Acquire) { return } std::thread::sleep(std::time::Duration::from_secs(1)) }
+        if stop.wait(PERIOD) { return }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Cleanup 14 Nov (ISL-16): the sweep waits out its minute on a condvar, and a quit ends the wait at once.
+    #[test]
+    fn a_stop_ends_the_wait_at_once() {
+        let stop = std::sync::Arc::new(Stop::default());
+        assert!(!stop.wait(std::time::Duration::from_millis(10)), "not stopped: the wait runs out");
+        let s = stop.clone();
+        let t = std::time::Instant::now();
+        let waiter = std::thread::spawn(move || s.wait(std::time::Duration::from_secs(60)));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        stop.stop();
+        assert!(waiter.join().unwrap());
+        assert!(t.elapsed() < std::time::Duration::from_secs(5), "{:?}", t.elapsed());
+        assert!(stop.stopped() && stop.wait(std::time::Duration::from_secs(60)), "stopped stays stopped");
+    }
 
     fn o(v: Value) -> Map<String, Value> { v.as_object().unwrap().clone() }
 
@@ -201,7 +235,7 @@ mod tests {
         assert!(!write(&r, 160).unwrap());
         assert!(write(&r, 100 + REFRESH_S).unwrap());
         let line = choose(&r, "ask:a-1", "yes").unwrap();
-        assert!(line.contains("User chose Yes on 'Pick the cut'"), "{line}");
+        assert!(line.contains("The user chose Yes on 'Pick the cut'"), "{line}");
         assert!(plan::items(&r.read("goals").unwrap()).is_empty(), "the answered ask leaves");
         assert!(r.read("scheduled").unwrap()["guarantee"]["waiting"].as_array().unwrap().is_empty());
         assert!(choose(&r, "ask:gone", "yes").unwrap().contains("no longer waits"));

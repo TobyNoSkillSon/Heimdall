@@ -3,14 +3,13 @@
 //! calls under the same label. Nobody is asked to name it here: the app suggests a name on the island
 //! (`crates/app/src/voice_suggest.rs`, `voice_namer.rs`).
 use crate::{
-    ax::AxSnapshot,
     embedding::Embedding,
-    identity::{EnrollmentStore, Identity},
+    identity::{EnrollmentStore, Identity, NearMiss},
 };
-use anyhow::{ensure, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::{Arc, Mutex},
 };
@@ -29,11 +28,21 @@ pub enum SpeakerEvent {
         track: TrackId,
         code: String,
         new: bool,
+        /// A new voice that sounds somewhat like a named person (`NearMiss::Ask`): the host may ask the user who it was.
+        /// Absent in older records.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        near: Option<NearVoice>,
     },
     LabelChanged {
         track: TrackId,
         name: String,
     },
+}
+/// The named person a new voice sounds somewhat like, and how close (best cosine against their samples).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct NearVoice {
+    pub name: String,
+    pub cosine: f32,
 }
 /// When a voice is coded: Unix milliseconds, the label's hour ("Fri 23 Oct 21h") and the local day ("2026-10-23").
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,7 +73,6 @@ pub fn voice_time(ms: u64) -> VoiceTime {
 pub struct NamingFlow {
     pub store: EnrollmentStore,
     labels: BTreeMap<TrackId, String>,
-    ax: VecDeque<AxSnapshot>,
     discord_sources: BTreeSet<String>,
     /// Tracks of this session whose voice is ignored (Don't Ask Again on the old prompt): left unlabelled.
     ignored_tracks: BTreeSet<TrackId>,
@@ -77,7 +85,6 @@ impl NamingFlow {
         Self {
             store,
             labels: BTreeMap::new(),
-            ax: VecDeque::new(),
             discord_sources: BTreeSet::new(),
             ignored_tracks: BTreeSet::new(),
             persist: None,
@@ -106,31 +113,6 @@ impl NamingFlow {
     /// The host classified this capture source as Discord; IDs need not be bundle IDs.
     pub fn enable_discord_ax(&mut self, source: String) {
         self.discord_sources.insert(source);
-    }
-    /// Discord accessibility snapshots, kept (bounded) for the participant list. They are not naming evidence.
-    pub fn observe_ax(&mut self, snapshot: AxSnapshot) {
-        if !snapshot.observed_at.is_finite() {
-            return;
-        }
-        self.ax.push_back(snapshot);
-        while self.ax.len() > 32 {
-            self.ax.pop_front();
-        }
-    }
-    /// Final transcript text of a track. Names are no longer guessed in the call (the voice namer reads the
-    /// archived transcript), so nothing changes here.
-    pub fn observe_transcript(&mut self, _from: TrackId, _end: f64, _text: &str) -> Vec<SpeakerEvent> {
-        vec![]
-    }
-    pub fn clean_voice(
-        &mut self,
-        track: TrackId,
-        at: f64,
-        embedding: Embedding,
-        clean_seconds: f64,
-        quote: &str,
-    ) -> Vec<SpeakerEvent> {
-        self.clean_voice_samples(track, at, vec![embedding], clean_seconds, quote)
     }
     /// A track's clean windows: a known name labels it; otherwise it is the coded voice they match, or a new one.
     /// The latest window is the query; do not choose the luckiest of several scores.
@@ -174,16 +156,32 @@ impl NamingFlow {
                 return Ok(Err(name));
             }
             if let Some(code) = store.voice_match(&embedding) {
-                store.heard_voice(&code, embeddings.clone(), now.ms, &now.day)?;
-                Ok(Ok((code, false)))
-            } else {
-                Ok(Ok((store.code_voice(embeddings.clone(), heard_in, quote, now.ms, &now.stamp, &now.day)?, true)))
+                // Recognised only through a widened sample: labelled, its samples not kept (no second hop).
+                let keep = if store.anchored(&code, &embedding) { embeddings.clone() } else { vec![] };
+                store.heard_voice(&code, keep, now.ms, &now.day)?;
+                return Ok(Ok((code, false, None)));
+            }
+            // Just outside one person's set: it joins that set, tagged with where it was heard (identity.rs
+            // `WidenedSample`), instead of becoming a new "Speaker … #n".
+            match store.near_miss(&embedding) {
+                Some(NearMiss::Widen { label, anchor, named }) => {
+                    store.widen(&label, embedding.clone(), heard_in, now.ms, anchor)?;
+                    if named {
+                        return Ok(Err(label));
+                    }
+                    store.heard_voice(&label, vec![], now.ms, &now.day)?;
+                    Ok(Ok((label, false, None)))
+                }
+                near => {
+                    let near = match near { Some(NearMiss::Ask { name, cosine }) => Some(NearVoice { name, cosine }), _ => None };
+                    Ok(Ok((store.code_voice(embeddings.clone(), heard_in, quote, now.ms, &now.stamp, &now.day)?, true, near)))
+                }
             }
         });
         match result {
-            Ok(Ok((code, new))) => {
+            Ok(Ok((code, new, near))) => {
                 self.labels.insert(track.clone(), code.clone());
-                vec![SpeakerEvent::VoiceCoded { track, code, new }]
+                vec![SpeakerEvent::VoiceCoded { track, code, new, near }]
             }
             Ok(Err(name)) => {
                 self.labels.insert(track.clone(), name.clone());
@@ -210,17 +208,6 @@ impl NamingFlow {
         store.save(&path)?;
         self.store = store;
         Ok(out)
-    }
-    /// This call's tracks labelled `code` (a coded voice), for the host's rename.
-    pub fn tracks_of(&self, label: &str) -> Vec<TrackId> {
-        self.labels.iter().filter(|(_, l)| *l == label).map(|(t, _)| t.clone()).collect()
-    }
-    pub fn forget(&mut self, name: &str, path: &std::path::Path) -> Result<Vec<SpeakerEvent>> {
-        let mut store = self.store.clone();
-        ensure!(store.names.remove(name).is_some(), "unknown enrollment");
-        store.save(path)?;
-        self.store = store;
-        Ok(self.clear_name(name))
     }
     /// Host already persisted removal; clear call-local labels without writing an
     /// older enrollment snapshot back over another source's confirmation.
@@ -259,12 +246,6 @@ impl NamingFlow {
                 }
             })
             .collect()
-    }
-    pub fn close_session(&mut self, source: &str, session: u64) {
-        self.labels
-            .retain(|t, _| t.source != source || t.session != session);
-        self.ignored_tracks
-            .retain(|t| t.source != source || t.session != session);
     }
     /// Whether this track already has its label (a name or a code): its clean speech is not collected again.
     pub fn labelled(&self, track: &TrackId) -> bool {
@@ -321,9 +302,9 @@ mod tests {
         assert_eq!((v.embeddings.len(), v.quote.as_str(), v.heard_in.as_str(), v.calls), (2, "Hi all", "Discord", 1));
         assert!(f.store.names.is_empty(), "a code is not a name");
         // Labelled once per call track.
-        assert!(f.clean_voice(track(2), 30., emb(), 3., "again").is_empty());
+        assert!(f.clean_voice_samples(track(2), 30., vec![emb()], 3., "again").is_empty());
         // A second new voice in the same hour is #2.
-        assert_eq!(code(&f.clean_voice(track(3), 40., other(), 3., "")).0, "Speaker Fri 23 Oct 21h #2");
+        assert_eq!(code(&f.clean_voice_samples(track(3), 40., vec![other()], 3., "")).0, "Speaker Fri 23 Oct 21h #2");
     }
     #[test]
     fn the_same_voice_in_a_later_call_keeps_its_code_and_samples_build_up() {
@@ -351,10 +332,10 @@ mod tests {
         let lock = Arc::new(Mutex::new(()));
         let mut a = flow(EnrollmentStore::default()).persist_to(path.clone(), lock.clone());
         let mut b = flow(EnrollmentStore::default()).persist_to(path.clone(), lock.clone());
-        let (x, _) = code(&a.clean_voice(track(1), 1., emb(), 3., ""));
+        let (x, _) = code(&a.clean_voice_samples(track(1), 1., vec![emb()], 3., ""));
         // b's in-memory store is stale; the file is re-read, so the voice is matched, not coded twice.
-        assert_eq!(code(&b.clean_voice(in_session(9, 1), 1., emb(), 3., "")), (x, false));
-        let (y, _) = code(&b.clean_voice(in_session(9, 2), 1., third(), 3., ""));
+        assert_eq!(code(&b.clean_voice_samples(in_session(9, 1), 1., vec![emb()], 3., "")), (x, false));
+        let (y, _) = code(&b.clean_voice_samples(in_session(9, 2), 1., vec![third()], 3., ""));
         assert_eq!(EnrollmentStore::load(&path).unwrap().voices.len(), 2);
         assert_ne!(y, "Speaker Fri 23 Oct 21h #1");
         std::fs::remove_file(&path).unwrap();
@@ -370,7 +351,7 @@ mod tests {
         assert!(store.name_voice(&c, "Dave").is_err(), "the code is retired");
         f.set_store(store);
         assert_eq!(f.rename_name(&c, "Dave").len(), 1);
-        let events = f.clean_voice(in_session(2, 3), 1., emb(), 3., "");
+        let events = f.clean_voice_samples(in_session(2, 3), 1., vec![emb()], 3., "");
         assert!(matches!(&events[..], [SpeakerEvent::LabelChanged { name, .. }] if name == "Dave"));
     }
     #[test]
@@ -382,17 +363,17 @@ mod tests {
         other.enroll("Dave", emb()).unwrap();
         other.save(&path).unwrap();
         // f's in-memory store has no names yet (its Work::Store has not arrived): the file's name still wins.
-        assert!(matches!(&f.clean_voice(track(1), 1., emb(), 3., "")[..], [SpeakerEvent::LabelChanged { name, .. }] if name == "Dave"));
+        assert!(matches!(&f.clean_voice_samples(track(1), 1., vec![emb()], 3., "")[..], [SpeakerEvent::LabelChanged { name, .. }] if name == "Dave"));
         assert!(EnrollmentStore::load(&path).unwrap().voices.is_empty());
         std::fs::remove_file(&path).unwrap();
     }
     #[test]
     fn a_forgotten_voice_keeps_its_code() {
         let mut f = flow(EnrollmentStore::default());
-        let (c, _) = code(&f.clean_voice(track(1), 1., emb(), 3., ""));
+        let (c, _) = code(&f.clean_voice_samples(track(1), 1., vec![emb()], 3., ""));
         assert!(f.store.set_irrelevant(&c, true));
         assert!(!f.store.set_irrelevant("Speaker nobody", true));
-        assert_eq!(code(&f.clean_voice(in_session(2, 1), 1., emb(), 3., "")), (c.clone(), false));
+        assert_eq!(code(&f.clean_voice_samples(in_session(2, 1), 1., vec![emb()], 3., "")), (c.clone(), false));
         assert!(f.store.voices[&c].irrelevant);
     }
     #[test]
@@ -400,15 +381,15 @@ mod tests {
         let mut store = EnrollmentStore::default();
         store.ignore(vec![emb()], "Discord", "Subscribe", 1).unwrap();
         let mut f = flow(store);
-        assert!(f.clean_voice(track(2), 1., emb(), 3., "").is_empty());
+        assert!(f.clean_voice_samples(track(2), 1., vec![emb()], 3., "").is_empty());
         assert_eq!(f.label(&track(2)), "Speaker 2");
         assert!(f.store.voices.is_empty());
     }
     #[test]
     fn incomplete_clean_evidence_codes_nothing() {
         let mut f = flow(EnrollmentStore::default());
-        assert!(f.clean_voice(track(1), 1.0, emb(), 2.0, "").is_empty());
-        assert!(f.clean_voice(track(1), f64::NAN, emb(), 3.0, "").is_empty());
+        assert!(f.clean_voice_samples(track(1), 1.0, vec![emb()], 2.0, "").is_empty());
+        assert!(f.clean_voice_samples(track(1), f64::NAN, vec![emb()], 3.0, "").is_empty());
         assert!(f.store.voices.is_empty());
     }
     #[test]
@@ -420,7 +401,7 @@ mod tests {
         f.labels.insert(track(2), "Alice".into());
         assert_eq!(f.rename_name("Alice", "Bob").len(), 2);
         assert_eq!(f.label(&track(1)), "Bob");
-        assert_eq!(f.tracks_of("Bob").len(), 2);
+        assert_eq!(f.label(&track(2)), "Bob");
         assert_eq!(f.clear_name("Bob").len(), 2);
         assert_eq!(f.label(&track(1)), "Speaker 1");
         assert_eq!(f.store.names.len(), 2);
@@ -446,5 +427,167 @@ mod tests {
         let t = voice_time(1_792_782_000_000);
         assert!(t.stamp.contains("Oct") && t.stamp.ends_with('h'), "{}", t.stamp);
         assert_eq!(t.day.len(), 10);
+    }
+
+    /// A voice at cosine `c` from axis 0, leaning toward axis `side` (unit length).
+    fn at(c: f32, side: usize) -> Embedding {
+        let mut v = vec![0.; DIMENSION];
+        v[0] = c;
+        v[side] = (1. - c * c).max(0.).sqrt();
+        Embedding::new(v).unwrap()
+    }
+    fn threshold() -> f32 {
+        EnrollmentStore::default().calibration.unwrap().threshold
+    }
+    /// "Add another point to expand that circle a little bit" (~08:15): a sample just outside a named
+    /// person's set labels them and joins their set, tagged with where it was heard; the next sample near it is them.
+    #[test]
+    fn a_near_miss_widens_that_persons_set_instead_of_a_new_code() {
+        let mut store = EnrollmentStore::default();
+        store.enroll("Vim", at(1., 1)).unwrap();
+        let mut f = flow(store);
+        let near = at(threshold() - 0.03, 2);
+        let events = f.clean_voice_samples(track(2), 10., vec![near.clone(), near.clone()], 12., "yo");
+        assert!(matches!(&events[..], [SpeakerEvent::LabelChanged { name, .. }] if name == "Vim"), "{events:?}");
+        let w = &f.store.names["Vim"].widened;
+        assert_eq!((w.len(), w[0].device.as_str()), (1, "Discord"));
+        assert!(f.store.voices.is_empty(), "no Speaker … #n");
+        // A coded voice widens the same way and keeps its code.
+        let mut store = EnrollmentStore::default();
+        let c = store.code_voice(vec![at(1., 1)], "Discord", "hi", 1, "Fri 23 Oct 21h", "2026-10-23").unwrap();
+        let mut f = flow(store);
+        let events = f.clean_voice_samples(track(3), 10., vec![near.clone(), near], 12., "yo");
+        assert_eq!(code(&events), (c.clone(), false));
+        assert_eq!(f.store.voices[&c].widened.len(), 1);
+        assert_eq!(f.store.voices[&c].embeddings.len(), 1, "a widened sample is not one of its own");
+    }
+    /// Drift guard: a similar stranger, a little further than the wiggle, is not absorbed; nor is one about as close to
+    /// two people.
+    #[test]
+    fn a_similar_stranger_is_not_absorbed() {
+        let mut store = EnrollmentStore::default();
+        store.enroll("Vim", at(1., 1)).unwrap();
+        let mut f = flow(store.clone());
+        let stranger = at(threshold() - crate::identity::WIGGLE - 0.02, 2);
+        let events = f.clean_voice_samples(track(2), 10., vec![stranger.clone(), stranger], 12., "hey");
+        assert!(code(&events).1, "a new voice");
+        assert!(f.store.names["Vim"].widened.is_empty());
+        // Between two people: inside the wiggle of one, too close to the other.
+        let mut v = vec![0.; DIMENSION];
+        v[0] = threshold() - 0.02;
+        v[1] = threshold() - 0.06;
+        v[2] = (1. - v[0] * v[0] - v[1] * v[1]).sqrt();
+        let between = Embedding::new(v).unwrap();
+        store.enroll("Dave", at(0., 1)).unwrap();
+        let mut f = flow(store);
+        let events = f.clean_voice_samples(track(3), 10., vec![between.clone(), between], 12., "hey");
+        assert!(code(&events).1);
+        assert!(f.store.names.values().all(|e| e.widened.is_empty()));
+    }
+    /// Drift guard: near misses in a row, each just outside the last one taken, cannot walk the set: the wiggle is
+    /// measured against the person's own samples only, and a voice known only through a widened sample is never kept.
+    #[test]
+    fn repeated_near_misses_do_not_walk_the_boundary() {
+        let thr = threshold();
+        let mut store = EnrollmentStore::default();
+        store.enroll("Vim", at(1., 1)).unwrap();
+        let mut f = flow(store);
+        // Points on a circle away from Vim, 0.03 rad apart, each a new call track.
+        let point = |k: usize| {
+            let a = (thr - 0.01).acos() + k as f32 * 0.03;
+            let mut v = vec![0.; DIMENSION];
+            v[0] = a.cos();
+            v[2] = a.sin();
+            Embedding::new(v).unwrap()
+        };
+        for k in 0..40 {
+            f.clean_voice_samples(in_session(10 + k as u64, 1), 10., vec![point(k), point(k)], 12., "");
+        }
+        let vim = &f.store.names["Vim"];
+        assert!(vim.widened.iter().all(|w| w.embedding.cosine(&at(1., 1)) >= thr - crate::identity::WIGGLE), "widened only inside the ring");
+        assert!(vim.widened.len() <= crate::identity::WIDENED_PER_DEVICE);
+        let far = point(39);
+        assert!(far.cosine(&at(1., 1)) < thr - 0.3);
+        assert!(!matches!(f.store.identify(&far), Identity::Known { ref name, .. } if name == "Vim"), "the far end is not Vim");
+        // A coded voice recognised only through its widened sample keeps no samples of it.
+        let mut store = EnrollmentStore::default();
+        let c = store.code_voice(vec![at(1., 1)], "Discord", "", 1, "Fri 23 Oct 21h", "2026-10-23").unwrap();
+        store.widen(&c, point(1), "Discord", 2, thr - 0.02).unwrap();
+        let hop = {
+            // At the threshold from the widened point, further from the voice's own sample.
+            let mut v = point(1).values().to_vec();
+            v[3] = 0.95;
+            Embedding::new(v).unwrap()
+        };
+        assert!(!store.anchored(&c, &hop));
+        let mut f = flow(store);
+        let events = f.clean_voice_samples(track(4), 10., vec![hop.clone(), hop], 12., "");
+        assert_eq!(code(&events), (c.clone(), false));
+        assert_eq!(f.store.voices[&c].embeddings.len(), 1, "no second hop");
+    }
+    /// Never by voice alone: the user, Heimdall and a guest Heimdall listens to.
+    #[test]
+    fn owner_heimdall_and_listened_guests_are_never_widened() {
+        let near = at(threshold() - 0.03, 2);
+        for name in ["User", "Vim"] {
+            let mut store = EnrollmentStore::default();
+            store.enroll(name, at(1., 1)).unwrap();
+            if name == "Vim" {
+                store.set_listening("Vim", true).unwrap();
+            }
+            assert!(!matches!(store.near_miss(&near), Some(NearMiss::Widen { .. })), "{name}");
+            assert!(store.widen(name, near.clone(), "Discord", 1, 0.4).is_err(), "{name}");
+        }
+        assert!(EnrollmentStore::default().widen("Heimdall", near, "Discord", 1, 0.4).is_err());
+    }
+    /// Not sure: a new voice somewhat like a named person carries that name, so the user can be asked who it was; a code
+    /// is never asked about, and a far voice carries nothing.
+    #[test]
+    fn an_unsure_new_voice_carries_the_name_it_sounds_like() {
+        let mut store = EnrollmentStore::default();
+        store.enroll("Vim", at(1., 1)).unwrap();
+        let mut f = flow(store);
+        let unsure = at(threshold() - 0.07, 2);
+        let events = f.clean_voice_samples(track(2), 10., vec![unsure.clone(), unsure], 12., "");
+        match &events[..] {
+            [SpeakerEvent::VoiceCoded { new: true, near: Some(n), .. }] => assert_eq!(n.name, "Vim"),
+            other => panic!("{other:?}"),
+        }
+        let far = at(0.05, 3);
+        let events = f.clean_voice_samples(track(3), 10., vec![far.clone(), far], 12., "");
+        assert!(matches!(&events[..], [SpeakerEvent::VoiceCoded { new: true, near: None, .. }]));
+    }
+    /// Widened samples survive a save and load, and older stores without them read as before.
+    #[test]
+    fn widened_samples_are_saved() {
+        let mut store = EnrollmentStore::default();
+        store.enroll("Vim", at(1., 1)).unwrap();
+        store.widen("Vim", at(threshold() - 0.03, 2), "AirPods", 5, threshold() - 0.03).unwrap();
+        let p = temp("widened");
+        store.save(&p).unwrap();
+        let back = EnrollmentStore::load(&p).unwrap();
+        std::fs::remove_file(&p).unwrap();
+        assert_eq!(back.names["Vim"].widened[0].device, "AirPods");
+        let mut text = serde_json::to_value(&back).unwrap();
+        text["names"]["Vim"].as_object_mut().unwrap().remove("widened");
+        let older: EnrollmentStore = serde_json::from_value(text).unwrap();
+        assert!(older.names["Vim"].widened.is_empty());
+    }
+    /// Review 12 Nov: a widening done before listening was turned on never lets a stranger count as that guest, and
+    /// naming a coded voice the user carries none of its widened samples.
+    #[test]
+    fn widened_samples_never_speak_for_a_listened_guest_or_owner() {
+        let near = at(threshold() - 0.03, 2);
+        let mut store = EnrollmentStore::default();
+        store.enroll("Vim", at(1., 1)).unwrap();
+        store.widen("Vim", near.clone(), "Discord", 1, threshold() - 0.03).unwrap();
+        assert!(matches!(store.identify(&near), Identity::Known { ref name, .. } if name == "Vim"));
+        store.set_listening("Vim", true).unwrap();
+        assert!(!matches!(store.identify(&near), Identity::Known { .. }), "listened: only Vim's own samples count");
+        let mut store = EnrollmentStore::default();
+        let c = store.code_voice(vec![at(1., 1)], "Discord", "", 1, "Fri 23 Oct 21h", "2026-10-23").unwrap();
+        store.widen(&c, near.clone(), "Discord", 2, threshold() - 0.03).unwrap();
+        store.name_voice(&c, "User").unwrap();
+        assert!(store.names["User"].widened.is_empty());
     }
 }

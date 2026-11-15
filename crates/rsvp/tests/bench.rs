@@ -15,6 +15,7 @@ fn text_of(words: usize) -> String {
 }
 
 #[test]
+#[ignore = "speed check: run when the Mac is idle (cargo test -p rsvp --test bench -- --ignored)"]
 fn two_thousand_words_plan_under_two_ms() {
     let text = text_of(2000);
     let cold = Instant::now();

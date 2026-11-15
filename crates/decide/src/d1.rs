@@ -1,4 +1,4 @@
-use crate::{Answer, DecisionInput, FixedCommand, Question};
+use crate::{Answer, DecisionInput, Question};
 use anyhow::{anyhow, ensure, Context, Result};
 use libloading::Library;
 use serde_json::{json, Value};
@@ -12,13 +12,11 @@ use std::{
 /// Decider V6 (4 Nov), a LiquidAI d1-2B fine-tune from V5, as its trained 16-bit checkpoint folder (config.json,
 /// tokenizer files, model.safetensors, calibration.json): the parity tests' and replay tools' model. The app loads the
 /// version and precision in its settings (`precision::Pick`: V6 in 4-bit by default, V5 the rollback; the 8-bit and
-/// 4-bit folders and V5's three sit beside this one). The 600M GGUFs stay loadable through the llama.cpp runtime.
+/// 4-bit folders and V5's three sit beside this one).
 pub const DEFAULT_MODEL: &str = "d1/d1-2B-heimdall-v6";
 /// Its runtime, relative to the decide models folder: the d1v5 MLX engine (crates/decide/engine-v5,
 /// scripts/build_decider_v5.sh) with `mlx.metallib` beside it.
 pub const DEFAULT_LIBRARY: &str = "runtime-v5/libd1v5_engine.dylib";
-/// The llama.cpp runtime for the 600M GGUFs (crates/decide/native, scripts/build_native.sh).
-pub const LLAMA_LIBRARY: &str = "runtime/libheimdall_decide.dylib";
 
 type Decide =
     unsafe extern "C" fn(*mut c_void, *const c_char, i32, *mut *mut c_char) -> *mut c_char;
@@ -30,8 +28,6 @@ pub struct D1 {
     paths: [std::path::PathBuf; 2],
     _runtime: Library,
     version: String,
-    /// Which dispatch question the model was trained on (`send_v3::Generation::of` its file).
-    generation: crate::send_v3::Generation,
     pub(crate) last_output: Option<Value>,
     pub last_send_request: Option<crate::send::Fitted>,
 }
@@ -51,12 +47,10 @@ impl D1 {
         let runtime = unsafe { Library::new(&paths[0])? };
         let native = NativeD1::load(&paths[0], &paths[1], true)?;
         let version = native.version.clone();
-        let generation = crate::send_v3::Generation::of(&paths[1]);
         Ok(Self {
             state: crate::gpu_recovery::Recovery::new(native, true),
             paths,
             version,
-            generation,
             last_output: None,
             last_send_request: None,
             _runtime: runtime,
@@ -74,7 +68,6 @@ impl D1 {
         urgent: &std::sync::atomic::AtomicUsize,
     ) -> Result<(crate::send::Fitted, crate::send::Prediction)> {
         let paths = &self.paths;
-        let generation = self.generation;
         self.last_send_request = None;
         let request = &mut self.last_send_request;
         self.state.run(
@@ -96,36 +89,23 @@ impl D1 {
                 NativeD1::load(&paths[0], &paths[1], gpu)
             },
             |model| {
-                let (fitted, lang) = match generation {
-                    crate::send_v3::Generation::V2 => (snapshot.fit(|text| model.tokens(text))?, None),
-                    crate::send_v3::Generation::V3 => {
-                        let (fitted, lang) = crate::send_v3::fit(snapshot, |text| model.tokens(text))?;
-                        (fitted, Some(lang))
-                    }
-                    crate::send_v3::Generation::V5 => (crate::send_v3::fit_v5(snapshot, |text| model.tokens(text))?, None),
-                };
+                let fitted = crate::send_v3::fit_v5(snapshot, |text| model.tokens(text))?;
                 *request = Some(fitted.clone());
                 ensure!(
                     urgent.load(std::sync::atomic::Ordering::Acquire) == 0,
                     "send preempted; transcript retained"
                 );
                 let value = model.raw_request_interruptible(&fitted.request, Some(urgent))?;
-                let prediction = match (generation, lang) {
-                    (crate::send_v3::Generation::V5, _) => crate::send_v3::parse_v5(value)?,
-                    (_, Some(lang)) => crate::send_v3::parse(value, lang)?,
-                    (_, None) => crate::send::parse(value)?,
-                };
-                Ok((fitted, prediction))
+                Ok((fitted, crate::send_v3::parse_v5(value)?))
             },
         )
     }
-    /// Decider V5's suggest question for this snapshot (`crate::suggest`). Only V5 learned it; older deciders refuse.
+    /// Decider V5's suggest question for this snapshot (`crate::suggest`).
     pub fn suggest_decision_interruptible(
         &mut self,
         snapshot: &crate::send::Snapshot,
         urgent: &std::sync::atomic::AtomicUsize,
     ) -> Result<(crate::send::Fitted, crate::suggest::Suggestion)> {
-        ensure!(self.generation == crate::send_v3::Generation::V5, "the suggest question needs Decider V5");
         let paths = &self.paths;
         self.state.run(
             |gpu| {
@@ -154,18 +134,11 @@ impl D1 {
     pub fn version(&self) -> &str {
         &self.version
     }
-    pub fn generation(&self) -> crate::send_v3::Generation {
-        self.generation
-    }
     pub fn questions(input: &DecisionInput) -> Value {
         NativeD1::questions(input)
     }
-    pub fn request(input: &DecisionInput, p: f32) -> Result<Value> {
-        NativeD1::request(input, p)
-    }
-    pub fn answer(&mut self, input: &DecisionInput, p: f32) -> Result<(Vec<Answer>, u64)> {
+    pub fn answer(&mut self, input: &DecisionInput) -> Result<(Vec<Answer>, u64)> {
         self.last_output = None;
-        let layout = crate::StateLayout::for_question(self.generation, input);
         let result = self.state.run(
             |gpu| {
                 if gpu {
@@ -184,7 +157,7 @@ impl D1 {
                 }
                 NativeD1::load(&self.paths[0], &self.paths[1], gpu)
             },
-            |model| model.answer(input, p, layout),
+            |model| model.answer(input),
         );
         self.last_output = self
             .state
@@ -278,76 +251,29 @@ impl NativeD1 {
         let text=unsafe{CStr::from_ptr(raw)}.to_string_lossy().into_owned();unsafe{(self.free)(raw)};
         Ok(serde_json::from_str(&text)?)
     }
-    /// Fixed instructions only; caller can supply candidate descriptions, never a new question.
+    /// Fixed instructions only, never a new question.
     pub fn questions(input: &DecisionInput) -> Value {
         let mut map = serde_json::Map::new();
         for q in &input.questions {
             let v = match q {
-                Question::SendNow => {
-                    json!({"type":"noul","instructions":"Is the pending thought complete enough to send now? Judge the accumulated pending thought, including the current utterance, with recent text context. Say no if the speaker is still developing it or likely to continue after this pause."})
-                }
-                Question::CommandIntent => {
-                    json!({"type":"choice","instructions":"Is the user requesting an action?","criteria":{"yes":"A spoken instruction to the assistant.", "false_alarm":"Only discussion, quotation or narration.", "unsure":"An ambiguous utterance."}})
-                }
                 Question::CommandCheck(command) => {
                     // The original criteria: "Cannot tell." pulled clear commands to unsure (training split, 13 Oct).
                     json!({"type":"choice","instructions":command.check_question(),"criteria":{"yes":"A spoken instruction to the assistant.", "false_alarm":"Only discussion, quotation or narration.", "unsure":"An ambiguous utterance."}})
                 }
-                Question::CommandSelection => {
-                    let opts: BTreeMap<_, _> = crate::CommandSelection::ALL.into_iter().map(|c| (c.key(), c.description())).collect();
-                    json!({"type":"choice","instructions":"Which action is requested?","criteria":opts})
-                }
-                Question::FixedCommand => {
-                    let opts: BTreeMap<_, _> = FixedCommand::ALL
-                        .into_iter()
-                        .map(|c| (c.key(), c.description()))
-                        .collect();
-                    json!({"type":"choice","instructions":"Which fixed computer command is requested by the current utterance? Choose none for ordinary conversation, quoted commands, or requests addressed to another person.","criteria":opts})
-                }
-                Question::PickCandidate(c) => {
-                    let opts: BTreeMap<_, _> = c
-                        .iter()
-                        .map(|c| (c.id.clone(), c.description.clone()))
-                        .collect();
-                    json!({"type":"choice","instructions":"Which of these supplied links or items does the user's utterance refer to? Select only from these candidates.","criteria":opts})
-                }
-                Question::ReplyLine(c) => {
-                    let opts: BTreeMap<_, _> = c
-                        .iter()
-                        .map(|c| (c.id.clone(), c.description.clone()))
-                        .collect();
-                    json!({"type":"choice","instructions":crate::reply::INSTRUCTIONS,"criteria":opts})
-                }
-                Question::BargeIn => {
-                    json!({"type":"choice","instructions":crate::barge::INSTRUCTIONS,"criteria":crate::barge::criteria()})
-                }
+                Question::Legacy => continue,
             };
             map.insert(q.key().into(), v);
         }
         Value::Object(map)
     }
-    pub fn request(input: &DecisionInput, p: f32) -> Result<Value> {
-        // Legacy archived inputs may still carry media/PCM. Only their labelled
-        // transcript and text state cross the d1 boundary, for every question.
-        Self::request_state(input, p)
-    }
-    fn request_state(input: &DecisionInput, p: f32) -> Result<Value> {
-        input.validate()?;
-        ensure!(
-            p.is_finite() && (0.0..=1.0).contains(&p),
-            "invalid addressedness"
-        );
-        // Heimdall and the user: the questions as trained; other names read in their place (`crate::names`).
-        Ok(json!({"state":input.state_text(p)?,"questions":crate::names::current().question(&Self::questions(input))}))
-    }
     /// Exposed for parity/evaluation of the same narrow request; no public arbitrary native route.
-    pub fn answer(&mut self, input: &DecisionInput, p: f32, layout: crate::StateLayout) -> Result<(Vec<Answer>, u64)> {
+    pub fn answer(&mut self, input: &DecisionInput) -> Result<(Vec<Answer>, u64)> {
         // A refused current utterance must never inherit an earlier answer in
         // its training evidence.
         self.last_output = None;
-        let request = input.fit_text_as(layout, p, |text| self.tokens(text))?;
+        let request = input.fit_text(|text| self.tokens(text))?;
         let mut value = self.raw_request_interruptible(&request, None)?;
-        // Exact executed prompt, also carried through command/reply/barge journals.
+        // Exact executed prompt, also carried through the command journal.
         value["heimdall_request"] = request;
         self.last_output = Some(value.clone());
         let result=Self::parse(input, &value)?;
@@ -363,17 +289,7 @@ impl NativeD1 {
         for q in &input.questions {
             let a = &value["answers"][q.key()];
             match q {
-                Question::SendNow => {
-                    let p = a["noul"].as_f64().context("missing noul probability")?;
-                    ensure!(
-                        p.is_finite() && (0.0..=1.).contains(&p),
-                        "invalid send probability"
-                    );
-                    result.push(Answer::SendNow {
-                        probability: p as f32,
-                    });
-                }
-                Question::CommandIntent | Question::CommandCheck(_) => {
+                Question::CommandCheck(_) => {
                     let keys: Vec<_> = crate::CommandIntent::ALL.iter().map(|c| c.key()).collect();
                     let probabilities = distribution(a, &keys)?;
                     let pick = a["choice"].as_str().context("missing command intent")?;
@@ -381,62 +297,7 @@ impl NativeD1 {
                     ensure_max(pick, &probabilities)?;
                     result.push(Answer::CommandIntent { intent, probabilities });
                 }
-                Question::CommandSelection => {
-                    let keys: Vec<_> = crate::CommandSelection::ALL.iter().map(|c| c.key()).collect();
-                    let probabilities = distribution(a, &keys)?;
-                    let pick = a["choice"].as_str().context("missing command selection")?;
-                    let command = crate::CommandSelection::ALL.into_iter().find(|c| c.key() == pick).context("unknown command selection")?;
-                    ensure_max(pick, &probabilities)?;
-                    result.push(Answer::CommandSelection { command, probabilities });
-                }
-                Question::FixedCommand => {
-                    let probs = distribution(
-                        a,
-                        &FixedCommand::ALL
-                            .iter()
-                            .map(|c| c.key())
-                            .collect::<Vec<_>>(),
-                    )?;
-                    let pick = a["choice"].as_str().context("missing command")?;
-                    let command = FixedCommand::ALL
-                        .into_iter()
-                        .find(|c| c.key() == pick)
-                        .context("native returned unknown command")?;
-                    ensure_max(pick, &probs)?;
-                    result.push(Answer::FixedCommand {
-                        command,
-                        probabilities: probs,
-                    });
-                }
-                Question::PickCandidate(c) => {
-                    let keys: Vec<_> = c.iter().map(|c| c.id.as_str()).collect();
-                    let probs = distribution(a, &keys)?;
-                    let id = a["choice"].as_str().context("missing candidate")?;
-                    ensure!(keys.contains(&id), "unknown candidate");
-                    ensure_max(id, &probs)?;
-                    result.push(Answer::PickCandidate {
-                        id: id.into(),
-                        probabilities: probs,
-                    });
-                }
-                Question::ReplyLine(c) => {
-                    let keys: Vec<_> = c.iter().map(|c| c.id.as_str()).collect();
-                    let probs = distribution(a, &keys)?;
-                    let id = a["choice"].as_str().context("missing reply line")?;
-                    ensure!(keys.contains(&id), "unknown reply line");
-                    ensure_max(id, &probs)?;
-                    result.push(Answer::ReplyLine {
-                        id: id.into(),
-                        probabilities: probs,
-                    });
-                }
-                Question::BargeIn => {
-                    let probs = distribution(a, &[crate::barge::STOP, crate::barge::CONTINUE])?;
-                    let choice = a["choice"].as_str().context("missing barge-in choice")?;
-                    ensure!(probs.contains_key(choice), "unknown barge-in choice");
-                    ensure_max(choice, &probs)?;
-                    result.push(Answer::BargeIn { choice: choice.into(), probabilities: probs });
-                }
+                Question::Legacy => anyhow::bail!("a legacy question kind is never asked"),
             }
         }
         Ok((
@@ -447,24 +308,12 @@ impl NativeD1 {
         ))
     }
 }
-/// The runtimes the loader accepts. The llama.cpp runtime prints the guarantees Heimdall relies on as markers; the
-/// d1v5 MLX engine gives the same ones by construction (crates/decide/engine-v5/INTEGRATION.md): one process-wide lock
-/// serialises all MLX work (ownership), `heimdall_d1_decide_interruptible` polls before each question's forward (async
-/// owner), and `heimdall_d1_tokens` counts with the checkpoint's own tokenizer (text window).
+/// The runtime the loader accepts: the d1v5 MLX engine (`engine-v5`). It gives Heimdall's guarantees by
+/// construction: one process-wide lock serialises all MLX work (ownership), `heimdall_d1_decide_interruptible` polls
+/// before each question's forward (async owner), and `heimdall_d1_tokens` counts with the checkpoint's own tokenizer
+/// (text window). The 600M llama.cpp runtime was removed on 14 Nov.
 pub(crate) fn check_version(version: &str) -> Result<()> {
-    if version.starts_with("d1v5-engine@") {
-        return Ok(());
-    }
-    ensure!(
-        version.starts_with("llama.cpp@62a6f74bab748b1755f4cd8dfc0871caf865c6c8;"),
-        "unexpected native ABI version"
-    );
-    ensure!(
-        version.contains(";native-ownership-v1"),
-        "d1 runtime lacks native ownership isolation"
-    );
-    ensure!(version.contains(";async-owner-v1"),"d1 runtime lacks asynchronous owner ABI");
-    ensure!(version.contains(";text-window-v1"),"d1 runtime lacks bounded text slot ABI");
+    ensure!(version.starts_with("d1v5-engine@"), "unexpected native ABI version");
     Ok(())
 }
 impl Drop for NativeD1 {
@@ -493,10 +342,6 @@ pub(crate) fn distribution(answer: &Value, expected: &[&str]) -> Result<BTreeMap
     ensure!((sum - 1.).abs() < 0.0001, "probabilities do not sum to one");
     Ok(out)
 }
-#[cfg(test)]
-pub(crate) fn parse_for_tests(input: &DecisionInput, value: &Value) -> Result<(Vec<Answer>, u64)> {
-    NativeD1::parse(input, value)
-}
 pub(crate) fn ensure_max(id: &str, probs: &BTreeMap<String, f32>) -> Result<()> {
     let p = probs.get(id).context("unknown chosen option")?;
     ensure!(
@@ -509,57 +354,36 @@ pub(crate) fn ensure_max(id: &str, probs: &BTreeMap<String, f32>) -> Result<()> 
 #[cfg(all(test, target_os = "macos"))]
 mod fault_model_tests {
     use super::*;
+    /// Decider V6 at 16 bit (3.6 GB) answers one command check through `LocalDecider::load`. Replaces the 600M-era
+    /// barge-in question (V5/V6 never learned barge-in) with the command check V5 learned and V6 kept.
     #[test]
-    #[ignore = "needs Decider V6 model weights that are not in the public repository"]
+    #[ignore = "model: loads Decider V6 16-bit (models/decide/d1/d1-2B-heimdall-v6) on the MLX engine"]
     fn live_decider_default_loads_the_tuned_model() -> Result<()> {
         use crate::Decider;
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/decide");
         let archive = tempfile::tempdir()?;
         let mut decider = crate::LocalDecider::load(&root, archive.path())?;
         assert_eq!(decider.d1.paths[1], root.join(DEFAULT_MODEL));
-        assert_eq!(decider.d1.paths.len(), 2);
-        let input = crate::barge::input("tuned-default", "wait, that's not what I asked", "The build passed.")?;
+        let input = crate::check_input("tuned-default", "Heimdall, look at this, the build failed again.", "idle");
         let decision = decider.decide(&input)?;
         assert_eq!(decision.answers.len(), 1);
+        assert!(matches!(decision.answers[0], Answer::CommandIntent { .. }));
         assert!(decision.input_tokens > 0);
-        // The V5 MLX engine on its default fast path (it names the path that ran) and the V5 generation.
+        // The V5 MLX engine on its default fast path (it names the path that ran).
         assert!(decider.d1.version().starts_with("d1v5-engine@"), "{}", decider.d1.version());
         assert!(decider.d1.last_output.as_ref().unwrap()["backend"].as_str().is_some_and(|b| b.starts_with("mlx")));
-        assert_eq!(decider.d1.generation(), crate::send_v3::Generation::V5);
         Ok(())
     }
     #[test]
-    #[ignore = "requires freshly built fault-aware d1 runtime and pinned assets"]
+    #[ignore = "lab: loads Decider V6 16-bit twice; requires a freshly built fault-aware d1 runtime (HEIMDALL_D1_LIBRARY)"]
     fn gpu_fault_d1_does_not_touch_another_instances_context() -> Result<()> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/decide");
         let library = std::env::var_os("HEIMDALL_D1_LIBRARY").context("fresh library path")?;
-        let load = || {
-            D1::load(
-                &library,
-                root.join(DEFAULT_MODEL),
-            )
-        };
+        let load = || D1::load(&library, root.join(DEFAULT_MODEL));
         let mut healthy = load()?;
         let mut faulty = load()?;
-        let input = DecisionInput {
-            current: crate::Turn {
-                id: "isolation".into(),
-                role: crate::Role::Owner,
-                transcript: "Please send this now.".into(),
-                audio: crate::AudioClip {
-                    sample_rate: 16000,
-                    samples: vec![0.; 1600],
-                },
-            },
-            source: crate::DecisionSource::Microphone,
-            is_final: true,
-            context: vec![],
-            pending_transcript: String::new(),
-            agent_state: String::new(),
-            questions: vec![Question::SendNow],
-            media: crate::DecisionMedia::Text,
-        };
-        let baseline = serde_json::to_value(healthy.answer(&input, 0.8)?)?;
+        let input = crate::check_input("isolation", "Please look at this now.", "idle");
+        let baseline = serde_json::to_value(healthy.answer(&input)?)?;
         // Arm A, run B first: B must not consume A's injection or sync A.
         let native = faulty.state.model.as_ref().unwrap();
         unsafe {
@@ -569,61 +393,35 @@ mod fault_model_tests {
                 native.handle.as_ptr(),
             );
         }
-        assert_eq!(
-            serde_json::to_value(healthy.answer(&input, 0.8)?)?,
-            baseline
-        );
+        assert_eq!(serde_json::to_value(healthy.answer(&input)?)?, baseline);
         assert!(healthy.state.is_gpu());
-        faulty.answer(&input, 0.8)?;
-        // llama.cpp: device reset is refused while B owns live GPU backends; only A falls back. The d1v5 MLX engine
-        // has no shared device to reset (`heimdall_d1_recreate_device` is always true): A reloads on the GPU.
-        assert_eq!(faulty.state.is_gpu(), faulty.version().starts_with("d1v5-engine@"));
-        assert_eq!(
-            serde_json::to_value(healthy.answer(&input, 0.8)?)?,
-            baseline
-        );
+        faulty.answer(&input)?;
+        // The d1v5 MLX engine has no shared device to reset (`heimdall_d1_recreate_device` is always true): A reloads
+        // on the GPU.
+        assert!(faulty.state.is_gpu());
+        assert_eq!(serde_json::to_value(healthy.answer(&input)?)?, baseline);
         assert!(healthy.state.is_gpu());
         drop(faulty);
         crate::gpu_recovery::inject(1);
-        healthy.answer(&input, 0.8)?;
+        healthy.answer(&input)?;
         assert!(healthy.state.is_gpu());
         Ok(())
     }
     #[test]
-    #[ignore = "requires freshly built fault-aware d1 runtime and pinned assets"]
+    #[ignore = "lab: loads Decider V6 16-bit; requires a freshly built fault-aware d1 runtime (HEIMDALL_D1_LIBRARY)"]
     fn gpu_fault_d1_recreates_falls_back_and_recovers() -> Result<()> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/decide");
         let library = std::env::var_os("HEIMDALL_D1_LIBRARY").context("fresh library path")?;
-        let mut model = D1::load(
-            library,
-            root.join(DEFAULT_MODEL),
-        )?;
-        let input = DecisionInput {
-            current: crate::Turn {
-                id: "fault".into(),
-                role: crate::Role::Owner,
-                transcript: "Please send this now.".into(),
-                audio: crate::AudioClip {
-                    sample_rate: 16000,
-                    samples: vec![0.; 1600],
-                },
-            },
-            source: crate::DecisionSource::Microphone,
-            is_final: true,
-            context: vec![],
-            pending_transcript: String::new(),
-            agent_state: String::new(),
-            questions: vec![Question::SendNow],
-            media: crate::DecisionMedia::Text,
-        };
-        model.answer(&input, 0.8).context("healthy baseline")?;
+        let mut model = D1::load(library, root.join(DEFAULT_MODEL))?;
+        let input = crate::check_input("fault", "Please look at this now.", "idle");
+        model.answer(&input).context("healthy baseline")?;
         for faults in [1, 2, 0] {
             if faults == 0 {
                 model.state.retry_now();
             }
             crate::gpu_recovery::inject(faults);
             let (answer, _) = model
-                .answer(&input, 0.8)
+                .answer(&input)
                 .with_context(|| format!("fault cycle {faults}, GPU={}", model.state.is_gpu()))?;
             assert_eq!(answer.len(), 1);
             assert_eq!(model.state.is_gpu(), faults != 2);
@@ -635,12 +433,11 @@ mod fault_model_tests {
 #[cfg(test)]
 mod version_tests {
     #[test]
-    fn both_runtimes_load_and_others_are_refused() {
+    fn only_the_mlx_engine_loads() {
         assert!(super::check_version("d1v5-engine@0.1.0;mlx-rs-0.32;text-only;json-v1").is_ok());
+        // The removed 600M llama.cpp runtime, and anything else, is refused.
         let llama = "llama.cpp@62a6f74bab748b1755f4cd8dfc0871caf865c6c8;F16;native-ownership-v1;async-owner-v1;text-window-v1";
-        assert!(super::check_version(llama).is_ok());
-        assert!(super::check_version(&llama.replace(";async-owner-v1", "")).is_err(), "the llama.cpp markers still hold");
-        assert!(super::check_version("llama.cpp@0000;native-ownership-v1;async-owner-v1;text-window-v1").is_err());
+        assert!(super::check_version(llama).is_err());
         assert!(super::check_version("d1v4-engine@0.1.0").is_err());
     }
 }
@@ -649,53 +446,33 @@ mod version_tests {
 mod command_parse_tests {
     use super::*;
     #[test]
-    fn every_chain_option_parses_and_unlisted_or_malformed_outputs_fail() {
-        let mut input = crate::DecisionInput {
-            source: crate::DecisionSource::Microphone,
-            is_final: true,
-            current: crate::Turn {
-                id: "test".into(),
-                role: crate::Role::Owner,
-                transcript: "look at this".into(),
-                audio: crate::AudioClip::new(vec![0.; 160]).unwrap(),
-            },
-            context: vec![],
-            pending_transcript: String::new(),
-            agent_state: String::new(),
-            media: crate::DecisionMedia::Audio,
-            questions: vec![],
-        };
-        for question in [Question::CommandIntent, Question::CommandCheck(crate::CommandSelection::TakeScreenshot), Question::CommandSelection] {
-            input.questions = vec![question.clone()];
-            let opts = NativeD1::questions(&input)[question.key()]["criteria"]
-                .as_object()
-                .unwrap()
-                .clone();
-            for key in opts.keys() {
+    fn every_check_option_parses_and_unlisted_or_malformed_outputs_fail() {
+        for command in [crate::CommandSelection::TakeScreenshot, crate::CommandSelection::LookAtThis] {
+            let mut input = crate::check_input("test", "look at this", "");
+            input.questions = vec![Question::CommandCheck(command)];
+            let key = input.questions[0].key();
+            let opts = NativeD1::questions(&input)[key]["criteria"].as_object().unwrap().clone();
+            assert_eq!(opts.len(), 3);
+            for pick in opts.keys() {
                 let probabilities: BTreeMap<_, _> = opts
                     .keys()
-                    .map(|k| (k.clone(), if k == key { 1.0 } else { 0.0 }))
+                    .map(|k| (k.clone(), if k == pick { 1.0 } else { 0.0 }))
                     .collect();
-                let mut raw = json!({"usage":{"input_tokens":10,"output_tokens":0},"answers":{question.key():{"choice":key,"probabilities":probabilities}}});
+                let mut raw = json!({"usage":{"input_tokens":10,"output_tokens":0},"answers":{key:{"choice":pick,"probabilities":probabilities}}});
                 assert!(NativeD1::parse(&input, &raw).is_ok());
-                raw["answers"][question.key()]["choice"] = json!("invented_command");
+                raw["answers"][key]["choice"] = json!("invented_command");
                 assert!(NativeD1::parse(&input, &raw).is_err());
-                raw["answers"][question.key()]["choice"] = json!(key);
-                raw["answers"][question.key()]["probabilities"][key] = json!(0.0);
+                raw["answers"][key]["choice"] = json!(pick);
+                raw["answers"][key]["probabilities"][pick] = json!(0.0);
                 assert!(NativeD1::parse(&input, &raw).is_err());
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod joint_graph_safety_tests {
-    #[test]
-    fn joint_graph_does_not_write_const_batch_row_count() {
-        // n_tokens is const in the pinned llm_graph_context. Even an unchanged
-        // probability receipt cannot make writing it through const_cast defined.
-        let graph = include_str!("../native/joint-decision.inc");
-        assert!(!graph.contains("const_cast"), "joint graph writes a const graph-context member");
+        // A legacy question is never parsed into an answer.
+        let mut input = crate::check_input("legacy", "stop", "");
+        input.questions = vec![Question::Legacy];
+        assert!(NativeD1::questions(&input).as_object().unwrap().is_empty());
+        let raw = json!({"usage":{"input_tokens":10,"output_tokens":0},"answers":{}});
+        assert!(NativeD1::parse(&input, &raw).is_err());
     }
 }
 
@@ -703,20 +480,16 @@ mod joint_graph_safety_tests {
 mod text_boundary_tests {
     use super::*;
     #[test]
-    fn every_question_ignores_legacy_audio_and_image_payloads() -> Result<()> {
-        let mut input=crate::barge::input("text-only","inspect the first item","The build passed.")?;
-        let candidates=vec![crate::Candidate{id:"none".into(),description:"Say nothing".into()},crate::Candidate{id:"first".into(),description:"Rust documentation".into()}];
-        for question in [Question::SendNow,Question::CommandIntent,Question::CommandCheck(crate::CommandSelection::LookAtThis),Question::CommandSelection,Question::FixedCommand,Question::PickCandidate(candidates.clone()),Question::ReplyLine(candidates),Question::BargeIn] {
-            input.questions=vec![question];
-            input.media=crate::DecisionMedia::Text;
-            let expected=D1::request(&input,0.)?;
-            for media in [crate::DecisionMedia::Audio,crate::DecisionMedia::Image(crate::Image{mime:"image/png".into(),bytes:vec![1]})] {
-                input.media=media;
-                // Even obsolete/malformed PCM is irrelevant to text inference.
-                input.current.audio=crate::AudioClip {samples:vec![f32::NAN],sample_rate:1};
-                assert_eq!(D1::request(&input,0.)?,expected);
-                assert!(expected.get("files").is_none());
-            }
+    fn the_check_ignores_legacy_audio_and_image_payloads() -> Result<()> {
+        let mut input = crate::check_input("text-only", "inspect the first item", "The build passed.");
+        let count = |s: &str| Ok(s.chars().count());
+        let expected = input.fit_text(count)?;
+        for media in [crate::DecisionMedia::Audio, crate::DecisionMedia::Image(crate::Image { mime: "image/png".into(), bytes: vec![1] })] {
+            input.media = media;
+            // Even obsolete/malformed PCM is irrelevant to text inference.
+            input.current.audio = crate::AudioClip { samples: vec![f32::NAN], sample_rate: 1 };
+            assert_eq!(input.fit_text(count)?, expected);
+            assert!(expected.get("files").is_none());
         }
         Ok(())
     }
@@ -726,18 +499,17 @@ mod text_boundary_tests {
 mod bounded_text_tests {
     use super::*;
     #[test]
-    #[ignore = "needs Decider V6 model weights that are not in the public repository"]
+    #[ignore = "model: loads Decider V6 16-bit (models/decide/d1/d1-2B-heimdall-v6) on the MLX engine"]
     fn oversized_current_is_refused_without_reusing_previous_model_evidence() -> Result<()> {
         let models =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models/decide");
         let mut model = D1::load_default(models.join(DEFAULT_LIBRARY), &models)?;
-        let mut input =
-            crate::barge::input("refused", "wait use the other branch", "The build finished")?;
-        model.answer(&input, 0.)?;
+        let mut input = crate::check_input("refused", "look at this, the other branch", "The build finished");
+        model.answer(&input)?;
         assert!(model.last_question_request().is_some());
         input.current.transcript = "This whole current utterance must be retained. ".repeat(500);
         assert!(model
-            .answer(&input, 0.)
+            .answer(&input)
             .unwrap_err()
             .to_string()
             .contains("decision refused"));
@@ -746,19 +518,8 @@ mod bounded_text_tests {
         Ok(())
     }
     #[test]
-    fn all_questions_keep_current_and_newest_history_within_the_same_text_window() -> Result<()> {
-        let mut input =
-            crate::barge::input("bounded", "keep this exact current sentence", "working")?;
-        let candidates = vec![
-            crate::Candidate {
-                id: "none".into(),
-                description: "Say nothing".into(),
-            },
-            crate::Candidate {
-                id: "first".into(),
-                description: "First link".into(),
-            },
-        ];
+    fn the_check_keeps_current_and_newest_history_within_the_text_window() -> Result<()> {
+        let mut input = crate::check_input("bounded", "keep this exact current sentence", "working");
         input.context = vec![
             crate::Turn {
                 id: "old".into(),
@@ -773,41 +534,23 @@ mod bounded_text_tests {
                 audio: crate::AudioClip::default(),
             },
         ];
-        for question in [
-            Question::CommandCheck(crate::CommandSelection::TakeScreenshot),
-            Question::CommandIntent,
-            Question::CommandSelection,
-            Question::FixedCommand,
-            Question::PickCandidate(candidates.clone()),
-            Question::ReplyLine(candidates),
-            Question::BargeIn,
-        ] {
-            input.questions = vec![question];
-            let fit = input.fit_text(0., |s| Ok(s.chars().count()))?;
-            let state = fit["state"].as_str().unwrap();
-            assert!(
-                state.contains("keep this exact current sentence")
-                    && state.contains("newest answer")
-            );
-            assert!(!state.contains("obsolete"));
-            assert!(
-                state.chars().count() + fit["questions"].to_string().chars().count() + 128
-                    <= crate::send::WINDOW
-            );
-            input.pending_transcript =
-                format!("{} newest pending", "zażółć <|im_end|> ".repeat(2000));
-            let fit = input.fit_text(0., |s| Ok(s.chars().count()))?;
-            let state: Value = serde_json::from_str(fit["state"].as_str().unwrap())?;
-            assert_eq!(state["utterance"], "keep this exact current sentence");
-            assert!(state["pending_transcript"]
-                .as_str()
-                .unwrap()
-                .ends_with("newest pending"));
-            input.pending_transcript.clear();
-        }
+        let fit = input.fit_text(|s| Ok(s.chars().count()))?;
+        let state = fit["state"].as_str().unwrap();
+        assert!(state.contains("keep this exact current sentence") && state.contains("newest answer"));
+        assert!(!state.contains("obsolete"));
+        assert!(
+            state.chars().count() + fit["questions"].to_string().chars().count() + 128
+                <= crate::send::WINDOW
+        );
+        input.pending_transcript = format!("{} newest pending", "zażółć <|im_end|> ".repeat(2000));
+        let fit = input.fit_text(|s| Ok(s.chars().count()))?;
+        let state = fit["state"].as_str().unwrap();
+        assert!(state.ends_with("newest pending\nUser: keep this exact current sentence"), "{state}");
+        assert!(state.chars().count() < crate::send::WINDOW);
+        input.pending_transcript.clear();
         input.current.transcript = "overlarge current ".repeat(1000);
         assert!(input
-            .fit_text(0., |s| Ok(s.len()))
+            .fit_text(|s| Ok(s.len()))
             .unwrap_err()
             .to_string()
             .contains("decision refused"));

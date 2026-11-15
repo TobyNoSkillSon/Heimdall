@@ -518,7 +518,7 @@ impl Attention {
         if let Some(a) = j::str(i.raw.get("attention")).filter(|a| Self::KINDS.contains(a)) {
             return Some(a.to_owned());
         }
-        (i.preset() == "todo" && i.waits_on_owner()).then(|| "waiting".to_owned())
+        (i.preset() == "todo" && i.waits_on_user()).then(|| "waiting".to_owned())
     }
 
     /// What the user has seen once he opens the island: the same kind with the same open waiting items and question

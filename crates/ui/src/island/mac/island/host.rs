@@ -59,17 +59,27 @@ pub(crate) struct Place {
 
 impl Place {
     pub(crate) fn of(screen: &NSScreen) -> Place {
-        let frame = screen.frame();
-        let inset = screen.safeAreaInsets().top;
-        let scale = screen.backingScaleFactor();
-        let (left, right) = (screen.auxiliaryTopLeftArea().size.width, screen.auxiliaryTopRightArea().size.width);
-        let notch = (inset > 0.0 && left > 0.0 && right > 0.0).then(|| (frame.size.width - left - right, inset));
+        Place::from_info(&ScreenInfo::of(screen))
+    }
+
+    /// The place on a display as AppKit describes it (plain numbers, so it is testable without a screen).
+    pub(crate) fn from_info(s: &ScreenInfo) -> Place {
+        let (x, y, w, h) = s.frame;
+        let (left, right) = s.aux;
+        let notch = (s.inset > 0.0 && left > 0.0 && right > 0.0).then(|| (w - left - right, s.inset));
         let center_x = match notch {
-            Some((core, _)) => frame.origin.x + left + core / 2.0,
-            None => frame.origin.x + frame.size.width / 2.0,
+            Some((core, _)) => x + left + core / 2.0,
+            None => x + w / 2.0,
         };
-        let display = Display { width: frame.size.width, height: frame.size.height, scale, notch }.sanitized();
-        Place { display, center_x, top: frame.origin.y + frame.size.height, id: screen.CGDirectDisplayID() }
+        let display = Display { width: w, height: h, scale: s.scale, notch }.sanitized();
+        Place { display, center_x, top: y + h, id: s.id }
+    }
+
+    /// The island window's frame on this place, in screen coordinates (x, y up, width, height): hung from the
+    /// display's top edge, centred on its notch.
+    pub(crate) fn window_frame(&self) -> (f64, f64, f64, f64) {
+        let (w, h) = (WINDOW_W, self.window_h());
+        (self.center_x - w / 2.0, self.top - h, w, h)
     }
 
     /// The user's 16" MacBook Pro, placed far off every display (checks and renders: nothing reaches the screen).
@@ -90,6 +100,71 @@ impl Place {
         Point::new(p.x - self.center_x, self.top - p.y)
     }
 }
+
+// ---- islands display (night 1107: bug notes 2026-11-07T21-57-37, 2026-11-07T02-02-35) ----
+/// A display as the island reads it from AppKit: its id, its frame (x, y up, width, height), the safe-area inset at
+/// its top, the widths of the menu bar's areas left and right of the notch, and its backing scale.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ScreenInfo {
+    pub id: u32,
+    pub name: String,
+    pub frame: (f64, f64, f64, f64),
+    pub inset: f64,
+    pub aux: (f64, f64),
+    pub scale: f64,
+}
+
+impl ScreenInfo {
+    pub(crate) fn of(screen: &NSScreen) -> ScreenInfo {
+        let f = screen.frame();
+        ScreenInfo {
+            id: screen.CGDirectDisplayID(),
+            name: screen.localizedName().to_string(),
+            frame: (f.origin.x, f.origin.y, f.size.width, f.size.height),
+            inset: screen.safeAreaInsets().top,
+            aux: (screen.auxiliaryTopLeftArea().size.width, screen.auxiliaryTopRightArea().size.width),
+            scale: screen.backingScaleFactor(),
+        }
+    }
+}
+
+thread_local! {
+    /// Settings `islands_display`: the display the islands are locked to, by name (`None`: they follow the pointer).
+    static LOCKED: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// The display the islands are locked to now (`islands_display`), as set.
+pub(crate) fn locked() -> Option<String> {
+    LOCKED.with(|l| l.borrow().clone())
+}
+
+/// Sets the lock; true when it changed.
+pub(crate) fn set_locked(name: Option<String>) -> bool {
+    LOCKED.with(|l| {
+        let mut l = l.borrow_mut();
+        if *l == name {
+            return false;
+        }
+        *l = name;
+        true
+    })
+}
+
+/// Which display the island goes on, by id (`None`: the pointer's). Drawing mode's pin first; then the display the
+/// islands are locked to while it is connected (`crate::islands_display::find`); then, when re-anchoring after a
+/// display change, the display it is on while that is still connected.
+pub(crate) fn choose_display(screens: &[ScreenInfo], pinned: Option<u32>, locked: Option<&str>, keep: Option<u32>) -> Option<u32> {
+    let connected = |id: u32| screens.iter().any(|s| s.id == id);
+    if let Some(id) = pinned.filter(|id| connected(*id)) {
+        return Some(id);
+    }
+    let names: Vec<&str> = screens.iter().map(|s| s.name.as_str()).collect();
+    if let Some(i) = locked.and_then(|l| crate::islands_display::find(&names, l)) {
+        return Some(screens[i].id);
+    }
+    keep.filter(|id| connected(*id))
+}
+// ---- end islands display ----
 
 /// Main-thread cost accounting (offscreen measurement and the live window's own numbers).
 #[derive(Clone, Debug, Default)]
@@ -316,46 +391,106 @@ impl Host {
     }
 
     fn place_windows(&self) {
-        let (w, h) = (WINDOW_W, self.place.window_h());
-        let frame = rect(self.place.center_x - w / 2.0, self.place.top - h, w, h);
-        self.panel.setFrame_display(frame, false);
+        let (x, y, w, h) = self.place.window_frame();
+        self.panel.setFrame_display(rect(x, y, w, h), false);
         self.view.setFrame(rect(0.0, 0.0, w, h));
     }
 
-    /// The island moves to the display the user is on (when it starts showing, unless drawing mode pins it).
+    /// The island moves to the display the user is on (when it starts showing): drawing mode's display, else the display
+    /// the islands are locked to, else the pointer's.
     fn follow_pointer(&mut self, mtm: MainThreadMarker) {
+        self.move_to(mtm, None);
+    }
+
+    /// The displays changed (added, removed, rearranged, the main display changed, a resolution): the island is laid
+    /// out again on the display it is on, read afresh, even while it shows. Before 7 Nov it kept the frame it opened
+    /// with until it next rested, so a card open across a rearrangement hung from stale coordinates, cut off above
+    /// the built-in display's top (bug note 2026-11-07T21-57-37). Its gone display: the lock's, else the pointer's.
+    pub(crate) fn screens_changed(&mut self) {
+        let Some(mtm) = MainThreadMarker::new() else { return };
         if self.offscreen || self.clock.is_some() {
             return;
         }
-        let screen = match self.pinned {
-            Some(id) => NSScreen::screens(mtm).iter().find(|s| s.CGDirectDisplayID() == id),
-            None => super::super::util::pointer_screen(mtm),
-        };
-        let Some(screen) = screen else { return };
+        self.move_to(mtm, Some(self.place.id));
+        // AppKit may have moved the windows itself: both frames are set again.
+        self.place_windows();
+        self.control_on = None;
+        let now = self.now();
+        self.after(now);
+    }
+
+    /// The lock changed (`islands_display`): a showing island moves now, a resting one at its next arrival.
+    pub(crate) fn lock_changed(&mut self) {
+        let Some(mtm) = MainThreadMarker::new() else { return };
+        if self.offscreen || self.clock.is_some() || !self.island.frame(self.now()).visible {
+            return;
+        }
+        self.move_to(mtm, Some(self.place.id));
+        self.control_on = None;
+        let now = self.now();
+        self.after(now);
+    }
+
+    /// The display the island shows on, read again (its frame, notch and scale), never another display: a showing
+    /// island does not change displays on an arrival. Gone: nothing here (`screens_changed` moves it).
+    fn refresh_place(&mut self, mtm: MainThreadMarker) {
+        if self.offscreen || self.clock.is_some() {
+            return;
+        }
+        let Some(screen) = NSScreen::screens(mtm).iter().find(|s| s.CGDirectDisplayID() == self.place.id) else { return };
         let place = Place::of(&screen);
         if place != self.place {
-            let size_changed = place.window_h() != self.place.window_h() || place.display.scale != self.place.display.scale;
-            self.place = place;
-            if size_changed {
-                // A new tree for the new size and scale (the old rasters were drawn at the old scale).
-                let tree = Tree::new((WINDOW_W, place.window_h()), place.display.scale);
-                // Notes are drawn again at the new scale (kept as they were, a 1x table showed stretched on the
-                // Retina display: bug note 2026-10-24T14-01-17).
-                let notes = std::mem::take(&mut self.tree.rasters.notes).into_iter().map(|(id, doc)| (id, doc.at_scale(place.display.scale))).collect();
-                let order = std::mem::take(&mut self.tree.rasters.note_order);
-                self.tree = tree;
-                self.tree.rasters.notes = notes;
-                self.tree.rasters.note_order = order;
-                self.view.setLayer(Some(&self.tree.root));
-            }
-            self.place_windows();
-            let now = self.now();
-            self.island.apply(Event::Display(place.display), now);
+            self.set_place(place);
         }
+    }
+
+    /// The island on the display `choose_display` picks (`keep`: the one it is on, when still connected).
+    fn move_to(&mut self, mtm: MainThreadMarker, keep: Option<u32>) {
+        if self.offscreen || self.clock.is_some() {
+            return;
+        }
+        let screens = NSScreen::screens(mtm);
+        let infos: Vec<ScreenInfo> = screens.iter().map(|s| ScreenInfo::of(&s)).collect();
+        let lock = locked();
+        let place = match choose_display(&infos, self.pinned, lock.as_deref(), keep) {
+            Some(id) => infos.iter().find(|s| s.id == id).map(Place::from_info),
+            None => super::super::util::pointer_screen(mtm).map(|s| Place::of(&s)),
+        };
+        let Some(place) = place else { return };
+        if place != self.place {
+            self.set_place(place);
+        }
+    }
+
+    /// The island takes `place`: a new layer tree when the size or scale changed, its windows there, and the display
+    /// told to the object.
+    fn set_place(&mut self, place: Place) {
+        let size_changed = place.window_h() != self.place.window_h() || place.display.scale != self.place.display.scale;
+        self.place = place;
+        if size_changed {
+            // A new tree for the new size and scale (the old rasters were drawn at the old scale).
+            let tree = Tree::new((WINDOW_W, place.window_h()), place.display.scale);
+            // Notes are drawn again at the new scale (kept as they were, a 1x table showed stretched on the
+            // Retina display: bug note 2026-10-24T14-01-17).
+            let notes = std::mem::take(&mut self.tree.rasters.notes).into_iter().map(|(id, doc)| (id, doc.at_scale(place.display.scale))).collect();
+            let order = std::mem::take(&mut self.tree.rasters.note_order);
+            self.tree = tree;
+            self.tree.rasters.notes = notes;
+            self.tree.rasters.note_order = order;
+            self.view.setLayer(Some(&self.tree.root));
+        }
+        self.place_windows();
+        let now = self.now();
+        self.island.apply(Event::Display(place.display), now);
     }
 
     /// The one way anything reaches the island.
     pub(crate) fn apply(&mut self, ev: Event) {
+        // Night 1111 [input]: the lock swaps the composer's field (or a secret's Return swaps it back): the keyboard
+        // goes to the new field, not back to the app the user was in.
+        if matches!(ev, Event::Click(Target::ComposerLock) | Event::SecretSent(_)) {
+            self.fields.composer_switching();
+        }
         let now = self.now();
         let was_visible = self.island.frame(now).visible;
         if !was_visible && !matches!(ev, Event::Tick | Event::Hover(_) | Event::Pointer(_) | Event::Press(_) | Event::Scroll(_) | Event::WithdrawReply(_) | Event::Chat(_)) {
@@ -364,6 +499,13 @@ impl Host {
             }
         }
         let arrival = !matches!(ev, Event::Tick | Event::Hover(_) | Event::Pointer(_) | Event::Press(_) | Event::Scroll(_) | Event::SpeechLevel(_) | Event::WithdrawReply(_) | Event::Chat(_));
+        // Something new for an island already showing (a card open for hours): its display is read afresh, so a
+        // display change it missed never leaves it hanging from a stale frame (bug note 2026-11-07T21-57-37).
+        if was_visible && arrival {
+            if let Some(mtm) = MainThreadMarker::new() {
+                self.refresh_place(mtm);
+            }
+        }
         // Something arrives while the island rests: the symbol renderer is woken before the motion's clock starts,
         // so its set-up lands before the first frame instead of between two frames of the growing shape.
         let started = Instant::now();
@@ -412,7 +554,7 @@ impl Host {
     /// A pull-down an agent's note opened becomes his conversation, with the keyboard; one hidden under the reader or
     /// drawing mode is never closed unseen.
     pub(crate) fn open_chat(&mut self) {
-        if self.island.owners_reply_open() && self.island.class() == crate::island::object::Class::Reply {
+        if self.island.user_reply_open() && self.island.class() == crate::island::object::Class::Reply {
             self.apply(Event::Click(Target::ReplyBand));
             return;
         }
@@ -937,6 +1079,7 @@ pub(crate) fn dispatch(o: Output) {
         Output::Report(r) => emit(UiAction::Island(r)),
         Output::PullOut { text, notes } => emit(UiAction::PullOut { text, notes }),
         Output::StopSpeech => emit(UiAction::StopSpeaking),
+        Output::Secret(secret) => emit(UiAction::Secret(secret)),
         Output::Copy(text) => {
             let board = objc2_app_kit::NSPasteboard::generalPasteboard();
             board.clearContents();
@@ -1148,3 +1291,72 @@ mod pointer_tests {
         assert!(!pointer_watch(true, true, true, false), "offscreen hosts are driven by synthetic events");
     }
 }
+
+// ---- islands display (night 1107: bug notes 2026-11-07T21-57-37, 2026-11-07T02-02-35) ----
+#[cfg(test)]
+mod display_tests {
+    use super::{choose_display, Place, ScreenInfo};
+
+    /// The user's 16" MacBook Pro (notch 185 × 32: menu bar areas of 771.5 pt each side) with its frame's origin at (x, y).
+    fn mbp(x: f64, y: f64) -> ScreenInfo {
+        ScreenInfo { id: 1, name: "Built-in Retina Display".into(), frame: (x, y, 1728.0, 1117.0), inset: 32.0, aux: (771.5, 771.5), scale: 2.0 }
+    }
+    /// The MSI MAG 271QPX at 2560 × 1440, no notch.
+    fn msi(x: f64, y: f64) -> ScreenInfo {
+        ScreenInfo { id: 2, name: "MSI MAG 271QPX".into(), frame: (x, y, 2560.0, 1440.0), inset: 0.0, aux: (0.0, 0.0), scale: 1.0 }
+    }
+    fn inside(r: (f64, f64, f64, f64), f: (f64, f64, f64, f64)) -> bool {
+        r.0 >= f.0 && r.1 >= f.1 && r.0 + r.2 <= f.0 + f.2 && r.1 + r.3 <= f.1 + f.3
+    }
+
+    /// Bug note 2026-11-07T21-57-37: an ask card open for hours, then the displays rearranged (the MacBook made the
+    /// main display), showed cut off above the built-in display's top, hanging from the frame it opened with. After a
+    /// display change the island is laid out again on the display it is on, read afresh: its whole window, and so the
+    /// card, is inside that display, hung from its top and centred on its notch.
+    #[test]
+    fn a_card_open_across_a_display_change_is_laid_out_inside_the_display_it_is_on() {
+        // Before: the MSI is the main display; the MacBook sits below it.
+        let before = [msi(0.0, 0.0), mbp(416.0, -1117.0)];
+        // After: the MacBook is the main display (origin 0, 0); the MSI above it.
+        let after = [mbp(0.0, 0.0), msi(-416.0, 1117.0)];
+        let opened = Place::from_info(&before[1]);
+        assert!(inside(opened.window_frame(), before[1].frame), "where it opened, it fit");
+        assert!(!inside(opened.window_frame(), after[0].frame), "the stale frame is off the MacBook after the change (the bug)");
+        let id = choose_display(&after, None, None, Some(opened.id)).expect("the display it is on is still connected");
+        assert_eq!(id, 1, "it stays on the MacBook");
+        let fresh = Place::from_info(after.iter().find(|s| s.id == id).unwrap());
+        assert!(inside(fresh.window_frame(), after[0].frame), "{:?} inside {:?}", fresh.window_frame(), after[0].frame);
+        assert_eq!(fresh.top, 1117.0, "hung from the display's top");
+        assert_eq!(fresh.center_x, 864.0, "centred on the notch");
+        // Every arrangement of the two: the island is inside whichever display it is laid out on.
+        for (dx, dy) in [(-1728.0, 0.0), (2560.0, 300.0), (0.0, 1440.0), (-300.0, -1117.0)] {
+            let screens = [msi(0.0, 0.0), mbp(dx, dy)];
+            for s in &screens {
+                let p = Place::from_info(s);
+                assert!(inside(p.window_frame(), s.frame), "{:?} on {:?}", p.window_frame(), s.frame);
+            }
+        }
+    }
+
+    /// The display it was on is gone: the island follows the lock if there is one, else the pointer (`None`).
+    #[test]
+    fn a_gone_display_hands_the_island_to_the_lock_or_the_pointer() {
+        let only = [mbp(0.0, 0.0)];
+        assert_eq!(choose_display(&only, None, None, Some(2)), None, "the pointer's display");
+        assert_eq!(choose_display(&only, None, Some("Built-in"), Some(2)), Some(1));
+    }
+
+    /// Bug note 2026-11-07T02-02-35: locked to the MSI, the notch island opens there wherever the pointer is; drawing
+    /// mode's own display still wins while it is up; an unplugged MSI falls back to following the pointer.
+    #[test]
+    fn the_lock_puts_the_island_on_its_display_and_falls_back_to_follow() {
+        let both = [mbp(0.0, 0.0), msi(1728.0, 0.0)];
+        assert_eq!(choose_display(&both, None, None, None), None, "follow cursor, the default: the pointer's display");
+        assert_eq!(choose_display(&both, None, Some("MSI MAG 271QPX"), None), Some(2));
+        assert_eq!(choose_display(&both, None, Some("msi"), Some(1)), Some(2), "the lock moves a showing island too");
+        assert_eq!(choose_display(&both, Some(1), Some("MSI"), None), Some(1), "drawing mode's pin first");
+        assert_eq!(choose_display(&both[..1], None, Some("MSI"), None), None, "unplugged: follow");
+        assert_eq!(choose_display(&both, None, None, Some(1)), Some(1), "re-anchoring keeps its display");
+    }
+}
+// ---- end islands display ----

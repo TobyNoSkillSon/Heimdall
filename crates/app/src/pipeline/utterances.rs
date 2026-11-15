@@ -86,26 +86,17 @@ impl Pipeline {
                     // Another participant is talking: the call is live while this voice lasts (bridge/speech_policy.rs).
                     self.tools.speech_policy.other_voice(&source, Some(host_time_ns));
                     self.start_discord(&source, host_time_ns)?;
-                    if !self.replay && self.sources.get(&source).is_some_and(is_discord_bundle) && speakers::ax::is_trusted() {
-                        let mut snapshots = vec![];
-                        for pid in speakers::ax::discord_processes() {
-                            if let Ok(ax) =
-                                speakers::ax::snapshot(pid, capture::host_now_ns() as f64 / 1e9)
-                            {
-                                snapshots.push(ax);
-                            }
-                        }
-                        if let Some(d) = self.discord.get(&source) {
-                            d.actor.send(crate::speakers_runtime::Work::Ax(snapshots))?;
-                        }
-                    }
+                    self.judge_call_voice(&source);
                 }
-                if self.owner(&source) {
+                if self.user_source(&source) {
                     self.mic_voice_warm(&source);
                     // Talking over an acknowledgement stops it (pipeline/ack.rs); read before his voice is noted. Not
                     // while he dictates to Vella (pipeline/vella.rs).
                     if !self.vella_dictating(&source) { self.ack_speech_start(&source); }
                     self.island_hold_voice(&source, true, host_time_ns);
+                    // Whether this onset waits for the speaker check before it can skip a reply (bridge/hold.rs; bug
+                    // note 2026-11-07T04-31-47): his primary microphone, with a check able to run.
+                    self.tools.owner.verify(&source, self.primary_mic(&source) && self.voice_check_ready());
                     self.tools.voice(&source, true);
                 }
                 self.barge_speech_start(&source, host_time_ns)?;
@@ -160,12 +151,7 @@ impl Pipeline {
                     let text = listen::Transcript::from_words(all.clone()).text;
                     self.discord[&source]
                         .actor
-                        .send(crate::speakers_runtime::Work::Observe(
-                            track,
-                            end_ns as f64 / 1e9,
-                            text,
-                            vec![],
-                        ))?;
+                        .send(crate::speakers_runtime::Work::Observe(track, text))?;
                 }
                 self.commands(&source, &all, false)?;
                 self.window_commands(&source, &all, end_ns)?;
@@ -199,6 +185,8 @@ impl Pipeline {
                     self.command_deferred.entry(source).or_default().push_back(retry_event);
                     return Ok(());
                 }
+                // An app's words, kept to recognise them on his microphone (pipeline/playback.rs).
+                self.note_app_speech(&source, &all);
                 let track = self.track_for(&source, start_ns, end_ns)?;
                 // speech-policy (night 3): an utterance on the user's microphone lying wholly inside the wake sound's
                 // window is the sound itself: Heimdall's, archived only (bridge/speech_policy.rs).
@@ -221,8 +209,18 @@ impl Pipeline {
                 });
                 // Only Heimdall's own score makes a line Heimdall's: his words over the echo that fail his print are
                 // "Unknown", context that never wakes, never thrown away (review 30 Oct).
-                let own_voice = voice == Some(heimdall_voice::MicVoice::Heimdall);
-                let unknown = voice == Some(heimdall_voice::MicVoice::Unknown);
+                // Playback from the Mac's own output heard on a Mac microphone (pipeline/playback.rs, bug note
+                // 2026-11-12T12-58-51): the apps' own audio said these words just now, so they are not his (nor
+                // Heimdall's own voice: a narrator can sound like it).
+                // Never over a line his print verified as his (review 12 Nov: his own voice sent back by a friend's
+                // open speakers in a call repeats his words in the app's audio).
+                let playback = !wake_sound && voice != Some(heimdall_voice::MicVoice::Owner) && self.playback_on_mic(&source, &all);
+                if playback {
+                    let _ = self.index.evidence.event("mic_playback", &source, std::slice::from_ref(&utterance_id), end_ns,
+                        serde_json::json!({"schema":1,"voice":voice,"words":all.len()}));
+                }
+                let own_voice = voice == Some(heimdall_voice::MicVoice::Heimdall) && !playback;
+                let unknown = voice == Some(heimdall_voice::MicVoice::Unknown) || playback;
                 if let Some(v) = &echo {
                     if !v.own() && !own_voice {
                         all = v.kept(&all);
@@ -242,7 +240,7 @@ impl Pipeline {
                             "Heimdall".into()
                         } else if unknown {
                             "Unknown".into()
-                        } else if self.owner(&source) {
+                        } else if self.user_source(&source) {
                             "User".into()
                         } else if self.own_audio(&source) {
                             "Heimdall".into()
@@ -254,24 +252,9 @@ impl Pipeline {
                     });
                 let text = listen::Transcript::from_words(all.clone()).text;
                 if let Some(t) = &track {
-                    let mut ax_items = vec![];
-                    if !self.replay && self.sources.get(&source).is_some_and(is_discord_bundle) && speakers::ax::is_trusted() {
-                        for pid in speakers::ax::discord_processes() {
-                            if let Ok(ax) =
-                                speakers::ax::snapshot(pid, capture::host_now_ns() as f64 / 1e9)
-                            {
-                                ax_items.push(ax);
-                            }
-                        }
-                    }
                     self.discord[&source]
                         .actor
-                        .send(crate::speakers_runtime::Work::Observe(
-                            t.clone(),
-                            end_ns as f64 / 1e9,
-                            text.clone(),
-                            ax_items,
-                        ))?;
+                        .send(crate::speakers_runtime::Work::Observe(t.clone(), text.clone()))?;
                 }
                 let u = self.active.remove(&source).unwrap();
                 let label = self
@@ -381,7 +364,7 @@ impl Pipeline {
                         decide::Role::Agent
                     } else if unknown {
                         decide::Role::Other("Unknown".into())
-                    } else if self.owner(&source) {
+                    } else if self.user_source(&source) {
                         decide::Role::Owner
                     } else {
                         decide::Role::Other(speaker)
@@ -425,14 +408,15 @@ impl Pipeline {
                     return Ok(());
                 }
                 if self.is_call(&source) && !text.trim().is_empty() {
-                    self.last_call_line_ns = Some(self.last_call_line_ns.map_or(end_ns, |t| t.max(end_ns)));
-                    // speech-policy (night 3): the user is in a conversation; Heimdall keeps quiet (bridge/speech_policy.rs).
-                    self.tools.speech_policy.other_line(end_ns);
+                    // speech-policy (night 3): the user is in a conversation (bridge/speech_policy.rs). Night 1115: only a
+                    // live one, a person he named or one he talks with; a stream or video in a call app is not.
+                    let named = track.as_ref().and_then(|t| self.speaker_names.get(t)).is_some_and(|n| !n.starts_with("Speaker ") && n != "Unknown");
+                    self.tools.speech_policy.call_line(end_ns, named);
                     if decide::send::farewell(&text) { self.call_goodbye(end_ns); }
                 }
                 self.call_final(u.id,&source,u.start,end_ns,&all,&u.notes);
                 self.project_call(&source)?;
-                if voice.is_some() { self.note_line_voice(&observation.id, if unknown { mic_voice::Line::Unknown } else { mic_voice::Line::Owner }); }
+                if voice.is_some() || playback { self.note_line_voice(&observation.id, if unknown { mic_voice::Line::Unknown } else { mic_voice::Line::Owner }); }
                 let final_ = AgentFinal { audio_error, observation, source:source.clone(), start:u.start, end:end_ns, words:all, notes:u.notes, images:u.images, turn, audio_spans, forced, end_of_turn_probability };
                 // Setup's last step is a phrase the user says (setup_phrase.rs): their own microphone, their voice.
                 if matches!(final_.turn.role, decide::Role::Owner) { self.setup_phrase_line(&final_.observation.text, &final_.turn.audio.samples); }
@@ -482,7 +466,7 @@ impl Pipeline {
         else {
             return Ok(());
         };
-        if !self.owner(source) {
+        if !self.user_source(source) {
             return Ok(());
         }
         let queued_start = self.command_deferred.get(source).and_then(|events| {
@@ -676,8 +660,25 @@ impl Pipeline {
         &mut self,
         final_: AgentFinal,
     ) -> Result<(Option<agent::delivery::DeliveryPermit>, u64)> {
-        // One utterance heard on two microphones reaches the decider and the agent once (`heard_twice`).
-        if self.archive_heard_twice(&final_)? {
+        // night1110 phone-core (bug note 2026-11-09T07-09-44): while a phone turn is pressed or in flight, the Mac
+        // microphone's speech is archived only: it never reaches the decider or the agent, so the Mac hearing what
+        // The user says into the phone cannot wake on it, ack it or take the turn from it (remote.rs). The phone's own live
+        // microphone is the phone (phone_mic.rs): never gated by its own turn.
+        let gated = self.user_source(&final_.source) && !self.phone_source(&final_.source) && crate::remote::phone_holds_mic();
+        // Phone listen (phone_listen.rs): the user's "not now" closes Heimdall's window on the phone at once, on whichever
+        // of his microphones heard it first (before `heard_twice` drops the other copy)
+        if self.owner_line(&final_.source, &final_.observation.id) { crate::phone_listen::heard_on_phone(&final_.observation.text); }
+        // One utterance heard on two microphones reaches the decider and the agent once (`heard_twice`). A gated Mac
+        // final is remembered there for the Mac's other microphones, but the phone's own line never matches it.
+        if self.archive_heard_twice(&final_, gated)? {
+            return Ok((None, 0));
+        }
+        if gated {
+            let mut record = serde_json::json!({"status":"archive_only","reason":"phone_turn","given_to_agent":false,"would_wake":false});
+            if let Some(e) = &final_.audio_error { record["audio_error"] = serde_json::json!(e); }
+            self.decisions += 1; // A completed disposition, without inference.
+            self.index.record(&final_.observation, &final_.source, final_.start, final_.end, &final_.words, &final_.notes, &record)?;
+            crate::diagnostics::event_stream(&serde_json::json!({"event":"final","dry_run":self.settings.dry_run,"id":final_.observation.id,"source":final_.observation.source,"speaker":final_.observation.speaker,"text":final_.observation.text,"decision":record,"would_wake":false}));
             return Ok((None, 0));
         }
         let AgentFinal {
@@ -726,7 +727,7 @@ impl Pipeline {
         // Listening to guests (listen_to.rs): a guest the user listens to who addresses Heimdall by name wakes it; the
         // agent's copy marks their lines. d1's conversation keeps the plain labels it learned on.
         let guest = self.guest_address(&source, &observation, &all);
-        // A listened guest's own line counts like his ("if I say 'listen to Kanan', Kanan should be
+        // A listened guest's own line counts like his ("if I say 'listen to Alex', Alex should be
         // treated like me"): their mention of the name, "send it" and d1's verdict follow his rules for a call.
         if let Some(name) = self.listened_line(&source, &observation, &all) {
             self.note_line_voice(&observation.id, mic_voice::Line::Guest(name));
@@ -779,22 +780,40 @@ impl Pipeline {
             // A listened guest's address by name is their request (`Trigger::Guest`), even where their line also
             // counts like his.
             let trigger = guest.as_ref().map(|_| decide::send::Trigger::Guest).or(trigger);
+            // 13 Nov (streaming is the phone's only way to talk): his first line on a live stream he started with a
+            // press is for Heimdall, as a push-to-talk press is, however short (phone_mic.rs `take_press_line`).
+            let trigger = if self.phone_source(&source) && self.owner_line(&source, &observation.id) && crate::phone_mic::take_press_line() {
+                Some(decide::send::Trigger::PhonePress)
+            } else { trigger };
             self.tools.persist_send_context(&context)?;
             (context.snapshot(), trigger)
         };
         // His microphone's words, by source (never a label that reads "the user"), for `listen_to` (listen_to.rs).
         if self.owner_line(&source, &observation.id) { self.owner_heard(snapshot.through, &spoken); }
-        // Night review D3: during a call, the follow-up window, "send it" and a mention of the name wait for d1, which
-        // holds them back when it says strongly that the line is part of the call (decide::send::CALL_NOT_FOR). The user's
-        // own address by name still wakes at once.
         // His goodbye in a call ends it too ("See ya, sir", 29 Oct 22:27), and so does his "I'm off the call" or "you can
         // talk to me now" (bug 2026-11-04T17-48-24).
-        if self.owner_line(&source, &observation.id) && self.in_call_at(end_ns)
-            && (decide::send::farewell(&observation.text) || decide::send::off_call(&observation.text)) { self.call_goodbye(end_ns); }
-        let in_call = self.like_owner(&source, &observation.id) && self.in_call_at(end_ns);
-        let call_trigger = heard_trigger.filter(|t| joined.is_empty() && in_call && decide::send::call_trigger_waits(*t, &observation.text));
+        // ---- address ends the call (lane S, night 1113) ----
+        // His address by name with nobody else on the call for `ADDRESS_GAP_NS` before his line began ends it too (bug note
+        // 2026-11-12T17-36-58: after his Discord call he said "Okay, Hanggal, I'm back." and was held as call talk
+        // until the window lapsed). A guest's next line opens it again.
+        // Review of the night pass (13 Nov, non-blocker 2): his own talk to the call counts as call talk too, so the
+        // address ends the call only after he too was quiet `ADDRESS_GAP_NS`, or when the line says he is back.
+        let addressed = decide::send::addressed_by_name(&observation.text);
+        let addressed_alone = || addressed
+            && self.tools.speech_policy.address_ends_call(start, capture::host_now_ns(), decide::send::says_back(&observation.text));
+        if self.owner_line(&source, &observation.id) && self.in_call_at(end_ns) {
+            if decide::send::farewell(&observation.text) || decide::send::off_call(&observation.text) || addressed_alone() {
+                self.call_goodbye(end_ns);
+            } else if !addressed {
+                self.tools.speech_policy.owner_call_line(end_ns);
+            }
+        }
+        // ---- end address ends the call ----
+        // Night 1115 ("Whenever I'm saying something, it should receive in the same way. You
+        // shouldn't be less reactive because we are on the call."): his name and "send it" wake at once in a call too,
+        // with no wait for d1's verdict (the old `call_trigger_waits`).
         // A drop with his words is for Heimdall, in a call or not.
-        let explicit = if joined.is_empty() { heard_trigger.filter(|_| call_trigger.is_none()) } else { Some(decide::send::Trigger::Dropped) };
+        let explicit = if joined.is_empty() { heard_trigger } else { Some(decide::send::Trigger::Dropped) };
         self.pending_text = self
             .tools
             .send_context
@@ -817,7 +836,6 @@ impl Pipeline {
         let mut pending = serde_json::json!({
             "schema":1,"status":"decision_pending","given_to_agent":true,"would_wake":explicit.is_some(),"trigger":explicit
         });
-        if let Some(t) = call_trigger { pending["call_trigger"] = serde_json::json!(t); }
         // Delivered as text with its waveform lost to a capture gap (L1): the gap stays visible in the archive and log.
         if let Some(error) = &audio_error { pending["audio_error"] = serde_json::json!(error); }
         self.index.record(&archive_observation,&source,start,end_ns,&all,&notes,&pending)?;
@@ -839,12 +857,7 @@ impl Pipeline {
             let before = self.dispatched_through;
             let ack = self.ack_plan_for(None, trigger_text.as_deref().unwrap_or(&observation.text));
             self.dispatch_pending(&source, &observation.text, snapshot.through, &observation.id, speaker, permit.clone(), for_heimdall, ack)?;
-            // speech-policy (night 3): the user addressing Heimdall by name may be answered aloud during a conversation,
-            // in the run this wake starts or steers (bridge/speech_policy.rs).
-            if self.dispatched_through > before && explicit == Some(decide::send::Trigger::Name) && self.like_owner(&source, &observation.id)
-                && decide::send::addressed_by_name(trigger_text.as_deref().unwrap_or(&observation.text)) {
-                self.tools.speech_policy.addressed_wake();
-            }
+            // The user's own words may be answered aloud on a call: `dispatch_pending` (night 1115).
             // A listened guest addressed Heimdall by name: it may answer them aloud during the call, as it may the user.
             if self.dispatched_through > before && explicit == Some(decide::send::Trigger::Guest) {
                 self.tools.speech_policy.addressed_wake();
@@ -876,7 +889,6 @@ impl Pipeline {
             },
             snapshot: snapshot.clone(),
             explicit,
-            call_trigger,
             permit: permit.clone(),
             audio,
             admitted: Instant::now(),

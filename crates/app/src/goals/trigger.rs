@@ -28,6 +28,7 @@ pub struct Triggers {
 pub enum Why { Owner, Task, Both, Retry }
 
 impl Why {
+    #[cfg_attr(not(test), allow(dead_code))] // goals-lab (goals/lab.rs) reads it
     pub fn as_str(self) -> &'static str {
         match self { Why::Owner => "owner", Why::Task => "task", Why::Both => "owner+task", Why::Retry => "retry" }
     }
@@ -48,6 +49,9 @@ impl Triggers {
         let owner = self.owner.map(|(first, last)| (last + QUIET_MS).min(first + MAX_WAIT_MS));
         let task = self.task.map(|t| t + TASK_MS);
         let at = [owner, task, self.retry].into_iter().flatten().min()?;
+        // A failed call's backoff holds every call until it ends: new words ride on the retry (bug note
+        // 2026-11-08T02-03-41: the user's speech fired calls every 1-3 minutes through a 30-minute backoff).
+        let at = self.retry.map_or(at, |r| at.max(r));
         Some(self.last_call.map_or(at, |c| at.max(c + GAP_MS)))
     }
 
@@ -119,5 +123,19 @@ mod tests {
         t.retry_in(60 * S, 120 * S);
         assert_eq!(t.due(), Some(180 * S));
         assert_eq!(t.fire(180 * S), Some(Why::Retry));
+    }
+
+    #[test]
+    fn new_words_wait_for_a_failed_calls_backoff() {
+        let mut t = Triggers::default();
+        t.note(Kind::Owner, 0);
+        assert_eq!(t.fire(60 * S), Some(Why::Owner));
+        t.retry_in(60 * S, 1800 * S);
+        // The user keeps talking: his words alone would be due a minute later, but the backoff holds them.
+        t.note(Kind::Owner, 100 * S);
+        t.note(Kind::Task, 110 * S);
+        assert_eq!(t.due(), Some(1860 * S));
+        assert_eq!(t.fire(200 * S), None);
+        assert_eq!(t.fire(1860 * S), Some(Why::Both));
     }
 }

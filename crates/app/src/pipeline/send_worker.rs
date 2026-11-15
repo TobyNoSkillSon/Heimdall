@@ -8,8 +8,6 @@ pub struct PendingSend {
     pub(super) final_: AgentFinal,
     pub(super) snapshot: decide::send::Snapshot,
     pub(super) explicit: Option<decide::send::Trigger>,
-    /// A trigger heard during a call that waits for d1's verdict (night review D3; decide::send::call_trigger_waits).
-    pub(super) call_trigger: Option<decide::send::Trigger>,
     pub(super) permit: Option<agent::delivery::DeliveryPermit>,
     pub(super) audio: serde_json::Value,
     pub(super) admitted: Instant,
@@ -742,13 +740,14 @@ impl InferenceOwner {
     }
 }
 impl Pipeline {
-    /// A call is going on at `end` (host ns): a call line within `CALL_ACTIVE_NS` and no goodbye since.
+    /// A call is going on at `end` (host ns). Night 1115: one call timer, the speech policy's live conversation
+    /// (`SpeechPolicy::in_conversation`), not the decider's former two minutes after any call-app line.
     pub(super) fn in_call_at(&self, end: u64) -> bool {
-        decide::send::call_active(self.last_call_line_ns, self.call_farewell_ns, end)
+        // A call line that ended after this line (its words came in first) counts: now as well as at its end.
+        self.tools.speech_policy.in_conversation(end) || self.tools.speech_policy.in_conversation(capture::host_now_ns())
     }
     /// A goodbye in the call ended at `end_ns`: the call and the conversation hold are over.
     pub(super) fn call_goodbye(&mut self, end_ns: u64) {
-        self.call_farewell_ns = Some(self.call_farewell_ns.map_or(end_ns, |t| t.max(end_ns)));
         self.tools.speech_policy.farewell(end_ns);
     }
     /// `speaker`: whose line the decision sent (`agent::Speaker`, night review 9).
@@ -783,7 +782,11 @@ impl Pipeline {
         if for_heimdall { self.tools.spoke_to_heimdall(through); }
         // Who this wake carries, for `listen_to` (pipeline/listen_to.rs): the user's own lines riding it, or a guest's.
         if speaker == agent::Speaker::Owner {
-            self.owner_wake(through, text);
+            self.owner_wake(source, through, text, observation);
+            // Night 1115 (bug note 2026-11-14T11-58-47): his words woke or steered this run, so he is
+            // talking to Heimdall: on a call its answer is spoken (after a pause in the others' talk, or at once with
+            // the agent's `now`), not held silent. Before, only his address by name opened speech on a call.
+            self.tools.speech_policy.addressed_wake();
         } else {
             self.tools.speech_policy.guest_woke();
         }
@@ -825,6 +828,8 @@ impl Pipeline {
             // The wake did not go out: its ack line is never told to a later one.
             self.tools.ack_said.lock().unwrap().take();
         }
+        // ---- phone endpoint: a wake of the user's that never went out ends its Mac turn (remote.rs) ----
+        if speaker == agent::Speaker::Owner && (result.is_err() || permit.check().is_err()) { crate::remote::mac_turn_failed(); }
         if permit.check().is_ok() {
             result?;
             self.dispatched_through = self.dispatched_through.max(through);
@@ -883,7 +888,6 @@ impl Pipeline {
             final_,
             snapshot,
             explicit,
-            call_trigger,
             permit,
             audio,
             admitted,
@@ -904,7 +908,6 @@ impl Pipeline {
         let mut trigger = explicit;
         // Decider v3: the verdict, and the ack line it picked with its send (pipeline/ack.rs `AckPlan`).
         let mut decided_line: Option<Option<String>> = None;
-        let mut call_gate = None;
         let mut d1_gate = None;
         // The user's own line (mic, labelled the user): while a question card is up, d1's verdict follows bridge/questions.rs.
         let card = if self.owner_line(&source, &observation.id) && snapshot.pending.iter().any(|t| t.seq == snapshot.through && t.speaker == "User") {
@@ -922,30 +925,25 @@ impl Pipeline {
                 self.component_status("decision", None);
                 self.decisions += 1;
                 decided_line = Some(prediction.ack.clone());
-                // Night review D3: a trigger heard during a call wakes unless d1 says strongly "not for Heimdall".
-                if let Some(t) = call_trigger {
-                    let not_for = prediction.probabilities.get("not_for_heimdall").copied();
-                    let wakes = decide::send::call_trigger_holds(not_for);
-                    call_gate = Some(serde_json::json!({"trigger":t,"not_for_heimdall":not_for,"bar":decide::send::CALL_NOT_FOR,"wakes":wakes}));
-                    if wakes { trigger = Some(t); }
-                }
                 if trigger.is_none() {
                     let text = snapshot.pending.iter().find(|t| t.seq == snapshot.through).map_or("", |t| t.text.as_str());
-                    // Night pass 1022: call and app-audio lines never wake by d1 alone, nor the user's lines during a call
-                    // unless he answers Heimdall's card; a near-tie outside a call sends (decide::send::d1_gate).
+                    // Night pass 1022: call and app-audio lines never wake by d1 alone; a near-tie sends
+                    // (decide::send::d1_gate). Night 1115: his lines get the same verdict in a call.
                     // His own line, or a listened guest's (listen_to.rs); never another voice on his microphone
                     // (mic_voice.rs).
                     let owner = self.like_owner(&source, &observation.id);
-                    let in_call = owner && self.in_call_at(end);
                     let argmax_send = prediction.choice == decide::send::Choice::Send;
                     use crate::bridge::questions::CardState;
-                    let gate = decide::send::d1_gate(owner, in_call, card == CardState::Answering, card == CardState::None,
-                        &prediction.probabilities, argmax_send);
+                    // A listened guest's line (listen_to.rs) is never woken by d1, which learned only his wakes: the
+                    // guest wakes by name or "send it", as before.
+                    let guest = owner && !self.owner_line(&source, &observation.id);
+                    let gate = if guest { decide::send::D1Gate::InCall } else { decide::send::d1_gate(owner, card == CardState::Answering, card == CardState::None,
+                        &prediction.probabilities, argmax_send) };
                     trigger = match gate {
                         decide::send::D1Gate::Open => crate::bridge::questions::card_verdict(card, text, argmax_send,
                             prediction.probabilities.get("send").copied().unwrap_or(0.)),
                         decide::send::D1Gate::NearTie => Some(decide::send::Trigger::D1),
-                        decide::send::D1Gate::NotOwner | decide::send::D1Gate::InCall => None,
+                        decide::send::D1Gate::NotUser | decide::send::D1Gate::InCall => None,
                     };
                     if gate != decide::send::D1Gate::Open {
                         d1_gate = Some(serde_json::json!({"gate":gate,"argmax_send":argmax_send,"near_tie":decide::send::NEAR_TIE}));
@@ -963,11 +961,6 @@ impl Pipeline {
                     "ack_line":prediction.ack})
             }
             Err(e) => {
-                // No verdict: a waiting call trigger wakes, as it did before the call rule.
-                if let Some(t) = call_trigger {
-                    trigger = Some(t);
-                    call_gate = Some(serde_json::json!({"trigger":t,"wakes":true,"reason":"no decision"}));
-                }
                 if !preempted {
                     self.errors += 1;
                     self.fail(&format!("Decision failed; transcript retained: {e}"));
@@ -977,7 +970,6 @@ impl Pipeline {
         };
         let would_wake = trigger.is_some() && !self.own_audio(&source);
         record["trigger"] = serde_json::json!(trigger);
-        if let Some(gate) = call_gate { record["call_gate"] = gate; }
         let held_by_gate = d1_gate.as_ref().and_then(|g| g["gate"].as_str().map(str::to_owned)).filter(|g| g != "near_tie");
         if let Some(gate) = d1_gate { record["d1_gate"] = gate; }
         if card != crate::bridge::questions::CardState::None { record["question_card"] = serde_json::json!(format!("{card:?}").to_lowercase()); }
@@ -985,7 +977,7 @@ impl Pipeline {
             "send"
         } else if let (Some(gate), true) = (held_by_gate.as_deref(), record["choice"] == "send") {
             // Night pass 1022: d1 said send, the gate kept it as context.
-            match gate { "not_owner" => "held_not_owner", "no_user_voice" => "held_no_user_voice", _ => "held_in_call" }
+            match gate { "not_user" => "held_not_user", "no_user_voice" => "held_no_user_voice", _ => "held_in_call" }
         } else if trigger.is_none() && record["choice"] == "send" {
             // d1 sent a filler while a question card was up: held (bridge/questions.rs).
             "filler_held"
@@ -1008,6 +1000,18 @@ impl Pipeline {
             record["agent_audio_spans"] = serde_json::json!(audio_spans);
         }
         self.index.decision(&observation.id, &record)?;
+        // His line to someone else makes the call audio around it a live conversation (night 1115, `call_line`). Any
+        // line of his that did not wake Heimdall counts, not only `not_for_heimdall`: short talk with an unnamed friend
+        // is often `wait` (night 1115 review S2). A stream with him silent, or talking only to Heimdall, stays app audio.
+        if !would_wake && record["choice"] != "send" && self.owner_line(&source, &observation.id) {
+            self.tools.speech_policy.owner_talked_to_others(end);
+        }
+        // 13 Nov: the decider's verdict on a line from the phone's live microphone, in the log (no words).
+        if self.phone_source(&source) {
+            let send = record["probabilities"]["send"].as_f64().map_or("-".to_owned(), |p| format!("{p:.2}"));
+            eprintln!("phone mic: line {} decider {} (send {send}, trigger {}): {}", observation.id, record["choice"].as_str().unwrap_or("none"),
+                record["trigger"].as_str().unwrap_or("none"), record["outcome"].as_str().unwrap_or("?"));
+        }
         // ⌃⌘\ and ⌃⌘' label what V5 saw for this line (hotkeys.rs).
         self.hotkey_decided(&source, &snapshot, &observation.id, &record);
         crate::diagnostics::event_stream(&serde_json::json!({"event":"final","dry_run":self.settings.dry_run,"id":observation.id,"source":observation.source,"speaker":observation.speaker,"text":observation.text,"forced":forced,"end_of_turn_probability":end_of_turn_probability,"decision":record,"would_wake":would_wake}));
@@ -1020,6 +1024,7 @@ impl Pipeline {
             // d1 sent it: for Heimdall, so it may close a card (bridge/questions.rs).
             let speaker = if self.owner_line(&source, &observation.id) { agent::Speaker::Owner } else { agent::Speaker::Other };
             let ack = self.ack_plan_for(decided_line.as_ref().map(Option::as_deref), &observation.text);
+            // His words: the run may answer aloud on a call (`dispatch_pending`).
             self.dispatch_pending(&source, &observation.text, snapshot.through, &turn.id, speaker, permit, true, ack)?;
         }
         // Decider V5 learned three jobs (wake, suggest, screen commands): no fixed-command or end-of-turn reply-line
@@ -1031,14 +1036,23 @@ impl Pipeline {
         // user's voice for barge-in (pipeline/heimdall_voice.rs `UserVoice`).
         let in_call = self.in_call_at(end);
         let heimdall_heard = self.tools.heimdall_speaking() || self.tools.send_context.lock().unwrap().finished_ns.is_some_and(|f| f >= start);
+        // Speaker identity across microphones (heimdall_voice.rs `UserVoice`): his print is never widened on voice
+        // alone. Support besides the voice: he addressed Heimdall by name, d1 sent it, and no app was talking around it
+        // (playback can say "Heimdall" too).
+        let device = self.sources.get(&source).map(|i| i.label.clone()).unwrap_or_default();
+        let support = if record["choice"] == "send" && decide::send::addressed_by_name(&observation.text) && !self.app_audible(start, end) {
+            heimdall_voice::Support::Addressed
+        } else {
+            heimdall_voice::Support::Voice
+        };
         if would_wake && self.primary_mic(&source) && self.owner_line(&source, &observation.id) && !in_call && !heimdall_heard {
-            self.user_voice_heard(&turn.audio.samples, false);
-        } else if self.line_voice(&observation.id) == Some(&super::mic_voice::Line::Unknown) && record["choice"] == "send"
-            && self.primary_mic(&source) && !in_call && !heimdall_heard && decide::send::addressed_by_name(&observation.text) {
+            self.user_voice_heard(&turn.audio.samples, heimdall_voice::Sample::Wake { device, support });
+        } else if self.line_voice(&observation.id) == Some(&super::mic_voice::Line::Unknown) && support == heimdall_voice::Support::Addressed
+            && self.primary_mic(&source) && !in_call && !heimdall_heard {
             // A line addressing Heimdall by name that d1 would have sent but his print did not match: it only counts
-            // toward starting his print again (five that agree with each other: his microphone or voice changed), never
-            // as a sample of him. Talk through the speakers rarely addresses Heimdall by name (review 30 Oct).
-            self.user_voice_heard(&turn.audio.samples, true);
+            // toward a set of his voice on this microphone (agreeing ones: his microphone changed), never as a sample
+            // of his print. Talk through the speakers rarely addresses Heimdall by name (review 30 Oct).
+            self.user_voice_heard(&turn.audio.samples, heimdall_voice::Sample::Held { device });
         }
         Ok(())
     }

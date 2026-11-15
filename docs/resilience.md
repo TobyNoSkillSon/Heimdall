@@ -1,280 +1,307 @@
-# Resilience: what can fail, how Heimdall notices, how it recovers, what the user sees
+# Troubleshooting and recovery
 
-Heimdall runs all the time, so when it fails it either fails in a way it can recover from, or shows that something is
-not right. A watchdog catches freezes, but only real ones: the part must actually be frozen.
+What can fail in Heimdall, how it notices, how it recovers by itself, what the island shows, and what to do when it
+asks for you. Organised by symptom, with where the logs are and how to reconstruct an outage.
 
-## Rules
+Read this when: Heimdall misbehaves and you want the cause and the fix, you want to read the logs, you want to know
+what a red or orange pill means, you are changing a watchdog, a recovery ladder or a health cue.
+Code: `crates/app/src/watchdog.rs` (freeze watchdog, relaunch, forced quit), `crates/app/src/pipeline/resilience.rs`
+(stall checks and lower rungs in the live loop), `crates/app/src/health.rs` (de-duplicated health, ladder, microphone
+switch), `crates/app/src/hang.rs` (stack samples), `crates/app/src/resource_watch.rs` (swap and GPU),
+`crates/app/src/preflight.rs` (agent pre-flight), `crates/app/src/bridge/health.rs` and
+`crates/app/src/bridge/supervisor.rs` (agent health), `crates/app/src/diagnostics_lines.rs` and
+`crates/app/src/diagnostics_log.rs` (log lines and the log file).
 
-- **Frozen, not quiet.** A freeze is work waiting with no progress: a microphone that is open but delivers no audio
-  (silence still delivers samples), a listen worker holding queued audio while finishing nothing, a live loop that
-  stops handling its 2-second tick, a UI thread that stops running a block posted every 10 s. Silence, Listening off,
-  an idle agent and a sleeping Mac (uptime clocks, re-baselined at wake) never count.
-- **Ladder, never a loop.** Restart the part, then restart listening (in-process Off/On, models kept), then relaunch
-  Heimdall. Each part's rungs count within 10 minutes. Automatic relaunches: at most 2 per 30 minutes, counted across
-  launches in atomically replaced `<data>/recovery.json`. An unreadable history or a failed durable count write
-  forbids automatic relaunch and shows the red problem pill. Past every bound: a red pill with what to do.
-- **Relaunch keeps everything.** The callback closes delivery synchronously and queues an independent writer for
-  `<data>/stop-intent.json`. Automatic relaunch waits for the latest intent to be durable before exit; a failed or
-  stalled writer blocks relaunch with the red pill. The final flush and exit hold the same acceptance lock as
-  menu and settings-file intents: no newer intent can be accepted between them. Helper failure releases
-  the lock and keeps the app alive. Launch combines settings with a stop-only recovery overlay before delivery
-  initializes; a persisted On never overrides settings Off.
-  Settings saves follow the latch and retire only the same durably saved generation. Committed archive records
-  are on disk. A rung-3 relaunch from a working loop goes through a normal Quit (drains audio and deliveries);
-  one from a frozen loop exits after 1.5 s and loses only the uncommitted tail of the current archive commit. The
-  relaunch runs through LaunchServices (`open Heimdall.app`), so macOS attributes permissions exactly as when the user
-  opens it: no permission prompt.
-- **Quit always ends**: once teardown makes no progress for 8 s (each finished step and each bounded wait counts),
-  and at most 30 s after the click, the process exits with `_exit` (no exit handlers: ggml's Metal destructors abort
-  while a model is loaded). Quit first preempts archive compaction (`compact::preempt_all`, which also lifts the
-  compactor out of background QoS), so teardown writes never wait behind a compaction step.
-- **Switches never wait for the archive**: Listening on creates its capture segment on the intake thread; Listening
-  off waits at most 2 s for the last archive commit (Quit settles the rest); Seeing on waits at most 2 s for its
-  stream and a later tick adopts a slower one; Seeing off stops the stream on its own thread. Screen starts and
-  stops run in one ordered lane, and a start cancelled before its turn never starts.
-- **Hang evidence**: a UI thread or live loop silent past 2 s writes every thread's stack to `logs/hangs/` (one per
-  thread per 10 minutes, newest 20 kept) and a summary line to heimdall.log (`crates/app/src/hang.rs`).
-- **Swap and GPU watch** (`crates/app/src/resource_watch.rs`, read once a minute): when macOS swap reaches 2 GB the
-  agent gets one notice (a wake) naming the swap, Heimdall's own total and the three largest processes, so it can
-  hold the heavy jobs it started; it warns again only after swap fell under 1.5 GB, and at most once an hour. With
-  Agent off the warning is a `memory:` log line only. Every 10 minutes in which the GPU averaged 25% or more, or
-  Heimdall's processes used 5% of GPU time, one `gpu:` line gives the device's utilisation, Heimdall's GPU time per
-  part (the Memory row's parts: Voice, Search Index, Speakers, Local Model, Islands, and Heimdall's own process, "Listening & Decider",
-  where Parakeet, the decider, Smart Turn and Supertonic run together) and the three busiest other processes. The
-  source is the IORegistry's per-client `accumulatedGPUTime` (Activity Monitor's GPU Time). The cross-task memory
-  guard for workers is not Heimdall's code.
+## Where the logs are
 
-Code: `crates/app/src/watchdog.rs` (freeze watchdog, relaunch), `crates/app/src/pipeline/resilience.rs` (checks and
-lower rungs in the live loop), `crates/app/src/health.rs` (de-duplicated health, ladder, microphone switch),
-`crates/app/src/preflight.rs` (agent pre-flight), `crates/ui/src/island/` (model and renderer) (the island).
+`<data>` is Heimdall's data folder, `<home>/.heimdall` ([home.md](home.md)).
 
-## What the user sees
-
-| State | Look | Renders (`lab/ui-renders/`) |
+| File | What is in it | Bound |
 |---|---|---|
-| Restarting | Orange reload glyph, "Restarting transcription…", with a static orange outline until it ends | `island-health-restarting*.png` |
-| Back | Green check, "Transcription OK", 1.7 s, then gone | `island-health-ok.png` |
-| Needs the user | Red pill, two lines (what is wrong, what to do), a static red outline while it is held; menu-bar helmet red; a click runs the action and collapses it to a red glyph (outlined too). Never a command or a raw error: those go to the log | `island-health-problem-*.png`, `island-health-alert-problem.png` |
-| Part down, returns by itself | Orange, said once (2.6 s), then a small glyph at the notch until it returns | `island-health-drop-mic.png`, `island-health-alert-drop.png` |
-| Notice | Accent colour, 3.2 s: microphone switch, harness update | `island-health-mic-*.png`, `island-health-agent-updated.png` |
+| `<data>/logs/heimdall.log` | One timestamped plain line per failure, fallback, retry, timeout, state change and event; also stdout, stderr and panics | rotates at 2 MiB into `.1` … `.10` (`LIMIT`, `COPIES`): at most about 22 MB |
+| `<data>/logs/tools.log` | Every agent tool call and its outcome, one line each | `MAX_BYTES` (1 MiB), then `tools.log.1`: at most twice that |
+| `<data>/logs/hangs/hang-<time>-<menu\|live\|quit>.txt` | Every thread's stack when the UI thread or live loop stalls past 2 s, or a Quit is forced | newest 20 kept; one per thread per 10 min |
+| `<data>/archive` | The structured journal: `health`, `recovery`, `gap`, `invariant_violation` and every other evidence record | read with `heimdall-archive timeline` (below) |
+| `<data>/recovery.json` | Automatic relaunch history, counted across launches | atomically replaced |
+| `<data>/stop-intent.json` | The latest switch intent (Listening, Agent …) that a relaunch must keep | atomically replaced |
+| `<data>/emergency/state.json` | Emergency and relay state ([emergency.md](emergency.md)) | — |
 
-Health shows whether or not Heimdall listens; Listening off clears the listening parts' conditions (the agent's,
-speech's and the screen's stay: those keep running). Commands keep working
-beside it: a heard command or its result takes the island for its moment, then the health pill returns (no second
-pulse). A health message that arrives while a command or another message holds the island waits its turn and then
-shows for its full time; a message stays readable for at least 1.2 s before one about something else replaces it,
-while one about the same condition (a restart's OK) replaces it at once. At rest a restart outranks
-a problem, a problem outranks a pending command, and the small glyph comes last. The Listening
-glyph is the helmet, with a ring while the models load (`island-listening-*.png`).
+Read the end of a log: `tail -n 200 "<data>/logs/heimdall.log"`. Every line starts with its local time
+(`2026-10-19 18:48:32.390 voice: …`), so search by the time the problem happened.
 
-## Failure catalogue
+## Find what went wrong
 
-| Failure | Detected by | Recovery | Island | recorded as |
-|---|---|---|---|---|
-| Chosen mic unplugged, Bluetooth dropped, or removed while recording | HAL device-list listener (event, no polling) | Capture opens the built-in mic in the same pass; back to the chosen one when it returns | "AirPods Pro → MacBook Pro Microphone"; back after it stays 5 s: "MacBook Pro Microphone → AirPods Pro" | `source_removed` / `gap` with device reason; `microphone_cue` and `health` switch transition |
-| Chosen mic present but failing (no callbacks for 3 s, or start error) | Capture's HAL owner | Retries at 2, 4, 8, 16 s; **the built-in mic records between retries** (before: up to ~40 s of nothing); after 4 failures built-in until a HAL event or the user's choice | The same switch notice, once (retries never flicker it) | `source_removed` / `gap` with start/callback reason; `microphone_cue` on fallback |
-| An extra mic the user switched on disconnects | Capture's microphone report | It reopens when it returns; the primary is unaffected | "<mic> disconnected" once, then an orange mic glyph at the notch; "<mic> back" | `microphone_cue` and `health` disconnect/recovery; `source_removed` cause |
-| System default input changes | — | Ignored by design: Heimdall uses the user's choice, else built-in; no restart, no gap | Nothing | None: deliberately ignored, no failure |
-| Default output, sample-rate or format change | HAL route and format listeners | Sources restart with the new format in the same pass (tens of ms) | Nothing | `source_removed` / `gap` route/format reason; next `source_added` |
-| No microphone at all (built-in gone with the lid closed, chosen one absent) | Capture's report: nothing in use | Waits for a HAL event | Red "No microphone · Click to pick one in the menu" (opens the menu); "Microphone OK" | `microphone_cue` and `health` missing/recovered |
-| Capture stuck (an open mic delivers nothing for 15 s) | Live-loop tick; microphones only (an app tap is silent when its app is); skipped when the loop itself was busy | Restart capture → restart listening → relaunch; a restarted capture is watched until one of its microphones opens | Orange "Restarting the microphone…"; "Microphone OK" when audio flows | `capture_stalled` silent duration/rung; `recovery` reason; `health` |
-| Listen worker dies (crash, panic, model error) | Its end marker | Restart, ≤3 per 10 min → relaunch | Orange "Restarting transcription…"; "Transcription OK" when its models are ready; red "Transcription keeps stopping" past the relaunch bound | `listen_worker_ended` reason/restart decision; `health` failure/recovery |
-| Listen worker hangs (queued audio, nothing finished for 30 s; models not loaded in 2 min) | Worker progress probe (`ListenWorker::progress`) on the tick | Left behind (a model call cannot be interrupted), its output discarded, a new worker started, same bound → relaunch | Same as above | `listen_worker_hung` reason/waiting work; `recovery`, `gap`, `health` |
-| Decider does not load | At use | Next try after 10 s, doubling to 5 min (before: a multi-second reload at every decision); agent starts regardless | "Commands paused · reloading" (orange glyph); after 3: red "Commands and replies are off" (click restarts Heimdall); "Commands OK" | `decider_load_failed` raw error/attempt/retry delay; `health` |
-| Decider owner panics, exits or hangs | Independent supervisor; response disconnect/panic, or 1 s + the request's UTF-8 token upper bound (capped at 3,000 ms; the model call itself measured p99 93 ms, max 205 ms, 25-26 Oct); loading has 30 s, the first 3 requests after a load 10 s, checked every 100 ms. Training rows are written on their own thread, outside the deadline (the 26 Oct hangs were 6 s archive writes after 72 ms answers) | Replace only the owner and retry the same in-flight request with its original one-shot completion. From the third failure within 10 min the replacement pauses before it loads: 30 s, doubling to 5 min; meanwhile its requests fail at once (sentences stay pending, the agent is still woken by name). Never a relaunch: an agent answer in flight is never lost to the decider. At most 3 owner threads hold a model; past that a replacement waits for a stuck one to finish. Abandoned results cannot execute commands or send | `decisions`: orange "Commands paused · reloading"; while paused "Commands paused · decider not answering"; "Commands OK" at the replacement's first answer. A replacement that cannot start: red "Commands and replies are off" (click restarts Heimdall) | `decider_owner_failed` raw cause/attempt/`pause_s`, diagnostics problem/invariant, `decision_archive_failed`, `health` |
-| Decider inference fails | At the call sites | 3 in a row: reload at the next decision | Orange "Restarting decisions…"; "Commands OK" | `decision` / `command_decision` error; `decider_reloaded`; `health` |
-| Screen stream stops or errors; display change | Screen crate's own recovery events | Its retries; display changes reconfigure the stream; an ended stream owner restarts once per 10 min | Orange "Restarting screen capture…" → "Screen capture OK"; waiting for a display: "Screen capture paused"; second end: "Screen capture stopped" | `health` component `screen` raw SCK/SQLite/owner/pause/retry event; `video_gaps`; `screen_command` / `command_action` keeps retrieval cause; recovery clears pill and component status |
-| Permission revoked (Microphone, Screen Recording while Seeing, Accessibility) | Passive status read when the user switches apps; never a prompt | Capture keeps its consent; returns when granted | Red "Microphone permission is off · Click to open Settings" (opens the pane); "… permission back" | `health` permission-specific denied/back transition |
-| System Audio Recording revoked | Taps deliver exact silence for 10 s while a recorded app plays | As above | Red "System Audio permission is off", same click | `health` `permission:system` inferred denial/back transition |
-| Disk below the free-space floor | Disk check on every archive write | Recording pauses and resumes by itself | Red "Disk almost full · not recording" (click opens the archive); "Recording again". Any other archive stop: red "Archive database is damaged" (SQLite corruption) or "Archive stopped · not recording", both "Click to show it in Finder"; the error itself goes to the log and the journal | `health` component `archive` raw free bytes/floor cause and recovery |
-| Archive database locked or I/O error | Archive pipeline stops (capture stops with it: nothing is recorded unarchived) | Restart capture (reopens the archive) → restart listening → relaunch | Orange "Restarting recording…"; red "Recording keeps stopping" past the bound | `gap` raw archive-pipeline reason; `recovery` ladder/trigger; `health` |
-| Archive store damaged (SQLite "malformed" / "not a database") | Archive pipeline stops, or the launch fails opening the store | None: the archive is one store, so a restart or relaunch reopens the same file | Red "Archive database is damaged", "Click to show it in Finder" | `archive_stopped` and `health` raw cause if the store accepts writes; otherwise stderr only (damaged store cannot journal itself) |
-| Sleep and wake | Capture and screen stop at sleep, restart at wake | Watchdog clocks pause in sleep and re-baseline at wake | Nothing | `health` screen pause cause / recreated-display recovery; `video_gaps`; capture `gap` / source lifecycle |
-| Live loop freezes (the 13 Oct 11:16 hang: stuck inside one handler) | Its 2-s tick not handled for 60 s (180 s before the first) | Relaunch | Orange "Restarting Heimdall…", then "Heimdall OK" from the new process; red "Heimdall keeps freezing · Click to restart it" past the bound | `health` watchdog stall reason; `recovery` relaunch request/blocked cause; durable `recovery.json` attempt; `relaunched` |
-| UI thread freezes | A block posted to the main queue every 10 s not run for 60 s | Relaunch | Same | `health` watchdog UI-stall reason; `recovery` relaunch request/blocked cause; `relaunched` |
-| Live loop ends on an error | Its thread returns | Relaunch within the bound | Orange "Restarting Heimdall…"; red "Heimdall stopped" past it | `health` Heimdall failed with full returned error before Listen Failed/relaunch; `recovery`, `relaunched` |
-| Quit hangs | 8 s without teardown progress, 30 s at most | Process exits (no relaunch) | Nothing | `health` watchdog quit-stall reason before forced exit (best effort if archive is writable) |
-| Owned Pi/Node missing, corrupt or wrong version | Read-only pre-flight of the runtime sealed in the app (files, receipt, exact Node and Pi versions) | None in place: nothing is downloaded or repaired | Red "Agent runtime is missing from Heimdall" or "Agent runtime in Heimdall is damaged" · "Reinstall Heimdall" | `agent_preflight` full failure; `agent_start_failed`; `health` |
-| Pi crash/exit, broken pipe, malformed/oversized/truncated RPC, or active turn without progress | EOF/framer/write/inactivity deadline (180 s in a turn, 600 s in a tool, 15 min in a compaction); stderr is not progress | Stop/reap process group; same active session; three durable restart attempts per ten minutes with backoff; a restart that opens resets the failure count | Orange "Restarting the agent…"; red "The agent could not recover · Check free disk space, then reload it in Open Agent" only when the restart budget refuses; "Agent OK" | `agent_transport_*`, `agent_reply`, `agent_start_failed`; `health` agent-supervisor error and restart/stop status with raw cause |
-| A compaction dies with Pi (its silence limit, a crash, a stop wait cut at its limit) | Supervisor: Pi ended while `compaction_in_progress` | Counted once per process; Heimdall's own compactions held 10 min, then 20, from the third until Pi completes one (`bridge/compaction_hold.rs`). Before 27 Oct each restart re-summarised the same 230K-token history and was killed again, six times, each billed | The Pi restart's cues above | `agent_compaction` `killed` (kills, held_s, error); `agent_compaction_killed` diagnostic |
-| Wake failed or interrupted (provider error, Pi crash, reload, app restart) | Live: the delivery's ledger state (a tool started → `effects_possible`). After a restart: Pi's session file (receipts, and the `heimdall_effects` record written before each tool runs) | Resolves itself, never waits for a click: a successful receipt completes; any sign a tool started settles it as done without replay (exactly-once for tool effects); no sign of a tool resends it once with its speech marked as repeated, and a second failure hands its speech to the next wake. Wakes and typed text arriving meanwhile queue. The Agent-window review stays only for a delivery recovery could not decide | Restarting pill while Pi restarts; one notice if the turn will not answer ("Agent couldn't answer; your words go with the next request", "Agent stopped partway after an error") | `agent_delivery_resolved` (id, outcome, reason); durable delivery ledger and `agent_reply` receipts |
-| Same tool with identical normalized arguments and identical result, consecutively | Pi extension hooks count five completed identical call/result pairs; the sixth matching call is blocked before execution with a tool error; changing output or an intervening tool/command breaks the streak | First block explains how to escape; two more blocked attempts in the same user turn make the supervisor clear both queues and abort, preserving the Pi session. Counters reset on settlement/reload/Off. One `agent_loop_guard` journal record carries tool, SHA-256 arguments hash, repeat and blocked counts | One notice “Agent stopped a repeating loop” and one Agent-window line; possible prior tool effects stay in review | `agent_loop_guard` tool/hash/repeat/blocked counts; `agent_reply` loop-stop notice |
-| Agent Off during a turn or blocked stdin write | Shared stop generation/permit notification | Revoke at once, stop process group/tools; old queued notice epochs cannot revive after On; epoch saved in intent/settings. A running compaction or state write finishes first (`Stopping`, up to `COMPACTION_WAIT` 15 min of Pi silence / `WRITE_WAIT` 10 s); a model switch parked behind that compaction is kept for the next Agent on | Agent caption "Stopping after compaction…" or "Stopping after saving…", then Agent Off; uncertain performed effects remain in review | `agent_stop` / `agent_restart_wait` (waiting, stopped, cap, interrupted); `settings_applied` / stop-intent durable generation; `health` |
-| Reload during a turn / reload_me from a tool | Supervisor command | Wait for tool result and true settlement; restart on the active session; reread extensions/settings/MCP/prompt; timestamped note without extra inference | Open Agent shows pending reload and the reason | `agent_reload` reason/note; agent transport/session receipts |
-| Long session grows past 32 MiB | Settlement file-size check | Compact, stop Pi, durably archive entire original, atomically retain safe checkpoint/recent active branch; no historical tool-result edits | Compaction/reload in Open Agent; a disk/unsafe-checkpoint failure is visible | Archived complete Pi session in store logs; compaction receipt; `health` supervisor failure if maintenance fails |
-| Quit/watchdog relaunch while Pi exists | stdin closure, process-group cleanup, inherited OS session lock and parent guard | Clean stop or wait for orphan retirement; never two Pi processes on one session | Restart state, or honest failure after the restart budget | `health` watchdog/relaunch cause; `agent_process_ownership` cleanup capability; durable session owner |
-| Agent ledger/config/session write fails or disk is full | Durable write result | No fabricated success, dropped receipt or blind replay; keep prior pointer/session; stop/retry within budget | Red recovery/review pill; disk action points at free space | `health` supervisor raw durable-write failure and stopped/review status; prior ledger/session kept |
-| Agent runtime thread ended | Tick | Restart the runtime → after 3 in 10 min a problem | Orange "Restarting the agent…"; red "The agent keeps stopping" | `agent_runtime_ended` rung; `health` restart/result; raw restart failure via pipeline health |
-| Agent can't answer: spent quota or credit, rejected sign-in twice, 3 provider errors in 10 min, 5 min without an answer | `agent::emergency::Detector` in the supervisor | Emergency mode (`docs/emergency.md`): turns held as context, a T3 cover thread answers through `heimdall-emergency`, probes until the agent answers, then hands back | Notice "Agent out of quota till 03:04 · backup agent on it, nothing to do"; "Agent back" and "I'm back." | `agent_emergency`; `emergency:` lines |
-| Speech synthesis fails | Speech queue failure event | Next reply tries again | "Speech unavailable" (orange glyph); "Speech OK" | `tts_error` raw synthesis cause; `health` speech component/drop/recovery |
-| settings.json invalid | Settings watcher | Last good settings stay | "settings.json is invalid · using the last good one"; "Settings OK" | `health` settings parse/apply cause, invalid/back cue; settings-save failure/recovery |
-Pipeline and agent health cues use the existing `health` evidence kind. Component status records carry
-`component`, `state`, `reason` and the previous message. Screen-owner events preserve the raw SCK cause and
-retry information, including lock/asleep/no-display pauses; a recreated stream with at least one display clears
-both the component status and held health cue. A configuration acknowledgement alone cannot clear capture health.
-Failed T3 connections and unavailable confirmations also record their returned cause as `health`.
-Component status and agent health are de-duplicated, including changes to a cause behind an unchanged label;
-screen pause repeats are de-duplicated too. Normal ticks append nothing.
+1. Note the time the problem happened.
+2. The timeline reader is not in the app bundle; build it once from the source:
+   `CARGO_TARGET_DIR=target/archive cargo build --release -p heimdall-archive --bins`. It lands in
+   `target/archive/release/heimdall-archive`. Check: `heimdall-archive timeline --since 00:00 --problems` prints JSON
+   lines or nothing, and no error.
+3. Run `heimdall-archive timeline --since 10:28 --until 10:34 --problems` for errors, failed, stalled, restarting and
+   unavailable transitions, memory refusals, diagnostic drops and invariant violations.
+4. Run the same without `--problems` to see the recovery and clear transitions around them: an outage needs both.
+5. Narrow by kind: `heimdall-archive timeline --since 2026-10-16T10:28 --until 2026-10-16T10:34 --kinds
+   agent_wake,agent_send,agent_reply,agent_state,agent_transport_reply,invariant_violation`.
+6. Match the line to a symptom below.
 
-The archive is also the destination for these diagnostics. A corrupt/full/unwritable database, or its mutex held by
-a frozen thread, can prevent a diagnostic commit. This is reported to stderr; no success is fabricated and the
-watchdog does not wait for the frozen thread's session mutex. Its independent diagnostic commit gets at most
-250 ms before recovery/forced Quit continues; a late commit may complete while the process stays alive.
-Recovery attempts also have `recovery.json`.
-The independent rotating stdout/stderr sink below remains available when the archive cannot journal itself.
+Timeline rules (`crates/archive/src/event_timeline.rs`):
 
-## Screen health gotchas
+- Output is JSON Lines in local time order, with decoded payloads, evidence ids, session, source and utterance ids,
+  and host and wall timestamps.
+- `HH:MM[:SS]` is today in local time; `YYYY-MM-DDTHH:MM[:SS]` selects a date. `--since` is included, `--until`
+  excluded; no `--until` runs to now. `--archive ROOT` reads another archive (default `<data>/archive`).
+- `model_output` rows are left out unless named in `--kinds`; `--problems` examines them too.
+- Final `utterance` lines come from the transcript projection: their negative ids are projection row ids, not evidence
+  ids.
+- `video_gaps` and `chunk_embedding_errors` are projections, not evidence events.
+- A record that fails to decode prints its evidence and payload ids and the error; nothing is dropped silently.
+- The reader is read-only: every database handle opens `SQLITE_OPEN_READ_ONLY`, it creates no lock, WAL or SHM file,
+  it takes a shared lock on the existing `.compact.lock`, and a busy compactor gives an explicit retry error. A
+  WAL-format database without its WAL and SHM sidecars, or a historical pack without a lock file, is refused; copy a
+  consistent snapshot to an isolated folder and pass it with `--archive`.
 
-From an earlier inspection:
+## How Heimdall recovers by itself
 
-- A screen recovery clears its health cue only with a nonzero display count (`Pipeline::screen_event`); configuration
-  success alone never clears a capture error.
-- Every explicit video write transaction begins `IMMEDIATE`. A deferred transaction that read first and then wrote
-  failed at once with SQLITE_BUSY_SNAPSHOT (517) beside a concurrent audio commit, bypassing the 60-second busy
-  timeout: "Screen database is locked".
-- Video sample retrieval uses a read-only connection per pack; a failed screenshot keeps the archive/SQLite cause
-  instead of only "no screen frame".
-- Lock/asleep/no-display stops are explicit pause events; exhausted retries wait for an OS refresh, or for the
-  archive catching up (a drained backlog refreshes a stream that gave up, whether or not the island showed it).
-- The archive's "Catching up" island shows only a real fall-behind: the oldest unsaved note waiting 10 minutes, or
-  writes dropped. A backlog that drains within minutes (routine under load: 36 s behind, nine
-  islands in ten minutes) shows nothing (catching up is fine as long as it keeps up over the
-  span of a couple of hours).
-- An epoch's first row that finds the archive busy (`live::Busy`, its 2 s wait over) is no stream failure: the stream
-  stays, that display's frames are dropped without asking the archive again, and recording resumes once the writer
-  has reached the abandoned begin (at most a minute later it tries anyway). A 110 s archive stall once spent
-  all five restarts in 28 s and the screen stayed off after the archive caught up.
-
-## Agent query: what went wrong today
-
-Use `heimdall-archive timeline` instead of hand-written SQL/decompression. It emits JSON Lines in local time
-order, with decoded payloads, stable evidence ids, session/source/utterance ids, and host/wall timestamps.
-Final `utterance` lines come from the transcript projection and include their decoded decision; their negative
-ids are projection row ids, **not evidence ids**. Other lines retain the original positive evidence id.
-
-```sh
-heimdall-archive timeline --since 10:28 --until 10:34
-heimdall-archive timeline --since 10:28 --until 10:34 --problems
-heimdall-archive timeline --since 2026-10-16T10:28 --until 2026-10-16T10:34 --kinds agent_wake,agent_send,agent_reply,agent_state,agent_transport_reply,invariant_violation
+```mermaid
+flowchart TD
+    F["Part stalls or fails"] --> R1["Rung 1: restart the part"]
+    R1 -->|"fails again within 10 min"| R2["Rung 2: restart listening, models kept"]
+    R2 -->|"fails again within 10 min"| R3["Rung 3: relaunch Heimdall"]
+    R3 -->|"over 2 relaunches in 30 min"| P["Red pill: what to do"]
+    R1 --> OK["Green: part OK"]
+    R2 --> OK
+    R3 --> OK
 ```
 
-The default archive is `<data>/archive` in Heimdall's normal Application Support directory. `--archive ROOT`
-selects an isolated archive. `HH:MM[:SS]` means today in the Mac's local timezone; `YYYY-MM-DDTHH:MM[:SS]`
-selects a date. The interval includes `--since` and excludes `--until`; omitting `--until` includes later events.
-Low-level `model_output` rows are omitted by default; request `--kinds model_output` explicitly. `--problems`
-examines these too, and selects structured errors, failed/stalled/restarting/unavailable transitions, memory
-refusals, diagnostic drops and invariant violations. Recovery/clear/intentional-stop transitions remain in the
-full timeline and must be retained when reconstructing an outage. Decode failures print the affected evidence
-and payload ids and error, rather than silently dropping an event.
+- **Frozen, not quiet.** A freeze is work waiting with no progress: a microphone that is open but delivers no audio
+  (silence still delivers samples), a listen worker holding queued audio while finishing nothing, a live loop that stops
+  handling its 2-second tick, a UI thread that stops running a block posted every 10 s. Silence, Listening off, an idle
+  agent and a sleeping Mac never count: watchdog clocks pause in sleep and re-baseline at wake.
+- **A ladder, never a loop.** Each part's rungs count within 10 minutes (`health::Ladder`). Automatic relaunches: at most
+  `RELAUNCHES` (2) per `RELAUNCH_WINDOW_SECONDS` (30 min), counted across launches in `<data>/recovery.json`. An
+  unreadable history or a failed write of the count forbids automatic relaunch and shows the red pill.
+- **A relaunch keeps state.** The latest switch intent is written to `<data>/stop-intent.json` before exit; a failed or
+  stalled write blocks the relaunch with the red pill. At launch a persisted On never overrides settings Off. A relaunch
+  from a working loop goes through a normal Quit (drains audio and deliveries); one from a frozen loop exits after
+  1.5 s and loses only the uncommitted tail of the current archive commit. The relaunch runs through LaunchServices
+  (`open Heimdall.app`), so macOS attributes permissions as for a normal open: no permission prompt.
+- **Quit always ends.** Once teardown makes no progress for `QUIT_LIMIT` (8 s), and at most `QUIT_CAP` (30 s) after the
+  click, the process exits with `_exit`. Why: exit handlers would run ggml's Metal destructors, which abort while a
+  model is loaded. Quit first preempts archive compaction (`compact::preempt_all`). Each teardown step is named
+  (`Beats::quit_step`, `watchdog::progress_step`), so a forced quit logs where it waited
+  (`Watchdog: quit did not finish (in the agent's stop, no progress for 8.2 s)`) and saves every thread's stack to
+  `logs/hangs/hang-<time>-quit.txt`.
+- **Switches never wait for the archive.** Listening off waits at most 2 s for the last archive commit (Quit settles the
+  rest); Seeing on waits at most 2 s for its stream and a later tick adopts a slower one; Seeing off stops the stream on
+  its own thread. Screen starts and stops run in one ordered lane, and a start cancelled before its turn never starts.
 
-All persistent database handles (index **and packs**) are opened `SQLITE_OPEN_READ_ONLY`. Existing live WAL
-commits are included in a read transaction; temporary projection tables stay in memory. The reader never calls
-schema initialization, checkpointing, retention or the ordinary writer-backed pack helpers. It takes a shared
-lock on the **existing** `.compact.lock` to keep old blobs alive. A busy compactor yields an explicit retry error,
-and historical packs without an existing lock are refused. WAL-format databases lacking existing WAL/SHM
-sidecars are refused before SQLite opens them, rather than creating sidecars or ignoring committed WAL data.
-For a closed historical database without sidecars, prepare a consistent isolated snapshot first. No lock file,
-archive directory, WAL or SHM file is created by the reader. Live SQLite read-lock bookkeeping still uses the
-existing SHM; this is not an immutable filesystem read or a content snapshot across separately invoked commands.
+## What the island shows
 
-`video_gaps` and `chunk_embedding_errors` are projections, not evidence events. Screen, archive and embedding
-health transitions appear in this timeline; the current embedding retry table is not misrepresented as a history.
+| State | Look | Meaning |
+|---|---|---|
+| Restarting | Orange reload glyph and "Restarting …", static orange outline until it ends | a rung is running |
+| Back | Green check, "… OK", 1.7 s, then gone | the part recovered |
+| Needs you | Red pill, two lines (what is wrong, what to do), static red outline; menu-bar helmet red | a click runs the action and collapses it to a red glyph. Commands and raw errors go to the log, never the pill |
+| Part down, returns by itself | Orange, shown once for 2.6 s, then a small glyph at the notch until it returns | nothing to do |
+| Notice | Accent colour, 3.2 s | a microphone switch, a harness update |
 
-## Problem context and sparse behavioural checks
+- Health shows whether or not Heimdall listens. Listening off clears the listening parts' conditions; the agent's,
+  speech's and the screen's stay.
+- A heard command or its result takes the island for its moment, then the health pill returns. A health message that
+  arrives while something else holds the island waits its turn and then shows for its full time. A message stays at
+  least 1.2 s before one about something else replaces it; one about the same condition (a restart's OK) replaces it at
+  once.
+- At rest a restart outranks a problem, a problem outranks a pending command, and the small glyph comes last.
 
-The common evidence insertion boundary enriches structured problem records from both synchronous journals and
-the bounded evidence writer. `system_context` records the actual sample wall time, installed source commit,
-free/wired/compressed bytes, available-memory **estimate** (free + inactive + purgeable), swap used and its delta
-since the preceding problem sample, macOS memory pressure level, CPU load averages, thermal state, battery/AC
-source and battery percentage. It captures Heimdall's RSS and its voice
-sidecar's RSS without launching a command or querying any model. Inaccessible readings are null or
-absent, never zero masquerading as a measurement. No command arguments are stored. Packaged builds read their
-bundled `source-commit.txt`; a nonpackaged binary honestly reports `unbundled`.
+## Microphone and audio
 
-Runtime context contains the five effective switches, agent runtime/queue/status and voice readiness; switch
-snapshots carry their host timestamp and update on settings evidence and the existing two-second health tick.
-Context limits agent ids to sixteen short references and error/state copy to 512 bytes, with an explicit
-truncation flag; the original state evidence retains the full details. Thus a context sample is timed explicitly; it does not claim
-that every component snapshot was taken atomically. Bounded writer records sample when inserted by its worker,
-not by blocking the live loop on a system probe. Synchronous journal writes sample on their existing writer path.
+| Symptom | Cause | What Heimdall does | What you do |
+|---|---|---|---|
+| Notice "AirPods Pro → MacBook Pro Microphone" | The chosen mic was unplugged, Bluetooth dropped, or it was removed while recording (HAL device-list event, no polling) | Opens the built-in mic in the same pass; switches back when the chosen one has been present `MIC_BACK_SECONDS` (5 s) | Nothing |
+| Same notice, once, while the chosen mic is plugged in | The chosen mic delivers no callbacks for 3 s, or fails to start | Retries at 2, 4, 8, 16 s; the built-in mic records between retries; after 4 failures stays on built-in until a HAL event, a route change, a wake or a new choice in the menu | Re-plug the mic or pick it again in the menu |
+| "Shure MV7 disconnected", then an orange mic glyph | An extra mic switched on in the menu disconnected | Reopens it when it returns ("… back"); the primary is unaffected | Nothing |
+| Red "No microphone · Click to pick one in the menu" | No mic at all (built-in gone with the lid closed, chosen one absent) | Waits for a HAL event; "Microphone OK" when one appears | Click and pick a microphone |
+| Orange "Restarting the microphone…" | An open mic delivered nothing for `CAPTURE_STALL` (15 s); app taps are exempt (silent when their app is) | Restart capture, then listening, then relaunch; "Microphone OK" when audio flows | Nothing; if it repeats, check the mic and see the log's `capture_stalled` |
+| Red "Microphone permission is off · Click to open Settings" | Permission revoked (read passively when you switch apps; never a prompt) | Waits; "… permission back" when granted | Click, then grant Microphone in System Settings |
+| Red "System Audio permission is off" | App taps deliver exact silence for 10 s while a recorded app plays | Waits | Click, then grant System Audio Recording |
+| Nothing | The system default input changed | Ignored: Heimdall uses the chosen mic, else built-in | Nothing |
+| Nothing | Default output, sample rate or format changed | Sources restart with the new format in the same pass (tens of ms) | Nothing |
 
-Checks emit `invariant_violation` with the original evidence ids and input numbers:
+Logged as `source_removed`, `gap`, `microphone_cue`, `capture_stalled`, `recovery` and `health`. Capture details:
+[capture.md](capture.md).
 
-- Agent completion signals (`agent_end` and successful `heimdall_receipt`) without an exact completion after
-  **five seconds**. The signal ids merge into one condition and it reports once until settlement.
-- Agent queue depth above one, once on entry; recovery permits a subsequent violation to be reported.
-- Decider, command, voice-reply and voice failures, once per failure run; memory-refusal numbers stay in the
-  original record and in the linked violation.
-- Duplicate image ids in one wake, and repeated screenshot references for the same utterance.
-- Command execution without a matching final cue dispatch, or a successful cue dispatch without command
-  execution, after five seconds; final command records include the correlation id. Listening cues are excluded
-  from that pairing.
-- Pipeline health cue dispatch without the corresponding health evidence record.
+## Transcription stops
 
-Idle ticks append nothing. State is bounded, contended monitor locks are skipped rather than waited on, and
-ordinary diagnostic enqueues use the existing bounded nonblocking writer; rejected enqueues are counted by
-`diagnostic_drops`. These checks diagnose evidence; they do not change when a decider wakes or sends a turn.
-They are process-local checks, not a replacement for the agent's durable recovery ledger.
+| Symptom | Cause | What Heimdall does | What you do |
+|---|---|---|---|
+| Orange "Restarting transcription…", then "Transcription OK" | The listen worker ended (crash, panic, model error) | Restarts it, at most 3 per 10 minutes, then relaunches | Nothing |
+| Same | The worker hangs: queued audio and nothing finished for `WORKER_STALL` (30 s), or models not loaded in `WORKER_LOAD_STALL` (2 min) (`ListenWorker::progress`) | The hung worker is left behind (a model call cannot be interrupted), its output discarded, a new one started; same bound | Nothing |
+| Red "Transcription keeps stopping" | Past the relaunch bound | Stops trying | Quit and reopen Heimdall; read `listen_worker_ended` or `listen_worker_hung` in the timeline |
 
-**Dispatch is not visibility.** `command_cue` and `health_cue` explicitly say `stage: dispatched` and whether a UI
-was attached. Detecting an island cue replaced before its first rendered frame, or a health pill rendered without
-an event, requires the island renderer's own presented/replaced callbacks. This engineering branch does not
-change island drawing or assert that a dispatched cue was seen. The UI integration owner must add that evidence;
-until then those two renderer invariants remain unverified.
+A hung worker keeps its thread and models (about 2 GB) until the process ends; that is why hang restarts share the
+bound that leads to a relaunch.
 
-## What `heimdall.log` says
+## Commands do not run
 
-One plain line for every failure, fallback, retry, timeout and state change, each starting with its local time
-(`2026-10-19 18:48:32.390 voice: voice stopped: …`), so a problem can be found by time and read without the
-archive. Evidence records become lines at the archive's front door (`diagnostics_lines.rs`, on the caller's thread):
-a stuck or full archive still leaves its line. Covered: component health and its recovery (every `health` record:
-listening, decider, speakers, screen, speech and its GPU fallback, the voice, archive, settings, capture
-gaps), island health cues and notices, the voice's load, unload, memory refusals and exits (with the guard's reason),
-every rejected voice take (what was heard) and every switch to the lighter voice (notice, sentence, reason), the
-agent's state changes and problems, agent start/stop/reload/queue fallbacks, the decider's wakes and failures, barge-in
-outcomes, lighter-voice failures, failed invariants, relaunches, capture stalls and diagnostics, speaker-helper loads,
-T3 connection changes and failed tool calls (`tool: …`; the full call is in `tools.log`). A line that loops (a memory
-refusal every 30 s, a flapping part) is written once per 10 minutes with a count; distinct events never fold.
-Lines are bounded and masked: API keys, bearer tokens, `api_key=`/`token:`/`password` values and long base64/hex runs.
-The per-turn JSON stream (each final with its decider record and 8.6 KB prompt, every agent payload) goes to stdout
-only in replay and CLI runs; the installed app leaves it to the archive. On 19 Oct that stream filled the 8 MiB
-rotation in about 4 hours; the same day replayed through the new lines is 467 lines, 48 KB.
+| Symptom | Cause | What Heimdall does | What you do |
+|---|---|---|---|
+| Orange "Commands paused · reloading" | The decider failed to load | Retries after 10 s, doubling to 5 min; the agent starts regardless | Nothing |
+| Red "Commands and replies are off · Click to restart Heimdall" | 3 failed decider loads, or a replacement owner cannot start | Waits for the click | Click to relaunch |
+| Orange "Commands paused · reloading", then "Commands OK" | The decider owner thread panicked, exited or missed its deadline: 1 s plus one ms per token up to `decide::send::WINDOW` (at most 3 s); 30 s while loading, 10 s for the first 3 requests after a load; checked every 100 ms | Replaces only the owner and retries the same request. From the third failure in 10 min the replacement pauses 30 s, doubling to 5 min (`owner_pause`); meanwhile requests fail at once and the agent is still woken by name. Never a relaunch. At most `MAX_OWNERS` (3) owner threads hold a model | Nothing |
+| "Commands paused · decider not answering" | A replacement owner is paused | As above | Nothing |
+| Nothing visible | 3 decider inference errors in a row | The decider is dropped and reloads at the next decision (`decider_reloaded`) | Nothing |
 
-## Independent stdout/stderr capture
+Decider behaviour: [decision-chain.md](decision-chain.md).
 
-Normal application startup redirects stdout and stderr (including panic output and inherited helper output)
-to a pipe consumed by a dedicated sleeping reader. It puts the local time before every line (empty lines stay empty;
-a line split across reads gets it once) and persists each chunk to private `<data>/logs/heimdall.log`,
-rotating at **2 MiB** into `.1`, `.2`, `.3`: at most **8 MiB** across four files, including a continuous output
-burst. No archive lock, schema, model or network service is involved. The reader has no idle timer. Normal exit
-allows at most 250 ms for the final drain; force-exit/power loss can lose an unconsumed pipe tail. A helper that
-keeps stdout open cannot hold application exit. A logging write failure falls back to the original stderr and
-keeps draining, so a dead log reader cannot break application output; if the filesystem cannot accept writes,
-durability cannot be promised. Failure to initialize this sink is reported without stopping the application.
+## Screen capture and `look`
 
-The subprocess regression starts with stdout/stderr attached to `/dev/null` (the Finder case), exercises both
-journal paths, and verifies durable stdout, stderr, a panic, bounded rotation, problem context and linked invariant
-evidence. No Finder launch, installed bundle, real recording, GPU inference or user profile is exercised.
+| Symptom | Cause | What Heimdall does | What you do |
+|---|---|---|---|
+| Orange "Restarting screen capture…", then "Screen capture OK" | The stream stopped or errored, or the display changed | The screen crate retries; display changes reconfigure the stream; an ended stream owner restarts once per 10 min | Nothing |
+| "Screen capture paused" | The Mac is locked, displays asleep, or no display | Waits for a display | Nothing |
+| "Screen capture stopped" | The stream owner ended a second time within 10 min | Stops | Turn Seeing off and on |
+| The agent says `SEEING_OFF` or `CAPTURE_UNAVAILABLE: <reason>` | `look` found Seeing off, a missing permission, a locked Mac, or dark displays (`screen::capture_blocker`), or its one-shot grab failed | One retry after 250 ms; `look` does not use the recording stream, so a stalled stream never blocks it; it never returns success without an image | Turn Seeing on or grant Screen Recording; `tools.log` has the reason |
+| Red "Screen Recording permission is off · Click to open Settings" | Permission revoked while Seeing is on | Waits; "Screen Recording permission back" when granted | Click, then grant Screen Recording |
 
-## Agent pre-flight
+Gotchas for code changes:
 
-Agent On checks the runtime sealed inside the app on a helper thread (`preflight.rs`): files, the integrity receipt
-and the exact Node and Pi versions. Nothing is downloaded or repaired; a missing or damaged runtime says "Reinstall
-Heimdall". Each check has a deadline. There is no account login or cloud pre-flight. Off during the check wins.
+- A screen recovery clears its health cue only with a nonzero display count (`Pipeline::screen_event`); a configuration
+  success alone never clears a capture error.
+- Every explicit video write transaction begins `IMMEDIATE`. Why: a deferred transaction that read first and then wrote
+  failed at once with `SQLITE_BUSY_SNAPSHOT` beside a concurrent audio commit, bypassing the busy timeout.
+- An epoch's first row that finds the archive busy (`heimdall_archive::live::Busy`, its 2 s wait over) is not a stream
+  failure: that display's frames are dropped until the writer catches up, then recording resumes (at most a minute
+  later it tries anyway). A drained backlog also refreshes a stream that gave up.
 
-## Not covered, and why
+Screen details: [screen.md](screen.md).
 
-- **A hung listen worker's memory.** A model call cannot be interrupted, so the hung thread and its models (~2 GB)
-  stay until the process ends. That is why hang restarts share the 3-per-10-minutes bound that leads to a relaunch.
-- **A permanently stuck native decider call.** Its Rust owner can be abandoned but cannot be killed safely. A replacement retries the same request; if the process-wide native lock is still held, repeated deadlines reach the relaunch ladder and reclaim the native state at process exit. Quit never joins the hung owner.
-- **A capture owner stuck inside Core Audio.** The stall check restarts capture; if dropping the stuck capture blocks
-  the live loop too, the watchdog relaunches. Not exercised against a real stuck HAL call.
-- **Observation API errors** can remain in the Agent window instead of reaching the island; the supervisor's
-  `health` record and `agent_delivery` record retain the cause.
-- **Installed-app verification** belongs to integration: this branch exercises the actual Pi supervisor in an
-  isolated data directory and does not launch the installed app or touch its permissions.
-- **Device and permission faults are not exercised live.** The decisions (stall vs quiet, ladder, bounds, cues,
-  pre-flight, microphone switch, relaunch helper) are tested in code and through the real `Pipeline`; unplugging a
-  device, revoking a permission and a real freeze were not performed on the installed app.
-- **The resting indicator** (something always at the notch while Heimdall runs) is two offscreen proposals,
-  `island-resting-dot*.png` and `island-resting-helmet*.png`, not wired.
+## Recording and the archive
+
+| Symptom | Cause | What Heimdall does | What you do |
+|---|---|---|---|
+| Red "Disk almost full · not recording" | Free space is below `free_space_floor_bytes` (default 10 GiB, at least 1 GiB) | Pauses recording; "Recording again" when space returns | Free disk space; the click opens the archive |
+| Orange "Restarting recording…" | The archive database is locked or hit an I/O error; capture stops with it (nothing is recorded unarchived) | Restart capture (reopens the archive), then listening, then relaunch | Nothing |
+| Red "Recording keeps stopping" | Past that bound | Stops | Check the disk; read `gap` and `recovery` in the timeline |
+| Red "Archive database is damaged · Click to show it in Finder" | SQLite reports the store malformed or not a database | None: a restart reopens the same file | Move the damaged archive aside in Finder and reopen Heimdall, or restore a backup |
+| Red "Archive stopped · not recording" | Any other archive stop | Stops | Click to show it in Finder; the error is in `heimdall.log` |
+| "Catching up · N notes to save" | The oldest unsaved note has waited `SHOW_AFTER` (10 min), or writes were dropped | Keeps writing; a backlog that drains within minutes shows nothing | Nothing, unless it grows for hours |
+
+A damaged store cannot journal itself: its cause goes to stderr, which is in `heimdall.log`. Archive details:
+[archive.md](archive.md).
+
+## Heimdall freezes, restarts itself or will not quit
+
+| Symptom | Cause | What Heimdall does | What you do |
+|---|---|---|---|
+| Orange "Restarting Heimdall…", then "Heimdall OK" from the new process | The live loop did not handle its 2-s tick for `STALL` (60 s; `STARTUP_STALL`, 180 s, before the first), or the UI thread did not run its block (posted every `CHECK_EVERY`, 10 s) for 60 s | Relaunches | Nothing; `logs/hangs/` has the stacks |
+| Same, or red "Heimdall stopped" | The live loop returned an error | Relaunches within the bound | Read the full error in `heimdall.log` |
+| Red "Heimdall keeps freezing · Click to restart it" | More than 2 relaunches in 30 min, or `recovery.json` cannot be read or written | Stops relaunching | Click to restart; send `logs/hangs/` with a bug report |
+| Heimdall quits a few seconds late | Teardown made no progress for 8 s | Exits at once (at most 30 s after the click), no relaunch | Nothing; `heimdall.log` names the step it waited in |
+| The Mac is slow and swapping | macOS swap reached `SWAP_WARN` (2 GB; checked once a minute) | The agent gets one notice naming the swap, Heimdall's own total and the three largest processes, so it can hold heavy jobs it started; warns again only after swap fell under `SWAP_REARM` (1.5 GB), at most once an hour (`SWAP_EVERY`). With Agent off it is a `memory:` log line only | Close heavy apps |
+
+Any UI thread or live loop silent past `hang::HANG` (2 s) writes every thread's stack to `logs/hangs/` and a summary
+line to `heimdall.log`. For each 10-minute window in which the GPU averaged 25% or more, or Heimdall's processes used
+5% of GPU time, one `gpu:` line gives device utilisation, Heimdall's GPU time per part and the three busiest other
+processes (source: the IORegistry's per-client `accumulatedGPUTime`).
+
+## The agent does not answer
+
+| Symptom | Cause | What Heimdall does | What you do |
+|---|---|---|---|
+| Red "Agent runtime is missing from Heimdall" or "Agent runtime in Heimdall is damaged" · "Reinstall Heimdall" | Agent On's pre-flight (on a helper thread, `preflight.rs`) found the Node and Pi runtime sealed in the app missing, its integrity receipt wrong, or the wrong Node or Pi version | Nothing is downloaded or repaired | Reinstall Heimdall ([install.md](install.md)) |
+| Orange "Restarting the agent…", then "Agent OK" | Pi crashed or exited, a broken pipe, a malformed, oversized or truncated RPC frame, or an active turn without progress: 180 s in a turn, 600 s in a tool, `COMPACTION_WAIT` (15 min) in a compaction; stderr is not progress | Stops the process group, restarts on the same session; `supervision::MAX` (3) restarts per 10 min with backoff; a restart that opens resets the count | Nothing |
+| Red "The agent could not recover · Check free disk space, then reload it in Open Agent" | The restart budget is spent, or a durable ledger, config or session write failed | Keeps the prior session; no fabricated success or blind replay | Free disk space, then click the pill (or Debug Agent in the menu) to open the Debug Agent window and click Reload |
+| Orange "Restarting the agent…", red "The agent keeps stopping" | The agent runtime thread ended; 3 times in 10 min is a problem | Restarts the runtime | Quit and reopen Heimdall |
+| "Agent waiting for the engine" | The local engine is starting, restarting, has released its weights, is missing metadata, its queue is full, or the provider stream dropped | Keeps prompts in a durable spool, polls readiness every 10 s, sends when ready; no Pi restart is spent | Nothing; see the engine row below |
+| Notice "Agent out of quota till 03:04 · backup agent on it, nothing to do" | Spent quota or credit, a sign-in rejected twice, 3 provider errors in 10 min, or 5 min without an answer (`agent::emergency::Detector`) | Emergency mode: a T3 thread covers until the agent answers ([emergency.md](emergency.md)) | Nothing; pick on the recovery card if you want another account |
+| "Agent couldn't answer; your words go with the next request" or "Agent stopped partway after an error" | A wake failed or was interrupted (provider error, Pi crash, reload, app restart) | Resolves by itself from the delivery ledger and Pi's session (`heimdall_effects` is written before each tool runs): a receipt completes it; any sign a tool started settles it without replay; no sign resends it once marked as repeated, and a second failure hands its words to the next wake. The Agent window keeps a review only for a delivery recovery could not decide | Nothing; check the Agent window if it shows a review |
+| Notice "Agent stopped a repeating loop" | The same tool with identical normalised arguments returned an identical result 5 times in a row (`crates/agent/runtime/loop-guard.json`) | The sixth identical call is blocked with a tool error that explains how to escape; after 3 blocked attempts in one user turn the supervisor clears both queues and aborts, keeping the session. Counts reset on settlement, reload or Off | Nothing |
+| Agent caption "Stopping after compaction…" or "Stopping after saving…" | Agent Off arrived during a compaction or a state write | Finishes it first (up to `COMPACTION_WAIT` of Pi silence, or `WRITE_WAIT`, 10 s), then Off; a model switch parked behind the compaction is kept for the next Agent On | Wait |
+
+More agent facts:
+
+- A compaction that dies with Pi is counted once per process; Heimdall's own compactions are then held 10 min, then
+  20, from the third, until Pi completes one (`crates/app/src/bridge/compaction_hold.rs`).
+- A session file past `session::ROTATE_BYTES` (32 MiB) at settlement is compacted: Pi stops, the whole original is
+  archived, and a safe checkpoint and the recent branch are kept; a failure is visible.
+- A reload during a turn waits for the tool result and settlement, restarts on the same session and rereads
+  extensions, settings, MCP servers and the prompt.
+- Quit or a relaunch never leaves two Pi processes on one session: stdin closes, the process group is cleaned up, and
+  an inherited session lock and parent guard retire an orphan ([crates/agent/README.md](../crates/agent/README.md)).
+- There is no account login or cloud pre-flight; Agent Off during the pre-flight wins.
+
+## Permissions, speech, settings and the engine
+
+| Symptom | Cause | What Heimdall does | What you do |
+|---|---|---|---|
+| Red "Accessibility permission is off · Click to open Settings" | Accessibility was turned off in System Settings | Waits; "Accessibility permission back" when granted | Click, then grant Accessibility |
+| "Speech unavailable" (orange glyph), then "Speech OK" | Speech synthesis failed | The next reply tries again | Nothing |
+| "settings.json is invalid · using the last good one" | The settings file does not parse or apply | Keeps the last good settings; "Settings OK" when fixed | Fix the file ([settings.md](settings.md)) |
+| Orange "Restarting inference engine…", then "Inference engine OK" | The local engine exited or stayed unready (2 s startup probe, 30 s ready probe, two failed ready probes) | One automatic restart per explicit enable or retry | Nothing |
+| Red "Inference engine unavailable · Click Engine to retry" | The restart failed | Holds until a click on Engine; an unusable `engine.json` override is set aside for the bundled default and noted in the log | Click Engine ([inference-engine.md](inference-engine.md)) |
+
+## What the log and the journal record
+
+- **`heimdall.log`.** Evidence records become lines at the archive's front door (`diagnostics_lines.rs`, on the
+  caller's thread), so a stuck or full archive still leaves its line. Every record kind gets one line unless it is in
+  `diagnostics_lines::QUIET` (per-frame streams, and records whose payload is message text: transcripts, the agent's
+  wire traffic and context). Covered: component health and recovery, island cues and notices, agent state changes,
+  deliveries and acknowledgements, the decider's wakes and failures, barge-in outcomes, relaunches, capture stalls,
+  T3 connection changes, failed tool calls (`tool: …`; the full call is in `tools.log`), every changed setting by name
+  (values only for short non-credential scalars) and every action with its source
+  (`action: menu|agent tool: SetListening(false)`).
+- **Repeats.** A line that loops (a refusal every 30 s, a flapping part) is written once per 10 minutes with a count
+  (`REPEAT_WINDOW`); identical consecutive lines within 30 s collapse into one count line in the file. Distinct events
+  never fold.
+- **Masking.** Lines are bounded (`LINE_LIMIT`, 700 bytes) and mask API keys, bearer tokens, `api_key=`, `token:` and
+  `password` values and long base64 or hex runs.
+- **stdout and stderr.** At start, stdout and stderr (with panics and inherited helper output) go to a pipe read by a
+  dedicated thread that timestamps each line and writes `heimdall.log`. No archive, model or network is involved. A
+  normal exit allows 250 ms for the final drain; a forced exit or power loss can lose the unread tail. A write failure
+  falls back to the original stderr. The per-turn JSON stream goes to stdout only in replay and CLI runs.
+- **Health records.** Pipeline and agent health use the `health` evidence kind; component status records carry
+  `component`, `state`, `reason` and the previous message. They are de-duplicated, including a changed cause behind an
+  unchanged label; normal ticks append nothing.
+- **Problem context.** Each structured problem record gets a `system_context`: sample time, installed source commit
+  (`source-commit.txt`, or `unbundled`), free, wired and compressed memory, an available-memory estimate, swap and its
+  change since the last problem, memory pressure, load averages, thermal state, power source and battery, the RSS of
+  Heimdall and its helpers, and the five switches with agent state. An unreadable reading is null, never zero.
+- **Invariant checks** emit `invariant_violation` with the original evidence ids: agent completion signals without a
+  completion after 5 s; agent queue depth above one; decider, command and voice-reply failures, once per run;
+  duplicate image ids in one wake; a command without its final cue (or a cue without its command) after 5 s; a health
+  cue without its health record. They diagnose; they never change behaviour. Rejected diagnostic writes are counted by
+  `diagnostic_drops`.
+- **When the archive cannot write.** A corrupt, full or unwritable database, or its mutex held by a frozen thread, can
+  block a diagnostic commit: the cause goes to stderr (so to `heimdall.log`), no success is faked, and recovery waits at
+  most 250 ms for it.
+
+## Not covered
+
+- A permanently stuck native decider call: its owner can be abandoned but not killed. Replacements retry the request;
+  if the native lock stays held, repeated deadlines reach the relaunch ladder. Quit never joins the hung owner.
+- A capture owner stuck inside Core Audio: the stall check restarts capture, and if dropping it blocks the live loop
+  too, the watchdog relaunches. Not exercised against a real stuck HAL call.
+- Agent observation API errors can stay in the Agent window instead of reaching the island; the `health` and
+  `agent_delivery` records keep the cause.
+- Dispatch is not visibility: `command_cue` and `health_cue` record `stage: dispatched` and whether a UI was attached,
+  not that a cue was seen. Proving that needs presented and replaced callbacks from the island renderer, which do not
+  exist yet.
+- Unplugging devices, revoking permissions and real freezes are tested in code and through the real `Pipeline`, not on
+  an installed app.
+
+## Test it
+
+No model inference, no installed app: `cargo test -p app watchdog`, `cargo test -p app resilience`,
+`cargo test -p app hang`, `cargo test -p app resource_watch`, `cargo test -p app diagnostics`. The stdout and stderr
+subprocess test starts with both attached to `/dev/null` (the Finder case) and checks durable output, a panic, bounded
+rotation, problem context and linked invariant evidence.
+
+## See also
+
+- [emergency.md](emergency.md): when the agent's provider fails and a T3 thread covers
+- [capture.md](capture.md): microphones, app audio and routes
+- [screen.md](screen.md): screen recording and `look`
+- [archive.md](archive.md): the archive store
+- [decision-chain.md](decision-chain.md): the decider
+- [inference-engine.md](inference-engine.md): the local engine
+- [settings.md](settings.md): every setting, including `free_space_floor_bytes`
+- [home.md](home.md): where `<data>` is

@@ -60,6 +60,33 @@ pub trait Diarization {
     fn finish(&mut self) -> Result<()>;
     fn segments(&self) -> Result<Vec<SpeakerSegment>>;
 }
+impl<T: Diarization + ?Sized> Diarization for Box<T> {
+    fn take_finalized_segments(&self) -> Result<Vec<crate::diar::SpeakerSegment>> { (**self).take_finalized_segments() }
+    fn frame_probabilities(&self,since:i64) -> Result<Option<crate::diar::FrameProbabilities>> { (**self).frame_probabilities(since) }
+    fn output_revision(&self) -> i64 { (**self).output_revision() }
+    fn stable_frames(&self) -> i64 { (**self).stable_frames() }
+    fn sample_rate(&self) -> u32 {
+        (**self).sample_rate()
+    }
+    fn speakers(&self) -> usize {
+        (**self).speakers()
+    }
+    fn seconds_per_frame(&self) -> f64 {
+        (**self).seconds_per_frame()
+    }
+    fn frame_count(&self) -> i64 {
+        (**self).frame_count()
+    }
+    fn push_f32(&mut self, a: &[f32]) -> Result<()> {
+        (**self).push_f32(a)
+    }
+    fn finish(&mut self) -> Result<()> {
+        (**self).finish()
+    }
+    fn segments(&self) -> Result<Vec<crate::diar::SpeakerSegment>> {
+        (**self).segments()
+    }
+}
 impl Diarization for DiarStream {
     fn take_finalized_segments(&self) -> Result<Vec<SpeakerSegment>> { self.take_finalized_segments() }
     fn frame_probabilities(&self,since:i64) -> Result<Option<crate::diar::FrameProbabilities>> { Ok(Some(self.probabilities_since(since)?)) }
@@ -101,6 +128,9 @@ pub struct SpeakerPipeline<E: VoiceEncoder, S: Diarization = DiarStream> {
     audio_start: usize,
     total: usize,
     last_frame: i64,
+    /// The segments `process` last read, with the output revision and frame count they belong to: the host's snapshot
+    /// right after a model output reuses them instead of asking the helper again.
+    segments_seen: Option<(i64, i64, Vec<SpeakerSegment>)>,
     last_model_revision: i64,
     stable_probability_frame: i64,
     last_probabilities: Option<crate::diar::FrameProbabilities>,
@@ -138,6 +168,7 @@ impl<E: VoiceEncoder, S: Diarization> SpeakerPipeline<E, S> {
             total: 0,
             last_frame: -1,
             last_model_revision: -1,
+            segments_seen: None,
             stable_probability_frame: 0,
             last_probabilities: None,
             probability_revision: 0,
@@ -150,10 +181,9 @@ impl<E: VoiceEncoder, S: Diarization> SpeakerPipeline<E, S> {
         })
     }
     pub fn set_evidence_hook(&mut self, hook:Box<dyn FnMut(serde_json::Value)->Result<()>+Send>) {self.evidence=Some(hook);}
-    pub fn observe_transcript(&mut self, speaker: i32, end: f64, text: &str) -> Vec<SpeakerEvent> {
-        self.quotes.insert(speaker, text.into());
-        self.naming
-            .observe_transcript(self.track(speaker), end, text)
+    /// The track's latest final transcript line, kept as the quote saved with its clean voice samples.
+    pub fn set_quote(&mut self, speaker: i32, text: String) {
+        self.quotes.insert(speaker, text);
     }
     fn track(&self, speaker: i32) -> TrackId {
         TrackId {
@@ -180,6 +210,7 @@ impl<E: VoiceEncoder, S: Diarization> SpeakerPipeline<E, S> {
         Ok(events)
     }
     pub fn finish(&mut self) -> Result<Vec<SpeakerEvent>> {
+        self.segments_seen = None;
         self.stream.finish()?;
         self.process()
     }
@@ -191,6 +222,11 @@ impl<E: VoiceEncoder, S: Diarization> SpeakerPipeline<E, S> {
         &self.stream
     }
     pub fn segments(&self) -> Result<Vec<SpeakerSegment>> {
+        if let Some((revision, frames, segments)) = &self.segments_seen {
+            if *revision == self.stream.output_revision() && *frames == self.stream.frame_count() {
+                return Ok(segments.clone());
+            }
+        }
         self.stream.segments()
     }
     fn process(&mut self) -> Result<Vec<SpeakerEvent>> {
@@ -227,6 +263,7 @@ impl<E: VoiceEncoder, S: Diarization> SpeakerPipeline<E, S> {
             }
         }
         let segments = self.stream.segments()?;
+        self.segments_seen = Some((revision, frame, segments.clone()));
         // Native labelled frames lag capture while awaiting context. Never enrol its unlabelled tail.
         let now = (frame as f64 * self.stream.seconds_per_frame())
             .min(self.total as f64 / SAMPLE_RATE as f64);
@@ -319,6 +356,40 @@ mod tests {
             assert_eq!(r["output"]["changed_frames"][0]["frame"],1);
         }
         assert_eq!(records[2]["output"]["previous_revision"],2);
+    }
+    /// CAP-8 (cleanup 14 Nov): the host's snapshot after a model output asked the helper for the segments `process`
+    /// had just read, a second JSON round trip per output.
+    #[test]
+    fn a_snapshot_after_a_model_output_reuses_its_segments() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        struct Stream { revision: i64, frames: i64, asked: Rc<Cell<u32>> }
+        impl Diarization for Stream {
+            fn sample_rate(&self)->u32{16000} fn speakers(&self)->usize{2}
+            fn seconds_per_frame(&self)->f64{0.08} fn frame_count(&self)->i64{self.frames}
+            fn output_revision(&self)->i64{self.revision}
+            fn push_f32(&mut self,_:&[f32])->Result<()>{self.revision+=1;self.frames+=1;Ok(())}
+            fn finish(&mut self)->Result<()>{Ok(())}
+            fn segments(&self)->Result<Vec<SpeakerSegment>>{
+                self.asked.set(self.asked.get()+1);
+                Ok(vec![SpeakerSegment{start_time:0.,end_time:self.frames as f64*0.08,speaker:1}])
+            }
+        }
+        struct Encoder;
+        impl VoiceEncoder for Encoder {fn embed(&mut self,_:&[f32])->Result<crate::embedding::Embedding>{panic!("no clean speech")}}
+        let asked=Rc::new(Cell::new(0));
+        let mut pipeline=SpeakerPipeline::new(Stream{revision:0,frames:0,asked:asked.clone()},Encoder,NamingFlow::new(Default::default()),"discord".into(),1,0.).unwrap();
+        pipeline.push(&[0.;320]).unwrap();
+        assert_eq!(asked.get(),1);
+        assert_eq!(pipeline.segments().unwrap()[0].end_time,0.08);
+        assert_eq!(asked.get(),1,"the snapshot reuses what process read");
+        pipeline.push(&[0.;320]).unwrap();
+        assert_eq!(pipeline.segments().unwrap()[0].end_time,0.16,"a new output's segments, not the old ones");
+        assert_eq!(asked.get(),2);
+        // Finishing can close the tail without a new revision: the helper is asked again.
+        pipeline.finish().unwrap();
+        pipeline.segments().unwrap();
+        assert_eq!(asked.get(),3);
     }
     #[test]
     fn overlap_never_enrolls_mixed_speech() {

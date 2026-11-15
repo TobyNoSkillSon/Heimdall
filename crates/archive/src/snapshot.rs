@@ -7,6 +7,13 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, params};
 use std::{cell::Cell, collections::HashMap, path::{Path, PathBuf}};
 
+/// Capture-span lookups start from the session's own segments (`CROSS JOIN` fixes SQLite's join order). The index
+/// has no `ANALYZE` statistics, and SQLite planned the plain join from `cold_chunks` by kind: every query walked all
+/// 150,384 cold block chunks of the archive (8 Nov, 02:17, measured with `sample` on the installed app: about a
+/// quarter of a core while the embedding index ran, for a live session that has none).
+pub(crate) const SPAN_BACKFILL_PENDING: &str = "SELECT EXISTS(SELECT 1 FROM main.segments s CROSS JOIN main.cold_chunks c WHERE s.session=?1 AND c.kind='blocks' AND c.scope=s.id AND NOT EXISTS(SELECT 1 FROM main.cold_capture_indexed i WHERE i.chunk_id=c.id))";
+pub(crate) const SPAN_CHUNKS: &str = "SELECT DISTINCT c.id FROM main.segments s CROSS JOIN main.cold_chunks c CROSS JOIN main.cold_capture_spans r WHERE s.session=?1 AND c.kind='blocks' AND c.scope=s.id AND r.chunk_id=c.id AND r.source=?2 AND r.start_ns<?4 AND r.end_ns>?3 ORDER BY c.id";
+
 pub struct View {
     pub db: Connection,
     root: PathBuf,
@@ -164,8 +171,8 @@ impl View {
         self.db.execute_batch("CREATE TEMP TABLE blocks(id INTEGER PRIMARY KEY,segment INTEGER,source_id TEXT,host_ns INTEGER,rate INTEGER,channels INTEGER,frames INTEGER,codec TEXT,discontinuity INTEGER,object_id TEXT,offset_frames INTEGER,gain REAL,wall_ns INTEGER);
             CREATE INDEX temp.view_block_timeline ON blocks(source_id,host_ns);")?;
         self.db.execute("INSERT INTO temp.blocks SELECT b.* FROM main.blocks b JOIN main.segments s ON s.id=b.segment WHERE s.session=?1 AND b.source_id=?2 AND b.host_ns<?4 AND b.host_ns+b.frames*1000000000/b.rate>?3",params![self.session,source,start as i64,end as i64])?;
-        anyhow::ensure!(!self.db.query_row("SELECT EXISTS(SELECT 1 FROM main.cold_chunks c JOIN main.segments s ON s.id=c.scope WHERE c.kind='blocks' AND s.session=?1 AND NOT EXISTS(SELECT 1 FROM main.cold_capture_indexed i WHERE i.chunk_id=c.id))",[self.session],|r|r.get::<_,bool>(0))?,"capture span catalogue backfill pending");
-        let ids:Vec<i64>=self.db.prepare("SELECT DISTINCT c.id FROM main.cold_chunks c JOIN main.segments s ON s.id=c.scope JOIN main.cold_capture_spans r ON r.chunk_id=c.id WHERE c.kind='blocks' AND s.session=?1 AND r.source=?2 AND r.start_ns<?4 AND r.end_ns>?3 ORDER BY c.id")?.query_map(params![self.session,source,start as i64,end as i64],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        anyhow::ensure!(!self.db.query_row(SPAN_BACKFILL_PENDING,[self.session],|r|r.get::<_,bool>(0))?,"capture span catalogue backfill pending");
+        let ids:Vec<i64>=self.db.prepare(SPAN_CHUNKS)?.query_map(params![self.session,source,start as i64,end as i64],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?;
         for id in ids {
             anyhow::ensure!(more(),"capture span cancelled");
             chunks::insert_rows(&self.db,&chunks::load(&self.db,&self.root,id)?,"blocks","temp.blocks")?;
@@ -271,5 +278,28 @@ impl View {
         let total: i64 = self.db.query_row("SELECT count(*) FROM temp.evidence WHERE id>?1 AND (?2='' OR instr(?2,','||kind||',')>0)", params![after,kinds], |r| r.get(0))?;
         anyhow::ensure!(n as i64 == total, "{} evidence rows have no payload body", total - n as i64);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Both capture-span lookups walk the session's segments, never every cold chunk of a kind (8 Nov: the embedding
+    /// index spent about a quarter of a core scanning 150k chunks per span).
+    #[test]
+    fn capture_span_lookups_start_from_the_sessions_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::store::open(dir.path()).unwrap();
+        let plan = |sql: &str, params: &[&dyn rusqlite::ToSql]| -> Vec<String> {
+            db.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap()
+                .query_map(params, |r| r.get::<_, String>(3)).unwrap()
+                .collect::<rusqlite::Result<_>>().unwrap()
+        };
+        for plan in [plan(super::SPAN_BACKFILL_PENDING, &[&1]), plan(super::SPAN_CHUNKS, &[&1, &"mic", &0, &1])] {
+            // `SELECT EXISTS(...)` has no FROM: its constant row is no table scan.
+            let steps: Vec<&String> = plan.iter().filter(|l| l.starts_with("SEARCH") || l.starts_with("SCAN") && !l.contains("CONSTANT ROW")).collect();
+            assert!(steps[0].starts_with("SEARCH s USING COVERING INDEX segment_session"), "{plan:?}");
+            assert!(plan.iter().any(|l| l.contains("chunk_scope (kind=? AND scope=?)")), "{plan:?}");
+            assert!(!steps.iter().any(|l| l.starts_with("SCAN")), "{plan:?}");
+        }
     }
 }

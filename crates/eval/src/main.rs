@@ -1,10 +1,10 @@
-mod decisions;
 mod screen_bench_run;
 use anyhow::{bail, Context, Result};
 use heimdall_eval::{
     load_manifest, pauses, read_recording, word_edits, Confusion, Pause, Recording,
 };
-use listen::{AudioChunk, ListenEngine, ListenEvent};
+use listen::{AudioChunk, ListenEngine, ListenEvent, Word};
+use screen::{PhraseMatcher, TimedWord};
 use serde_json::{json, Value};
 use std::{
     fs::{self, File},
@@ -18,9 +18,6 @@ fn main() -> Result<()> {
     let mut models = root.join("models");
     let mut out = root.join("lab/eval/data/replay-300");
     let (mut labels_only, mut realtime, mut allow_full) = (false, false, false);
-    let mut collect = false;
-    let mut chunk_size = 0usize;
-    let mut live_cost = false;
     let mut args = std::env::args().skip(1);
     if std::env::args().nth(1).as_deref() == Some("screen-phrase-bench") {
         return screen_bench_run::run(&root, args.skip(1));
@@ -33,12 +30,6 @@ fn main() -> Result<()> {
             "--labels-only" => labels_only = true,
             "--realtime" => realtime = true,
             "--allow-full-corpus" => allow_full = true,
-            "--collect" => collect = true,
-            "--live-cost" => {
-                live_cost = true;
-                realtime = true;
-            }
-            "--chunk-size" => chunk_size = args.next().context("Missing chunk size")?.parse()?,
             _ => bail!("Unknown argument: {a}"),
         }
     }
@@ -90,23 +81,8 @@ fn main() -> Result<()> {
     {
         let mut vad = listen::onnx::Silero::load(&models.join("silero/silero_vad.onnx"))?;
         let asr = listen::asr::Parakeet::load(&models.join("parakeet-ultra"))?;
-        let mut engine = if collect {
-            ListenEngine::new(
-                asr,
-                listen::onnx::Silero::load(&models.join("silero/silero_vad.onnx"))?,
-                listen::onnx::SmartTurn::load(&models.join("smart-turn/smart-turn-v3.2-cpu.onnx"))?,
-                listen::ListenConfig::default(),
-            )?
-        } else {
-            ListenEngine::load(&models, asr)?
-        };
-        let mut decider = if collect {
-            decisions::Decisions::load_collection(&models, &out.join("decision-archive"))?
-        } else {
-            decisions::Decisions::load(&models, &out.join("decision-archive"))
-        };
-        eprintln!("decision_runtime={}", decider.status);
-        let idle_before = if live_cost { Some(idle_cost()) } else { None };
+        let mut engine = ListenEngine::load(&models, asr)?;
+        let mut screen = ScreenPhrases::default();
         let mut results = BufWriter::new(File::create(out.join("recordings.jsonl"))?);
         let mut dry = BufWriter::new(File::create(out.join("dry-run.jsonl"))?);
         let (
@@ -120,12 +96,10 @@ fn main() -> Result<()> {
         let mut wer_excluded_no_reference = 0;
         let (mut successful, mut failures, mut missing_endpoint) = (0, 0, 0);
         let (mut audio_seconds, mut compute_seconds) = (0.0, 0.0);
-        let mut send = Confusion::default();
-        let mut dispatch_send = Confusion::default();
         let mut screenshot = Confusion::default();
         for (index, row) in rows.iter().enumerate() {
             let r: Recording = serde_json::from_value(row.clone())?;
-            decider.reset(&r.id);
+            screen.reset(&r.id);
             let run = (|| -> Result<Value> {
                 let audio = read_recording(&r)?;
                 let p: Vec<Pause> = if row["labels"]["vad_model"].is_string() {
@@ -142,7 +116,6 @@ fn main() -> Result<()> {
                 let mut last_voice_end_ms = 0.0;
                 engine.set_source_policy(&r.id, listen::PartialPolicy::Responsive)?;
                 let mut finals = Vec::new();
-                let mut decision_seconds = 0.0;
                 let mut last_screen_index = 0;
                 let padded_len = audio.len() + 48000;
                 let mut cursor = 0;
@@ -181,7 +154,7 @@ fn main() -> Result<()> {
                             segment_prefix.push_str(text);
                         }
                         if let ListenEvent::PartialTranscript { words, .. } = &event {
-                            decider.observe(&r.id, words)?;
+                            screen.observe(&r.id, words)?;
                         }
                         if let ListenEvent::FinalUtterance {
                             text,
@@ -199,29 +172,15 @@ fn main() -> Result<()> {
                                 format!("{} {}", std::mem::take(&mut segment_prefix), text)
                             };
                             hypothesis.push(text.clone());
-                            decider.observe(&r.id, &words)?;
+                            screen.observe(&r.id, &words)?;
                             finals.push(json!({"text":text,"words":words,"start_ns":start_ns,"end_ns":end_ns,
                                 "observed_ms":end as f64/16.0,"probability":end_of_turn_probability,"forced":forced,"eof":false}));
                             let last = finals.len() - 1;
                             finals[last]["silence_ms"] =
                                 json!(continuous_silence_ms(end as u64 * 62500, quiet_start,));
-                            let decision = decider.evaluate(&r.id, last, &finals[last], &audio);
-                            decision_seconds +=
-                                decision["elapsed_ms"].as_f64().unwrap_or(0.0) / 1000.0;
-                            finals[last]["decision"] = decision;
                             finals[last]["fixed_screen_phrases"] =
-                                json!(&decider.phrases[last_screen_index..]);
-                            last_screen_index = decider.phrases.len();
-                        }
-                    }
-                    if let Some(quiet) = quiet_start {
-                        let silence = (end as u64 * 62500).saturating_sub(quiet) / 1000000;
-                        if let Some(decision) = decider.quiet_send(silence) {
-                            let text = decision["pending_transcript"]
-                                .as_str()
-                                .unwrap_or("")
-                                .to_owned();
-                            finals.push(json!({"event":"send_recheck","text":text,"words":[],"start_ns":quiet,"end_ns":quiet,"observed_ms":end as f64/16.0,"silence_ms":silence,"probability":null,"forced":false,"eof":false,"decision":decision,"fixed_screen_phrases":[]}));
+                                json!(&screen.phrases[last_screen_index..]);
+                            last_screen_index = screen.phrases.len();
                         }
                     }
                     cursor = end;
@@ -250,12 +209,9 @@ fn main() -> Result<()> {
                             padded_len as u64 * 62500,
                             quiet_start
                         ));
-                        let decision = decider.evaluate(&r.id, last, &finals[last], &audio);
-                        decision_seconds += decision["elapsed_ms"].as_f64().unwrap_or(0.0) / 1000.0;
-                        finals[last]["decision"] = decision;
                         finals[last]["fixed_screen_phrases"] =
-                            json!(&decider.phrases[last_screen_index..]);
-                        last_screen_index = decider.phrases.len();
+                            json!(&screen.phrases[last_screen_index..]);
+                        last_screen_index = screen.phrases.len();
                     }
                 }
                 let elapsed = start.elapsed().as_secs_f64();
@@ -265,14 +221,12 @@ fn main() -> Result<()> {
                     .iter()
                     .filter(|f| {
                         let at = f["observed_ms"].as_f64().unwrap();
-                        f["event"] != "send_recheck"
-                            && p.iter().any(|p| at >= p.start_ms && at <= p.end_ms + 32.0)
+                        p.iter().any(|p| at >= p.start_ms && at <= p.end_ms + 32.0)
                     })
                     .count();
                 let delay = finals
                     .iter()
-                    .rev()
-                    .find(|f| f["event"] != "send_recheck")
+                    .next_back()
                     .filter(|f| {
                         f["eof"] == false
                             && !p.iter().any(|p| {
@@ -298,67 +252,25 @@ fn main() -> Result<()> {
                 audio_seconds += r.duration;
                 compute_seconds += elapsed;
                 successful += 1;
-                // Score send events at internal pauses as false; terminal label exists only for matched sends.
-                let mut any_screenshot = !decider.phrases.is_empty();
-                let mut decision_failed = false;
+                let any_screenshot = !screen.phrases.is_empty();
                 for f in &finals {
-                    let at = f["observed_ms"].as_f64().unwrap();
-                    let internal = p.iter().any(|p| at >= p.start_ms && at <= p.end_ms + 32.0);
-                    let label = if internal {
-                        Some(false)
-                    } else {
-                        r.labels["send_now"].as_bool()
-                    };
-                    send.add(label, f["decision"]["send_now_ungated"].as_bool());
-                    dispatch_send.add(label, f["decision"]["send_now"].as_bool());
-                    any_screenshot |= f["decision"]["screenshot"].as_bool() == Some(true);
-                    decision_failed |= f["decision"]["status"] == "decision_error";
+                    let phrase = f["fixed_screen_phrases"].as_array().is_some_and(|p| !p.is_empty());
                     writeln!(
                         dry,
                         "{}",
                         json!({"mode":"DRY-RUN","recording":r.id,"observed_ms":f["observed_ms"],
-                        "would_append":if f["event"]=="send_recheck"{Value::Null}else if f["fixed_screen_phrases"].as_array().is_some_and(|p|!p.is_empty()){
+                        "would_append":if phrase {
                             json!(format!("{} [DRY-RUN: would capture screen; historical screen frames unavailable]",f["text"].as_str().unwrap_or("")))
-                        }else{f["text"].clone()},"would_send_now":f["decision"]["send_now"],
-                        "would_attach_screenshot":if f["fixed_screen_phrases"].as_array().is_some_and(|p|!p.is_empty()){json!(true)}else{f["decision"]["screenshot"].clone()},"decision":f["decision"],"fixed_screen_phrases":f["fixed_screen_phrases"],"cloud_calls":0})
+                        }else{f["text"].clone()},
+                        "would_attach_screenshot":phrase,"fixed_screen_phrases":f["fixed_screen_phrases"],"cloud_calls":0})
                     )?;
                 }
-                if !finals.iter().any(|f| {
-                    let at = f["observed_ms"].as_f64().unwrap();
-                    !p.iter().any(|p| at >= p.start_ms && at <= p.end_ms + 32.0)
-                }) {
-                    dispatch_send.add(
-                        r.labels["send_now"].as_bool(),
-                        if decider.available() {
-                            Some(false)
-                        } else {
-                            None
-                        },
-                    );
-                    send.add(
-                        r.labels["send_now"].as_bool(),
-                        if decider.available() {
-                            Some(false)
-                        } else {
-                            None
-                        },
-                    );
-                }
-                screenshot.add(
-                    r.has_image,
-                    if any_screenshot {
-                        Some(true)
-                    } else if decision_failed || !decider.available() {
-                        None
-                    } else {
-                        Some(false)
-                    },
-                );
+                screenshot.add(r.has_image, Some(any_screenshot));
                 Ok(
                     json!({"recording":r.id,"audio_seconds":r.duration,"vella_reference":r.vella_text,"reference_kind":"model_output_not_ground_truth",
                     "last_voice_end_ms":last_voice_end_ms,"hypothesis":hypothesis,"edits":e,"reference_words":w,"reference_available":w>0,"internal_pauses":p,"finals":finals,"premature_cuts":cuts,"added_delay_ms":delay,
                     "process_cpu_seconds":cpu_seconds()-cpu_start,"replay_wall_start":wall_start,"replay_wall_end":wall_seconds(),"paced_wall_seconds":elapsed,
-                    "engine_seconds":elapsed-decision_seconds,"decision_seconds":decision_seconds,"fixed_screen_phrases":decider.phrases,"matched":r.matched_message.is_some()}),
+                    "engine_seconds":elapsed,"fixed_screen_phrases":screen.phrases,"matched":r.matched_message.is_some()}),
                 )
             })();
             match run {
@@ -375,9 +287,6 @@ fn main() -> Result<()> {
             }
             results.flush()?;
             dry.flush()?;
-            if chunk_size > 0 && (index + 1) % chunk_size == 0 && !realtime {
-                std::thread::sleep(Duration::from_secs(5));
-            }
             if (index + 1) % 10 == 0 {
                 eprintln!(
                     "replayed={}/{} successful={} errors={}",
@@ -402,32 +311,12 @@ fn main() -> Result<()> {
                 "added_delay_mean_ms":if delays.is_empty(){None}else{Some(delays.iter().sum::<f64>()/delays.len()as f64)},"added_delay_p50_ms":percentile(0.5),
                 "added_delay_p95_ms":percentile(0.95),"missing_natural_endpoint":missing_endpoint,
                 "delay_definition":"emission audio-clock minus recording end floored at zero; 3s terminal silence; EOF flush excluded",
-                "send_now":{"confusion":send,"precision":send.precision(),"recall":send.recall()},
-                "timed_dispatch_strict_eof_diagnostic":{"confusion":dispatch_send,"precision":dispatch_send.precision(),"recall":dispatch_send.recall()},
-                "screenshot":{"confusion":screenshot,"precision":screenshot.precision(),"recall":screenshot.recall()},"decision_status":decider.status,"decision_context":"within recording only; no prior recordings or agent replies; audio limited to last 30s per final","decision_thresholds":{"addressed":"advisory only","send_now":"selected private policy or .95 for collection","minimum_silence_ms":1000,"long_silence_ms":2500},
+                "screenshot":{"confusion":screenshot,"precision":screenshot.precision(),"recall":screenshot.recall(),"source":"fixed screen phrases only"},
                 "audio_seconds":audio_seconds,"pipeline_wall_seconds":compute_seconds,"realtime":realtime,
-                "rtf_including_decisions":if audio_seconds>0.0{Some(compute_seconds/audio_seconds)}else{None},"cloud_calls":0});
+                "rtf":if audio_seconds>0.0{Some(compute_seconds/audio_seconds)}else{None},"cloud_calls":0});
             let temp = out.join("metrics.json.tmp");
             fs::write(&temp, serde_json::to_string_pretty(&metrics)? + "\n")?;
             fs::rename(temp, out.join("metrics.json"))?;
-        }
-        if live_cost {
-            let idle_after = idle_cost();
-            let rows = load_manifest(&out.join("recordings.jsonl"))?;
-            let cpu: f64 = rows
-                .iter()
-                .filter_map(|r| r["process_cpu_seconds"].as_f64())
-                .sum();
-            let wall: f64 = rows
-                .iter()
-                .filter_map(|r| r["paced_wall_seconds"].as_f64())
-                .sum();
-            fs::write(
-                out.join("live-cost.json"),
-                serde_json::to_vec_pretty(
-                    &json!({"idle_before":idle_before,"idle_after":idle_after,"paced_cpu_percent_one_core":100.0*cpu/wall,"paced_cpu_seconds":cpu,"paced_wall_seconds":wall,"streams":1,"batch_cost_separate":true,"power":"macmon whole-machine brackets; not app-attributed watts"}),
-                )?,
-            )?;
         }
         println!("{}", fs::read_to_string(out.join("metrics.json"))?);
     }
@@ -452,14 +341,25 @@ fn wall_seconds() -> f64 {
         .unwrap()
         .as_secs_f64()
 }
-fn idle_cost() -> Value {
-    let start = Instant::now();
-    let wall_start = wall_seconds();
-    let cpu = cpu_seconds();
-    std::thread::sleep(Duration::from_secs(5));
-    let elapsed = start.elapsed().as_secs_f64();
-    let used = cpu_seconds() - cpu;
-    json!({"wall_start":wall_start,"wall_end":wall_seconds(),"wall_seconds":elapsed,"cpu_seconds":used,"cpu_percent_one_core":100.0*used/elapsed})
+/// The screen `PhraseMatcher`'s hits on the replayed words ("look at this", "take a screenshot"); it logs them and
+/// takes no frames. Offline-only: no capture, screen permission, agent session or network API.
+#[derive(Default)]
+struct ScreenPhrases {
+    phrases: Vec<Value>,
+    matcher: PhraseMatcher,
+}
+impl ScreenPhrases {
+    fn reset(&mut self, id: &str) {
+        self.phrases.clear();
+        self.matcher.reset_source(id);
+    }
+    fn observe(&mut self, id: &str, words: &[Word]) -> Result<()> {
+        let timed: Vec<_> = words.iter().map(|w| TimedWord { text: w.text.clone(), start_ns: w.start_ns, end_ns: w.end_ns }).collect();
+        for p in self.matcher.observe(id, &timed) {
+            self.phrases.push(serde_json::to_value(p)?);
+        }
+        Ok(())
+    }
 }
 
 // A forced line flush is not a silence event. Only SpeechEnd starts this clock;

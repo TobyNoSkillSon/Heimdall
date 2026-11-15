@@ -93,6 +93,8 @@ pub(crate) fn attach_speech_level(ui: Option<ui::Ui>, tools: std::sync::Weak<Too
 /// Bug note 2026-11-05T02-32-17: speak only in a quiet gap, and stop as soon as anyone talks, guests included. A voice
 /// opening on a call source holds a reply waiting to start until the gap (`hold::OwnerVoice::other_voice`), and one still open `GUEST_CUT_AFTER` later while Heimdall is audible stops him
 /// (`Tools::guest_talked_over`). Nothing runs while Heimdall is silent but the hold's bookkeeping.
+/// While the user listens to a guest (`listen_to`), the cut waits for the speaker tracker's verdict instead and comes only
+/// for the listened guest's or an unlabelled voice (`Tools::listened_guest_tick`, bridge/call_interrupt.rs).
 pub(crate) fn install_call_voice_hook(tools: &std::sync::Weak<Tools>) {
     let Some(t) = tools.upgrade() else { return };
     let weak = tools.clone();
@@ -103,7 +105,20 @@ pub(crate) fn install_call_voice_hook(tools: &std::sync::Weak<Tools>) {
         let (weak, source) = (weak.clone(), source.to_owned());
         std::thread::spawn(move || {
             std::thread::sleep(super::speech_policy::GUEST_CUT_AFTER);
-            with_tools(&weak, |t| t.guest_talked_over(&source, at));
+            let mut listening = false;
+            with_tools(&weak, |t| listening = t.speech_policy.listening_guests());
+            if !listening {
+                with_tools(&weak, |t| t.guest_talked_over(&source, at));
+                return;
+            }
+            // Listening to a guest: only the listened guest's or an unlabelled voice cuts (bridge/call_interrupt.rs).
+            let mut kept_noted = false;
+            loop {
+                let mut again = false;
+                with_tools(&weak, |t| again = t.listened_guest_tick(&source, at, capture::host_now_ns(), &mut kept_noted));
+                if !again { return; }
+                std::thread::sleep(super::call_interrupt::POLL);
+            }
         });
     })));
 }
@@ -238,6 +253,47 @@ impl speak::Synthesizer for LazySynth {
         // No Jarvis in this build (tests, bank fill).
         self.lighter_line(&written,l,c,emit)
     }
+}
+impl Tools {
+    /// The synthesizer replies are said with: Speaking ▸ the voice, Jarvis waiting for his load and giving a sentence
+    /// he cannot say to the lighter voice, at the user's speed. The Mac's speech queue and the phone's speech
+    /// (`render_for_phone_parts`) both use it, so the phone hears exactly the voice, and the fallback, the Mac would use now.
+    pub(crate) fn reply_synth(&self) -> Result<LazySynth> {
+        Ok(LazySynth {
+            drama3: Some(self.drama3.clone()),
+            session: self.archive_session.lock().unwrap().clone().context("speech archive session missing")?,
+            models: self.models.clone(),
+            model: self.tts_model.clone(),
+            backend: self.tts_backend.lock().unwrap().clone(),
+            record: Some((self.voice_bank.clone(), voicebank::Origin::Agent)),
+            speed: self.voice_speed.clone(),
+            sample: None,
+            voices: Some(self.speech_voices.clone()),
+        })
+    }
+    /// The title of the voice saying replies now: the chosen one, or the lighter voice while the Mac is on its fallback
+    /// (Jarvis chosen and not loaded: Phonon S while he is held out for memory, else Supertonic).
+    pub(crate) fn voice_now(&self) -> String {
+        use crate::speech_voice::Route;
+        let route = self.speech_voices.route();
+        if route == Route::Jarvis && !crate::edition::PUBLIC {
+            if let Some(lighter) = lighter_now(self.drama3.ready(), self.drama3.memory_held().is_some(), self.drama3.wanted(), self.drama3.loading()) {
+                return match lighter { Lighter::Phonon => format!("Phonon S · {}", self.speech_voices.choice().phonon_preset), Lighter::Supertonic => ui::speech_voice::LocalVoice::Supertonic.title().into() };
+            }
+        }
+        crate::remote_settings::route_title(&route, &self.speech_voices.ui_state())
+    }
+}
+/// The lighter voice Jarvis's lines go to now.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Lighter { Phonon, Supertonic }
+/// Whether the Mac is on its fallback for Jarvis: held out for memory (Phonon S says the lines), or neither loaded,
+/// wanted nor loading (Supertonic). A normal load (wanted or loading, at most `JARVIS_LOAD_WAIT`) is not a fallback:
+/// the line waits for him (review 8 Nov).
+pub(crate) fn lighter_now(ready: bool, memory_held: bool, wanted: bool, loading: bool) -> Option<Lighter> {
+    if memory_held { return Some(Lighter::Phonon); }
+    if ready || wanted || loading { return None; }
+    Some(Lighter::Supertonic)
 }
 impl LazySynth {
     /// The public edition's lighter voice: the chosen Phonon S preset says the whole text, stretched to the user's speed.

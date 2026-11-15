@@ -85,7 +85,7 @@ fn upd_t03_memory_and_archive_db_row_survives() {
     hot.execute_batch("CREATE TABLE blocks(object TEXT); INSERT INTO blocks VALUES ('upd-sentinel-object');").unwrap();
     let wal = archive.join("heimdall.sqlite-wal");
     assert!(std::fs::metadata(&wal).unwrap().len() > 0, "the WAL holds the row");
-    // The pre-update snapshot (SQLite online backup, as export::snapshot_archive does per file).
+    // The pre-update snapshot (SQLite online backup, per file).
     let snapshot = f.root.join("snapshot.sqlite");
     {
         let mut dst = Connection::open(&snapshot).unwrap();
@@ -796,8 +796,11 @@ fn a_failed_versions_workers_are_stopped_with_it() {
     let mut child = Command::new(&worker).env("HEIMDALL_UPDATE_STATE", &f.state).spawn().unwrap();
     std::thread::sleep(std::time::Duration::from_millis(200));
     assert_eq!(install::running_pids(&worker), [child.id() as i32]);
+    // Reaped as it dies: the test is the worker's parent (the app never is), and an unreaped child stays a zombie that
+    // `kill(pid, 0)` still finds, so terminate_app would wait out its whole 15 s deadline.
+    let reaper = std::thread::spawn(move || child.wait());
     install::terminate_app(&f.destination(), &PRODUCT);
-    assert!(child.wait().is_ok());
+    assert!(reaper.join().unwrap().is_ok());
     assert!(install::running_pids(&worker).is_empty());
 }
 

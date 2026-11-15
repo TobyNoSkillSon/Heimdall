@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 struct Running {
     watcher: Option<watch::Watcher>,
     /// The guarantee and proposal sweep's stop flag (`guarantee::run`).
-    sweep: Arc<std::sync::atomic::AtomicBool>,
+    sweep: Arc<super::guarantee::Stop>,
     helper: Option<Arc<supervisor::Supervisor<supervisor::Native>>>,
 }
 static RUNNING: Mutex<Option<Running>> = Mutex::new(None);
@@ -49,6 +49,8 @@ pub fn start(data: &Path, helper_off: bool, hidden: bool, tools: &Arc<crate::bri
     // A thread's open request is answered on the notch card (binding.rs `card`), so the notch gets its updates.
     let notch = weak.clone();
     host.bindings.set_card_sink(Arc::new(move |update| {
+        // Phone endpoint (remote_jobs.rs): the same card to the phone as the multi-question `ask`, and its close.
+        crate::remote_jobs::card_update(&update);
         if let Some(tools) = notch.upgrade() { tools.send_notch(update) }
     }));
     host.set_deliver(Arc::new(move |class, text| {
@@ -76,8 +78,10 @@ pub fn start(data: &Path, helper_off: bool, hidden: bool, tools: &Arc<crate::bri
     super::visibility::set(hidden);
     // Show Islands on Streams, in the folder before the helper starts (it reads it at launch).
     super::streams::sync();
+    // Islands Display (night 1107): the lock, in the folder before the helper starts.
+    super::display::sync();
     // What waits on the user (the guarantee line) and the two-day archive of proposals, every minute.
-    let sweep = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sweep = Arc::new(super::guarantee::Stop::default());
     {
         let (h, stop) = (host.clone(), sweep.clone());
         if let Err(e) = std::thread::Builder::new().name("islands-sweep".into()).spawn(move || super::guarantee::run(h, stop)) {
@@ -110,23 +114,29 @@ pub fn start(data: &Path, helper_off: bool, hidden: bool, tools: &Arc<crate::bri
 /// The orderly quit: the helper is asked to quit (no relaunch) and the watcher stops.
 pub fn shutdown() {
     let Some(mut r) = RUNNING.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
-    r.sweep.store(true, std::sync::atomic::Ordering::Release);
+    r.sweep.stop();
     if let Some(h) = r.helper.take() { h.quit() }
     if let Some(mut w) = r.watcher.take() { w.stop() }
 }
 
-/// The thread-binding loop for one agent start, beside the T3 watcher; ends with `stop`. Nothing when the live
+/// The thread-binding loop for one agent start, beside the T3 watcher, restarted if it dies; ends with `stop`. Nothing when the live
 /// host is not running (replays, tests).
 pub fn binding_loop(workers: Arc<t3::Workers>, stop: tokio::sync::watch::Receiver<bool>) -> Option<tokio::task::JoinHandle<()>> {
     let host = super::host()?;
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    host.set_t3(Some(tx));
     // Every task Heimdall starts gets its job island before the tool call returns (night 1023).
     let h = host.clone();
-    workers.on_task_started(Arc::new(move |thread, title, brief| super::binding::task_island(&h, thread, title, brief)));
+    workers.on_task_started(Arc::new(move |thread, title, brief| {
+        // Phone endpoint (remote.rs): a task Heimdall started, as the phone's `task` frame.
+        crate::remote::publish("task", serde_json::json!({"taskId": thread, "title": title, "state": "working"}));
+        super::binding::task_island(&h, thread, title, brief)
+    }));
+    // Bug note 2026-11-13T12-27-46: a task's result delivered to Heimdall starts its job island's short grace (`binding::RESULT_GRACE`).
+    let h = host.clone();
+    workers.on_result_delivered(Arc::new(move |thread| h.bindings.told(thread, super::tools::now_s())));
     let passes = workers.passes();
     let src: Arc<dyn super::binding::ThreadSource> = Arc::new(super::binding::T3Source::new(workers));
-    Some(tokio::spawn(super::binding::run(host, src, passes, stop, rx)))
+    // Kept alive: a run that panics or ends is logged and started again (bug note 2026-11-07T13-12-26).
+    Some(tokio::spawn(super::binding::supervise(host, src, passes, stop, super::binding::RESTART_FIRST)))
 }
 
 #[cfg(test)]

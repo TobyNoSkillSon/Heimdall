@@ -9,7 +9,7 @@ use std::time::Duration;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::sel;
-use objc2_app_kit::{NSAutoresizingMaskOptions as Mask, NSTextAlignment, NSTextField};
+use objc2_app_kit::{NSTextAlignment, NSTextField};
 use objc2_foundation::MainThreadMarker;
 
 use super::kit::*;

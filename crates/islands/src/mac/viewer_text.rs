@@ -1,4 +1,4 @@
-//! The viewer's text (Swift `Viewer.swift`, "Text"): markdown rendered block by block (headings, lists, task boxes,
+//! The viewer's text ("Text"): markdown rendered block by block (headings, lists, task boxes,
 //! quotes, code blocks on a dark block, real tables, rules) with inline markdown through Foundation, and source code
 //! monospaced with light colouring in Xcode's dark palette. TextKit 1 attributed strings (text blocks and tables).
 //!

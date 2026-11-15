@@ -39,8 +39,13 @@ class IslandsContent(unittest.TestCase):
         script = (Path(__file__).with_name('bundle.sh')).read_text()
         call = script.index('scripts/bundle_islands.sh "$BUNDLE" "$IDENTITY"')
         self.assertLess(call, script.index('codesign --force --sign "$IDENTITY" --identifier "$BUNDLE_ID" "$BUNDLE"\n'))
+        # bundle.sh's one cargo call builds both islands binaries (no lab feature) and hands them over in ISLANDS_BIN;
+        # bundle_islands.sh builds them itself only when run alone.
+        self.assertIn('SHIPPED+=(-p islands --bin FloatingIslands --bin islands); export ISLANDS_BIN=', script)
         helper = (Path(__file__).with_name('bundle_islands.sh')).read_text()
-        self.assertIn('nice -n 19 swift build -c release -j 2', helper)
+        self.assertIn('if [[ -n "${ISLANDS_BIN:-}" ]]; then BIN="$ISLANDS_BIN"', helper)
+        self.assertIn('nice -n 19 cargo build --release -p islands --bins -j', helper)
+        self.assertNotIn('--features lab', helper + script)
         self.assertIn('Contents/Helpers/FloatingIslands.app', helper)
         self.assertIn(verify.ISLANDS_HELPER_ID, helper)
 

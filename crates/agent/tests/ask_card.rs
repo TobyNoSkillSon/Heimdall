@@ -101,11 +101,11 @@ fn the_legacy_answer_is_delivered_byte_for_byte_as_before() {
     let p = gate.permit().unwrap();
     let q = a.ask("legacy", &[AskItem::one("Install the new build?", &["Yes", "No"])], &p).unwrap();
     assert_eq!(a.answer(&q, "No", &p).unwrap(), Clicked::Delivered);
-    assert_eq!(*sink.delivered.lock().unwrap(), vec![format!("Question {q}: User clicked No. Question: Install the new build?")]);
+    assert_eq!(*sink.delivered.lock().unwrap(), vec![format!("Question {q}: The user clicked No. Question: Install the new build?")]);
     // The same answer through the card's own call is the same line.
     let again = a.ask("legacy-2", &[AskItem::one("Ship it?", &["Yes", "No"])], &p).unwrap();
     assert_eq!(a.answer_card(&again, &[answer("q1", &["Yes"], None)], &p).unwrap(), Clicked::Delivered);
-    assert_eq!(sink.delivered.lock().unwrap()[1], format!("Question {again}: User clicked Yes. Question: Ship it?"));
+    assert_eq!(sink.delivered.lock().unwrap()[1], format!("Question {again}: The user clicked Yes. Question: Ship it?"));
 }
 
 #[test]
@@ -123,7 +123,7 @@ fn a_receipt_written_before_the_card_still_answers_in_its_old_form() {
         .execute("UPDATE receipts SET body=? WHERE id=?", rusqlite::params![r#"{"options":["Yes","No"],"question":"Ship?"}"#, q])
         .unwrap();
     assert_eq!(a.answer(&q, "No", &p).unwrap(), Clicked::Delivered);
-    assert_eq!(*sink.delivered.lock().unwrap(), vec![format!("Question {q}: User clicked No. Question: Ship?")]);
+    assert_eq!(*sink.delivered.lock().unwrap(), vec![format!("Question {q}: The user clicked No. Question: Ship?")]);
 }
 
 #[test]
@@ -168,8 +168,8 @@ fn a_multi_select_answer_comes_back_keyed_and_in_card_order() {
     assert_eq!(
         *sink.delivered.lock().unwrap(),
         vec![format!(
-            "Question {q}: User answered q1 \"Which stale branches should the worker delete?\": resampler-old, meter-fix\n\
-             Question {q}: User answered q2 \"Push the fix to main?\": No"
+            "Question {q}: The user answered q1 \"Which stale branches should the worker delete?\": resampler-old, meter-fix\n\
+             Question {q}: The user answered q2 \"Push the fix to main?\": No"
         )]
     );
     assert_eq!(a.ask_answer(&q).unwrap().unwrap().1, "q1: resampler-old, meter-fix\nq2: No");
@@ -231,14 +231,14 @@ fn a_card_sent_with_some_questions_answered_tells_the_agent_which_were_left() {
     assert_eq!(a.answer_card(&q, &[answer("q1", &["meter-fix"], None), answer("q2", &[], None)], &p).unwrap(), Clicked::Delivered);
     let delivered = sink.delivered.lock().unwrap()[0].clone();
     assert!(delivered.contains(r#"q1 "Which stale branches should the worker delete?": meter-fix"#), "{delivered}");
-    assert!(delivered.contains(&format!("Question {q}: User left q2 ")) && delivered.ends_with("unanswered"), "{delivered}");
+    assert!(delivered.contains(&format!("Question {q}: The user left q2 ")) && delivered.ends_with("unanswered"), "{delivered}");
     assert_eq!(a.ask_answer(&q).unwrap().unwrap().1, "q1: meter-fix\nq2: (unanswered)");
     assert_eq!(a.state(&q).unwrap(), "answered");
 
     let absent = a.ask("partial-absent", &parse_ask(&two_questions()).unwrap(), &p).unwrap();
     assert_eq!(a.answer_card(&absent, &[answer("q2", &["Yes"], None)], &p).unwrap(), Clicked::Delivered);
     let delivered = sink.delivered.lock().unwrap()[1].clone();
-    assert!(delivered.contains(&format!("Question {absent}: User left q1 ")) && delivered.contains(r#"q2 ""#), "{delivered}");
+    assert!(delivered.contains(&format!("Question {absent}: The user left q1 ")) && delivered.contains(r#"q2 ""#), "{delivered}");
 }
 
 #[test]
@@ -347,7 +347,7 @@ fn the_grant_field_says_how_to_use_it_and_the_short_form_points_to_it() {
     let grant = &ask["inputSchema"]["properties"]["questions"]["items"]["properties"]["options"]["items"]["oneOf"][1]["properties"]["grant"];
     if heimdall_emergency::grants::ENABLED {
         let d = grant["description"].as_str().expect("grant describes its use");
-        for part in ["only User's own click", "questions form", "plain rm of its absolute path", "30 minutes", "grants nothing", "delete login item"] {
+        for part in [&format!("only {}'s own click", agent::identity::user()) as &str, "questions form", "plain rm of its absolute path", "30 minutes", "grants nothing", "delete login item"] {
             assert!(d.contains(part), "{part} missing from {d}");
         }
     } else {
@@ -422,4 +422,17 @@ fn an_option_grants_one_new_keychain_file_only() {
         let e = parse_ask(&card(grant.clone())).unwrap_err().to_string();
         assert!(e.starts_with("ASK_BAD_GRANT"), "{why}: {grant} -> {e}");
     }
+}
+
+/// Night 8 Nov log sweep, finding 8: "arguments.options: string length outside bounds" (7 Nov 13:12) did not say
+/// which limit "Leave it for the fix round" broke. The error names its length, the limit and the short form's word
+/// rule; any other string field names its own limit.
+#[test]
+fn a_length_error_names_the_limit() {
+    let e = validate_tool("ask", &json!({"question": "Restart now?", "options": ["Restart Heimdall", "Leave it for the fix round"]})).unwrap_err().to_string();
+    assert!(e.starts_with("arguments.options: 26 characters; the limit is 1 to 24"), "{e}");
+    assert!(e.contains("one to three words"), "{e}");
+    let long = "Q".repeat(121);
+    let e = validate_tool("ask", &json!({"question": long, "options": ["Yes", "No"]})).unwrap_err().to_string();
+    assert_eq!(e, "arguments.question: 121 characters; the limit is 1 to 120");
 }

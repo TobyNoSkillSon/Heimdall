@@ -9,6 +9,7 @@
 //!   and in Background Tasks ▸ Model at once; Providers keeps its items (item 14).
 //! - `bug_notes_row_only_in_the_personal_menu`: the built menu has the Bug Notes row in the personal edition and
 //!   none in the public one (docs/bugs.md).
+//! - `friends_and_phone_rows_absent`: the public menu has no Friends row and no Phone or iPhone row (release 1114).
 //! Each state is written as a PNG at 2×. `--menu-bench` times the menu's sync with 30 apps (audit, menu sync cost).
 
 use std::path::Path;
@@ -43,6 +44,7 @@ pub(crate) fn render(dir: &Path) -> Vec<String> {
     prominent(dir, mtm, &mut check);
     cloud(dir, mtm, &mut check);
     bug_notes_row(mtm, &mut check);
+    friends_and_phone_rows_absent(mtm, &mut check);
     failures
 }
 
@@ -213,6 +215,23 @@ fn bug_notes_row(mtm: MainThreadMarker, check: &mut Check) {
     } else {
         check(&format!("{NAME}: the personal menu keeps one Bug Notes row"), rows == ["Bug Notes"] && titled, format!("{rows:?}"));
     }
+}
+
+/// Friends and the phone are not in this source release: the public menu names neither.
+fn friends_and_phone_rows_absent(mtm: MainThreadMarker, check: &mut Check) {
+    const NAME: &str = "friends_and_phone_rows_absent";
+    if !cfg!(feature = "public") { return; }
+    let state = demo_state(mtm);
+    fn titles(menu: &NSMenu, out: &mut Vec<String>) {
+        for item in menu.itemArray().iter() {
+            out.push(item.title().to_string());
+            if let Some(sub) = item.submenu() { titles(&sub, out); }
+        }
+    }
+    let mut all = vec![];
+    titles(&state.menu, &mut all);
+    let bad: Vec<&String> = all.iter().filter(|t| t.starts_with("Friends") || t.contains("Phone") || t.contains("iPhone")).collect();
+    check(&format!("{NAME}: the public menu has no Friends, Phone or iPhone row"), bad.is_empty(), format!("{bad:?}"));
 }
 
 /// Each model radio's title in `menu`, in order.

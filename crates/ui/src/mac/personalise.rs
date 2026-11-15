@@ -563,6 +563,7 @@ pub(crate) fn render_grey(rows: &Rows, dark: bool) {
 
 /// The submenu as `submenu` builds it for `identity`, with `error` committed into the Name field first, drawn into
 /// `path` (`offscreen::stack`).
+#[cfg(feature = "lab")]
 pub(crate) fn render_submenu(path: &Path, identity: &Identity, error: Option<&str>, dark: bool, mtm: MainThreadMarker) -> bool {
     let (sub, rows) = submenu(identity, mtm);
     if let Some(text) = error {
@@ -579,6 +580,7 @@ pub(crate) fn render_submenu(path: &Path, identity: &Identity, error: Option<&st
 /// with the leaf; the submenu for both, with an invalid name, and with a custom SVG mark; the menu-bar mark on, off
 /// and needing attention for the helmet, the leaf and the SVG (1× and 2×); the notch island speaking with the leaf;
 /// then the in-process checks. The identity is the default again afterwards. Returns what failed.
+#[cfg(feature = "lab")]
 pub(crate) fn render(dir: &Path, mtm: MainThreadMarker) -> Vec<String> {
     std::fs::create_dir_all(dir).ok();
     let mut failures = vec![];

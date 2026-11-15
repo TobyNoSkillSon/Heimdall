@@ -695,6 +695,7 @@ pub(crate) fn sync(s: &mut State) {
 /// Offscreen renders of the Speaking section for `heimdall-ui-demo --speaking <dir>`: the whole menu with Local
 /// (Drama 3, the user's default; Phonon S with its Voice row) and API (connected, not connected), dark and light, then
 /// the presets submenu and the ElevenLabs submenu in each state. Returns what failed.
+#[cfg(feature = "lab")]
 pub(crate) fn render(dir: &Path, mtm: MainThreadMarker) -> Vec<String> {
     use crate::speech_voice::demo_speech_voice;
     std::fs::create_dir_all(dir).ok();

@@ -159,8 +159,8 @@ mod tests {
         w.stop();
         assert!(std::fs::read_dir(h.root.responses()).unwrap().flatten().all(|e| e.file_name().to_string_lossy().starts_with('.')));
         let lines = lines.lock().unwrap();
-        assert!(lines.contains(&(Class::Context, "User opened /tmp/x from the island 'notes'.".into())), "{lines:?}");
-        assert!(lines.contains(&(Class::Answer, "User clicked 'Go' on the island 'Tests' (action go).".into())), "{lines:?}");
+        assert!(lines.contains(&(Class::Context, "The user opened /tmp/x from the island 'notes'.".into())), "{lines:?}");
+        assert!(lines.contains(&(Class::Answer, "The user clicked 'Go' on the island 'Tests' (action go).".into())), "{lines:?}");
     }
 
     #[test]

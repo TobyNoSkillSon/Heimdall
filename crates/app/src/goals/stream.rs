@@ -97,18 +97,42 @@ fn incoming_kind(t: &str) -> Kind {
 
 /// A notice of the user's own click on an island ("the user chose …", "the user ticked …"): his answer as much as his words. Only
 /// the islands' own notices (`[Heimdall notice: islands-answer:…]`, `islands-context:…`) count, never a line of
-/// Heimdall's that says so (review 31 Oct).
+/// Heimdall's that says so (review 31 Oct). The notices name the user as Personalise sets it (`islands::user`; the
+/// public edition's wording says "the user"), so the click is read from the notice's shape, `<name> chose …`, never
+/// from the word the user (cleanup 14 Nov, ISL-5).
 pub fn owners_click(l: &Line) -> bool {
     let t = l.text();
-    // Also a question card's answer (`[Heimdall notice: ask-…] Question ask-…: the user clicked Install both.`; night 1 Nov:
-    // two of the three asks left open had been answered there).
     // The marker on the entry's own first line, never inside a catch-up of spooled lines (review 1 Nov: a catch-up is a
     // notice whose text holds other speakers' words).
     let head = l.lines.first().map(String::as_str).unwrap_or("");
-    let card = head.contains("[Heimdall notice: ask-") && t.contains(": User clicked ");
-    l.kind == Kind::Notice && !t.contains("Heimdall catch-up:")
-        && (card || head.contains("[Heimdall notice: islands-answer:") || head.contains("[Heimdall notice: islands-context:"))
-        && ["User chose ", "User ticked ", "User clicked ", "User picked ", "User switched ", "User set "].iter().any(|m| t.contains(m))
+    let body = || head.split_once(']').map_or("", |(_, r)| r).lines().chain(l.lines.iter().skip(1).map(String::as_str)).map(str::trim);
+    // Also a question card's answer (`[Heimdall notice: ask-…] Question ask-…: the user clicked Install both.`; night 1 Nov:
+    // two of the three asks left open had been answered there).
+    let card = head.contains("[Heimdall notice: ask-")
+        && body().any(|b| b.strip_prefix("Question ask-").and_then(|r| r.split_once(": ")).is_some_and(|(_, r)| acted(r, &[" clicked "])));
+    let island = (head.contains("[Heimdall notice: islands-answer:") || head.contains("[Heimdall notice: islands-context:"))
+        && body().any(|b| acted(b, &CLICKS));
+    l.kind == Kind::Notice && !t.contains("Heimdall catch-up:") && (card || island)
+}
+
+/// How an island notice says a click (`responses.rs`): "the user chose …", "the user ticked …" (not "unticked", "closed").
+const CLICKS: [&str; 6] = [" chose ", " ticked ", " clicked ", " picked ", " switched ", " set "];
+
+/// Every verb an island or card notice opens with after the user's name (`islands/responses.rs`, `guarantee.rs`,
+/// `binding.rs`, `phone_goals.rs`): the first of them in a line is the actor's, so "the user opened Clip set 2.mov" is
+/// an open, not a set.
+const VERBS: [&str; 17] = [" chose ", " ticked ", " clicked ", " picked ", " switched ", " set ", " unticked ", " closed ",
+    " opened ", " declined ", " says ", " dropped ", " answered ", " removed ", " paused ", " resumed ", " tried "];
+
+/// `line` opens with a name and then one of `verbs` as its first verb: "Ada clicked Yes on …", "Sinéad O'Brien chose …".
+/// The name holds no colon, double or curly quote and no word opening with `'` (a quoted title is not a name).
+fn acted(line: &str, verbs: &[&str]) -> bool {
+    let Some((i, first)) = VERBS.iter().filter_map(|v| line.find(v).map(|i| (i, *v))).min_by_key(|(i, _)| *i) else { return false };
+    let who = &line[..i];
+    verbs.contains(&first)
+        && (1..=5).contains(&who.split_whitespace().count())
+        && !who.contains([':', '"', '\u{2018}', '\u{2019}', '\u{201c}'])
+        && !who.split_whitespace().any(|w| w.starts_with('\''))
 }
 
 /// Words typed or heard in the text: a typed message, or a transcript line (`[Mic · User] …`, source · speaker).
@@ -199,7 +223,7 @@ fn relay(t: &str) -> Option<Option<(Vec<String>, Kind)>> {
         let text = clip(text.trim(), MESSAGE_CHARS);
         if tag.is_empty() {
             if text.is_empty() || text == "NO_REPLY" { return Some(None) }
-            if call && !text.starts_with("said to User:") {
+            if call && !text.starts_with("said to ") {
                 return Some(Some((vec![clip(&format!("Heimdall called {}", one_line(&text)), TOOL_CHARS + 40)], Kind::Tool)));
             }
             return Some(Some((lines_of("Heimdall: ", &text), Kind::Heimdall)));

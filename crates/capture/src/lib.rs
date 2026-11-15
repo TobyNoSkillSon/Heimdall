@@ -13,7 +13,7 @@ mod time;
 use anyhow::Result;
 pub use archive::{Archive, ArchivedBlock};
 pub use echo::{EchoCancel, EchoControl};
-pub use pipeline::{settle_stopped_archives, AudioChunk, CaptureEvent, CaptureReceiver};
+pub use pipeline::{settle_stopped_archives, AudioChunk, CaptureEvent, CaptureReceiver, PushInput, PushSource};
 pub use source::{app_identity, owning_app_path, AppIdentity, AppOwner, NativeFormat, SourceId, SourceInfo, SourceKind};
 use std::{path::PathBuf, sync::Arc, thread::JoinHandle};
 pub use time::{host_now_ns, ClockMapper};
@@ -39,6 +39,22 @@ impl ArchiveSink for Archive {
     fn append(&mut self, id: &SourceId, ns: u64, format: NativeFormat, samples: &[f32], discontinuity: bool) -> Result<()> { self.append(id, ns, format, samples, discontinuity) }
     fn flush(&mut self) -> Result<()> { self.flush() }
     fn commit_wait(&self) -> Option<std::time::Duration> { self.commit_wait() }
+}
+
+/// A capture pipeline with no HAL behind it: only pushed sources (`PushInput`), archived through `archive` and
+/// delivered on the receiver like a capture's. For tests and labs; the live app pushes into its running capture.
+pub struct PushOnly {
+    input: PushInput,
+    _pipeline: pipeline::Pipeline,
+}
+impl PushOnly {
+    pub fn start(archive: Box<dyn ArchiveSink>) -> Result<(Self, CaptureReceiver)> {
+        let (pipeline, rx) = pipeline::start_pipeline_with_archive(archive)?;
+        Ok((Self { input: pipeline.push_input(), _pipeline: pipeline }, rx))
+    }
+    pub fn input(&self) -> PushInput {
+        self.input.clone()
+    }
 }
 
 /// An explicit acknowledgement of the setup action. Construct only after the
@@ -107,17 +123,9 @@ pub struct MicrophoneState {
 /// Exactly one microphone: the chosen one when connected and usable, otherwise the built-in one.
 /// No other input is ever a fallback, so an unchosen Bluetooth headset is never opened
 /// (opening its mic forces it into low-quality headset mode). `usable` excludes a chosen device
-/// whose recovery attempts are exhausted until a fresh HAL event.
-pub fn select_microphone<'a>(
-    devices: &'a [InputDevice],
-    chosen: Option<&str>,
-    usable: impl Fn(&InputDevice) -> bool,
-) -> Option<&'a InputDevice> {
-    select_microphone_from(devices, chosen, false, usable)
-}
-
-/// `select_microphone`, where `system_default` makes macOS's default input the one used while nothing is chosen
-/// (`CaptureConfig::system_default_input`); a chosen device that is missing still falls back to the built-in one.
+/// whose recovery attempts are exhausted until a fresh HAL event. `system_default` makes macOS's default input the
+/// one used while nothing is chosen (`CaptureConfig::system_default_input`); a chosen device that is missing still
+/// falls back to the built-in one.
 pub fn select_microphone_from<'a>(
     devices: &'a [InputDevice],
     chosen: Option<&str>,
@@ -132,18 +140,9 @@ pub fn select_microphone_from<'a>(
 }
 
 impl MicrophoneState {
-    /// The published state for `devices`; `in_use` is `select_microphone`'s answer and `open`
-    /// adds only extras the user switched on that are connected and usable.
-    pub fn new(
-        devices: Vec<InputDevice>,
-        chosen: Option<String>,
-        extras: Vec<String>,
-        usable: impl Fn(&InputDevice) -> bool,
-    ) -> Self {
-        Self::with_default(devices, chosen, extras, false, usable)
-    }
-
-    /// `new`, with macOS's default input used while nothing is chosen when `system_default`.
+    /// The published state for `devices`; `in_use` is `select_microphone_from`'s answer (macOS's default input while
+    /// nothing is chosen when `system_default`) and `open` adds only extras the user switched on that are connected and
+    /// usable.
     pub fn with_default(
         devices: Vec<InputDevice>,
         chosen: Option<String>,
@@ -161,8 +160,6 @@ impl MicrophoneState {
         Self { devices, chosen, in_use, extras, open }
     }
 }
-/// The archive session a standalone capture writes: `path` itself when it already names a session
-/// (`.../session-*`), else a new `session-<ms>-capture` inside the store at `path`.
 /// Asks for System Audio Recording now, without capturing: macOS's prompt shows (`tap_gate`). Returns at once; the
 /// capture's taps start when the ask comes back, and the microphone never waits for it. Asked again after a failed
 /// ask; once answered in this launch, it answers at once (macOS shows its prompt once per app anyway).
@@ -177,6 +174,8 @@ pub fn system_audio() -> Option<tap_gate::TapAccess> {
     tap_gate::global().peek()
 }
 
+/// The archive session a standalone capture writes: `path` itself when it already names a session
+/// (`.../session-*`), else a new `session-<ms>-capture` inside the store at `path`.
 pub fn session_address(path: &std::path::Path) -> PathBuf {
     if path.file_name().is_some_and(|n| n.to_string_lossy().starts_with("session-")) {
         return path.to_path_buf();
@@ -200,6 +199,9 @@ impl Default for CaptureConfig {
 /// RAII capture owner. Drop stops all native sources, drains raw queues, and
 /// commits the session. Keep this alongside the receiver in the app process.
 pub struct Capture {
+    /// Where pushed sources (the phone's microphone) join this capture's pipeline; `None` for discovery.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    push: Option<PushInput>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     owner: Option<JoinHandle<()>>,
     wake: std::thread::Thread,
@@ -211,6 +213,12 @@ pub struct Capture {
     echo: EchoControl,
 }
 impl Capture {
+    /// A handle that adds pushed sources (`PushInput::open`) to this capture's pipeline: same archive, resampler and
+    /// event stream as its microphones. `None` for a discovery-only capture. The handle goes dead when this capture
+    /// stops (its sources then end with it).
+    pub fn push_input(&self) -> Option<PushInput> {
+        self.push.clone()
+    }
     /// Echo guard (23 Oct): ask for Apple voice-processing echo cancellation on the primary microphone, or release
     /// it. Non-blocking and idempotent; call it on every change (the app: while Heimdall speaks on speakers, plus a
     /// short tail). It runs only when every safety gate passes (speaker output, no Bluetooth default input or mic,
@@ -325,7 +333,7 @@ mod microphone_tests {
         dev("zoom.us.ZoomAudioDevice", "ZoomAudioDevice", false)
     }
     fn pick(devices: &[InputDevice], chosen: Option<&str>) -> Option<String> {
-        select_microphone(devices, chosen, |_| true).map(|d| d.uid.clone())
+        select_microphone_from(devices, chosen, false, |_| true).map(|d| d.uid.clone())
     }
 
     /// voice (night 1022): the user's setup, the Shure chosen and AirPods connecting while he watches his iPhone. The
@@ -335,12 +343,12 @@ mod microphone_tests {
     fn capture_never_auto_picks_a_bluetooth_input() {
         let shure = dev("AppleUSBAudioEngine:Shure Inc:Shure MV7i:2,3", "Shure MV7i", false);
         let devices = [airpods(), shure.clone(), built_in()];
-        let state = MicrophoneState::new(devices.to_vec(), Some(shure.uid.clone()), vec![], |_| true);
+        let state = MicrophoneState::with_default(devices.to_vec(), Some(shure.uid.clone()), vec![], false, |_| true);
         assert_eq!(state.open, [shure.uid.clone()]);
         // The Shure failing or unplugged falls back to the built-in mic, not the AirPods.
-        let failing = MicrophoneState::new(devices.to_vec(), Some(shure.uid.clone()), vec![], |d| d.uid != shure.uid);
+        let failing = MicrophoneState::with_default(devices.to_vec(), Some(shure.uid.clone()), vec![], false, |d| d.uid != shure.uid);
         assert_eq!(failing.open, ["BuiltInMicrophoneDevice"]);
-        let unplugged = MicrophoneState::new(vec![airpods(), built_in()], Some(shure.uid.clone()), vec![], |_| true);
+        let unplugged = MicrophoneState::with_default(vec![airpods(), built_in()], Some(shure.uid.clone()), vec![], false, |_| true);
         assert_eq!(unplugged.open, ["BuiltInMicrophoneDevice"]);
         // Only an explicit choice opens them.
         assert_eq!(pick(&devices, Some("AC-3E-B1:input")).as_deref(), Some("AC-3E-B1:input"));
@@ -353,7 +361,7 @@ mod microphone_tests {
     fn the_chosen_mic_stays_chosen_while_missing_and_returns_when_it_appears() {
         let shure = dev("AppleUSBAudioEngine:Shure Inc:Shure MV7i:MV7i#7-8bc6:2,3", "Shure MV7i", false);
         let chosen = Some(shure.uid.clone());
-        let at = |devices: Vec<InputDevice>| MicrophoneState::new(devices, chosen.clone(), vec![], |_| true);
+        let at = |devices: Vec<InputDevice>| MicrophoneState::with_default(devices, chosen.clone(), vec![], false, |_| true);
         // Missing at launch (unplugged, or enumerating late): built-in records, the Shure stays the choice.
         let launch = at(vec![built_in(), airpods()]);
         assert_eq!((launch.chosen.as_deref(), launch.in_use.as_deref()), (Some(shure.uid.as_str()), Some("BuiltInMicrophoneDevice")));
@@ -399,7 +407,7 @@ mod microphone_tests {
     fn exhausted_chosen_device_falls_back_without_other_inputs() {
         let devices = [airpods(), zoom(), built_in()];
         let usable = |d: &InputDevice| d.uid != "AC-3E-B1:input";
-        let state = MicrophoneState::new(devices.to_vec(), Some("AC-3E-B1:input".into()), vec![], usable);
+        let state = MicrophoneState::with_default(devices.to_vec(), Some("AC-3E-B1:input".into()), vec![], false, usable);
         assert_eq!(state.in_use.as_deref(), Some("BuiltInMicrophoneDevice"));
         assert_eq!(state.chosen.as_deref(), Some("AC-3E-B1:input"));
         assert_eq!(state.open, ["BuiltInMicrophoneDevice"]);
@@ -407,34 +415,34 @@ mod microphone_tests {
 
     #[test]
     fn only_the_primary_is_open_by_default() {
-        let state = MicrophoneState::new(vec![airpods(), zoom(), built_in()], None, vec![], |_| true);
+        let state = MicrophoneState::with_default(vec![airpods(), zoom(), built_in()], None, vec![], false, |_| true);
         assert_eq!(state.open, ["BuiltInMicrophoneDevice"]);
         let state =
-            MicrophoneState::new(vec![airpods(), zoom(), built_in()], Some("AC-3E-B1:input".into()), vec![], |_| true);
+            MicrophoneState::with_default(vec![airpods(), zoom(), built_in()], Some("AC-3E-B1:input".into()), vec![], false, |_| true);
         assert_eq!(state.open, ["AC-3E-B1:input"]);
     }
 
     #[test]
     fn extras_open_only_when_switched_on_and_connected() {
         let extras = vec!["zoom.us.ZoomAudioDevice".to_string(), "AC-3E-B1:input".to_string()];
-        let all = MicrophoneState::new(vec![built_in(), airpods(), zoom()], None, extras.clone(), |_| true);
+        let all = MicrophoneState::with_default(vec![built_in(), airpods(), zoom()], None, extras.clone(), false, |_| true);
         // Primary first, then switched-on extras in device order; nothing unswitched.
         assert_eq!(all.open, ["BuiltInMicrophoneDevice", "AC-3E-B1:input", "zoom.us.ZoomAudioDevice"]);
         // An extra disconnects: it closes, the rest stay; it reopens on reconnect.
-        let gone = MicrophoneState::new(vec![built_in(), zoom()], None, extras.clone(), |_| true);
+        let gone = MicrophoneState::with_default(vec![built_in(), zoom()], None, extras.clone(), false, |_| true);
         assert_eq!(gone.open, ["BuiltInMicrophoneDevice", "zoom.us.ZoomAudioDevice"]);
         assert_eq!(gone.extras, extras);
-        let back = MicrophoneState::new(vec![built_in(), zoom(), airpods()], None, extras.clone(), |_| true);
+        let back = MicrophoneState::with_default(vec![built_in(), zoom(), airpods()], None, extras.clone(), false, |_| true);
         assert_eq!(back.open, ["BuiltInMicrophoneDevice", "zoom.us.ZoomAudioDevice", "AC-3E-B1:input"]);
         // An extra that is also the primary opens once.
-        let same = MicrophoneState::new(vec![built_in(), airpods()], Some("AC-3E-B1:input".into()), extras, |_| true);
+        let same = MicrophoneState::with_default(vec![built_in(), airpods()], Some("AC-3E-B1:input".into()), extras, false, |_| true);
         assert_eq!(same.open, ["AC-3E-B1:input"]);
     }
 
     #[test]
     fn extra_with_exhausted_recovery_is_not_reopened() {
         let usable = |d: &InputDevice| d.uid != "zoom.us.ZoomAudioDevice";
-        let state = MicrophoneState::new(vec![built_in(), zoom()], None, vec!["zoom.us.ZoomAudioDevice".into()], usable);
+        let state = MicrophoneState::with_default(vec![built_in(), zoom()], None, vec!["zoom.us.ZoomAudioDevice".into()], false, usable);
         assert_eq!(state.open, ["BuiltInMicrophoneDevice"]);
     }
 

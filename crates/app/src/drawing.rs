@@ -123,10 +123,19 @@ pub(crate) fn drawing_mode(tools: &Tools, args: &Value, permit: &agent::delivery
 /// content, with the `size` line `point` needs. The user's strokes are on it while drawing mode is up.
 pub(crate) async fn look(tools: &Tools, app: Option<&str>, permit: &agent::delivery::DeliveryPermit) -> Result<Value> {
     permit.check()?;
+    // Seeing off is an error that says so (bug notes 2026-11-10T15-35-42, 2026-11-10T17-55-57), never a success.
     if tools.screen_off.load(std::sync::atomic::Ordering::Acquire) {
-        return Ok(json!({"content":[{"type":"text","text":crate::bridge::SCREEN_OFF}]}));
+        anyhow::bail!("{}", tools.seeing_off_error());
     }
-    let grab = grabber(tools).context("CAPTURE_UNAVAILABLE: screen capture is unavailable")?;
+    let grab = grabber(tools).context("CAPTURE_UNAVAILABLE: this build has no native screen capture")?;
+    #[cfg(test)]
+    let blocker = tools.test_blocker.lock().unwrap().clone();
+    #[cfg(not(test))]
+    let blocker = screen::capture_blocker();
+    // Known blockers answer at once, with why: no grab is tried behind a revoked permission or a locked Mac.
+    if let Some(why) = blocker {
+        anyhow::bail!("CAPTURE_UNAVAILABLE: no screenshot was taken because {why}");
+    }
     let app = app.map(str::to_owned);
     let work = permit.clone();
     let (png, w, h, index, switched) = tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, u32, u32, usize, Option<Duration>)> {
@@ -136,7 +145,17 @@ pub(crate) async fn look(tools: &Tools, app: Option<&str>, permit: &agent::deliv
         };
         work.check()?;
         let display = ui::drawing::pointer_display().context("no display")?;
-        let frame = grab(display.id)?;
+        // One quiet retry: a one-shot ScreenCaptureKit grab can fail once (a display or Space change in flight). It
+        // does not use the recording stream, so a stalled stream never blocks `look`.
+        let frame = match grab(display.id) {
+            Ok(frame) => frame,
+            Err(first) => {
+                eprintln!("look: screen grab failed, retrying once: {first:#}");
+                std::thread::sleep(LOOK_RETRY);
+                work.check()?;
+                grab(display.id).map_err(|e| anyhow::anyhow!("CAPTURE_UNAVAILABLE: the screen grab failed twice: {e:#}"))?
+            }
+        };
         let mut rgb = frame.rgb.to_vec();
         if let Some(marks) = ui::drawing::current_marks().filter(|m| m.display == display.id) {
             rgb = ui::drawing::composite_rgb(&rgb, frame.width, frame.height, marks.view, &marks.strokes).map_err(anyhow::Error::msg)?;
@@ -160,6 +179,9 @@ pub(crate) async fn look(tools: &Tools, app: Option<&str>, permit: &agent::deliv
     }
     Ok(look_result(&block, &line))
 }
+/// The pause before `look`'s one retry of a failed grab.
+const LOOK_RETRY: Duration = Duration::from_millis(250);
+
 /// The `look` result: the screenshot as the agent receives it, labelled with the type its bytes are. 20 Oct 19:20:
 /// the label was always PNG while a busy screen (the YouTube home page) went as JPEG, and the provider refused every
 /// request after it.

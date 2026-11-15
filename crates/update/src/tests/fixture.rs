@@ -70,14 +70,29 @@ pub fn run(cmd: &mut Command) {
     assert!(out.status.success(), "{cmd:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
+/// The fixture program, compiled once per run and shared by every test process: a file in the temp folder named by
+/// the source's hash (check.sh gives each run its own TMPDIR), moved into place whole so parallel tests never see a
+/// partial one.
+fn compiled_program() -> PathBuf {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    PROGRAM.hash(&mut hash);
+    let program = std::env::temp_dir().join(format!("heimdall-upd-fixture-{:016x}", hash.finish()));
+    if !program.is_file() {
+        let build = tempfile::Builder::new().prefix("upd-fixture-build").tempdir().unwrap();
+        let (source, out) = (build.path().join("fixture.c"), build.path().join("fixture-bin"));
+        std::fs::write(&source, PROGRAM).unwrap();
+        run(Command::new("/usr/bin/clang").args(["-O1", "-o"]).arg(&out).arg(&source));
+        std::fs::rename(&out, &program).unwrap();
+    }
+    program
+}
+
 impl Fixture {
     pub fn new() -> Fixture {
         let dir = tempfile::Builder::new().prefix("upd-home").tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
-        let program = root.join("fixture-bin");
-        let source = root.join("fixture.c");
-        std::fs::write(&source, PROGRAM).unwrap();
-        run(Command::new("/usr/bin/clang").args(["-O1", "-o"]).arg(&program).arg(&source));
+        let program = compiled_program();
         let f = Fixture {
             apps: root.join("Applications"),
             state: root.join("Library/Application Support/com.tobynoskillson.heimdall/updates"),

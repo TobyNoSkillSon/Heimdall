@@ -1,7 +1,8 @@
 # Deciding model provenance
 
 Checked 11 October 2026 against the immutable source snapshots in
-`scripts/models.lock.json` and `scripts/sources.lock.json`.
+`scripts/models.lock.json` and `scripts/sources.lock.json` (the 600M rows and `sources.lock.json` were removed on
+14 Nov; see git history).
 
 ## Intelligent Wakeup
 
@@ -63,7 +64,10 @@ License v1.0 (`licenses/LFM-Open-License-1.0.txt`, taken from d1-2B).
 
 ## d1-omni-600M
 
-Default from 25 to 29 October (now loadable, not bundled): `d1-omni-600M-heimdall-v4-F16.gguf`, local fine-tune from
+History: its runtime, tests and lock rows were removed on 14 Nov (git keeps them; V5 is the rollback behind V6). The
+local reference checkout in `crates/decide/ref/` is untracked and was left in place.
+
+Default from 25 to 29 October: `d1-omni-600M-heimdall-v4-F16.gguf`, local fine-tune from
 the `d1-train` base (sha 0713bb05), `training-material/d1/runs/v4` (same dispatch question
 with instant-ack lines as v3, `src/send_v3.rs`). Installed over the v3 parity and dispatch numbers in `lab/decider-v4/PLAN.md`. Rollback model: v3
 (24 Oct, `runs/v3`, still bundled). Earlier defaults: v2 (17 Oct, `runs/v2`), v1 (14 Oct,
@@ -145,11 +149,6 @@ The same LFM licence applies. Source: https://huggingface.co/LiquidAI/d1-3B-GGUF
 
 ## Test data
 
-FLEURS excerpts are Google FLEURS (Conneau et al., 2022), **CC-BY-4.0**. Exact
-archive members, references, immutable revision and hashes are in
-`tests/fixtures/manifest.json`; these are copied from the existing listen test
-assets, not downloaded again. Source: https://huggingface.co/datasets/google/fleurs
-The small PNG is a synthetic QA input. Sigma/human clips and the 30-utterance
-smoke corpus use the installed macOS Samantha voice, locally synthesized with
-no microphone or network. They are not real-world voice accuracy evidence.
-No Vella recordings or agent-history records were read or copied by this worker.
+The 30-utterance smoke corpus (`tests/fixtures/smoke.json`) is hand-written text. The small PNG is a synthetic QA
+input (read by the archive crate's screen-chunk test). The FLEURS and Samantha audio clips the 600M audio tests used
+were removed on 14 Nov with those tests. No Vella recordings or agent-history records were read or copied.

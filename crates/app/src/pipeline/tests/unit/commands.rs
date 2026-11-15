@@ -17,11 +17,11 @@
         }
         let done = |label: &str, kind| ui::CommandCue::Done { id: Some(1), kind, label: label.into() };
         let failed = |reason: &str, kind| ui::CommandCue::Failed { id: Some(1), kind, reason: reason.into() };
-        assert_eq!(action_cue(1, C::LookAtThis, Ok(()), false, true), done("Screenshot", ui::CommandKind::LookAtThis));
-        assert_eq!(action_cue(1, C::LookAtThis, Ok(()), true, false), failed("Seeing is off", ui::CommandKind::LookAtThis));
+        assert_eq!(action_cue(1, C::LookAtThis, Ok(()), false), done("Screenshot", ui::CommandKind::LookAtThis));
+        assert_eq!(action_cue(1, C::LookAtThis, Ok(()), true), failed("Seeing is off", ui::CommandKind::LookAtThis));
         let floor = anyhow::anyhow!("below disk floor");
-        assert_eq!(action_cue(1, C::TakeScreenshot, Err(&floor), false, false), failed("Disk almost full", ui::CommandKind::Screenshot));
-        assert_eq!(action_cue(1, C::Unsure, Err(&floor), false, false), ui::CommandCue::Dropped { id: 1 });
+        assert_eq!(action_cue(1, C::TakeScreenshot, Err(&floor), false), failed("Disk almost full", ui::CommandKind::Screenshot));
+        assert_eq!(action_cue(1, C::Unsure, Err(&floor), false), ui::CommandCue::Dropped { id: 1 });
     }
     #[test]
     fn approved_screen_command_keeps_words_and_attaches_archived_image() {

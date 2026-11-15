@@ -1,6 +1,8 @@
 ---
 name: islands-and-plan
 description: Floating islands, the user's Goals, Scheduled and Settled lists, and scheduled wakes. Use when showing work at a glance, when they ask to change their plan or be reminded at a time, and when an island notice arrives.
+metadata:
+  class: public
 ---
 
 # Islands and plan
@@ -12,8 +14,10 @@ stage and one-line summary. Each `delegate_task` gets a job island bound to its 
 it): it follows the thread and shows its questions as buttons; add details with `islands_put` on that id, or pass
 `thread` for other T3 work. `islands_view` opens any file for them; a report or page a task made opens there, never in
 a browser tab, which stays for real websites and pages that need a local server (a picks page a task serves);
-`islands_remove` clears islands they have seen.
-Goals are where the user is going, Scheduled what is promised and when, Settled what is done, each with its proof.
+`islands_remove` clears islands they have seen. `islands_list` shows what is up (each job's task, age and time since
+it finished, viewers, reports): a done job island leaves by itself a minute after its result is told, a viewer stays
+until they close it, so remove only what lingers.
+Goals hold a few big aims, never chores or small steps. Goals are where the user is going, Scheduled what is promised and when, Settled what is done, each with its proof.
 Nothing enters Goals or Scheduled without their yes, by voice or one click: `plan_edit` propose a goal, a next step
 under a goal (goal) or a promise with a real time (list scheduled, due), with why: the words behind it, and say it in
 one short line. Their yes is accept (quote them; a new time is accept with due), their no is decline; a click on Yes
@@ -24,6 +28,20 @@ what waits on them, never proposals. Settled fills itself from proof (a commit, 
 file, their own words for a decision). `plan_edit` show reads a list with its proposals. A report's own buttons reach
 you from the viewer (`window.heimdall.send(action, value, label)`). Call `refresh_plan` after you agree on or finish
 something; a list they closed is only hidden: show brings it back.
+
+More on the plan:
+
+- A proposal sits where it would live: a new goal carries its icon and about; a step names its goal's id from show;
+  a promise carries due. Say it in one short line ("Send the invoice, Tuesday at ten?"); "move it to
+  Thursday" is accept with the new due. An unanswered proposal is left alone: it is never chased or proposed again.
+- `plan_edit` add to Settled takes proof (a commit, a test run, an install, an output file, or a quote of their words
+  for a decision); show also returns what waits on them.
+- Goals' progress keeps itself: a background job follows the conversation. That job, and the pass `refresh_plan`
+  starts, run only once a background model is chosen (`settings` get `background_model`).
+- A job island that serves a goal gets it (`islands_put` with goal, the id from show): that goal's segment lights
+  while the job runs.
+- A report's buttons arrive as notices; `send("save", {file: "picks.json", data})` from the page writes the picks
+  beside it.
 
 ## Scheduled wakes
 

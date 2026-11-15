@@ -37,12 +37,15 @@ extern "C" {
     fn CGContextAddPath(c: Ref, p: Ref);
     fn CGContextFillPath(c: Ref);
     fn CGContextStrokePath(c: Ref);
+    #[cfg(feature = "lab")]
     fn CGContextClip(c: Ref);
     fn CGPathCreateWithRoundedRect(r: CGRect, cw: f64, ch: f64, t: *const c_void) -> Ref;
     fn CGImageGetWidth(img: Ref) -> usize;
     fn CGImageGetHeight(img: Ref) -> usize;
     fn CGImageCreateWithImageInRect(img: Ref, r: CGRect) -> Ref;
+    #[cfg(feature = "lab")]
     fn CGGradientCreateWithColors(space: Ref, colors: Ref, locations: *const f64) -> Ref;
+    #[cfg(feature = "lab")]
     fn CGContextDrawLinearGradient(c: Ref, g: Ref, start: CGPoint, end: CGPoint, options: u32);
 }
 
@@ -206,10 +209,12 @@ impl Bitmap {
             CGContextStrokePath(self.raw());
         }
     }
+    #[cfg(feature = "lab")]
     pub fn clip_path(&self) {
         unsafe { CGContextClip(self.raw()) }
     }
     /// A vertical linear gradient from `top` (at y = h) to `bottom` (at y = 0), in user space.
+    #[cfg(feature = "lab")]
     pub fn vertical_gradient(&self, top: &CGColor, bottom: &CGColor, h: f64) {
         let cols: Retained<objc2_foundation::NSArray<AnyObject>> = objc2_foundation::NSArray::from_slice(&[
             // SAFETY: CGColors are Objective-C objects.
@@ -352,7 +357,6 @@ extern "C" {
     fn CGPathMoveToPoint(p: Ref, t: *const c_void, x: f64, y: f64);
     fn CGPathAddLineToPoint(p: Ref, t: *const c_void, x: f64, y: f64);
     fn CGPathAddArc(p: Ref, t: *const c_void, x: f64, y: f64, r: f64, start: f64, end: f64, clockwise: bool);
-    fn CGPathAddCurveToPoint(p: Ref, t: *const c_void, c1x: f64, c1y: f64, c2x: f64, c2y: f64, x: f64, y: f64);
 }
 
 /// A mutable CGPath (lines, arcs) for shape layers.
@@ -372,10 +376,6 @@ impl CgPath {
     pub fn arc(&self, x: f64, y: f64, r: f64, start: f64, end: f64, clockwise: bool) {
         unsafe { CGPathAddArc(self.0.raw(), std::ptr::null(), x, y, r, start, end, clockwise) }
     }
-    /// A cubic Bézier to (x, y) through two control points.
-    pub fn curve_to(&self, c1: (f64, f64), c2: (f64, f64), x: f64, y: f64) {
-        unsafe { CGPathAddCurveToPoint(self.0.raw(), std::ptr::null(), c1.0, c1.1, c2.0, c2.1, x, y) }
-    }
     pub fn cg(&self) -> &objc2_core_graphics::CGPath {
         // SAFETY: a live CGPath for as long as `self`.
         unsafe { &*(self.0.raw() as *const objc2_core_graphics::CGPath) }
@@ -389,7 +389,7 @@ impl Default for CgPath {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A NULL result is `None` and is never released (`CFRelease(NULL)` traps the process: the 24 Oct crash).
@@ -399,8 +399,8 @@ mod tests {
     }
 
     /// Files that are not readable images give no thumbnail and no crash: missing, empty, cut short, a folder, text.
-    #[test]
-    fn thumbnail_of_bad_files_is_none() {
+    /// Run by `mac::tests::appkit_renders`, in one process with the other AppKit renders (TST-11).
+    pub(crate) fn thumbnail_of_bad_files_is_none() {
         let dir = lab_dir("thumbs");
         let png = sample_png(&dir);
         let bytes = std::fs::read(&png).unwrap();

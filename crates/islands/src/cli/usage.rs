@@ -1,10 +1,10 @@
 //! The help texts, word for word the Swift CLI's (main.swift at 9c9332a).
 
 /// `islands put --help`.
-pub const PUT: &str = r#"islands put <id> [options]   Create or update one island in one call (merges; a place User chose is kept).
+pub const PUT: &str = r#"islands put <id> [options]   Create or update one island in one call (merges; a place the user chose is kept).
 Words follow docs/island-style.md; put refuses text that breaks the checkable rules.
   --title T                  1-3 words naming the thing: "Qwen-Image", "iPad sale". Never the id. Needed for a new island.
-  --state S                  running (working in the background) | waiting (needs User) | done | failed
+  --state S                  running (working in the background) | waiting (needs the user) | done | failed
   --stage WORDS              1-2 words, the present activity: "Downloading", "Final tests", "Your answer"
   --summary TEXT             one plain line: what it is and what is next
   --step "TEXT[=done|now|failed]"   a sequence, once per step in order (replaces the list; --step none clears it)
@@ -21,22 +21,24 @@ Where:
   --order N                  place in its stack (lower first)
   --at X,Y                   place freely: its top-left corner in screen points from the display's top-left (y down)
   --auto                     back to its default dock
-  Without these, put keeps the place User chose (an island he threw keeps its edge and height).
+  Without these, put keeps the place the user chose (an island he threw keeps its edge and height).
 Example: islands put img --title "Qwen-Image" --state running --stage Downloading --icon photo \
            --summary "20 GB of weights, then convert and install" --step "Download=now" --step "Convert" --step "Install""#;
 
 /// `islands plan --help`.
 pub const PLAN: &str = r#"islands plan                              The plan lists (left dock): Goals, Scheduled, Settled, numbered.
 islands plan [goals|scheduled|settled] list
-islands plan LIST add "TEXT" [--due TIME] [--when W] [--detail T] [--proposal TEXT] [--item-id ID] [--goal GOAL-ID]
-                                          Add an item (on Goals a question that needs User: --goal puts it under that
-                                          goal, else it is a card at the top; --proposal gives it Yes / No / Later).
-                                          Each item gets a stable id (a slug of its text).
+islands plan goals add "TEXT" [--when W] [--detail T] [--proposal TEXT] [--item-id ID] [--goal GOAL-ID]
+                                          Add a question that needs the user to Goals (--goal puts it under that goal, else
+                                          it is a card at the top; --proposal gives it Yes / No / Later). Each item gets
+                                          a stable id (a slug of its text). Scheduled and Settled take nothing from
+                                          here: a promise is proposed for the user's yes and Settled fills from proof, both
+                                          through Heimdall's plan_edit.
 islands plan LIST done|undo|rm N|ID|"TEXT"...   Tick off / back on / remove (N from the listing, an id, or a unique part).
-islands plan LIST move N|ID|"TEXT" [--to goals|scheduled|settled] [--due TIME] [--when W]
+islands plan LIST move N|ID|"TEXT" [--due TIME] [--when W]   Change an item's time (or --to goals).
 islands plan LIST prune                   Remove ticked items.
 LIST defaults to goals. Goals: a few big goals a week or a month ahead with their tasks (written by the Goals job;
-listed here) and the questions that need User now; Scheduled = what has to happen at a time, with a due time
+listed here) and the questions that need the user now; Scheduled = what has to happen at a time, with a due time
 (--due "2026-10-24 10:00" | "tomorrow 10:00" | "today 22:00" | tonight | +2h | +30m | +3d): the app counts down to it,
 and when it is due it stays in Scheduled, at the top, as due now; Settled = done or agreed."#;
 
@@ -54,7 +56,7 @@ islands clear                           Remove every island but the plan lists, 
 islands list [--json]                   Islands with where they are now: dock or placed, top-left x,y in screen points, size.
 islands state [<id>] [--json]           What is on screen: open, side, x, y (top-left, screen points), width, height.
 islands quit                            Quit the app (islands vanish; files stay unless cleared).
-islands responses [--consume] [--json]  Show clicks User made (and delete them with --consume).
+islands responses [--consume] [--json]  Show clicks the user made (and delete them with --consume).
 islands dir                             Print the data folder."#;
 
 /// `islands --help`.

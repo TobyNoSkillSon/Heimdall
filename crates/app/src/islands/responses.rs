@@ -64,6 +64,7 @@ pub fn handle(h: &Host, r: &Map<String, Value>) -> Option<(Class, String)> {
     let island = h.seen(island_id);
     let title = island.as_ref().and_then(|o| o.get("title")).and_then(Value::as_str).unwrap_or(island_id).to_string();
     let action = s(r, "action");
+    let who = super::user_cap();
     let log = |e: anyhow::Error| eprintln!("islands: {} response on {island_id} not applied: {}", s(r, "kind"), super::short_error(&e));
     match s(r, "kind") {
         "approval" => {
@@ -72,13 +73,22 @@ pub fn handle(h: &Host, r: &Map<String, Value>) -> Option<(Class, String)> {
             // Yes on a proposal: his one click; it fills in where it sits (docs/one-system.md).
             if let Some((l, p)) = super::proposals::find(&h.root, Some(list), &item_id).filter(|(_, p)| p.get("id").and_then(Value::as_str) == Some(item_id.as_str())) {
                 let name = p.get("title").and_then(Value::as_str).unwrap_or(&item_id).to_string();
+                // No is a no ("I cannot say no to goals"): the proposal leaves, is recorded as declined
+                // and is never proposed again, as `plan_edit` decline. Later keeps it waiting.
+                if action == "no" {
+                    let on = if s(r, "via") == "phone" { " on his phone" } else { "" };
+                    return Some(match super::proposals::decline(&h.root, Some(l), &item_id, super::tools::now_s() as i64) {
+                        Ok((t, l, _)) => (Class::Answer, format!("{who} declined the proposal '{t}'{on}; it left {} and is not proposed again.", plan::list_title(l))),
+                        Err(e) => { log(e); (Class::Answer, format!("{who} declined the proposal '{name}'{on}, but it could not be taken off.")) }
+                    });
+                }
                 if action != "yes" {
-                    return Some((Class::Answer, format!("User chose {action} on the proposal '{name}'; nothing was done (only Yes takes it).")));
+                    return Some((Class::Answer, format!("{who} chose {action} on the proposal '{name}'; nothing was done (only Yes takes it).")));
                 }
                 return Some(match super::proposals::accept(&h.root, Some(l), &item_id, super::proposals::Yes::Click, None, super::tools::now_s() as i64) {
-                    Ok((t, l, next)) => (Class::Answer, format!("User clicked Yes on the proposal '{t}': it is in {} now.{}", plan::list_title(l),
+                    Ok((t, l, next)) => (Class::Answer, format!("{who} clicked Yes on the proposal '{t}': it is in {} now.{}", plan::list_title(l),
                         next.map(|p| format!(" Next on screen: {}", super::proposals::notice(l, &p))).unwrap_or_default())),
-                    Err(e) => { log(e); (Class::Answer, format!("User clicked Yes on the proposal '{name}', but it could not be added.")) }
+                    Err(e) => { log(e); (Class::Answer, format!("{who} clicked Yes on the proposal '{name}', but it could not be added.")) }
                 });
             }
             let item = h.root.read(list).map(|o| plan::items(&o)).unwrap_or_default().into_iter()
@@ -89,10 +99,10 @@ pub fn handle(h: &Host, r: &Map<String, Value>) -> Option<(Class, String)> {
             // A click on buttons that changed or went away meanwhile (the plan refresher rewrites its own answers)
             // does nothing to the item; Heimdall still hears what he chose.
             if !offered(item.as_ref(), action) {
-                return Some((Class::Answer, format!("User chose {label} on '{name}', but that question had changed; nothing was done to the item.")));
+                return Some((Class::Answer, format!("{who} chose {label} on '{name}', but that question had changed; nothing was done to the item.")));
             }
             if let Err(e) = plan::approve(&h.root, list, &item_id, action) { log(e) }
-            Some((Class::Answer, format!("User chose {label} on the approval '{name}'.")))
+            Some((Class::Answer, format!("{who} chose {label} on the approval '{name}'.")))
         }
         "tick" => {
             let item_id = shown(r.get("value"));
@@ -102,19 +112,19 @@ pub fn handle(h: &Host, r: &Map<String, Value>) -> Option<(Class, String)> {
                 Ok(t) => t.unwrap_or(item_id),
                 Err(e) => { log(e); item_id }
             };
-            Some((Class::Context, if done { format!("User ticked '{name}' in {}.", plan::list_title(list)) } else { format!("User unticked '{name}' in {}.", plan::list_title(list)) }))
+            Some((Class::Context, if done { format!("{who} ticked '{name}' in {}.", plan::list_title(list)) } else { format!("{who} unticked '{name}' in {}.", plan::list_title(list)) }))
         }
         // The helper before night 1022 ticks in the file itself and reports the title.
         "todo" => {
             let done = r.get("value").and_then(Value::as_bool).unwrap_or(true);
-            Some((Class::Context, format!("User {} '{action}' in {title}.", if done { "ticked" } else { "unticked" })))
+            Some((Class::Context, format!("{who} {} '{action}' in {title}.", if done { "ticked" } else { "unticked" })))
         }
         "button" => {
             let label = shown(r.get("value"));
             // A viewer's proposed-action buttons report only their action id: the label comes from the island.
             let label = if label.is_empty() { button_label(island.as_ref(), action) } else { label };
             let how = if label == action { String::new() } else { format!(" (action {action})") };
-            Some((Class::Answer, format!("User clicked '{label}' on the island '{title}'{how}.")))
+            Some((Class::Answer, format!("{who} clicked '{label}' on the island '{title}'{how}.")))
         }
         // The islands app drew a proposal to the user, open and on screen: its two days start now. Nobody is told.
         "seen" => {
@@ -126,7 +136,7 @@ pub fn handle(h: &Host, r: &Map<String, Value>) -> Option<(Class, String)> {
         }
         // A choice on Scheduled's guarantee line: applied to what waits (an ask, a missed promise).
         "waiting" => Some((Class::Answer, super::guarantee::choose(&h.root, &shown(r.get("value")), action).unwrap_or_else(|e| {
-            let line = format!("User chose {action} on '{}', but it could not be applied.", shown(r.get("value")));
+            let line = format!("{who} chose {action} on '{}', but it could not be applied.", shown(r.get("value")));
             log(e);
             line
         }))),
@@ -144,14 +154,17 @@ pub fn handle(h: &Host, r: &Map<String, Value>) -> Option<(Class, String)> {
                 Some(v) => format!(": {}", one_line(&v.to_string(), 300)),
             };
             let how = if label == action { String::new() } else { format!(" (action {action})") };
-            Some((Class::Answer, format!("User chose '{label}' in the report '{title}'{how}{value}.")))
+            Some((Class::Answer, format!("{who} chose '{label}' in the report '{title}'{how}{value}.")))
         }
-        "list" => Some((Class::Answer, format!("User picked '{}' in the list on '{title}'.", shown(r.get("value"))))),
+        // The user's own remove, pause or resume of a goal, from the phone (islands/phone_goals.rs).
+        #[cfg(feature = "phone")]
+        "goal" => Some((Class::Context, super::phone_goals::line(&h.root, r, super::tools::now_s() as i64))),
+        "list" => Some((Class::Answer, format!("{who} picked '{}' in the list on '{title}'.", shown(r.get("value"))))),
         "toggle" => {
             let on = r.get("value").and_then(Value::as_bool).unwrap_or(false);
-            Some((Class::Answer, format!("User switched '{}' {} on '{title}'.", part_label(island.as_ref(), action), if on { "on" } else { "off" })))
+            Some((Class::Answer, format!("{who} switched '{}' {} on '{title}'.", part_label(island.as_ref(), action), if on { "on" } else { "off" })))
         }
-        "slider" => Some((Class::Answer, format!("User set '{}' to {} on '{title}'.", part_label(island.as_ref(), action), shown(r.get("value"))))),
+        "slider" => Some((Class::Answer, format!("{who} set '{}' to {} on '{title}'.", part_label(island.as_ref(), action), shown(r.get("value"))))),
         "closed" => {
             // A job island: its task is archived once finished, by Heimdall itself (never stopped while it works).
             let bound = h.bindings.get(island_id);
@@ -162,13 +175,22 @@ pub fn handle(h: &Host, r: &Map<String, Value>) -> Option<(Class, String)> {
             if let Some(list) = plan::list_of(island_id, island.as_ref()) {
                 if let Err(e) = plan::keep_closed(&h.root, list, island.as_ref()) { log(e) }
             }
-            Some((Class::Context, format!("User closed the island '{title}'.")))
+            Some((Class::Context, format!("{who} closed the island '{title}'.")))
         }
-        "open" => Some((Class::Context, format!("User opened {} from the island '{title}'.", shown(r.get("value"))))),
+        "open" => {
+            // Lane R (bug note 2026-11-11T12-05-15): a report island goes once opened; a done job island remembers it.
+            if let Err(e) = super::kept_report::opened(&h.root, island_id) { log(e) }
+            Some((Class::Context, format!("{who} opened {} from the island '{title}'.", shown(r.get("value")))))
+        }
         // A Scheduled item fell due: it stays in Scheduled, drawn as due. An older islands app
         // moved it into a To do list: it goes back.
         "due" => {
             let item_id = shown(r.get("value"));
+            // A wake's item (bug note 2026-11-14T16-58-00): the wake itself brings the work at this time; told, quietly.
+            if super::wake_items::is_wake_item(&h.root, &item_id) {
+                if let Err(e) = plan::tell_due(&h.root, &item_id) { log(e) }
+                return None;
+            }
             // Each due time is told once: an item already told (`told` equals `due`) moves and notifies no more.
             let back = match plan::return_due(&h.root, &item_id) {
                 Ok(plan::Returned::AlreadyTold) => return None,
@@ -217,11 +239,11 @@ mod tests {
              "proposal": {"text": "", "actions": [{"label": "Looks right", "action": "done"}], "anticipated": true}}]}))).unwrap();
         // "Keep" (no) was on screen, but the buttons went away meanwhile: nothing is done to the ask.
         let (c, line) = handle(&h, &r(json!({"island": "goals", "kind": "approval", "action": "no", "value": "trash", "label": "Keep"}))).unwrap();
-        assert_eq!((c, line.as_str()), (Class::Answer, "User chose Keep on 'Empty Trash', but that question had changed; nothing was done to the item."));
+        assert_eq!((c, line.as_str()), (Class::Answer, "The user chose Keep on 'Empty Trash', but that question had changed; nothing was done to the item."));
         assert_eq!(h.root.read("goals").unwrap()["items"].as_array().unwrap().len(), 2);
         // The label he saw wins over a rewording that landed meanwhile; the answered ask leaves.
         let (_, line) = handle(&h, &r(json!({"island": "goals", "kind": "approval", "action": "done", "value": "page", "label": "Looks good"}))).unwrap();
-        assert_eq!(line, "User chose Looks good on the approval 'Check the page'.");
+        assert_eq!(line, "The user chose Looks good on the approval 'Check the page'.");
         assert_eq!(plan::items(&h.root.read("goals").unwrap()).iter().map(|i| i["id"].as_str().unwrap()).collect::<Vec<_>>(), ["trash"]);
     }
 
@@ -233,10 +255,10 @@ mod tests {
             {"id": "push", "title": "Push branch", "proposal": {"text": "git push"}}]}))).unwrap();
         h.remember(&h.root.all());
         let (c, line) = handle(&h, &r(json!({"island": "goals", "kind": "approval", "action": "yes", "value": "caches"}))).unwrap();
-        assert_eq!((c, line.as_str()), (Class::Answer, "User chose Do it on the approval 'Delete old caches'."));
+        assert_eq!((c, line.as_str()), (Class::Answer, "The user chose Do it on the approval 'Delete old caches'."));
         // An old helper still reporting on the To do island: the same list.
         let (_, line) = handle(&h, &r(json!({"island": "todo", "kind": "approval", "action": "later", "value": "push"}))).unwrap();
-        assert_eq!(line, "User chose Later on the approval 'Push branch'.");
+        assert_eq!(line, "The user chose Later on the approval 'Push branch'.");
         let items = plan::items(&h.root.read("goals").unwrap());
         assert_eq!(items.len(), 1);
         assert_eq!((items[0]["id"].as_str(), items[0]["chosen"].as_str(), items[0].contains_key("proposal")), (Some("push"), Some("later"), false));
@@ -247,12 +269,12 @@ mod tests {
         let (_d, h) = host();
         h.root.put("scheduled", &r(json!({"preset": "todo", "list": "scheduled", "title": "Scheduled", "items": [{"id": "a", "title": "Arsenal: push", "when": "Tonight"}]}))).unwrap();
         let (c, line) = handle(&h, &r(json!({"island": "scheduled", "kind": "tick", "action": "done", "value": "a"}))).unwrap();
-        assert_eq!((c, line.as_str()), (Class::Context, "User ticked 'Arsenal: push' in Scheduled."));
+        assert_eq!((c, line.as_str()), (Class::Context, "The user ticked 'Arsenal: push' in Scheduled."));
         assert_eq!(plan::items(&h.root.read("scheduled").unwrap())[0]["done"], true);
         let (_, line) = handle(&h, &r(json!({"island": "scheduled", "kind": "tick", "action": "undo", "value": "a"}))).unwrap();
-        assert_eq!(line, "User unticked 'Arsenal: push' in Scheduled.");
+        assert_eq!(line, "The user unticked 'Arsenal: push' in Scheduled.");
         let (_, line) = handle(&h, &r(json!({"island": "todo", "kind": "todo", "action": "Old item", "value": true}))).unwrap();
-        assert_eq!(line, "User ticked 'Old item' in todo.");
+        assert_eq!(line, "The user ticked 'Old item' in todo.");
     }
 
     #[test]
@@ -261,18 +283,18 @@ mod tests {
         h.root.put("notes", &r(json!({"title": "Notes", "parts": [{"type": "toggle", "id": "hq", "label": "High quality"}, {"type": "slider", "id": "spd", "label": "Speed"}]}))).unwrap();
         h.remember(&h.root.all());
         let line = |v: Value| handle(&h, &r(v)).unwrap();
-        assert_eq!(line(json!({"island": "notes", "kind": "button", "action": "do-all", "value": "Do all of it"})), (Class::Answer, "User clicked 'Do all of it' on the island 'Notes' (action do-all).".into()));
-        assert_eq!(line(json!({"island": "notes", "kind": "button", "action": "go"})).1, "User clicked 'go' on the island 'Notes'.");
+        assert_eq!(line(json!({"island": "notes", "kind": "button", "action": "do-all", "value": "Do all of it"})), (Class::Answer, "The user clicked 'Do all of it' on the island 'Notes' (action do-all).".into()));
+        assert_eq!(line(json!({"island": "notes", "kind": "button", "action": "go"})).1, "The user clicked 'go' on the island 'Notes'.");
         h.root.put("view-plan.md", &r(json!({"title": "Plan", "preset": "viewer", "actions": [{"label": "Do all of it", "action": "do-all"}]}))).unwrap();
-        assert_eq!(line(json!({"island": "view-plan.md", "kind": "button", "action": "do-all"})).1, "User clicked 'Do all of it' on the island 'Plan' (action do-all).");
-        assert_eq!(line(json!({"island": "notes", "kind": "list", "action": "i2", "value": "Second"})).1, "User picked 'Second' in the list on 'Notes'.");
-        assert_eq!(line(json!({"island": "notes", "kind": "toggle", "action": "hq", "value": false})).1, "User switched 'High quality' off on 'Notes'.");
-        assert_eq!(line(json!({"island": "notes", "kind": "slider", "action": "spd", "value": 1.5})).1, "User set 'Speed' to 1.5 on 'Notes'.");
-        assert_eq!(line(json!({"island": "notes", "kind": "open", "action": "open", "value": "/tmp/a.html"})), (Class::Context, "User opened /tmp/a.html from the island 'Notes'.".into()));
+        assert_eq!(line(json!({"island": "view-plan.md", "kind": "button", "action": "do-all"})).1, "The user clicked 'Do all of it' on the island 'Plan' (action do-all).");
+        assert_eq!(line(json!({"island": "notes", "kind": "list", "action": "i2", "value": "Second"})).1, "The user picked 'Second' in the list on 'Notes'.");
+        assert_eq!(line(json!({"island": "notes", "kind": "toggle", "action": "hq", "value": false})).1, "The user switched 'High quality' off on 'Notes'.");
+        assert_eq!(line(json!({"island": "notes", "kind": "slider", "action": "spd", "value": 1.5})).1, "The user set 'Speed' to 1.5 on 'Notes'.");
+        assert_eq!(line(json!({"island": "notes", "kind": "open", "action": "open", "value": "/tmp/a.html"})), (Class::Context, "The user opened /tmp/a.html from the island 'Notes'.".into()));
         // Closed: the helper already deleted the file; the title comes from what the watcher saw last.
         h.bindings.bind("notes", "th");
         h.root.remove("notes").unwrap();
-        assert_eq!(line(json!({"island": "notes", "kind": "closed", "action": "close"})).1, "User closed the island 'Notes'.");
+        assert_eq!(line(json!({"island": "notes", "kind": "closed", "action": "close"})).1, "The user closed the island 'Notes'.");
         assert!(h.bindings.get("notes").is_none());
         assert!(handle(&h, &r(json!({"island": "x", "kind": "weird"}))).is_none());
     }
@@ -288,7 +310,7 @@ mod tests {
         h.bindings.bind("task-disk", "mcp:d");
         h.remember(&h.root.all());
         let (_, line) = handle(&h, &r(json!({"island": "task-disk", "kind": "closed", "action": "close"}))).unwrap();
-        assert_eq!(line, "User closed the island 'Disk cleanup'.");
+        assert_eq!(line, "The user closed the island 'Disk cleanup'.");
         assert!(matches!(rx.try_recv(), Ok(Job::Cleared(t)) if t == "mcp:d"));
         assert!(h.bindings.get("task-disk").is_none());
         h.root.put("notes", &r(json!({"title": "Notes"}))).unwrap();
@@ -305,7 +327,7 @@ mod tests {
         // The app hides a plan island in place now: the list stays, hidden, and comes back.
         h.root.patch("goals", |o| { o.insert("hidden".into(), json!(true)); }).unwrap();
         let (c, line) = handle(&h, &r(json!({"island": "goals", "kind": "closed", "action": "close"}))).unwrap();
-        assert_eq!((c, line.as_str()), (Class::Context, "User closed the island 'Goals'."));
+        assert_eq!((c, line.as_str()), (Class::Context, "The user closed the island 'Goals'."));
         assert_eq!(h.root.read("goals").unwrap()["items"][0]["title"], "Call the bank");
         assert_eq!(plan::reopen_closed(&h.root).unwrap(), ["goals"]);
         assert!(!h.root.read("goals").unwrap().contains_key("hidden"));
@@ -313,7 +335,7 @@ mod tests {
         h.root.remove("goals").unwrap();
         h.root.remove("notes").unwrap();
         let (_, line) = handle(&h, &r(json!({"island": "goals", "kind": "closed", "action": "close"}))).unwrap();
-        assert_eq!(line, "User closed the island 'Goals'.");
+        assert_eq!(line, "The user closed the island 'Goals'.");
         handle(&h, &r(json!({"island": "notes", "kind": "closed", "action": "close"}))).unwrap();
         assert_eq!(plan::reopen_closed(&h.root).unwrap(), ["goals"]);
         assert_eq!(h.root.read("goals").unwrap()["items"][0]["title"], "Call the bank");
@@ -375,11 +397,11 @@ mod tests {
         let (id, _) = crate::islands::proposals::propose(&h.root, &crate::islands::proposals::Draft { list: "goals".into(), kind: "goal".into(),
             title: "Get a job".into(), ..Default::default() }, 1).unwrap();
         let (_, line) = handle(&h, &r(json!({"island": "goals", "kind": "approval", "action": "yes", "value": id}))).unwrap();
-        assert_eq!(line, "User clicked Yes on the proposal 'Get a job': it is in Goals now.");
+        assert_eq!(line, "The user clicked Yes on the proposal 'Get a job': it is in Goals now.");
         assert_eq!(h.root.read("goals").unwrap()["goals"][0]["yes"]["by"], "click");
         h.root.put("view-page", json!({"preset": "viewer", "title": "Latency", "path": "/tmp/x.html"}).as_object().unwrap()).unwrap();
         let (c, line) = handle(&h, &r(json!({"island": "view-page", "kind": "report", "action": "keep", "label": "Keep in record"}))).unwrap();
-        assert_eq!((c, line.as_str()), (Class::Answer, "User chose 'Keep in record' in the report 'Latency' (action keep)."));
+        assert_eq!((c, line.as_str()), (Class::Answer, "The user chose 'Keep in record' in the report 'Latency' (action keep)."));
         let (_, line) = handle(&h, &r(json!({"island": "view-page", "kind": "report", "action": "save", "value": {"file": "picks.json", "saved": "/tmp/picks.json"}}))).unwrap();
         assert!(line.ends_with(": saved /tmp/picks.json."), "{line}");
         let (_, line) = handle(&h, &r(json!({"island": "view-page", "kind": "report", "action": "save", "value": {"file": "../x.json", "refused": true}}))).unwrap();
@@ -390,5 +412,42 @@ mod tests {
         assert!(handle(&h, &r(json!({"island": "goals", "kind": "seen", "value": pid}))).is_none());
         let q = crate::islands::proposals::queue(&h.root.read("goals").unwrap());
         assert!(q.iter().any(|p| p["id"] == pid.as_str() && p["shown"].is_i64()));
+    }
+
+    /// "we need some yes and no for the proposed goals". The Mac Goals island's No chip writes
+    /// `{island: "goals", kind: "approval", action: "no", value: <proposal id>}` (the islands crate's
+    /// `Responses::approval`, asserted there); it goes the phone's decline path: the proposal leaves, is recorded as
+    /// declined and is never proposed again. No "on his phone" for a Mac click.
+    #[cfg(feature = "phone")]
+    #[test]
+    fn a_mac_no_on_a_goal_proposal_declines_it_for_good() {
+        let (_d, h) = host();
+        let draft = |kind: &str, title: &str| super::super::proposals::Draft { list: "goals".into(), kind: kind.into(), title: title.into(), ..Default::default() };
+        let (id, _) = super::super::proposals::propose(&h.root, &draft("goal", "Euro AGD"), 1).unwrap();
+        let mac = r(json!({"island": "goals", "kind": "approval", "action": "no", "value": id}));
+        crate::remote_jobs::write_response(&h.root, &mac).unwrap();
+        let taken = h.root.take_responses();
+        assert_eq!(taken.len(), 1);
+        let (c, line) = handle(&h, &taken[0]).unwrap();
+        assert_eq!((c, line.as_str()), (Class::Answer, "User declined the proposal 'Euro AGD'; it left Goals and is not proposed again."));
+        assert!(super::super::proposals::queue(&h.root.read("goals").unwrap()).is_empty());
+        assert!(super::super::proposals::propose(&h.root, &draft("goal", "Euro AGD"), 5).is_err(), "a declined proposal never comes back");
+    }
+
+    /// Cleanup 14 Nov (ISL-5): a notice names the user as Personalise sets it, never a fixed "the user".
+    #[test]
+    fn notices_name_the_configured_user() {
+        let (_d, h) = host();
+        h.root.put("notes", &r(json!({"title": "Notes"}))).unwrap();
+        h.remember(&h.root.all());
+        let click = || handle(&h, &r(json!({"island": "notes", "kind": "button", "action": "go"}))).unwrap().1;
+        assert_eq!(crate::islands::with_user("Ada", click), "Ada clicked 'go' on the island 'Notes'.");
+        assert_eq!(crate::islands::with_user("", click), "The user clicked 'go' on the island 'Notes'.");
+        assert_eq!(crate::islands::with_user("User", click), "The user clicked 'go' on the island 'Notes'.");
+        // The setting as `remote_presence` reads it (the Goals lab builds `files.rs` without that module).
+        assert_eq!(crate::islands::user(), crate::remote_presence::user_name());
+        for n in ["", "  ", agent::identity::PUBLIC_USER, "Ada"] {
+            assert_eq!(crate::islands::with_user(n, crate::islands::user), crate::remote_presence::name_from(n), "{n:?}");
+        }
     }
 }

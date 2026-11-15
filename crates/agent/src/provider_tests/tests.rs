@@ -277,15 +277,11 @@
         assert_eq!(normalize_key("  sk-abc  ").unwrap(), "sk-abc");
         assert!(normalize_key("").is_err());
         assert!(normalize_key("sk-a b").is_err());
-        assert!(looks_like_key("sk-0123456789abcdefghijklmnop"));
-        assert!(!looks_like_key("hello world"));
-        assert!(!looks_like_key("sk-short"));
-        assert!(!looks_like_key("https://opencode.ai/console"));
     }
     #[test]
     fn lab_binary_keeps_keys_in_memory_and_never_searches_keychain() {
         let _lab = crate::provider::LAB_ITEMS_TEST.blocking_lock();
-        assert!(!installed_app());
+        assert!(!is_installed_app());
         let p = go();
         if std::env::var_os(p.key_env).is_some() {
             return;
@@ -458,7 +454,7 @@
     #[test]
     fn workspace_ids_are_kept_beside_the_key_and_go_with_it() {
         let _lab = crate::provider::LAB_ITEMS_TEST.blocking_lock();
-        assert!(!installed_app());
+        assert!(!is_installed_app());
         let p = provider(ANTHROPIC).unwrap();
         if std::env::var_os(p.key_env).is_some() { return; }
         save_key(p, "sk-ant-usr-lab-0123456789abcdefghij", Some("wrkspc_01ABCdef")).unwrap();

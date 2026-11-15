@@ -35,38 +35,12 @@ impl CaptureRun {
         let drain = draining.clone();
         let pump = std::thread::spawn(move || pump_capture_events(
             || rx.recv_timeout(Duration::from_secs(1)), tx, s, drain));
-        if let Err(e) = crate::bridge::echo_cancel::spawn(capture.echo_control(), Arc::downgrade(&app.tools), stop.clone()) {
-            eprintln!("Echo cancellation control did not start: {e}");
-        }
-        Self { capture: Some(capture), pump: Some(pump), stop, draining }
-    }
-    pub(super) fn start(
-        app: &pipeline::Pipeline,
-        tx: crossbeam_channel::Sender<capture::CaptureEvent>,
-        permissions: LivePermissions,
-    ) -> Result<Self> {
-        let (capture, rx) = capture::Capture::start_with_archive(
-            mic_config(app, app.session.clone()),
-            permissions.consent(),
-            app.raw_archive()?,
-        )?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let s = stop.clone();
-        let draining = Arc::new(AtomicBool::new(false));
-        let drain = draining.clone();
-        let pump = std::thread::spawn(move || pump_capture_events(
-            || rx.recv_timeout(Duration::from_secs(1)), tx, s, drain));
         // Echo guard (23 Oct): Apple's echo cancellation while Heimdall speaks on speakers (bridge/echo_cancel.rs).
         // It stops with the capture run (`stop`).
         if let Err(e) = crate::bridge::echo_cancel::spawn(capture.echo_control(), Arc::downgrade(&app.tools), stop.clone()) {
             eprintln!("Echo cancellation control did not start: {e}");
         }
-        Ok(Self {
-            capture: Some(capture),
-            pump: Some(pump),
-            stop,
-            draining,
-        })
+        Self { capture: Some(capture), pump: Some(pump), stop, draining }
     }
     /// Stop the native owner while continuing to receive its resampler tail and
     /// SourceRemoved events. The normal Drop cancellation intentionally abandons
@@ -321,7 +295,8 @@ impl LivePermissions {
     /// System Audio has no status call: real sound from a tap grants it; digital silence while a recorded app plays
     /// (`recorded_playing`) for `SYSTEM_AUDIO_DENIAL_NS` denies it.
     pub(super) fn audio_permission_transition(&mut self, source_id: &str, samples: &[f32], host_ns: u64, recorded_playing: bool) -> Option<ui::UiUpdate> {
-        if source_id.starts_with("mic:") || self.system_confirmed { return None; }
+        // Microphones and the phone's pushed microphone say nothing about System Audio Recording.
+        if source_id.starts_with("mic:") || crate::phone_mic::is_phone_source(source_id) || self.system_confirmed { return None; }
         let state = if samples.iter().any(|s| *s != 0.0) {
             self.system_confirmed = true;
             ui::PermissionState::Granted
@@ -389,7 +364,27 @@ pub(super) fn live(
         system_confirmed: app.settings.setup_requested && app.settings.system_audio_confirmed,
         ..Default::default()
     };
-    permissions.observe(&ui::permissions::status());
+    let states = ui::permissions::status();
+    permissions.observe(&states);
+    // The grants Setup got, checked again (launch_permissions.rs): an update's new signature can drop them, and Setup
+    // asks only once.
+    // Only the installed app: a lab or `--data-dir` run must not raise macOS's prompt (it would name Terminal) or
+    // record its own process's grants.
+    let installed = keychain::installed_app();
+    app.mic_denied = crate::launch_permissions::mic_denied(&states);
+    if installed { ui::permissions::remember_grants(&states); }
+    let held: Vec<ui::Permission> = ui::Permission::ALL.into_iter().filter(|p| ui::permissions::granted_once(*p)).collect();
+    let launch = crate::launch_permissions::plan(installed && app.settings.setup_requested, !app.settings.paused, !app.settings.screen_off, &states, &held);
+    for (key, part, permission, label, action) in launch.pills.iter().copied() {
+        crate::diagnostics::line("permissions", &format!("{label} at launch"));
+        let cue = app.health.problem(key, part, label, action, ui::HealthControl::OpenSettings(permission));
+        app.health_cue(cue);
+    }
+    if launch.request_mic || launch.request_screen {
+        crate::diagnostics::line("permissions", &format!("asking again at launch: microphone {}, screen recording {}", launch.request_mic, launch.request_screen));
+        let (mic, screen) = (launch.request_mic, launch.request_screen);
+        u.on_main(move || ui::permissions::request_at_launch(mic, screen));
+    }
     if wants_listen {
         app.listening_starting();
         start_live(
@@ -406,7 +401,6 @@ pub(super) fn live(
         // Launched with Listening off: the agent and the screen run on their own switches.
         start_unheard(&mut app, &mut screens, permissions);
     }
-    let maintenance = crossbeam_channel::tick(Duration::from_secs(3600));
     let settings_tick = crossbeam_channel::tick(Duration::from_secs(2));
     let mut settings_watch = settings::SettingsWatch::default();
     let internal = app.internal_events();
@@ -427,7 +421,14 @@ pub(super) fn live(
     // Vella borrows the loaded listen model over asr.sock (vella_asr.rs); a failure here only costs Vella the loan.
     let mut vella_asr = Some(crate::vella_asr::VellaAsr::start(&crate::vella_asr::socket_dir(&app.data, crate::settings::profile_data().as_deref(), std::env::var_os("HOME").map(std::path::PathBuf::from).as_deref(), crate::edition::PUBLIC), true)).map(|(v, e)| { if let Some(e) = e { eprintln!("Vella transcription socket (retrying every 30 s): {e:#}"); } v });
     while !quitting {
+        // The phone's live microphone joins the running capture (phone_mic.rs); none while Listening is off.
+        crate::phone_mic::set_input(capture.as_ref().filter(|_| wants_listen).and_then(|c: &CaptureRun| c.capture.as_ref()).and_then(|c| c.push_input()));
         if let Some(v) = &mut vella_asr { v.sync(app.live_worker()); }
+        crate::remote::lend_asr(app.live_worker()); // the phone's audio turns decode on the same model (remote.rs)
+        // What the phone's press needs to know of Listening, and how long an auto-on took (remote_listen.rs).
+        crate::remote_listen::live_pass(!app.settings.paused && app.settings.setup_requested, app.listen_models_ready(), app.settings.setup_requested, crate::remote::asr_ready());
+        app.phone_settings_tick(); // the phone's copy of the menu (remote_settings.rs)
+        crate::remote::expire_asks(); // question cards past their day close on the phone too
         app.night_admission(app.settings.setup_requested && (!wants_listen || worker_started));
         let speaker_ready = app.speaker_events_rx.clone();
         let screen_events = screens.as_ref().map(|s: &screen::ScreenCapture| s.events.clone()).unwrap_or_else(crossbeam_channel::never);
@@ -512,9 +513,6 @@ pub(super) fn live(
                 settings::merge_heard(&mut heard,&playing_now,&app.settings.recorded_app_keys());
                 u.send(ui::UiUpdate::AppAudio(app.menu_apps(&heard)));
             },
-            recv(maintenance)->_=>{
-                archive::prune(&app.data.join("archive"),app.settings.retention_days,Some(&app.session))?;
-            },
             recv(actions)->a=>match a? {
                 ui::UiAction::Quit=>{app.request_engine_stop();if let Some(d)=crate::model_store::global(){d.stop();}quitting=true;},
                 ui::UiAction::Reload=>{
@@ -559,10 +557,11 @@ pub(super) fn live(
                 },
                 ui::UiAction::PermissionsChanged(states)=>{
                     let previous=permissions;permissions.observe(&states);
+                    app.mic_denied=crate::launch_permissions::mic_denied(&states);
+                    if installed { ui::permissions::remember_grants(&states); }
                     if app.settings.setup_requested { permission_health(&mut app, previous, permissions); }
                     if wants_listen && app.settings.setup_requested {
                         start_live(&mut app,&mut capture,&mut screens,&tx,&listen_tx,&mut worker_started,permissions)?;
-                        if !previous.accessibility && permissions.accessibility { app.refresh_discord_accessibility()?; }
                     } else if app.settings.setup_requested {
                         // Listening off: Screen Recording granted or revoked still starts or stops Seeing.
                         reconcile_screen(&mut app,&mut screens,true,permissions);
@@ -633,18 +632,22 @@ pub(super) fn live(
     }
     // Shutting down on purpose: the watchdog bounds it (Quit always ends) instead of watching it as a freeze.
     beats.quitting();
+    // Each step is named (bug note 2026-11-08T02-03-52): a Quit past its limit says which one waited.
+    beats.quit_step("Vella and the islands");
     drop(vella_asr.take()); // `gone` to Vella, then the socket closes
     // Also for a recovery's Quit: no teardown write waits behind a compaction step (main.rs does it at the click).
     heimdall_archive::compact::preempt_all();
     // Floating islands (night 1022): the bundled helper quits with Heimdall.
     crate::islands::live::shutdown();
     app.night_admission(false);
+    crate::phone_mic::set_input(None); // the phone's source ends (archived) before the capture stops
+    beats.quit_step("stopping capture");
     if let Some(capture) = capture.take() { capture.finish(&mut app, &events); }
-    beats.quit_progress();
+    beats.quit_step("restarted captures");
     if !settle_retired(Duration::from_secs(4)) {
         eprintln!("Quit: a restarted capture is still stopping; its last second may be lost");
     }
-    beats.quit_progress();
+    beats.quit_step("stopped captures' archives");
     // Listening off hands a slow last commit to the background; Quit lets it land.
     if !capture::settle_stopped_archives(Duration::from_secs(4)) {
         eprintln!("Quit: a stopped capture's archive is still committing; its last second may be lost");
@@ -652,9 +655,9 @@ pub(super) fn live(
     while let Ok(e) = events.try_recv() {
         if let Err(e)=app.capture_event(e){app.errors+=1;app.record_teardown_error(&format!("Capture drain failed during shutdown: {e:#}"));eprintln!("Capture drain failed; continuing teardown: {e:#}");}
     }
-    beats.quit_progress();
+    beats.quit_step("the listening worker");
     app.stop_live_worker(&listen_events)?;
-    beats.quit_progress();
+    beats.quit_step("screen capture");
     // The last stream stops in the lane, after any earlier stop; Quit gives the lane a bounded moment so its final
     // gap lands before the session is marked complete.
     cancel_screen_start(&mut app);
@@ -664,8 +667,9 @@ pub(super) fn live(
         std::thread::sleep(Duration::from_millis(20));
     }
     drop(discovering);
-    beats.quit_progress();
+    beats.quit_step("the pipeline's finish");
     app.finish()?;
+    beats.quit_step("the menu's exit");
     u.send(ui::UiUpdate::Terminate);
     Ok(())
 }
@@ -773,8 +777,7 @@ pub(super) fn reload_settings(app: &mut pipeline::Pipeline, watch: &mut settings
         app.health_cue(cue);
     };
     let applied = match watch.read_changed(&app.data.join("settings.json")) {
-        Ok(Some(mut next)) => {
-            next.normalize_archive();
+        Ok(Some(next)) => {
             let applied = if next == app.settings && !app.stop_settings_fresh(&next) { Ok(None) } else {
                 let old = app.settings.clone();
                 app.apply_settings(next).map(|()| Some(old))

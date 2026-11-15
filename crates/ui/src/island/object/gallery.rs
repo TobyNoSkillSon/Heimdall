@@ -160,7 +160,7 @@ pub fn memory_note() -> AgentNotice {
 /// An evening's conversation as the app sends it (`chat_history`): ending with the last turn's own reply and table.
 pub fn chat_day() -> Vec<crate::chat::ChatEntry> {
     use crate::chat::{ActionKind, ChatEntry, ChatKind, Heard, NoteShape};
-    let owner = |s: &str| ChatKind::Owner(s.into());
+    let owner = |s: &str| ChatKind::User(s.into());
     let him = |s: &str, heard| ChatKind::Heimdall { text: s.into(), heard };
     let act = |kind, s: &str, a: Option<&str>| ChatKind::Action { kind, text: s.into(), answer: a.map(Into::into) };
     let rows = vec![
@@ -515,9 +515,9 @@ pub fn all() -> Vec<Card> {
         "Question: a new voice, one guess",
         "Question card",
         "One real guess: one chip.",
-        vec![ev(0.1, voice_card("voice-new:Speaker Tue 3 Nov 17h #5", "New voice: \u{201c}Let's decide that on Friday then.\u{201d}", &["Kanan", "Not important"], 300_000)), (2.4, Step::ClickAny(0))],
+        vec![ev(0.1, voice_card("voice-new:Speaker Tue 3 Nov 17h #5", "New voice: \u{201c}Let's decide that on Friday then.\u{201d}", &["Alex", "Not important"], 300_000)), (2.4, Step::ClickAny(0))],
         3.6,
-        vec![(0.1, "Asks"), (2.4, "Kanan")],
+        vec![(0.1, "Asks"), (2.4, "Alex")],
     ));
     v.push(card(
         "question_new_voice_none",
@@ -862,7 +862,7 @@ pub fn all() -> Vec<Card> {
     // Night 1027 (bug notes 2026-10-26T19-14-48 and 19-14-21-3): the conversation stays open through a send and the
     // thinking, and follows the newest message to the end.
     let mut sent = history.clone();
-    sent.push(crate::chat::ChatEntry { at_ms: sent.last().map_or(0, |e| e.at_ms) + 1000, kind: crate::chat::ChatKind::Owner("And what is on the GPU?".into()) });
+    sent.push(crate::chat::ChatEntry { at_ms: sent.last().map_or(0, |e| e.at_ms) + 1000, kind: crate::chat::ChatKind::User("And what is on the GPU?".into()) });
     v.push(card(
         "chat_send_follows",
         "Pull-down: a send keeps it open",

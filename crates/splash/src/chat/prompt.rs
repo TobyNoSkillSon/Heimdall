@@ -98,11 +98,6 @@ pub fn thinking_token_budget(body: &Value, default: Option<u64>) -> Result<Optio
     }
 }
 
-/// The budget the engine enforces: only for a request that thinks, and only below its output budget.
-pub fn effective_thinking_budget(budget: Option<u64>, thinking: bool, max_new: u64) -> Option<u64> {
-    budget.filter(|b| thinking && *b < max_new)
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RenderedPrompt {
     pub text: String,

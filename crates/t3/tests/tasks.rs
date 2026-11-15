@@ -84,6 +84,10 @@ struct Fake {
     idempotent_send: std::sync::atomic::AtomicBool,
     /// T3's pending-request listing fails (as the renamed tool did from 1 Nov until 0.1.6's name was used).
     fail_requests: std::sync::atomic::AtomicBool,
+    /// T3 lists the user's second Claude account (`claudeAgent_2`) beside the main one.
+    second_account: std::sync::atomic::AtomicBool,
+    /// Every send and thread read fails as if T3 were busy or restarting (crewmates: the inbox keeps the message).
+    fail_sends: std::sync::atomic::AtomicBool,
 }
 fn catalog(s: &Fake) -> Value {
     let open = json!({"type":"object","additionalProperties":true});
@@ -97,7 +101,7 @@ fn catalog(s: &Fake) -> Value {
         tool("t3_thread_read",false,false), tool("t3_thread_wait",true,false), tool("t3_thread_launch",false,true),
         send, tool("t3_thread_interrupt",false,true), tool("t3_thread_organize",false,true),
         // T3 0.1.6's action tools (bug note 2026-11-02T14-56-51-3): one tool, an `action`.
-        tool("t3_pending_request",false,true), tool("t3_queue",false,true),
+        tool("t3_pending_request",false,true), tool("t3_queue",false,true), tool("t3_thread_configure",false,true),
     ]})
 }
 /// Opus as the installed T3 lists it since its 23 Oct update (`values` and `default`; bug note 2026-10-23T01-29-13).
@@ -105,7 +109,16 @@ fn live_options() -> Value {
     json!([{"id":"effort","values":["low","medium","high","xhigh","max","ultracode","ultrathink"],"default":"medium"},
         {"id":"fastMode","values":[false,true]}])
 }
-fn capabilities() -> Value {
+fn capabilities(s: &Fake) -> Value {
+    let mut c = capabilities_one();
+    if s.second_account.load(std::sync::atomic::Ordering::Acquire) {
+        let mut two = c["providers"][0].clone();
+        two["providerInstanceId"] = json!("claudeAgent_2");
+        c["providers"].as_array_mut().unwrap().insert(1, two);
+    }
+    c
+}
+fn capabilities_one() -> Value {
     let effort = |default: &str| {
         let choices: Vec<Value> = ["low", "medium", "high", "max"].iter().map(|o| json!({"id":o,"isDefault":*o == default})).collect();
         json!([{"id":"effort","type":"select","options":choices}])
@@ -128,13 +141,16 @@ fn detail(t: &Value) -> Value {
     // `approvals`: approval waits T3 counts without listing a request id (the count beyond `pending`).
     let pending = t["pending"].as_array().unwrap().len() + t["approvals"].as_u64().unwrap_or(0) as usize;
     let count = t["items"].as_array().unwrap().len();
-    json!({"threadId":t["threadId"],"projectId":t["projectId"],"title":t["title"],"model":t["model"],"providerInstanceId":"claudeAgent",
+    json!({"threadId":t["threadId"],"projectId":t["projectId"],"title":t["title"],"model":t["model"],"providerInstanceId":t["provider"].as_str().unwrap_or("claudeAgent"),
         "status":status,"latestRunId":latest_id,"activeRunId":active_id,"pendingRequestCount":pending,"itemCount":count,
         "archived":t["archived"],"runtimeMode":"full-access","relationshipToParent":t["relationshipToParent"],"parentThreadId":t["parentThreadId"],"creationSource":t["creationSource"],"updatedAt":t["updatedAt"],"createdAt":t["updatedAt"],"link":t["link"]})
 }
+/// A `t3_thread_list` row as the installed T3 lists it (live key list, 6 Nov; bug note 2026-11-06T11-57-54): no
+/// `activeRunId` and no `pendingRequestCount`, which only the read shell (`detail`) carries.
 fn row(t: &Value) -> Value {
     let mut d = detail(t);
     d.as_object_mut().unwrap().remove("activeRunId");
+    d.as_object_mut().unwrap().remove("pendingRequestCount");
     d
 }
 async fn mcp(State(s): State<Arc<Fake>>, _h: HeaderMap, Json(v): Json<Value>) -> Response {
@@ -148,14 +164,17 @@ async fn mcp(State(s): State<Arc<Fake>>, _h: HeaderMap, Json(v): Json<Value>) ->
     let name = v["params"]["name"].as_str().unwrap().to_owned();
     let a = v["params"]["arguments"].clone();
     s.calls.lock().unwrap().push((name.clone(), a.clone()));
+    if s.fail_sends.load(std::sync::atomic::Ordering::Acquire) && matches!(name.as_str(), "t3_thread_send" | "t3_thread_read" | "t3_thread_launch") {
+        return Json(json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":"T3 is restarting"}})).into_response();
+    }
     let fail = |text: &str| Json(json!({"jsonrpc":"2.0","id":id,"result":{"isError":true,"content":[{"type":"text","text":text}]}})).into_response();
     let result = match name.as_str() {
-        "orchestrator_capabilities" => capabilities(),
+        "orchestrator_capabilities" => capabilities(&s),
         "t3_project_list" => json!({"projects":[{"id":"p-vault","title":"Vault","workspaceRoot":*s.root.lock().unwrap()},{"id":"p-scratch","title":"No project","workspaceRoot":"/nonexistent-scratch"}],"nextCursor":null}),
         "t3_thread_list" => {
             let statuses: Vec<Value> = a["statuses"].as_array().cloned().unwrap_or_default();
             let mut rows: Vec<Value> = s.threads.lock().unwrap().iter()
-                .filter(|t| t["projectId"] == a["projectId"])
+                .filter(|t| a["allProjects"] == true || t["projectId"] == a["projectId"])
                 .filter(|t| a["includeSubagents"] == true || t["relationshipToParent"] != "subagent")
                 .filter(|t| a["titleContains"].as_str().is_none_or(|q| t["title"].as_str().unwrap().contains(q)))
                 .map(row)
@@ -201,7 +220,7 @@ async fn mcp(State(s): State<Arc<Fake>>, _h: HeaderMap, Json(v): Json<Value>) ->
             let n = threads.len();
             let tid = format!("mcp:task-{n}");
             let run = format!("run:{tid}:1");
-            threads.push(json!({"threadId":tid,"projectId":a["projectId"],"title":a["title"],"model":a["modelSelection"]["model"],"archived":false,"pending":[],"relationshipToParent":null,"updatedAt":iso(0),
+            threads.push(json!({"threadId":tid,"projectId":a["projectId"],"title":a["title"],"model":a["modelSelection"]["model"],"provider":a["modelSelection"]["instanceId"],"archived":false,"pending":[],"relationshipToParent":null,"updatedAt":iso(0),
                 "runs":[{"runId":run,"ordinal":1,"status":"running","model":a["modelSelection"]["model"],"requestedAt":iso(0),"startedAt":iso(0),"completedAt":null}],
                 "items":[{"position":0,"itemId":format!("{tid}:brief"),"runId":run,"type":"user_message","status":"completed","text":a["message"],"createdBy":"agent","creationSource":"mcp","visibility":"local","updatedAt":iso(0)}]}));
             json!({"threadId":tid,"projectId":a["projectId"],"runId":run,"status":"running","modelSelection":a["modelSelection"]})
@@ -209,7 +228,15 @@ async fn mcp(State(s): State<Arc<Fake>>, _h: HeaderMap, Json(v): Json<Value>) ->
         "t3_thread_send" => {
             let mut threads = s.threads.lock().unwrap();
             let Some(t) = threads.iter_mut().find(|t| t["threadId"] == a["threadId"]) else { return fail("Thread not found") };
+            // T3 0.1.x refuses a message into an archived thread (log sweep 8 Nov, finding 1).
+            if t["archived"] == true {
+                return fail(&format!(r#"{{"_tag":"OrchestratorMcpFailure","code":"thread_not_sendable","message":"Thread {} is archived and cannot receive messages."}}"#, t["threadId"].as_str().unwrap()));
+            }
             let active = t["runs"].as_array().unwrap().iter().rev().find(|r| ACTIVE.contains(&r["status"].as_str().unwrap())).map(|r| r["runId"].clone());
+            // T3 0.1.x refuses a steer when no turn runs (bug note 2026-11-10T09-03-14; Heimdall's log, 5 Nov 07:44).
+            if a["mode"] == "steer" && active.is_none() {
+                return fail(&format!(r#"{{"_tag":"OrchestratorMcpFailure","code":"thread_not_sendable","message":"Thread {} has no running turn that can be steered."}}"#, t["threadId"].as_str().unwrap()));
+            }
             let (run, delivery) = match active {
                 // T3's queue_after_active: a run of its own that starts when the current turn ends.
                 Some(_) if a["mode"] == "queue" => {
@@ -252,6 +279,14 @@ async fn mcp(State(s): State<Arc<Fake>>, _h: HeaderMap, Json(v): Json<Value>) ->
             }
             json!({"sequence":1})
         }
+        // The account and model a thread runs on next (bug note 2026-11-06T12-26-36: the relay's move at 12:26).
+        "t3_thread_configure" => {
+            let mut threads = s.threads.lock().unwrap();
+            let Some(t) = threads.iter_mut().find(|t| t["threadId"] == a["threadId"]) else { return fail("Thread not found") };
+            t["provider"] = a["modelSelection"]["instanceId"].clone();
+            t["model"] = a["modelSelection"]["model"].clone();
+            json!({"sequence":1})
+        }
         "t3_thread_interrupt" => {
             let mut threads = s.threads.lock().unwrap();
             let t = threads.iter_mut().find(|t| t["threadId"] == a["threadId"]).unwrap();
@@ -264,8 +299,17 @@ async fn mcp(State(s): State<Arc<Fake>>, _h: HeaderMap, Json(v): Json<Value>) ->
         }
         "t3_thread_organize" => {
             let mut threads = s.threads.lock().unwrap();
-            if a["action"] == "archive" {
-                threads.iter_mut().find(|t| t["threadId"] == a["threadId"]).unwrap()["archived"] = json!(true);
+            if a["action"] == "archive" || a["action"] == "unarchive" {
+                let t = threads.iter_mut().find(|t| t["threadId"] == a["threadId"]).unwrap();
+                // T3 refuses to unarchive a thread that is not archived (3 and 4 Nov).
+                if a["action"] == "unarchive" && t["archived"] != true {
+                    return fail(&format!(r#"{{"_tag":"OrchestratorMcpFailure","code":"orchestration_error","message":"Thread {} is not archived."}}"#, t["threadId"].as_str().unwrap()));
+                }
+                // And to archive one that is (review 1111 S5).
+                if a["action"] == "archive" && t["archived"] == true {
+                    return fail(&format!(r#"{{"_tag":"OrchestratorMcpFailure","code":"orchestration_error","message":"Thread {} is already archived."}}"#, t["threadId"].as_str().unwrap()));
+                }
+                t["archived"] = json!(a["action"] == "archive");
             }
             json!({"sequence":1})
         }
@@ -546,9 +590,20 @@ async fn delegate_task_starts_a_thread_in_one_call() {
     // The default task prompt (docs/skills.md) goes above every brief once set, also in a worktree.
     l.w.set_brief_preamble("Rules every task follows.\n");
     l.call("delegate_task", json!({"task":"Fix it.","title":"Ruled","target":{"model":"claude-opus-5-5"},"path":l.dir.path()})).await.unwrap();
-    assert_eq!(l.calls("t3_thread_launch")[3]["message"], "Rules every task follows.\n\n---\n\nFix it.");
+    assert_eq!(l.calls("t3_thread_launch")[3]["message"], format!("Rules every task follows.\n\n{}\n\n---\n\nFix it.", t3::workers::AVOID_APPROVALS));
     l.call("delegate_task", json!({"task":"Fix it.","title":"Ruled tree","target":{"model":"claude-opus-5-5"},"path":l.dir.path(),"isolation":"worktree"})).await.unwrap();
-    assert_eq!(l.calls("t3_thread_launch")[4]["message"], "Rules every task follows.\n\n---\n\nFix it.");
+    assert_eq!(l.calls("t3_thread_launch")[4]["message"], format!("Rules every task follows.\n\n{}\n\n---\n\nFix it.", t3::workers::AVOID_APPROVALS));
+    // Review 1111: outside the Vault (no Vault CLAUDE.md loads there) the preamble keeps the two rules the Vault's
+    // contract carries; inside it, it stays trimmed.
+    let vault = l.dir.path().join("vault");
+    std::fs::create_dir_all(&vault).unwrap();
+    std::fs::write(vault.join("CLAUDE.md"), "# Vault Agent Contract\n").unwrap();
+    l.w.set_outside_vault_rules("- Done means checked the way User will meet it.\n", &vault);
+    l.call("delegate_task", json!({"task":"Fix it.","title":"Outside","target":{"model":"claude-opus-5-5"},"path":l.dir.path()})).await.unwrap();
+    assert_eq!(l.calls("t3_thread_launch")[5]["message"], format!("Rules every task follows.\n- Done means checked the way User will meet it.\n\n{}\n\n---\n\nFix it.", t3::workers::AVOID_APPROVALS));
+    l.call("delegate_task", json!({"task":"Fix it.","title":"Inside","target":{"model":"claude-opus-5-5"},"path":vault})).await.unwrap();
+    let inside = l.calls("t3_thread_launch")[6]["message"].as_str().unwrap().to_owned();
+    assert!(inside.starts_with("Rules every task follows.\n\n") && !inside.contains("Done means") && inside.ends_with("Fix it."), "{inside}");
     // A folder no project contains says so.
     let e = l.call("delegate_task", json!({"task":"x","title":"x","target":{"model":"claude-opus-5-5"},"path":"/"})).await.unwrap_err().to_string();
     assert!(e.starts_with("PROJECT_NOT_FOUND: no registered T3 project contains /"), "{e}");
@@ -560,13 +615,14 @@ async fn delegate_task_starts_a_thread_in_one_call() {
 #[tokio::test]
 async fn a_turn_that_waits_on_its_sub_agents_or_background_work_wakes_nothing() {
     let l = Lab::new().await;
+    l.w.set_self_close(false); // lane S: this rule is about a finished task that stays open (task_status, a later turn, a cleared island)
     let task = l.delegate("Qwen 27B engine benchmark").await;
     let agents: Vec<String> = ["Research Splash", "Research vllm-metal", "Research oMLX"]
         .iter()
         .map(|t| l.item(&task, "subagent", "running", "", json!({"title":t,"subagentId":format!("node:{t}")})))
         .collect();
     l.item(&task, "command_execution", "failed", "$ ps -o pid -p 38738\nNo such process", json!({}));
-    l.item(&task, "assistant_message", "completed", "AllForOne is cleaned and archived. Three research workers are now checking. I'll pick this up when they report.", json!({}));
+    l.item(&task, "assistant_message", "completed", "Atlas is cleaned and archived. Three research workers are now checking. I'll pick this up when they report.", json!({}));
     l.end_run(&task, "completed");
     l.pass().await;
     l.pass().await;
@@ -603,7 +659,7 @@ async fn a_turn_that_waits_on_its_sub_agents_or_background_work_wakes_nothing() 
     // The held turns' replies ride before the result, in order (review 21 Oct: no reply is lost).
     assert!(
         got[0].1.starts_with(&format!(
-            "Task 'Qwen 27B engine benchmark' ({task}) completed. Final reply:\n\nEarlier turn:\nAllForOne is cleaned and archived. Three research workers are now checking. I'll pick this up when they report.\n\nEarlier turn:\nWaiting on the vllm-metal install and the oMLX research.\n\nLast turn:\nSplash 94.5 tok/s"
+            "Task 'Qwen 27B engine benchmark' ({task}) completed. Final reply:\n\nEarlier turn:\nAtlas is cleaned and archived. Three research workers are now checking. I'll pick this up when they report.\n\nEarlier turn:\nWaiting on the vllm-metal install and the oMLX research.\n\nLast turn:\nSplash 94.5 tok/s"
         )),
         "{}",
         got[0].1
@@ -701,6 +757,36 @@ async fn own_stops_wake_nothing() {
     assert!(l.call("task_cancel", json!({"taskId":"owner"})).await.unwrap_err().to_string().starts_with("TASK_NOT_OWNED"));
 }
 
+/// Night 8 Nov log sweep, finding 1: the relay archived a finished task with task_cancel and the user's click for it
+/// ("Try int8 once", 02:08:50) went to the archived thread, which T3 refuses (`thread_not_sendable`). A message for
+/// Heimdall's own archived task unarchives it and is delivered; the user's own archived thread keeps T3's refusal.
+#[tokio::test]
+async fn a_message_for_an_archived_task_unarchives_it_and_is_delivered() {
+    let l = Lab::new().await;
+    let task = l.delegate("Rerun Nemotron on the Turkish clip").await;
+    l.item(&task, "assistant_message", "completed", "Done: WER 0.31 forced Turkish.", json!({}));
+    l.end_run(&task, "completed");
+    assert_eq!(l.call("task_cancel", json!({"taskId":task,"reason":"Relayed and shown."})).await.unwrap(), "Archived 'Rerun Nemotron on the Turkish clip'.");
+    let sent = l.call("t3_thread_send", json!({"threadId":task,"message":"The user clicked \"Try int8 once\"."})).await.unwrap();
+    assert!(sent.starts_with(&format!("Sent to thread {task} (started")), "{sent}");
+    assert_eq!(l.calls("t3_thread_organize").last().unwrap(), &json!({"threadId":task,"action":"unarchive"}));
+    let sends = l.calls("t3_thread_send");
+    assert_eq!(sends.len(), 2, "refused once, then delivered");
+    let status = l.call("task_status", json!({})).await.unwrap();
+    assert!(status.contains(&task) && status.contains("working"), "the task is followed again: {status}");
+    // Its finish wakes the relay as any task's does.
+    l.item(&task, "assistant_message", "completed", "int8: WER 0.33.", json!({}));
+    l.end_run(&task, "completed");
+    l.pass().await;
+    assert!(l.deliveries().iter().any(|d| d.1.contains("int8: WER 0.33.")), "{:?}", l.deliveries());
+    // The user's own archived thread is not Heimdall's to unarchive.
+    l.owner_thread("owner", "User's research", 1);
+    l.with("owner", |t| t["archived"] = json!(true));
+    let e = l.call("t3_thread_send", json!({"threadId":"owner","message":"Carry on."})).await.unwrap_err().to_string();
+    assert!(e.contains("thread_not_sendable"), "{e}");
+    assert_eq!(l.calls("t3_thread_organize").iter().filter(|c| c["action"] == "unarchive").count(), 1);
+}
+
 /// Day review T1 ("if I have to wake you up and then tell you to read it and then tell you to
 /// answer it like that's just stupid"): a message Heimdall sends into one of the user's threads wakes it when that run
 /// ends, with the reply; the thread stays the user's (his later runs wake nothing, destructive calls still ask).
@@ -764,7 +850,7 @@ async fn reading_three_threads_is_one_compact_call() {
     let q40 = heim.find("Question 40 from User.").unwrap();
     let a40 = heim.find("Answer 40: done.").unwrap();
     assert!(a39 < q40 && q40 < a40, "{heim}");
-    assert!(heim.contains("\nUser, "), "{heim}");
+    assert!(heim.contains("\nThe user, "), "{heim}");
     for noise in ["recentRuns", "runId", "providerInstanceId", "creationSource", "sourceThreadId", "visibility", "itemCount", "\"", "{"] {
         assert!(!out.contains(noise), "{noise} reached the agent: {out}");
     }
@@ -891,7 +977,7 @@ async fn a_stuck_sub_agent_holds_a_result_only_until_the_hold_limit() {
     assert_eq!(l.deliveries().len(), 4, "{:?}", l.deliveries());
     assert!(l.deliveries()[3].1.contains("Final reply:\n\nCache is cold on first run."));
     l.new_run("t-w");
-    l.item("t-w", "assistant_message", "completed", "User's own next answer.", json!({}));
+    l.item("t-w", "assistant_message", "completed", "the user's own next answer.", json!({}));
     l.end_run("t-w", "completed");
     l.pass().await;
     l.pass().await;
@@ -912,7 +998,7 @@ async fn a_stuck_sub_agent_holds_a_result_only_until_the_hold_limit() {
     }
     assert_eq!(l.deliveries().len(), 5, "{:?}", l.deliveries());
     l.new_run("t-q");
-    l.item("t-q", "assistant_message", "completed", "User asked something else.", json!({}));
+    l.item("t-q", "assistant_message", "completed", "The user asked something else.", json!({}));
     l.end_run("t-q", "completed");
     l.pass().await;
     assert_eq!(l.deliveries().len(), 5, "no longer watched: {:?}", l.deliveries());
@@ -996,7 +1082,7 @@ async fn a_sub_agents_question_or_approval_is_reported_as_its_tasks() {
         format!("Task 'Engine research' ({task}) asks through its sub-agent 'Check oMLX' [thread c-omlx, request req-1]:\nWhich engine first? [question q]")
     );
     let approval = got.iter().find(|(id, _)| id == "approval:c-deep:run:c-deep:1").expect("the nested sub-agent's approval");
-    assert_eq!(approval.1, format!("Task 'Engine research' ({task}): its sub-agent 'Install probe' waits for an approval in T3; only User can give it there [thread c-deep]."));
+    assert_eq!(approval.1, format!("Task 'Engine research' ({task}): its sub-agent 'Install probe' waits for an approval in T3; only the user can give it there [thread c-deep]."));
     assert!(!got.iter().any(|(id, _)| id.contains("c-owner")), "{got:?}");
     // The question waits for the user after a start (the harness classifies notices by id).
     assert_eq!(agent::notice::NoticeKind::classify(&question.0, &question.1), agent::notice::NoticeKind::Question);
@@ -1505,6 +1591,7 @@ async fn a_cleared_task_with_live_background_work_or_a_monitor_is_never_archived
 #[tokio::test]
 async fn a_long_output_quoting_the_background_line_is_no_background_command() {
     let l = Lab::new().await;
+    l.w.set_self_close(false); // lane S: this rule is about a finished task that stays open (task_status, a later turn, a cleared island)
     l.w.set_hold_timing(0, 0);
     let task = l.delegate("Transcript search").await;
     let text = format!(
@@ -1561,6 +1648,7 @@ impl Drop for Background {
 #[tokio::test]
 async fn a_final_reply_is_not_held_by_background_commands_that_finished_unseen() {
     let l = Lab::new().await;
+    l.w.set_self_close(false); // lane S: this rule is about a finished task that stays open (task_status, a later turn, a cleared island)
     let task = l.delegate("Research: small high-quality TTS for Heimdall").await;
     let mut chatterbox = Background::start(l.dir.path(), "b0a5nzni8");
     let mut voxcpm = Background::start(l.dir.path(), "bvt6app9s");
@@ -1810,6 +1898,7 @@ async fn monitor_event_turns_over_reported_background_work_wake_nothing() {
 #[tokio::test]
 async fn monitor_rule_edges() {
     let l = Lab::new().await;
+    l.w.set_self_close(false); // lane S: this rule is about a finished task that stays open (task_status, a later turn, a cleared island)
     l.w.set_hold_timing(0, 0);
     let monitor = |id: Option<&str>, what: &str| {
         let output = id.map_or(String::new(), |id| format!(",\n  \"output\": {}", json!({"taskId":id,"timeoutMs":1800000,"persistent":false})));
@@ -1908,6 +1997,7 @@ async fn monitor_rule_edges() {
 async fn a_task_turn_failing_on_its_sign_in_is_retried_once_and_not_re_steered() {
     const AUTH: &str = "Failed to authenticate: OAuth session expired and could not be refreshed";
     let l = Lab::new().await;
+    l.w.set_self_close(false); // lane S: this rule is about a finished task that stays open (task_status, a later turn, a cleared island)
     l.w.set_auth_retry(60 * 60 * 1000);
     let task = l.delegate("Decider v4: max-RAM training launcher").await;
     l.item(&task, "assistant_message", "completed", "Training launched; I'll check the first epoch.", json!({}));
@@ -1988,17 +2078,30 @@ async fn a_task_turn_failing_on_its_sign_in_is_retried_once_and_not_re_steered()
     assert!(l.deliveries().last().is_some_and(|(_, text)| text.contains("Labelling finished")), "{:?}", l.deliveries());
     let delivered = l.deliveries().len();
 
-    // While the retry is still due, a send is refused too.
+    // night1114 relay (bug note 2026-11-13T10-54-06): while the retry is still due, a send (the user's restart, 10:48)
+    // goes through and is that retry: no second, automatic one follows, and the answer says so.
     l.w.set_auth_retry(60 * 60 * 1000);
     let other = l.delegate("Drama 3 BF16 download").await;
     l.item(&other, "assistant_message", "completed", AUTH, json!({}));
     l.end_run(&other, "failed");
     l.pass().await;
     assert_eq!(l.deliveries().len(), delivered, "{:?}", l.deliveries());
-    let refused = l.call("t3_thread_send", json!({"threadId":other,"message":"Carry on."})).await.unwrap_err().to_string();
-    assert!(refused.contains("retries it once by itself in 60 min"), "{refused}");
-    // Bounded (review 27 Oct): long past the retry's time (one that could not be sent), a send goes through.
+    let sent = l.call("t3_thread_send", json!({"threadId":other,"message":"Carry on."})).await.unwrap();
+    assert!(!sent.contains("NOT_SENT") && sent.contains("this message is its retry"), "{sent}");
+    let sends = l.calls("t3_thread_send").len();
     l.w.set_auth_retry(0);
+    l.pass().await;
+    l.pass().await;
+    assert_eq!(l.calls("t3_thread_send").len(), sends, "the send was the retry: no automatic one after it");
+    // Its turn (the run the send started) fails on its sign-in again: that is the retry failing, reported once; a send
+    // right after is refused with when.
+    l.item(&other, "assistant_message", "completed", AUTH, json!({}));
+    l.end_run(&other, "failed");
+    l.pass().await;
+    assert!(l.deliveries().last().is_some_and(|(_, text)| text.contains("after Heimdall's one automatic retry")), "{:?}", l.deliveries());
+    let refused = l.call("t3_thread_send", json!({"threadId":other,"message":"Carry on."})).await.unwrap_err().to_string();
+    assert!(refused.contains("NOT_SENT") && refused.contains("Send after"), "{refused}");
+    // Bounded (review 27 Oct): past the cooldown, a send goes through.
     l.w.set_auth_cooldown(0);
     let sent = l.call("t3_thread_send", json!({"threadId":other,"message":"Carry on."})).await.unwrap();
     assert!(!sent.contains("NOT_SENT"), "{sent}");
@@ -2018,14 +2121,15 @@ async fn heimdalls_sends_join_its_own_message_still_queued() {
     let queue = l.with(&task, |t| t["runs"].as_array().unwrap().iter().filter(|r| r["status"] == "queued").count());
     assert_eq!(queue, 1);
     let text = l.with(&task, |t| t["items"].as_array().unwrap().iter().rev().find(|i| i["type"] == "user_message").unwrap()["text"].clone());
-    assert_eq!(text, "Switch the runners to effort high.\n\nAnd stop reporting progress.");
+    // One mark from Heimdall at the top (bug note 2026-11-08T06-13-58), not one per joined message.
+    assert_eq!(text, format!("{} Switch the runners to effort high.\n\nAnd stop reporting progress.", t3::workers::steer_mark()));
     // The same operation replayed (a lost answer) joins nothing twice.
     let args = json!({"threadId":task,"message":"And keep the logs."});
     let once = l.w.execute("t3_thread_send", args.clone(), "op-join", &l.p()).await.unwrap();
     let again = l.w.execute("t3_thread_send", args, "op-join", &l.p()).await.unwrap();
     assert_eq!(once, again);
     let text = l.with(&task, |t| t["items"].as_array().unwrap().iter().rev().find(|i| i["type"] == "user_message").unwrap()["text"].clone());
-    assert_eq!(text, "Switch the runners to effort high.\n\nAnd stop reporting progress.\n\nAnd keep the logs.");
+    assert_eq!(text, format!("{} Switch the runners to effort high.\n\nAnd stop reporting progress.\n\nAnd keep the logs.", t3::workers::steer_mark()));
     // Heimdall stopped between T3's edit and recording it: the same message again finds itself joined already.
     let crashed = "Switch the runners to effort high.\n\nAnd stop reporting progress.\n\nAnd keep the logs.\n\nAnd tidy up.";
     l.with(&task, |t| {
@@ -2057,6 +2161,7 @@ async fn heimdalls_sends_join_its_own_message_still_queued() {
 #[tokio::test]
 async fn followed_tasks_survive_a_restart_and_each_result_arrives_once() {
     let mut l = Lab::new().await;
+    l.w.set_self_close(false); // lane S: this rule is about a finished task that stays open (task_status, a later turn, a cleared island)
     let islands = l.delegate("Floating Islands prototype (standalone)").await;
     let remote = l.delegate("Heimdall iPhone remote prototype").await;
     let tts = l.delegate("Research: what Reddit recommends for local TTS voices").await;
@@ -2077,6 +2182,7 @@ async fn followed_tasks_survive_a_restart_and_each_result_arrives_once() {
     l.item(&islands, "assistant_message", "completed", "Islands demo shows realistic tasks now.", json!({}));
     l.end_run(&islands, "completed");
     l.restart_process();
+    l.w.set_self_close(false);
     let status = l.call("task_status", json!({})).await.unwrap();
     for t in [&islands, &remote, &tts, &arsenal] {
         assert!(status.contains(t.as_str()), "{t} still a task after the restart: {status}");
@@ -2403,7 +2509,7 @@ async fn a_watched_threads_own_follow_up_runs_still_wake_it() {
     l.pass().await;
     l.pass().await;
     assert_eq!(l.deliveries().iter().filter(|(id, _)| id.starts_with("terminal:")).count(), 3, "{:?}", l.deliveries());
-    assert!(l.w.restart_notice(true).unwrap().is_none(), "nothing followed after User's own turn");
+    assert!(l.w.restart_notice(true).unwrap().is_none(), "nothing followed after the user's own turn");
 }
 
 /// The follow-up following has an end: quiet for `TRAIL_MS` after its last notice, the thread is the user's again; and
@@ -2466,7 +2572,7 @@ async fn a_reply_held_only_for_a_background_waiter_arrives_within_minutes() {
     l.pass().await;
     assert_eq!(l.deliveries().len(), 1);
     l.w.set_hold_timing(0, 400);
-    l.call("t3_thread_send", json!({"threadId":task,"message":"User is ready now (16:07): the iPhone is unlocked."})).await.unwrap();
+    l.call("t3_thread_send", json!({"threadId":task,"message":"The user is ready now (16:07): the iPhone is unlocked."})).await.unwrap();
     l.item(&task, "command_execution", "completed", "$ /tmp/hr_wait.sh\nCommand running in background with ID: bi03w9ndy. Output is being written to: /nonexistent/bi03w9ndy.output.", json!({}));
     l.item(&task, "assistant_message", "completed", "The phone reports Developer Mode as off. Switch it on, let it restart and tap Turn On.", json!({}));
     l.end_run(&task, "completed");
@@ -2581,7 +2687,7 @@ async fn delegate_task_binds_only_a_projects_own_repository() {
     l.w.set_brief_preamble("Rules.");
     l.call("delegate_task", json!({"task":"Fix it.","title":"Fix","target":{"model":"claude-opus-5-5"},"path":app})).await.unwrap();
     let ruled = l.calls("t3_thread_launch").last().unwrap()["message"].as_str().unwrap().to_owned();
-    assert!(ruled.starts_with(&format!("Rules.\n\n---\n\nWorking folder: {} (", app_real.display())) && ruled.ends_with("\n\nFix it."), "{ruled}");
+    assert!(ruled.starts_with(&format!("Rules.\n\n{}\n\n---\n\nWorking folder: {} (", t3::workers::AVOID_APPROVALS, app_real.display())) && ruled.ends_with("\n\nFix it."), "{ruled}");
 }
 
 /// Bug note 22 Oct 15:35, replayed from the Voxtral research task (mcp:3bf45699, run 3): the turn launched an Explore
@@ -2603,12 +2709,12 @@ async fn a_background_sub_agent_the_turn_read_itself_delays_nothing() {
     // After it closed: a command ends, then a new model call (the sub-agent's result rides on it).
     l.item(&task, "command_execution", "completed", "$ python3 -I /tmp/latan.py\nmedian 4.9 s", json!({}));
     l.item(&task, "reasoning", "completed", "The shelved sliding-window pipeline re-decodes the last 8 seconds.", json!({}));
-    l.item(&task, "assistant_message", "completed", "User was right: the cache is warm on 98% of calls.", json!({}));
+    l.item(&task, "assistant_message", "completed", "The user was right: the cache is warm on 98% of calls.", json!({}));
     l.end_run(&task, "completed");
     l.pass().await;
     let got = l.deliveries();
     assert_eq!(got.len(), 1, "held for the grace though the turn read its sub-agent: {got:?}");
-    assert!(got[0].1.contains("Final reply:\n\nUser was right"), "{}", got[0].1);
+    assert!(got[0].1.contains("Final reply:\n\nThe user was right"), "{}", got[0].1);
 }
 
 /// The same bug note's timing, through the app's watcher: a result is never left for the next 30 s pass. A run that
@@ -2702,6 +2808,7 @@ async fn every_run_working_for_heimdall_gets_its_island_once() {
 #[tokio::test]
 async fn a_cleared_task_is_archived_once_finished_and_reported_and_never_stopped() {
     let l = Lab::new().await;
+    l.w.set_self_close(false); // lane S: this rule is about a finished task that stays open (task_status, a later turn, a cleared island)
     // Finished and reported: archived at once.
     let done = l.delegate("Disk cleanup").await;
     l.item(&done, "assistant_message", "completed", "Freed 12 GB.", json!({}));
@@ -2923,4 +3030,932 @@ async fn a_result_recorded_against_a_dropped_run_still_lets_the_task_be_archived
     assert!(l.deliveries().is_empty(), "the ending is not reported again under the earlier run: {:?}", l.deliveries());
     assert!(l.w.clear_task(&task).unwrap());
     assert_eq!(l.w.archive_cleared().await.unwrap(), vec!["Rebuild setup wizard".to_string()]);
+}
+
+/// Bug note 2026-11-06T11-57-54 (the user, 11:57): task threads stopped on approval prompts and Heimdall never said so.
+/// T3's list rows carry no request count and a run waiting on an approval still reads "running", so the sweep of
+/// sub-agents never looked at a running child's approval; a task T3 showed "waiting" without counting the request
+/// was skipped too; and the relay's own listing said "approvals are not listed". Each now reaches Heimdall once.
+#[tokio::test]
+async fn an_approval_in_a_running_sub_agent_or_an_uncounted_wait_reaches_heimdall() {
+    let l = Lab::new().await;
+    let task = l.delegate("Arsenal VM test").await;
+    l.with(&task, |t| t["link"] = json!("<t3-thread://v2/env/vm>"));
+    l.item(&task, "subagent", "running", "", json!({"title":"Install probe"}));
+    // Two running sub-agents, as T3 lists them: one waits on an approval, one only works.
+    l.sub_thread("c-ask", "Install probe", &task, "running", json!([]));
+    l.with("c-ask", |t| t["approvals"] = json!(1));
+    let card = "turn-item:runtime-request:runtime-request%3Aprovider%3AclaudeAgent%3Anative-request%3Atoolu_R%3Ae1";
+    l.item("c-ask", "command_execution", "running", "$ rm -rf $VM/disk.img", json!({"itemId":"turn-item:provider:claudeAgent:native-item:toolu_R"}));
+    l.item("c-ask", "approval_request", "waiting", "rm -rf $VM/disk.img\nDangerous rm operation on possibly-empty variable path", json!({"itemId":card}));
+    l.sub_thread("c-busy", "Survey", &task, "running", json!([]));
+    l.pass().await;
+    l.pass().await;
+    let approvals = |l: &Lab| l.deliveries().into_iter().filter(|(id, _)| id.starts_with("approval:")).collect::<Vec<_>>();
+    let got = approvals(&l);
+    assert_eq!(got.len(), 1, "one notice for the running child's approval, none for the busy one: {got:?}");
+    assert_eq!(got[0].0, "approval:c-ask:run:c-ask:1:toolu_R");
+    assert!(got[0].1.contains("its sub-agent 'Install probe' waits for an approval") && got[0].1.contains("It asks: rm -rf $VM/disk.img Dangerous rm"), "{}", got[0].1);
+    // The relay's own listing names it, though T3's lists no approvals.
+    let listed = l.call("t3_call", json!({"tool":"t3_pending_request","args":{"action":"list","threadId":"c-ask"}})).await.unwrap();
+    assert!(listed.contains("Approval waiting (T3 lists no approvals; only the user can give it, in T3): rm -rf $VM/disk.img"), "{listed}");
+    let quiet = l.call("t3_call", json!({"tool":"t3_pending_request","args":{"action":"list","threadId":"c-busy"}})).await.unwrap();
+    assert!(!quiet.contains("Approval waiting"), "{quiet}");
+    // The task itself: T3 shows it "waiting" but counts nothing. A wait, said once, and named by task_status.
+    let run = l.with(&task, |t| t["runs"].as_array().unwrap().last().unwrap()["runId"].as_str().unwrap().to_owned());
+    l.set_run(&task, &run, "waiting");
+    l.pass().await;
+    l.pass().await;
+    let got = approvals(&l);
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert!(got.iter().any(|(id, text)| id == &format!("approval:{task}:{run}") && text.contains("Open it: t3-thread://v2/env/vm")), "{got:?}");
+    let status = l.call("task_status", json!({"taskId":task})).await.unwrap();
+    assert!(status.contains("waits for the user's approval in T3 (open it: t3-thread://v2/env/vm)"), "{status}");
+    // Each new delegate_task brief carries the steering away from the asks Claude Code keeps (part 2).
+    l.w.set_brief_preamble("Rules.");
+    l.call("delegate_task", json!({"task":"Fix it.","title":"Fix","target":{"model":"claude-opus-5-5"},"path":l.dir.path()})).await.unwrap();
+    let brief = l.calls("t3_thread_launch").last().unwrap()["message"].as_str().unwrap().to_owned();
+    assert!(brief.contains("`rm -rf` on literal absolute paths") && brief.contains("`.claude/` settings") && brief.contains("full-access mode"), "{brief}");
+}
+
+/// Bug note 2026-11-06T12-26-36 (12:08): five tasks failed one after another on the main Claude account's weekly limit
+/// while the second account was at 0%, and nothing moved them; at 12:27 the relay moved them by hand. A task that
+/// fails on a usage limit now moves to the account with quota and resumes there ("check what's on disk"), with one
+/// quiet notice; a new task goes to that account too; it never loops back onto a spent account, and with the failover
+/// off it is reported as before.
+#[tokio::test]
+async fn a_task_that_hits_a_usage_limit_moves_to_the_account_with_quota_once() {
+    use t3::workers::{AccountsHook, ACCOUNTS_OFF};
+    use agent::accounts::{AccountQuota, Kind, Window};
+    let l = Lab::new().await;
+    let now = agent::now_ms();
+    let acct = |instance: &str, used: f64| AccountQuota { instance: instance.into(), kind: Kind::Claude, windows: vec![Window { name: "weekly".into(), used_percent: Some(used), resets_at_ms: Some(now + 3 * 86_400_000) }], reached: None, error: None };
+    // 12:26's reading: default weekly 100%, ~/.claude-account2 weekly 0%.
+    let reading = Arc::new(Mutex::new(Ok(vec![acct("claudeAgent", 100.0), acct("claudeAgent_2", 0.0)])));
+    let r = reading.clone();
+    let hook: AccountsHook = Arc::new(move |_wait| r.lock().unwrap().clone());
+    l.w.set_accounts(hook);
+    let task = l.delegate("Arsenal VM test").await;
+    l.s.second_account.store(true, std::sync::atomic::Ordering::Release);
+    l.item(&task, "assistant_message", "completed", "You've hit your weekly limit · resets Nov 9 at 1pm (Europe/Warsaw)", json!({}));
+    l.end_run(&task, "failed");
+    l.pass().await;
+    l.pass().await;
+    let configured = l.calls("t3_thread_configure");
+    assert_eq!(configured.len(), 1, "{configured:?}");
+    // The task keeps its effort on the other account (night review, 6 Nov).
+    assert_eq!(configured[0], json!({"threadId":task,"modelSelection":{"instanceId":"claudeAgent_2","model":"claude-opus-5-5","options":{"effort":"high"}}}));
+    let sends = l.calls("t3_thread_send");
+    assert_eq!(sends.len(), 1);
+    assert!(sends[0]["message"].as_str().unwrap().starts_with("Your run stopped when the main Claude account hit its weekly limit. Heimdall moved this thread to Claude code 2."), "{}", sends[0]);
+    assert!(sends[0]["clientRequestId"].as_str().unwrap().starts_with("heimdall-failover-"));
+    let got = l.deliveries();
+    assert!(!got.iter().any(|(id, _)| id.starts_with("terminal:")), "the limit is not news, the move is: {got:?}");
+    let moved: Vec<_> = got.iter().filter(|(id, _)| id.starts_with("t3-failover:")).collect();
+    assert_eq!(moved.len(), 1, "{got:?}");
+    assert_eq!(moved[0].1, format!("Task 'Arsenal VM test' ({task}) stopped on the main Claude account's weekly limit; Heimdall moved it to Claude code 2 and resumed it there. Nothing to do."));
+    assert_eq!(agent::notice::NoticeKind::classify(&moved[0].0, &moved[0].1), agent::notice::NoticeKind::Context, "quiet: no wake");
+    // A new task asked for on the spent account starts on the one with quota.
+    let started = l.call("delegate_task", json!({"task":"Next.","title":"Promo","target":{"model":"claude-opus-5-5","providerInstanceId":"claudeAgent"},"path":l.dir.path()})).await.unwrap();
+    assert_eq!(l.calls("t3_thread_launch").last().unwrap()["modelSelection"]["instanceId"], "claudeAgent_2");
+    assert!(started.contains("It runs on Claude code 2: the main Claude account has no quota left."), "{started}");
+    // The resumed run hits the second account's limit too, while the main one is still spent (the reading is stale):
+    // no move back, no loop; the failure is reported with the earlier turn and why it stayed.
+    l.item(&task, "assistant_message", "completed", "You've hit your weekly limit · resets Nov 13 at 9am", json!({}));
+    l.end_run(&task, "failed");
+    l.pass().await;
+    l.pass().await;
+    assert_eq!(l.calls("t3_thread_configure").len(), 1, "never moved twice for one limit");
+    let terminal: Vec<_> = l.deliveries().into_iter().filter(|(id, _)| id.starts_with(&format!("terminal:{task}"))).collect();
+    assert_eq!(terminal.len(), 1, "{terminal:?}");
+    assert!(terminal[0].1.contains("it was not moved again (one move per limit reset)"), "{}", terminal[0].1);
+    // Off (Settings::task_failover_off): a limit-failed task is reported as before, nothing moves.
+    *reading.lock().unwrap() = Err(ACCOUNTS_OFF.into());
+    l.s.second_account.store(false, std::sync::atomic::Ordering::Release);
+    let other = l.delegate("Feedback inbox").await;
+    l.item(&other, "assistant_message", "completed", "You've hit your weekly limit · resets Nov 9 at 1pm (Europe/Warsaw)", json!({}));
+    l.end_run(&other, "failed");
+    l.pass().await;
+    assert_eq!(l.calls("t3_thread_configure").len(), 1);
+    let done: Vec<_> = l.deliveries().into_iter().filter(|(id, _)| id.starts_with(&format!("terminal:{other}"))).collect();
+    assert_eq!(done.len(), 1, "{:?}", l.deliveries());
+    assert!(!done[0].1.contains("moved"), "{}", done[0].1);
+}
+
+/// Bug note 2026-11-08T02-03-49 (01:58:55, 01:59:00): delegate_task named no account, both Claude accounts offered
+/// Opus, and it answered MODEL_AMBIGUOUS although the main account was spent until Mon 13:00. Now the account with
+/// quota runs it; with both usable the main account (T3's first) is the stable default, still no error.
+#[tokio::test]
+async fn a_task_with_no_account_named_runs_on_the_one_with_quota() {
+    use t3::workers::AccountsHook;
+    use agent::accounts::{AccountQuota, Kind, Window};
+    let l = Lab::new().await;
+    let now = agent::now_ms();
+    let acct = |instance: &str, used: f64| AccountQuota { instance: instance.into(), kind: Kind::Claude, windows: vec![Window { name: "weekly".into(), used_percent: Some(used), resets_at_ms: Some(now + 86_400_000) }], reached: None, error: None };
+    let reading = Arc::new(Mutex::new(Ok(vec![acct("claudeAgent", 100.0), acct("claudeAgent_2", 3.0)])));
+    let r = reading.clone();
+    let hook: AccountsHook = Arc::new(move |_wait| r.lock().unwrap().clone());
+    l.w.set_accounts(hook);
+    l.s.second_account.store(true, std::sync::atomic::Ordering::Release);
+    let start = |title: &str| json!({"task":"Go.","title":title,"target":{"model":"claude-opus-5-5"},"path":l.dir.path()});
+    let started = l.call("delegate_task", start("Clip")).await.unwrap();
+    assert_eq!(l.calls("t3_thread_launch").last().unwrap()["modelSelection"]["instanceId"], "claudeAgent_2", "{started}");
+    // Both with quota: the main account, no MODEL_AMBIGUOUS.
+    *reading.lock().unwrap() = Ok(vec![acct("claudeAgent", 40.0), acct("claudeAgent_2", 3.0)]);
+    l.call("delegate_task", start("Next")).await.unwrap();
+    assert_eq!(l.calls("t3_thread_launch").last().unwrap()["modelSelection"]["instanceId"], "claudeAgent");
+    // No reading at all (the failover off): T3's first, still no error.
+    *reading.lock().unwrap() = Err(t3::workers::ACCOUNTS_OFF.into());
+    l.call("delegate_task", start("Third")).await.unwrap();
+    assert_eq!(l.calls("t3_thread_launch").last().unwrap()["modelSelection"]["instanceId"], "claudeAgent");
+}
+
+/// Night review H1 and H2 (6 Nov): a plan that was dropped without moving (T3 started a queued turn on the spent
+/// account first) no longer blocks the real move when that turn fails on the limit too; and a Codex thread's "You've
+/// hit your usage limit" is no Claude limit, so nothing tries to move it to a Claude account.
+#[tokio::test]
+async fn a_dropped_failover_plan_does_not_block_the_move_and_codex_limits_never_move() {
+    use t3::workers::AccountsHook;
+    use agent::accounts::{AccountQuota, Kind, Window};
+    let l = Lab::new().await;
+    let now = agent::now_ms();
+    let acct = |instance: &str, used: f64| AccountQuota { instance: instance.into(), kind: Kind::Claude, windows: vec![Window { name: "weekly".into(), used_percent: Some(used), resets_at_ms: Some(now + 3 * 86_400_000) }], reached: None, error: None };
+    let codex = AccountQuota { instance: "codex".into(), kind: Kind::Codex, windows: vec![], reached: None, error: None };
+    let reading = vec![acct("claudeAgent", 100.0), acct("claudeAgent_2", 0.0), codex];
+    let hook: AccountsHook = Arc::new(move |_wait| Ok(reading.clone()));
+    l.w.set_accounts(hook);
+    let task = l.delegate("Arsenal VM test").await;
+    let other = l.delegate("Feedback inbox").await;
+    l.s.second_account.store(true, std::sync::atomic::Ordering::Release);
+    let first = l.with(&task, |t| t["runs"][0]["runId"].as_str().unwrap().to_owned());
+    // The plan for the first failed run, and then T3 starting the queued steer on the same account before the move.
+    rusqlite::Connection::open(l.dir.path().join("workers.db")).unwrap().execute(
+        "INSERT INTO task_failovers(thread,run,from_instance,to_instance,model,limit_window,at_ms,until_ms,sent_ms) VALUES(?1,?2,'claudeAgent','claudeAgent_2','claude-opus-5-5','weekly',?3,?4,NULL)",
+        rusqlite::params![task, first, now as i64, (now + 3 * 86_400_000) as i64],
+    ).unwrap();
+    l.set_run(&task, &first, "failed");
+    l.new_run(&task);
+    l.pass().await;
+    assert!(l.calls("t3_thread_configure").is_empty(), "the plan was dropped: its run is not the task's any more");
+    // That turn fails on the limit too: now it moves.
+    l.item(&task, "assistant_message", "completed", "You've hit your weekly limit · resets Nov 9 at 1pm (Europe/Warsaw)", json!({}));
+    l.end_run(&task, "failed");
+    l.pass().await;
+    l.pass().await;
+    assert_eq!(l.calls("t3_thread_configure").len(), 1, "{:?}", l.deliveries());
+    assert!(!l.deliveries().iter().any(|(_, text)| text.contains("one move per limit reset")), "{:?}", l.deliveries());
+    // A Codex task with Codex's own limit wording: an ordinary failure, no move, no Claude account marked spent.
+    l.with(&other, |t| t["provider"] = json!("codex"));
+    l.item(&other, "assistant_message", "completed", "You've hit your usage limit. Upgrade to Pro or try again in 3 days.", json!({}));
+    l.end_run(&other, "failed");
+    l.pass().await;
+    l.pass().await;
+    assert_eq!(l.calls("t3_thread_configure").len(), 1, "the Codex task is not moved");
+    let done: Vec<_> = l.deliveries().into_iter().filter(|(id, _)| id.starts_with(&format!("terminal:{other}"))).collect();
+    assert_eq!(done.len(), 1, "{:?}", l.deliveries());
+    assert!(!done[0].1.contains("moved") && !done[0].1.contains("quota"), "{}", done[0].1);
+}
+
+/// Bug note 2026-11-08T06-13-58: two tasks ignored Heimdall's steers (the user's newer words, 06:02 and 06:07) as text
+/// "attached to" their instructions. Every message Heimdall sends now starts with a mark saying who speaks: into its
+/// own task, its orchestrator speaking for the user; into the user's other threads, his voice assistant. One mark each, by
+/// `t3_thread_send` or through `t3_call`, steer or queue, and a message already marked keeps one.
+#[tokio::test]
+async fn heimdalls_messages_say_they_come_from_heimdall() {
+    let l = Lab::new().await;
+    let task = l.delegate("Re-rank the job offers").await;
+    l.call("t3_thread_send", json!({"threadId":task,"message":"User (06:02): a fresh search is allowed.","mode":"steer"})).await.unwrap();
+    l.call("t3_call", json!({"tool":"t3_thread_send","args":{"threadId":task,"message":"Only the newest generation."}})).await.unwrap();
+    let marked = format!("{} Only the newest generation.", t3::workers::steer_mark());
+    l.call("t3_thread_send", json!({"threadId":task,"message":marked})).await.unwrap();
+    l.owner_thread("t-own", "User's research", 1);
+    l.call("t3_thread_send", json!({"threadId":"t-own","message":"Status?"})).await.unwrap();
+    let sent: Vec<String> = l.calls("t3_thread_send").iter().map(|c| c["message"].as_str().unwrap().to_owned()).collect();
+    assert_eq!(sent, [
+        format!("{} User (06:02): a fresh search is allowed.", t3::workers::steer_mark()),
+        marked.clone(),
+        marked,
+        format!("{} Status?", t3::workers::message_mark()),
+    ]);
+    assert!(t3::workers::steer_mark().contains("From Heimdall") && t3::workers::steer_mark().contains("orchestrator"));
+    assert_eq!(t3::workers::from_heimdall("  ", true), "  ");
+    assert_eq!(t3::workers::unmarked(&t3::workers::from_heimdall("Go on.", true)), "Go on.");
+    assert_eq!(t3::workers::unmarked("Go on."), "Go on.");
+    // The task rules every task gets say what the mark means, in both editions.
+    let rules = include_str!("../../agent/prompt/worker.md");
+    let rules = agent::identity::template(rules, &agent::identity::current()).split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(rules.contains(&format!("starts with `{}` comes from Heimdall, the orchestrator that started this task", t3::workers::steer_mark())), "{rules}");
+}
+
+// ---- Lane S (night 10–11 Nov): sends that always land, tasks that close themselves, a default target. ----
+
+/// Bug note 2026-11-10T09-03-14: a steer into a thread with no running turn failed, three times on 10 Nov with
+/// "unarchiving it failed too … is not archived", and the relay retried each with `auto`. The three shapes the relay
+/// met (a finished task, an idle one, an archived one) all land as a new turn in one call; the user's archived thread
+/// keeps T3's refusal.
+#[tokio::test]
+async fn a_send_always_lands_on_a_finished_idle_or_archived_task() {
+    let l = Lab::new().await;
+    let finished = l.delegate("Finished task").await;
+    l.item(&finished, "assistant_message", "completed", "Done.", json!({}));
+    l.end_run(&finished, "completed");
+    let idle = l.delegate("Idle task").await;
+    l.end_run(&idle, "interrupted");
+    let archived = l.delegate("Archived task").await;
+    l.end_run(&archived, "completed");
+    l.with(&archived, |t| t["archived"] = json!(true));
+    for (n, id) in [&finished, &idle, &archived].into_iter().enumerate() {
+        let sent = l.call("t3_thread_send", json!({"threadId":id,"message":format!("Steer {n}"),"mode":"steer"})).await.unwrap_or_else(|e| panic!("{id}: {e}"));
+        assert!(sent.starts_with(&format!("Sent to thread {id} (started")), "{id}: {sent}");
+        assert!(!sent.contains("unarchiv"), "{sent}");
+    }
+    assert_eq!(l.calls("t3_thread_organize").iter().filter(|c| c["action"] == "unarchive").map(|c| c["threadId"].clone()).collect::<Vec<_>>(), vec![json!(archived)]);
+    // Each refused steer went again once, as a new turn under its own retry key.
+    let sends = l.calls("t3_thread_send");
+    assert_eq!(sends.len(), 6, "{sends:?}");
+    assert!(sends.iter().skip(1).step_by(2).all(|s| s["mode"] == "auto"), "{sends:?}");
+    // The same through t3_call, the relay's other way in.
+    l.end_run(&idle, "completed");
+    let sent = l.call("t3_call", json!({"tool":"t3_thread_send","args":{"threadId":idle,"message":"Again","mode":"steer"}})).await.unwrap();
+    assert!(sent.starts_with(&format!("Sent to thread {idle} (started")), "{sent}");
+    // A running turn is still steered, not restarted.
+    let sent = l.call("t3_thread_send", json!({"threadId":idle,"message":"More","mode":"steer"})).await.unwrap();
+    assert!(sent.starts_with(&format!("Sent to thread {idle} (steered")), "{sent}");
+    // The user's own archived thread is not Heimdall's to unarchive.
+    l.owner_thread("owner", "User's research", 1);
+    l.with("owner", |t| t["archived"] = json!(true));
+    let e = l.call("t3_thread_send", json!({"threadId":"owner","message":"Carry on.","mode":"steer"})).await.unwrap_err().to_string();
+    assert!(e.contains("is archived") && !e.contains("unarchiving"), "{e}");
+    // Review 1111 S4: nor is his idle thread Heimdall's to start a turn in; T3's refusal says how to do it on purpose.
+    l.owner_thread("owner-idle", "User's notes", 1);
+    let before = l.calls("t3_thread_send").len();
+    let e = l.call("t3_thread_send", json!({"threadId":"owner-idle","message":"Carry on.","mode":"steer"})).await.unwrap_err().to_string();
+    assert!(e.starts_with("T3_TOOL_FAILED") && e.contains("no running turn") && e.contains("ask the user first"), "{e}");
+    assert_eq!(l.calls("t3_thread_send").len(), before + 1, "no retry as a new turn");
+    let sent = l.call("t3_thread_send", json!({"threadId":"owner-idle","message":"Carry on.","mode":"auto"})).await.unwrap();
+    assert!(sent.starts_with("Sent to thread owner-idle (started"), "{sent}");
+}
+
+/// Review 1111 S5: the user's click approves one call, also when that call finds the thread already archived.
+#[tokio::test]
+async fn an_already_archived_answer_spends_owners_confirmation() {
+    let l = Lab::new().await;
+    l.owner_thread("owner-old", "User's old notes", 1);
+    l.with("owner-old", |t| t["archived"] = json!(true));
+    let call = json!({"tool":"t3_thread_organize","args":{"threadId":"owner-old","action":"archive"}});
+    let e = l.call("t3_call", call.clone()).await.unwrap_err().to_string();
+    assert!(e.starts_with("CONFIRM_REQUIRED"), "{e}");
+    let question = e.split('"').nth(1).unwrap().to_owned();
+    let yes = l.w.actions.ask("ask-archive", &[agent::actions::AskItem::one(&question, &["Yes", "No"])], &l.p()).unwrap();
+    l.w.actions.answer(&yes, "Yes", &l.p()).unwrap();
+    let mut with = call.clone();
+    with["confirm"] = json!(yes);
+    assert_eq!(l.call("t3_call", with.clone()).await.unwrap(), "Thread owner-old is already archived; nothing to do.");
+    let e = l.call("t3_call", with).await.unwrap_err().to_string();
+    assert!(e.starts_with("CONFIRM_USED"), "{e}");
+}
+
+/// Proposal 1 (tool calls, 10 Nov): the relay closed 254 of 363 delivered tasks with task_cancel. A task whose run
+/// completed with nothing open is archived as its final notice goes out, and the notice says so; a failed run or an
+/// open question keeps it open; a message to it reopens it.
+#[tokio::test]
+async fn a_finished_task_closes_itself_with_its_notice_unless_something_is_open() {
+    let l = Lab::new().await;
+    let done = l.delegate("Report").await;
+    l.item(&done, "assistant_message", "completed", "Report written.", json!({}));
+    l.end_run(&done, "completed");
+    let failed = l.delegate("Broken build").await;
+    l.item(&failed, "assistant_message", "completed", "The build failed.", json!({}));
+    l.end_run(&failed, "failed");
+    l.pass().await;
+    let got = l.deliveries();
+    let notice = got.iter().find(|d| d.1.contains("Report written.")).unwrap_or_else(|| panic!("{got:?}")).1.clone();
+    assert!(notice.contains(&format!("Report written.\n\n{}", t3::workers::CLOSED)), "{notice}");
+    let failed_notice = got.iter().find(|d| d.1.contains("The build failed.")).unwrap().1.clone();
+    assert!(!failed_notice.contains(t3::workers::CLOSED), "{failed_notice}");
+    assert_eq!(l.calls("t3_thread_organize"), vec![json!({"threadId":done,"action":"archive"})]);
+    let status = l.call("task_status", json!({})).await.unwrap();
+    assert!(!status.contains(&done) && status.contains(&failed), "{status}");
+    // Reopened by a message, followed again, and closed again at its next result.
+    let sent = l.call("t3_thread_send", json!({"threadId":done,"message":"Add the chart."})).await.unwrap();
+    assert!(sent.starts_with(&format!("Sent to thread {done} (started")), "{sent}");
+    l.item(&done, "assistant_message", "completed", "Chart added.", json!({}));
+    l.end_run(&done, "completed");
+    l.pass().await;
+    assert!(l.deliveries().iter().any(|d| d.1.contains("Chart added.") && d.1.contains(t3::workers::CLOSED)), "{:?}", l.deliveries());
+    // task_cancel on a closed task still answers plainly.
+    assert_eq!(l.call("task_cancel", json!({"taskId":done})).await.unwrap(), "Archived 'Report'.");
+    // An open question in T3 keeps it open.
+    let asks = l.delegate("Asks first").await;
+    l.item(&asks, "assistant_message", "completed", "Which engine first?", json!({}));
+    l.with(&asks, |t| t["pending"] = json!(["req-1"]));
+    l.end_run(&asks, "completed");
+    l.pass().await;
+    assert!(!l.calls("t3_thread_organize").iter().any(|c| c["threadId"] == json!(asks) && c["action"] == "archive"));
+}
+
+/// Review 1111 S1: Vault workers put their question for the user in the final reply, not as a T3 question, so T3 shows
+/// nothing open. A reply ending in a question, one putting a decision to the user, and one reporting a staged build keep
+/// the task open (archiving it would remove its build before he answers); a plain done reply still closes it.
+#[tokio::test]
+async fn a_finished_task_whose_reply_waits_on_owner_stays_open() {
+    let l = Lab::new().await;
+    let waits = [
+        ("Asks", "Built and checked the menu.\n\nInstall it?"),
+        ("Decision", "Fixed the parser.\n\nShould I also rewrite the importer. Default: no."),
+        ("Staged", "Staged the build at ~/Applications/.Heimdall.app.stage; the check passed.\n\nThat is all."),
+    ];
+    let mut open = vec![];
+    for (title, reply) in waits {
+        let t = l.delegate(title).await;
+        l.item(&t, "assistant_message", "completed", reply, json!({}));
+        l.end_run(&t, "completed");
+        open.push(t);
+    }
+    let done = l.delegate("Plain").await;
+    l.item(&done, "assistant_message", "completed", "Report written. Nothing needs User.", json!({}));
+    l.end_run(&done, "completed");
+    l.pass().await;
+    let got = l.deliveries();
+    for (title, _) in waits {
+        let n = got.iter().find(|d| d.1.contains(&format!("'{title}'"))).unwrap_or_else(|| panic!("{title}: {got:?}"));
+        assert!(!n.1.contains(t3::workers::CLOSED), "{}", n.1);
+    }
+    assert!(got.iter().any(|d| d.1.contains("Report written.") && d.1.contains(t3::workers::CLOSED)), "{got:?}");
+    assert_eq!(l.calls("t3_thread_organize"), vec![json!({"threadId":done,"action":"archive"})]);
+    let status = l.call("task_status", json!({})).await.unwrap();
+    assert!(open.iter().all(|t| status.contains(t.as_str())), "{status}");
+}
+
+/// Bug note 2026-11-12T00-19-55: the night pass integrator ended a turn at 23:04 waiting on a lane it had started
+/// with T3's own delegate_task; the self-close archived it, T3 disposed of the lane's completion at 00:01 because
+/// its parent was archived, and the pass stood still for 75 minutes. A task with a live delegated child stays open
+/// (its notice says why), a cleared island does not archive it either, and once T3 wakes it after the child finished,
+/// that turn's result closes it as usual.
+#[tokio::test]
+async fn a_finished_task_with_a_live_delegated_child_is_not_closed_or_archived() {
+    let l = Lab::new().await;
+    let parent = l.delegate("Night pass").await;
+    let lane = "thread:delegated-task:command%3Amcp%3Aint%3Adelegate-task%3Alane-k";
+    l.sub_thread(lane, "Lane K: secret audit", &parent, "running", json!([]));
+    // A finished delegated child and one of another parent hold nothing.
+    l.sub_thread("thread:delegated-task:done", "Lane J", &parent, "completed", json!([]));
+    l.sub_thread("thread:delegated-task:other", "Other lane", "someone-else", "running", json!([]));
+    l.item(&parent, "assistant_message", "completed", "Check passed. Waiting on lane K.", json!({}));
+    l.end_run(&parent, "completed");
+    l.pass().await;
+    let got = l.deliveries();
+    let notice = got.iter().find(|d| d.1.contains("Waiting on lane K.")).unwrap_or_else(|| panic!("{got:?}")).1.clone();
+    assert!(!notice.contains(t3::workers::CLOSED), "{notice}");
+    assert!(notice.contains("delegated task 'Lane K: secret audit' still runs"), "{notice}");
+    assert!(!notice.contains("Lane J") && !notice.contains("Other lane"), "{notice}");
+    assert!(l.calls("t3_thread_organize").is_empty(), "{:?}", l.calls("t3_thread_organize"));
+    // The user clearing its island archives it only once the child is done.
+    assert!(l.w.clear_task(&parent).unwrap());
+    assert!(l.w.archive_cleared().await.unwrap().is_empty());
+    assert!(l.calls("t3_thread_organize").is_empty());
+    assert!(l.call("task_status", json!({})).await.unwrap().contains(&parent));
+    // The lane finishes; T3 wakes the parent with its result (a new turn); that turn's result closes it.
+    l.set_run(lane, &format!("run:{lane}:1"), "completed");
+    l.new_run(&parent);
+    l.item(&parent, "assistant_message", "completed", "Lane K merged. The pass is done.", json!({}));
+    l.end_run(&parent, "completed");
+    l.pass().await;
+    let got = l.deliveries();
+    let last = got.iter().find(|d| d.1.contains("Lane K merged.")).unwrap_or_else(|| panic!("{got:?}")).1.clone();
+    assert!(last.contains(t3::workers::CLOSED), "{last}");
+    assert_eq!(l.calls("t3_thread_organize"), vec![json!({"threadId":parent,"action":"archive"})]);
+    // A child in another project counts too; one that ends without waking its parent (cancelled) leaves no task open
+    // for good: once it is done and the thread has been quiet a while, a pass archives the kept task.
+    let other = l.delegate("Second pass").await;
+    let lane = "thread:delegated-task:command%3Amcp%3Aint%3Adelegate-task%3Alane-m";
+    l.sub_thread(lane, "Lane M", &other, "running", json!([]));
+    l.with(lane, |t| t["projectId"] = json!("p-scratch"));
+    l.item(&other, "assistant_message", "completed", "Waiting on lane M.", json!({}));
+    l.end_run(&other, "completed");
+    l.pass().await;
+    let got = l.deliveries();
+    let notice = got.iter().find(|d| d.1.contains("Waiting on lane M.")).unwrap_or_else(|| panic!("{got:?}")).1.clone();
+    assert!(notice.contains("delegated task 'Lane M' still runs") && !notice.contains(t3::workers::CLOSED), "{notice}");
+    l.set_run(lane, &format!("run:{lane}:1"), "cancelled");
+    assert!(l.w.archive_cleared().await.unwrap().is_empty(), "not while its thread changed just now");
+    l.with(&other, |t| t["updatedAt"] = json!(iso(-300)));
+    assert_eq!(l.w.archive_cleared().await.unwrap(), vec!["Second pass".to_string()]);
+    assert_eq!(l.calls("t3_thread_organize").last().unwrap(), &json!({"threadId":other,"action":"archive"}));
+}
+
+/// Proposal 5: delegate_task with no target starts Claude Opus 5.5 at medium effort on the account with quota left.
+/// Personal edition only: the public edition takes the user's own providers (below).
+#[cfg(not(feature = "public"))]
+#[tokio::test]
+async fn delegate_task_without_a_target_starts_opus_medium_on_the_account_with_quota() {
+    use t3::workers::AccountsHook;
+    use agent::accounts::{AccountQuota, Kind, Window};
+    let l = Lab::new().await;
+    let now = agent::now_ms();
+    let acct = move |instance: &str, used: f64| AccountQuota { instance: instance.into(), kind: Kind::Claude, windows: vec![Window { name: "weekly".into(), used_percent: Some(used), resets_at_ms: Some(now + 86_400_000) }], reached: None, error: None };
+    let hook: AccountsHook = Arc::new(move |_wait| Ok(vec![acct("claudeAgent", 100.0), acct("claudeAgent_2", 3.0)]));
+    l.w.set_accounts(hook);
+    l.s.second_account.store(true, std::sync::atomic::Ordering::Release);
+    let started = l.call("delegate_task", json!({"task":"Go.","title":"Plain","path":l.dir.path()})).await.unwrap();
+    let launch = l.calls("t3_thread_launch").last().unwrap().clone();
+    assert_eq!(launch["modelSelection"], json!({"instanceId":"claudeAgent_2","model":"claude-opus-5-5","options":{"effort":"medium"}}), "{started}");
+    assert_eq!(launch["runtimeMode"], "full-access");
+    // An effort alone keeps the default model; a named model keeps its own options.
+    l.call("delegate_task", json!({"task":"Go.","title":"Deep","target":{"options":{"effort":"high"}},"path":l.dir.path()})).await.unwrap();
+    assert_eq!(l.calls("t3_thread_launch").last().unwrap()["modelSelection"]["options"], json!({"effort":"high"}));
+    assert_eq!(t3::workers::default_target(&json!({"model":"claude-haiku-5-5"})), json!({"model":"claude-haiku-5-5"}));
+}
+
+/// The public edition's task default names no vendor: without a target model, the user's own T3 providers decide
+/// (`workers::catalog_default`): the model T3 says the caller runs, else the first usable provider's default or first
+/// model; disabled providers and those without full access never; target.providerInstanceId narrows it.
+#[test]
+fn the_task_default_comes_from_the_providers_t3_lists() {
+    use t3::workers::catalog_default;
+    let caps = capabilities_one();
+    assert_eq!(catalog_default(&caps, None), Some(("claudeAgent".into(), "claude-haiku-5-5".into())), "the first usable provider's first model");
+    assert_eq!(catalog_default(&caps, Some("codex")), Some(("codex".into(), "gpt-6-luna".into())));
+    assert_eq!(catalog_default(&caps, Some("cursor")), None, "a disabled provider is never the default");
+    let mut marked = caps.clone();
+    marked["providers"][0]["models"][1]["isDefault"] = json!(true);
+    assert_eq!(catalog_default(&marked, None), Some(("claudeAgent".into(), "claude-opus-5-5".into())), "T3's default model wins");
+    let mut inherited = caps.clone();
+    inherited["inheritedProviderInstanceId"] = json!("codex");
+    inherited["inheritedModel"] = json!("gpt-6-luna");
+    assert_eq!(catalog_default(&inherited, None), Some(("codex".into(), "gpt-6-luna".into())), "the model T3 says the caller runs");
+    inherited["inheritedModel"] = json!("gone-model");
+    assert_eq!(catalog_default(&inherited, None), Some(("claudeAgent".into(), "claude-haiku-5-5".into())), "an unlisted inherited model is skipped");
+    let only_grok = json!({"providers":[
+        {"providerInstanceId":"grok","driverKind":"grok","runtimeModes":["approval-required"],"constraints":[],"models":[{"id":"grok-4.7"}]},
+        {"providerInstanceId":"local","driverKind":"pi","runtimeModes":["full-access"],"constraints":[],"models":[{"id":"default"}]}]});
+    assert_eq!(catalog_default(&only_grok, None), Some(("local".into(), "default".into())), "no full access, no default");
+    assert_eq!(catalog_default(&json!({"providers":[]}), None), None);
+}
+
+/// The public edition: delegate_task with no target starts the user's own provider's model with that model's own
+/// default options (no effort forced), and says so; it never falls back to a named vendor.
+#[cfg(feature = "public")]
+#[tokio::test]
+async fn the_public_edition_s_task_default_is_the_user_s_provider() {
+    let l = Lab::new().await;
+    let started = l.call("delegate_task", json!({"task":"Go.","title":"Plain","path":l.dir.path()})).await.unwrap();
+    let launch = l.calls("t3_thread_launch").last().unwrap().clone();
+    assert_eq!(launch["modelSelection"], json!({"instanceId":"claudeAgent","model":"claude-haiku-5-5"}), "{started}");
+    assert!(started.contains("(claude-haiku-5-5)"), "{started}");
+    // An effort alone is kept on the picked model; a provider alone narrows the pick.
+    l.call("delegate_task", json!({"task":"Go.","title":"Deep","target":{"options":{"effort":"high"}},"path":l.dir.path()})).await.unwrap();
+    assert_eq!(l.calls("t3_thread_launch").last().unwrap()["modelSelection"], json!({"instanceId":"claudeAgent","model":"claude-haiku-5-5","options":{"effort":"high"}}));
+    l.call("delegate_task", json!({"task":"Go.","title":"Other","target":{"providerInstanceId":"codex"},"path":l.dir.path()})).await.unwrap();
+    assert_eq!(l.calls("t3_thread_launch").last().unwrap()["modelSelection"], json!({"instanceId":"codex","model":"gpt-6-luna"}));
+    assert_eq!(t3::workers::default_target(&json!(null)), json!({}), "no vendor is filled in");
+}
+
+/// T3_call's archive failures (3 and 4 Nov): unarchiving a thread that is not archived is not a failure.
+#[tokio::test]
+async fn unarchiving_a_thread_that_is_not_archived_is_not_a_failure() {
+    let l = Lab::new().await;
+    let t = l.delegate("Live task").await;
+    let out = l.call("t3_call", json!({"tool":"t3_thread_organize","args":{"threadId":t,"action":"unarchive"}})).await.unwrap();
+    assert_eq!(out, format!("Thread {t} is already unarchived; nothing to do."));
+}
+// ---- end lane S ----
+
+// ---- crewmates (17:09–17:13; crates/t3/src/crew.rs) ----
+impl Lab {
+    /// The crew layer on this lab's workers, its store where the app keeps it (`<data>/agent/crew.sqlite`), with no
+    /// waiting: a sub-job wake goes on the pass after the work ended, and every pass looks at each thread.
+    fn crew(&self) -> Arc<t3::crew::Crew> {
+        let crew = t3::crew::Crew::open(&self.dir.path().join("agent/crew.sqlite"), &self.w).unwrap();
+        crew.set_timing(0, 0);
+        // As the app does: a crewmate without a folder works in Heimdall's home folder.
+        self.w.set_default_folder(self.dir.path());
+        crew
+    }
+    async fn crew_pass(&self, crew: &t3::crew::Crew) {
+        crew.pass(&self.p()).await.unwrap();
+    }
+    /// The thread a crew_add or crew_tell started, from its answer.
+    fn crew_thread(&self, name: &str) -> String {
+        self.w.crew().unwrap().store.get(name).unwrap().unwrap().thread.unwrap()
+    }
+    fn reply(&self, thread: &str, text: &str, status: &str) {
+        self.item(thread, "assistant_message", "completed", text, json!({}));
+        self.end_run(thread, status);
+    }
+    fn sent_to(&self, thread: &str) -> Vec<String> {
+        self.calls("t3_thread_send").into_iter().filter(|c| c["threadId"] == thread).map(|c| c["message"].as_str().unwrap().to_owned()).collect()
+    }
+}
+
+/// A crewmate is created by the agent in one call, its first message starts its thread with its standing intro, its
+/// result comes back as a notice like a task's, and its thread never closes itself.
+#[tokio::test]
+async fn a_crewmate_is_created_told_and_never_closed() {
+    let l = Lab::new().await;
+    let crew = l.crew();
+    let added = l.call("crew_add", json!({"name":"Hub","role":"runs the social hub","folder":l.dir.path(),"brief":"/nonexistent/WORKER.md","message":"Check the approval queue."})).await.unwrap();
+    assert!(added.starts_with("Crewmate Hub added: runs the social hub · claude-opus-5-5 medium"), "{added}");
+    assert!(added.contains("Told Hub: started its thread"), "{added}");
+    let launch = l.calls("t3_thread_launch").pop().unwrap();
+    assert!(launch["title"].as_str().unwrap().starts_with("Crew · Hub [heimdall:"), "{launch}");
+    let brief = launch["message"].as_str().unwrap();
+    assert!(brief.contains("You are Hub, one of") && brief.contains("Your role: runs the social hub"), "{brief}");
+    assert!(brief.contains("/nonexistent/WORKER.md; it does not exist yet. Write it"), "{brief}");
+    assert!(brief.contains("Never address") && brief.ends_with("The message:\nCheck the approval queue."), "{brief}");
+    assert_eq!(launch["modelSelection"]["options"]["effort"], "medium");
+    let thread = l.crew_thread("Hub");
+    l.reply(&thread, "Queue checked: three drafts wait. Nothing needs User.", "completed");
+    l.pass().await;
+    l.crew_pass(&crew).await;
+    let got = l.deliveries();
+    let notice = got.iter().find(|d| d.0.starts_with(&format!("terminal:{thread}"))).unwrap_or_else(|| panic!("{got:?}"));
+    assert!(notice.1.contains("Queue checked") && !notice.1.contains(t3::workers::CLOSED), "{}", notice.1);
+    assert!(l.calls("t3_thread_organize").is_empty(), "a crewmate's thread is never archived by itself");
+    // The thread's island closing does not archive it either.
+    assert!(l.w.clear_task(&thread).unwrap());
+    assert!(l.w.archive_cleared().await.unwrap().is_empty());
+    let status = l.call("crew_status", json!({"name":"Hub"})).await.unwrap();
+    assert!(status.starts_with("Hub · idle · runs the social hub"), "{status}");
+    assert!(status.contains("from Heimdall: Check the approval queue.") && status.contains("result: completed: Queue checked"), "{status}");
+    // The same name twice is refused; a second message goes into the same thread.
+    assert!(l.call("crew_add", json!({"name":"hub","role":"x"})).await.unwrap_err().to_string().starts_with("CREW_EXISTS"));
+    let told = l.call("crew_tell", json!({"name":"hub","message":"Post the first draft."})).await.unwrap();
+    assert_eq!(told, "Told Hub: started a turn in its thread. Its result arrives as a notice.");
+    assert_eq!(l.calls("t3_thread_launch").len(), 1);
+}
+
+/// The user, 17:13: nothing reaches a crewmate except through Heimdall's crew layer. The agent's own T3 tools refuse to
+/// send into, stop, archive or reconfigure a crew thread; reading it stays free.
+#[tokio::test]
+async fn a_crew_thread_is_reached_only_through_the_crew() {
+    let l = Lab::new().await;
+    let _crew = l.crew();
+    l.call("crew_add", json!({"name":"Trainer","role":"runs the training queue","message":"Start."})).await.unwrap();
+    let thread = l.crew_thread("Trainer");
+    let sends = l.calls("t3_thread_send").len();
+    for (tool, args) in [
+        ("t3_thread_send", json!({"threadId":thread,"message":"psst"})),
+        ("task_cancel", json!({"taskId":thread})),
+        ("t3_call", json!({"tool":"t3_thread_send","args":{"threadId":thread,"message":"psst"}})),
+        ("t3_call", json!({"tool":"t3_thread_organize","args":{"threadId":thread,"action":"archive"}})),
+        ("t3_call", json!({"tool":"t3_thread_interrupt","args":{"threadId":thread}})),
+        ("t3_call", json!({"tool":"t3_thread_configure","args":{"threadId":thread,"modelSelection":{}}})),
+        ("t3_call", json!({"tool":"t3_thread_organize","args":{"action":"archive"},"threads":["other",thread]})),
+    ] {
+        let e = l.call(tool, args.clone()).await.unwrap_err().to_string();
+        assert!(e.starts_with(&format!("CREW_THREAD: {thread} is crewmate Trainer's thread")), "{tool} {args}: {e}");
+    }
+    assert_eq!(l.calls("t3_thread_send").len(), sends, "nothing was sent");
+    assert!(l.calls("t3_thread_organize").is_empty() && l.calls("t3_thread_interrupt").is_empty());
+    assert!(l.call("t3_thread_read", json!({"threadId":thread})).await.is_ok());
+    assert!(l.call("t3_call", json!({"tool":"t3_queue","args":{"threadId":thread,"action":"list"}})).await.is_ok());
+}
+
+/// The user's 17:09 problem: a worker's thread archived itself and a local process could not message it. A crewmate's
+/// archived thread is reopened by the message; a thread gone from T3 is replaced by a new one started from the
+/// crewmate's brief and history, and the record follows. Each answer says which happened.
+#[tokio::test]
+async fn a_message_reaches_a_crewmate_whose_thread_is_archived_or_gone() {
+    let l = Lab::new().await;
+    let crew = l.crew();
+    l.call("crew_add", json!({"name":"Library","role":"runs the Library's nightly import","message":"Import tonight's batch."})).await.unwrap();
+    let first = l.crew_thread("Library");
+    l.reply(&first, "Imported 41 books; two covers missing.", "completed");
+    l.pass().await;
+    l.with(&first, |t| t["archived"] = json!(true));
+    let told = l.call("crew_tell", json!({"name":"Library","message":"Fetch the two missing covers."})).await.unwrap();
+    assert_eq!(told, "Told Library: reopened its archived thread and started a turn. Its result arrives as a notice.");
+    assert!(l.calls("t3_thread_organize").contains(&json!({"threadId":first,"action":"unarchive"})));
+    assert!(l.sent_to(&first).last().unwrap().ends_with("Fetch the two missing covers."));
+    l.reply(&first, "Both covers fetched.", "completed");
+    l.pass().await;
+    // Gone: deleted from T3.
+    // Deleted from T3 (the fake numbers new threads by count, so the row stays under another id).
+    l.with(&first, |t| t["threadId"] = json!("deleted"));
+    let told = l.call("crew_tell", json!({"name":"Library","message":"Check the import log."})).await.unwrap();
+    let second = l.crew_thread("Library");
+    assert_ne!(second, first, "{told}");
+    assert_eq!(told, format!("Told Library: its thread {first} was gone, so it started a new one ({second}) from its brief and history. Its result arrives as a notice."));
+    let brief = l.calls("t3_thread_launch").pop().unwrap()["message"].as_str().unwrap().to_owned();
+    assert!(brief.contains(&format!("your previous one ({first}) was lost")), "{brief}");
+    assert!(brief.contains("Your last result") && brief.contains("Both covers fetched."), "{brief}");
+    assert!(brief.contains("from Heimdall: Import tonight's batch.") && brief.ends_with("The message:\nCheck the import log."), "{brief}");
+    // Gone between passes while idle: the record drops the thread, and the next message starts a new one.
+    l.reply(&second, "Log clean.", "completed");
+    l.pass().await;
+    // Deleted from T3 (the fake numbers new threads by count, so the row stays under another id).
+    l.with(&second, |t| t["threadId"] = json!("deleted"));
+    l.crew_pass(&crew).await;
+    assert_eq!(crew.store.get("Library").unwrap().unwrap().thread, None);
+    let status = l.call("crew_status", json!({"name":"Library"})).await.unwrap();
+    assert!(status.starts_with("Library · lost its thread") && status.contains(&format!("lost thread {second}: gone from T3")), "{status}");
+}
+
+/// T3 unreachable: the message waits in the crewmate's inbox and goes on a later pass, never lost, never doubled.
+#[tokio::test]
+async fn a_message_that_cannot_go_now_waits_in_the_inbox() {
+    let l = Lab::new().await;
+    let crew = l.crew();
+    l.call("crew_add", json!({"name":"Feedback","role":"reads the feedback inbox","message":"Read today's feedback."})).await.unwrap();
+    let thread = l.crew_thread("Feedback");
+    l.reply(&thread, "Two reports.", "completed");
+    l.pass().await;
+    // T3 is restarting: every send and read fails.
+    l.s.fail_sends.store(true, std::sync::atomic::Ordering::Release);
+    let told = l.call("crew_tell", json!({"name":"Feedback","message":"Fix the first report."})).await.unwrap();
+    assert!(told.starts_with("Queued for Feedback: it could not go now ("), "{told}");
+    // Many failing passes: never given up, one notice after MAX_ATTEMPTS.
+    for _ in 0..(t3::crew::MAX_ATTEMPTS + 3) {
+        l.crew_pass(&crew).await;
+    }
+    assert_eq!(crew.store.pending().unwrap().len(), 1);
+    let warned: Vec<_> = l.deliveries().into_iter().filter(|(id, _)| id.starts_with("crew:undelivered:")).collect();
+    assert_eq!(warned.len(), 1, "{warned:?}");
+    assert!(warned[0].1.contains("it stays in its inbox"), "{}", warned[0].1);
+    // T3 is back: delivered once, then never again.
+    l.s.fail_sends.store(false, std::sync::atomic::Ordering::Release);
+    l.crew_pass(&crew).await;
+    l.crew_pass(&crew).await;
+    let sent = l.sent_to(&thread);
+    assert_eq!(sent.iter().filter(|m| m.ends_with("Fix the first report.")).count(), 1, "{sent:?}");
+    assert!(crew.store.pending().unwrap().is_empty());
+}
+
+/// A first start that failed is retried with the very same launch, even when the crewmate's history changed in
+/// between (review: a rebuilt brief made every retry a REPLAY_CONFLICT).
+#[tokio::test]
+async fn a_failed_first_start_is_retried_with_the_same_launch() {
+    let l = Lab::new().await;
+    let crew = l.crew();
+    l.s.fail_sends.store(true, std::sync::atomic::Ordering::Release);
+    let added = l.call("crew_add", json!({"name":"Late","role":"starts while T3 restarts","message":"Begin."})).await.unwrap();
+    assert!(added.contains("Queued for Late: it could not go now"), "{added}");
+    l.call("crew_schedule", json!({"action":"add","name":"Late","when":"daily 07:00","message":"Morning run."})).await.unwrap();
+    l.s.fail_sends.store(false, std::sync::atomic::Ordering::Release);
+    l.crew_pass(&crew).await;
+    assert!(crew.store.get("Late").unwrap().unwrap().thread.is_some(), "{:?}", l.calls("t3_thread_launch"));
+    assert!(crew.store.pending().unwrap().is_empty());
+}
+
+/// A turn that waits on its own sub-agent inside the turn and ends once it is back is not woken again (review).
+#[tokio::test]
+async fn a_crewmate_whose_sub_agent_ended_within_its_turn_is_not_woken() {
+    let l = Lab::new().await;
+    let crew = l.crew();
+    l.call("crew_add", json!({"name":"Quick","role":"x","message":"Go."})).await.unwrap();
+    let thread = l.crew_thread("Quick");
+    let agent = l.item(&thread, "subagent", "running", "", json!({"title":"Look it up","subagentId":"node:q"}));
+    l.pass().await;
+    l.crew_pass(&crew).await;
+    l.set_item(&thread, &agent, "completed");
+    l.reply(&thread, "Looked it up: done.", "completed");
+    l.pass().await;
+    for _ in 0..3 {
+        l.crew_pass(&crew).await;
+    }
+    assert!(l.sent_to(&thread).is_empty(), "{:?}", l.sent_to(&thread));
+}
+
+/// Crew tools replayed under the same operation id answer as the first time: no second crewmate, schedule or retire.
+#[tokio::test]
+async fn crew_tools_replayed_with_the_same_operation_change_nothing_twice() {
+    let l = Lab::new().await;
+    let crew = l.crew();
+    let p = l.p();
+    let add = json!({"name":"Once","role":"x","message":"Hi."});
+    let first = l.w.execute("crew_add", add.clone(), "op-add", &p).await.unwrap();
+    assert_eq!(l.w.execute("crew_add", add, "op-add", &p).await.unwrap(), first);
+    assert_eq!(l.calls("t3_thread_launch").len(), 1);
+    let sched = json!({"action":"add","name":"Once","when":"daily 07:00","message":"m"});
+    let one = l.w.execute("crew_schedule", sched.clone(), "op-s", &p).await.unwrap();
+    assert_eq!(l.w.execute("crew_schedule", sched, "op-s", &p).await.unwrap(), one);
+    assert_eq!(crew.store.all_schedules().unwrap().len(), 1);
+    let r = l.w.execute("crew_retire", json!({"name":"Once"}), "op-r", &p).await.unwrap();
+    assert_eq!(l.w.execute("crew_retire", json!({"name":"Once"}), "op-r", &p).await.unwrap(), r);
+}
+
+/// After a forced restart a crewmate's turn ends interrupted: the new Heimdall process resumes it in the same thread
+/// by itself with one notice, the interruption itself wakes nothing, and a second failure is reported as usual.
+#[tokio::test]
+async fn a_crewmate_interrupted_by_a_restart_is_resumed_once_by_itself() {
+    let mut l = Lab::new().await;
+    let _crew = l.crew();
+    l.call("crew_add", json!({"name":"Decider","role":"trains Decider v7","message":"Run the night training."})).await.unwrap();
+    let thread = l.crew_thread("Decider");
+    l.restart_process();
+    let crew = l.crew();
+    l.reply(&thread, "Epoch 3 of 8…", "interrupted");
+    l.pass().await;
+    l.crew_pass(&crew).await;
+    let got = l.deliveries();
+    assert!(!got.iter().any(|(id, _)| id.starts_with(&format!("terminal:{thread}"))), "the interruption is not news: {got:?}");
+    let resumed: Vec<_> = got.iter().filter(|(id, _)| id.starts_with("crew:resumed:")).collect();
+    assert_eq!(resumed.len(), 1, "{got:?}");
+    assert!(resumed[0].1.starts_with("Crew: Decider's turn ended interrupted; Heimdall resumed it by itself (Told Decider: started a turn in its thread."), "{}", resumed[0].1);
+    assert!(l.sent_to(&thread).last().unwrap().contains("your last turn ended interrupted before it finished"));
+    l.crew_pass(&crew).await;
+    assert_eq!(l.sent_to(&thread).len(), 1, "resumed once");
+    // The resumed turn fails too: reported.
+    l.reply(&thread, "CUDA? No: the MLX kernel crashed.", "failed");
+    l.pass().await;
+    l.crew_pass(&crew).await;
+    assert!(l.deliveries().iter().any(|(id, t)| id.starts_with(&format!("terminal:{thread}")) && t.contains("the MLX kernel crashed")), "{:?}", l.deliveries());
+    assert_eq!(l.sent_to(&thread).len(), 1);
+}
+
+/// "Tasks that said I'll report when the worker finishes and then never woke": a crewmate whose turn ended waiting on
+/// its sub-agent is woken when that sub-agent has ended and no turn of its own started meanwhile.
+#[tokio::test]
+async fn a_crewmate_waiting_on_its_sub_job_is_woken_when_it_ends() {
+    let l = Lab::new().await;
+    let crew = l.crew();
+    l.call("crew_add", json!({"name":"Taste","role":"improves the taste model","message":"Label the new batch."})).await.unwrap();
+    let thread = l.crew_thread("Taste");
+    let agent = l.item(&thread, "subagent", "running", "", json!({"title":"Label batch 12","subagentId":"node:label"}));
+    l.reply(&thread, "Labelling runs in a sub-agent; I'll report when it finishes.", "completed");
+    l.pass().await;
+    l.crew_pass(&crew).await;
+    assert_eq!(crew.state(&crew.store.get("Taste").unwrap().unwrap()), "waiting on its sub-jobs");
+    assert!(l.sent_to(&thread).is_empty());
+    // The sub-agent ends (a crash), and T3 starts no turn for it.
+    l.set_item(&thread, &agent, "failed");
+    l.pass().await;
+    l.crew_pass(&crew).await; // the work ended: the grace starts
+    l.crew_pass(&crew).await; // grace over: woken
+    let sent = l.sent_to(&thread);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(sent[0].contains("the work you were waiting on has ended (Label batch 12)"), "{}", sent[0]);
+    l.crew_pass(&crew).await;
+    assert_eq!(l.sent_to(&thread).len(), 1, "woken once");
+}
+
+/// A crewmate's turn that hits a usage limit moves to the account with quota as a task's does; the crew's record
+/// follows the move, and the crew does not resume it a second time.
+#[tokio::test]
+async fn a_crewmate_moves_account_on_a_usage_limit_like_a_task() {
+    use agent::accounts::{AccountQuota, Kind, Window};
+    use t3::workers::AccountsHook;
+    let l = Lab::new().await;
+    let crew = l.crew();
+    let now = agent::now_ms();
+    let acct = |instance: &str, used: f64| AccountQuota { instance: instance.into(), kind: Kind::Claude, windows: vec![Window { name: "weekly".into(), used_percent: Some(used), resets_at_ms: Some(now + 3 * 86_400_000) }], reached: None, error: None };
+    let reading = vec![acct("claudeAgent", 100.0), acct("claudeAgent_2", 0.0)];
+    let hook: AccountsHook = Arc::new(move |_wait| Ok(reading.clone()));
+    l.w.set_accounts(hook);
+    l.call("crew_add", json!({"name":"Site","role":"keeps the Heimdall website","message":"Fix the hero."})).await.unwrap();
+    let thread = l.crew_thread("Site");
+    l.s.second_account.store(true, std::sync::atomic::Ordering::Release);
+    l.reply(&thread, "You've hit your weekly limit · resets Nov 19 at 1pm (Europe/Warsaw)", "failed");
+    l.pass().await;
+    l.pass().await;
+    l.crew_pass(&crew).await;
+    assert_eq!(l.calls("t3_thread_configure").len(), 1);
+    let sends = l.sent_to(&thread);
+    assert_eq!(sends.len(), 1, "the account move's own resume only: {sends:?}");
+    assert!(!l.deliveries().iter().any(|(id, _)| id.starts_with("crew:resumed:")));
+    let status = l.call("crew_status", json!({"name":"Site"})).await.unwrap();
+    assert!(status.contains("on claudeAgent_2") && status.contains("runs on claudeAgent_2 now"), "{status}");
+}
+
+/// The way in for the user's project tools (`heimdall --crew tell`): queued in the crew's store without waking the agent,
+/// delivered on the next pass marked as a project tool's, recorded, and its result kept in the history for the digest
+/// rather than sent to the agent, unless it asks something of the user. It can only reach an existing crewmate.
+#[tokio::test]
+async fn the_local_command_queues_for_a_crewmate_and_its_result_goes_to_the_digest() {
+    let l = Lab::new().await;
+    let crew = l.crew();
+    l.call("crew_add", json!({"name":"Notes","role":"acts on User's notes on the hub","message":"Say hello."})).await.unwrap();
+    let thread = l.crew_thread("Notes");
+    l.reply(&thread, "Ready.", "completed");
+    l.pass().await;
+    let _ = l.call("crew_status", json!({})).await.unwrap(); // the agent looked
+    let data = l.dir.path().to_owned();
+    let note = data.join("note.txt");
+    std::fs::write(&note, "User's note on draft 4: shorter, no emoji.").unwrap();
+    let mut stdin = std::io::empty();
+    let line = t3::crew::cli(&["tell".into(), "notes".into(), note.to_string_lossy().into(), "--id".into(), "n4".into()], || Ok(data.clone()), &mut stdin).unwrap();
+    assert_eq!(line, "Queued for Notes as message 2; Heimdall delivers it on its next pass (within a minute while it runs) and keeps it in Notes's history.");
+    // The same id again is the same message.
+    t3::crew::cli(&["tell".into(), "Notes".into(), note.to_string_lossy().into(), "--id".into(), "n4".into()], || Ok(data.clone()), &mut stdin).unwrap();
+    let before = l.deliveries().len();
+    l.crew_pass(&crew).await;
+    let sent = l.sent_to(&thread);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(sent[0].contains("From one of the project's tools on the Mac (passed on by Heimdall):\nUser's note on draft 4"), "{}", sent[0]);
+    l.reply(&thread, "Draft 4 shortened and saved. Nothing needs User.", "completed");
+    l.pass().await;
+    l.crew_pass(&crew).await;
+    assert_eq!(l.deliveries().len(), before, "no wake for a routine result: {:?}", l.deliveries());
+    let digest = l.call("crew_status", json!({})).await.unwrap();
+    assert!(digest.contains("Notes · idle · acts on User's notes on the hub · claude-opus-5-5 medium · 1 in (1 routine), 1 results; last: Draft 4 shortened"), "{digest}");
+    let again = l.call("crew_status", json!({})).await.unwrap();
+    assert!(again.contains("· nothing"), "{again}");
+    // A routine result that asks the user something reaches the agent.
+    std::fs::write(&note, "User's note: post draft 5?").unwrap();
+    t3::crew::cli(&["tell".into(), "Notes".into(), note.to_string_lossy().into()], || Ok(data.clone()), &mut stdin).unwrap();
+    l.crew_pass(&crew).await;
+    l.reply(&thread, "Draft 5 is ready.\n\nShould I post it? Default: hold.", "completed");
+    l.pass().await;
+    assert!(l.deliveries().iter().any(|(_, t)| t.contains("Should I post it?")), "{:?}", l.deliveries());
+    // Only an existing crewmate; nothing but tell, list and the migration's import.
+    let e = t3::crew::cli(&["tell".into(), "Nobody".into(), note.to_string_lossy().into()], || Ok(data.clone()), &mut stdin).unwrap_err().to_string();
+    assert!(e.starts_with("NO_CREWMATE: no crewmate is called 'Nobody'"), "{e}");
+    assert!(t3::crew::cli(&["add".into(), "X".into()], || Ok(data.clone()), &mut stdin).is_err());
+    assert!(t3::crew::cli(&["list".into()], || Ok(data.clone()), &mut stdin).unwrap().starts_with("Notes · acts on"));
+}
+
+/// A crewmate's schedule fires straight into its thread without a turn of the agent; the firing and its result are
+/// in the history. Retiring it ends its schedules and archives its thread; crew_add brings it back with its history.
+#[tokio::test]
+async fn a_crew_schedule_fires_into_its_thread_and_retiring_ends_it() {
+    let l = Lab::new().await;
+    let crew = l.crew();
+    l.call("crew_add", json!({"name":"Weekly","role":"runs the weekly project cycle","message":"Introduce yourself."})).await.unwrap();
+    let thread = l.crew_thread("Weekly");
+    l.reply(&thread, "Hello.", "completed");
+    l.pass().await;
+    let added = l.call("crew_schedule", json!({"action":"add","name":"Weekly","when":"weekly sun 21:00","message":"Run the weekly project cycle."})).await.unwrap();
+    assert!(added.starts_with("Schedule 1 for Weekly: weekly sun 21:00, first at Sun"), "{added}");
+    assert!(l.call("crew_schedule", json!({})).await.unwrap().starts_with("1 · Weekly · weekly sun 21:00 · next Sun"));
+    l.crew_pass(&crew).await;
+    assert!(l.sent_to(&thread).is_empty(), "not due yet");
+    crew.shift_schedules_for_tests(8 * 86_400_000);
+    let before = l.deliveries().len();
+    l.crew_pass(&crew).await;
+    l.crew_pass(&crew).await;
+    let sent = l.sent_to(&thread);
+    assert_eq!(sent.len(), 1, "fired once: {sent:?}");
+    assert!(sent[0].contains("Your schedule (passed on by Heimdall):\nRun the weekly project cycle."), "{}", sent[0]);
+    assert_eq!(l.deliveries().len(), before);
+    let status = l.call("crew_status", json!({"name":"Weekly"})).await.unwrap();
+    assert!(status.contains("Schedule 1: weekly sun 21:00, next") && status.contains("schedule 1 (weekly sun 21:00) fired"), "{status}");
+    let retired = l.call("crew_retire", json!({"name":"Weekly","reason":"User dropped it"})).await.unwrap();
+    assert!(retired.starts_with("Weekly retired; its history stays"), "{retired}");
+    assert!(l.calls("t3_thread_organize").contains(&json!({"threadId":thread,"action":"archive"})));
+    assert!(l.call("crew_tell", json!({"name":"Weekly","message":"x"})).await.unwrap_err().to_string().starts_with("CREW_RETIRED"));
+    assert_eq!(l.call("crew_schedule", json!({})).await.unwrap(), "No crew schedules.");
+    let back = l.call("crew_add", json!({"name":"Weekly","role":"runs the weekly project cycle"})).await.unwrap();
+    assert!(back.starts_with("Crewmate Weekly re-added with its history"), "{back}");
+}
+
+/// Re-adding (the user, 17:11): an existing T3 thread becomes a crewmate's body in one call, and a crewmate can be
+/// pointed at another thread. The migration's import names threads that the next pass adopts.
+#[tokio::test]
+async fn an_existing_thread_is_adopted_as_a_crewmates_body() {
+    let l = Lab::new().await;
+    let crew = l.crew();
+    l.owner_thread("t-old-worker", "Newsletter worker", 2);
+    let added = l.call("crew_add", json!({"name":"Builder","role":"builds the hub","thread":"t-old-worker"})).await.unwrap();
+    assert!(added.ends_with("Its body is thread t-old-worker."), "{added}");
+    assert!(l.w.owns_task("t-old-worker").unwrap());
+    l.pass().await;
+    assert!(l.deliveries().is_empty(), "its old runs are not news: {:?}", l.deliveries());
+    let told = l.call("crew_tell", json!({"name":"Builder","message":"Add the Sponsor button."})).await.unwrap();
+    assert_eq!(told, "Told Builder: started a turn in its thread. Its result arrives as a notice.");
+    l.owner_thread("t-other", "Hub v2", 1);
+    let moved = l.call("crew_change", json!({"name":"Builder","thread":"t-other"})).await.unwrap();
+    assert_eq!(moved, "Builder: changed thread.");
+    assert_eq!(l.crew_thread("Builder"), "t-other");
+    // The registry import: threads adopted on the next pass.
+    let reg = l.dir.path().join("Assistant");
+    std::fs::create_dir_all(&reg).unwrap();
+    // A thread Heimdall started (as the registry's were), and one of the user's own, which the import may not take.
+    let dec = l.delegate("Decider v7").await;
+    l.owner_thread("t-owner", "User's own", 1);
+    std::fs::write(reg.join("workers.md"), format!("## Active\n- Decider v7 · plan, data, trainer · {dec} · Opus 5.5 medium (claudeAgent) · Projects/Heimdall/lab/decider-v7/WORKER.md (to write) · 14 Nov\n- Grab · x · t-owner · Opus 5.5 · a/WORKER.md · 14 Nov\n")).unwrap();
+    let data = l.dir.path().to_owned();
+    let line = t3::crew::cli(&["import".into(), reg.join("workers.md").to_string_lossy().into()], || Ok(data.clone()), &mut std::io::empty()).unwrap();
+    assert_eq!(line, "Imported 2 crewmates: Decider v7, Grab; Heimdall adopts their threads on its next pass.");
+    l.crew_pass(&crew).await;
+    assert!(crew.store.get("Decider v7").unwrap().unwrap().adopted);
+    assert_eq!(crew.store.crewmate_of(&dec).unwrap().as_deref(), Some("Decider v7"));
+    assert_eq!(crew.store.get("Grab").unwrap().unwrap().thread, None);
+    assert!(!l.w.owns_task("t-owner").unwrap());
+}
+// ---- end crewmates ----
+
+/// The app's watcher runs the crew's pass: a project tool's message queued while Heimdall runs is delivered by the
+/// next control-plane pass, with nobody calling the crew.
+#[tokio::test]
+async fn the_watcher_delivers_a_queued_crew_message() {
+    let l = Lab::new().await;
+    let _crew = l.crew();
+    l.call("crew_add", json!({"name":"Hub","role":"runs the social hub","message":"Start."})).await.unwrap();
+    let thread = l.crew_thread("Hub");
+    l.reply(&thread, "Started.", "completed");
+    let data = l.dir.path().to_owned();
+    let note = data.join("n.txt");
+    std::fs::write(&note, "A note from the hub.").unwrap();
+    t3::crew::cli(&["tell".into(), "Hub".into(), note.to_string_lossy().into()], || Ok(data.clone()), &mut std::io::empty()).unwrap();
+    let (stop, task) = l.watcher();
+    for _ in 0..100 {
+        if l.sent_to(&thread).len() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    stop.send(true).unwrap();
+    task.await.unwrap();
+    assert!(l.sent_to(&thread)[0].ends_with("A note from the hub."), "{:?}", l.sent_to(&thread));
 }

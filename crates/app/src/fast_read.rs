@@ -296,6 +296,8 @@ pub fn start(tools: &crate::bridge::Tools, actions: &Actions, args: &serde_json:
         reads.pending.lock().unwrap().insert(id.clone(), Pending { permit: permit.clone(), text: text.clone(), title: title.clone(), embedding: None });
         permit.with(|| {
             ui.send(ui::UiUpdate::FastRead(FastReadUpdate::Show(FastRead { id: id.clone(), text: text.clone(), title: title.clone(), wpm: prediction.wpm })));
+            // Phone endpoint (remote.rs): the reader as shown.
+            crate::remote::publish("fast_read", serde_json::json!({"id": id, "text": text, "title": title, "wpm": prediction.wpm}));
             Ok(())
         })?;
         actions.set_state(&id, "shown", permit)?;

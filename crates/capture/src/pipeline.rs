@@ -364,6 +364,82 @@ pub(crate) struct Pipeline {
     pub alive: Arc<AtomicBool>,
     pub control_wake: Arc<std::sync::Mutex<Option<thread::Thread>>>,
 }
+impl Pipeline {
+    /// Where pushed sources join this pipeline (`PushInput`).
+    pub(crate) fn push_input(&self) -> PushInput {
+        PushInput { tx: self.tx.clone(), wake: self.wake.clone(), alive: self.alive.clone() }
+    }
+}
+/// Adds sources whose audio is pushed from the app (the phone's microphone, `phone_mic.rs`) to a running capture
+/// pipeline: the same raw queue, archive, clock check, 16 kHz resampler and `CaptureEvent`s as a microphone's. Cheap
+/// to clone; dead once its pipeline stops (`alive`), and then its sources end with the pipeline.
+#[derive(Clone)]
+pub struct PushInput {
+    tx: Sender<Command>,
+    wake: thread::Thread,
+    alive: Arc<AtomicBool>,
+}
+impl PushInput {
+    /// The pipeline behind it still runs.
+    pub fn alive(&self) -> bool {
+        self.alive.load(Ordering::Acquire)
+    }
+    /// Both handles reach the same pipeline.
+    pub fn same(&self, other: &PushInput) -> bool {
+        Arc::ptr_eq(&self.alive, &other.alive)
+    }
+    /// A new source: `SourceAdded` (and its archive row) follow on the pipeline's thread, never waiting here.
+    pub fn open(&self, info: SourceInfo) -> Result<PushSource> {
+        info.format.validate()?;
+        anyhow::ensure!(self.alive(), "the capture pipeline stopped");
+        let raw = RawQueue::new(info, self.wake.clone());
+        self.tx.send(Command::Add(raw.clone())).map_err(|_| anyhow::anyhow!("the capture pipeline stopped"))?;
+        self.wake.unpark();
+        Ok(PushSource { raw, input: self.clone(), closed: false })
+    }
+}
+/// One pushed source. Dropping it (or `close`) ends it: an archived removal and `SourceRemoved`, after every sample
+/// pushed before.
+pub struct PushSource {
+    raw: Arc<RawQueue>,
+    input: PushInput,
+    closed: bool,
+}
+impl PushSource {
+    pub fn info(&self) -> &SourceInfo {
+        &self.raw.info
+    }
+    /// Interleaved samples in the source's format whose first frame is at `host_ns` (`host_now_ns`'s clock). Never
+    /// waits: a full queue counts the frames as lost (an archived gap). False once the pipeline stopped.
+    pub fn push(&self, host_ns: u64, samples: &[f32]) -> bool {
+        if self.closed || !self.input.alive() {
+            return false;
+        }
+        let ch = self.raw.info.format.channels.max(1) as usize;
+        self.raw.push_frames(samples.len() / ch, host_ns, |f, c| samples[f * ch + c]);
+        true
+    }
+    /// `frames` were lost before the next push: it is archived as a gap and listen starts over there.
+    pub fn mark_loss(&self, frames: u64) {
+        self.raw.reject_frames(frames);
+    }
+    /// Ends the source with `reason` (archived with its removal).
+    pub fn close(mut self, reason: &str) {
+        self.end(reason);
+    }
+    fn end(&mut self, reason: &str) {
+        if std::mem::replace(&mut self.closed, true) {
+            return;
+        }
+        let _ = self.input.tx.send(Command::Remove(self.raw.info.id.clone(), reason.to_owned()));
+        self.input.wake.unpark();
+    }
+}
+impl Drop for PushSource {
+    fn drop(&mut self) {
+        self.end("source stopped");
+    }
+}
 /// The longest a capture stop waits for the archive thread's last commit before handing it off.
 pub(crate) const CLOSE_WAIT: Duration = Duration::from_secs(2);
 /// Archive threads still committing after their capture stopped (`Pipeline::close`).
@@ -566,36 +642,40 @@ fn emit_audio(
     let mut used = 0;
     while state.output.len() - used >= 320 {
         let ns = output_timestamp(state, state.emitted);
-        if inflight.load(Ordering::Acquire) < 512 {
-            inflight.fetch_add(1, Ordering::Relaxed);
-            if events
-                .send(CaptureEvent::Audio(AudioChunk {
-                    source_id: state.raw.info.id.clone(),
-                    label: state.raw.info.label.clone(),
-                    host_ns: ns,
-                    samples: state.output[used..used + 320].to_vec(),
-                    discontinuity: state.listen_gap,
-                }))
-                .is_err()
-            {
-                inflight.fetch_sub(1, Ordering::Relaxed);
-            }
-            state.listen_gap = false;
-            state.receiver_lag = false;
-        } else if !state.receiver_lag {
-            let _ = events.send(CaptureEvent::Gap {
-                source_id: Some(state.raw.info.id.clone()),
-                host_ns: ns,
-                detail: "listen receiver lagged; raw archive retained".into(),
-            });
-            state.listen_gap = true;
-            state.receiver_lag = true;
-        }
+        let samples = state.output[used..used + 320].to_vec();
+        send_chunk(state, ns, samples, events, inflight, "");
         state.emitted += 320;
         used += 320;
     }
     state.output.drain(..used);
     Ok(())
+}
+/// One chunk to listen, unless 512 are already in flight: then the lag is reported once, and the next chunk sent is
+/// marked a discontinuity.
+fn send_chunk(state: &mut State, ns: u64, samples: Vec<f32>, events: &Sender<CaptureEvent>, inflight: &AtomicUsize, note: &str) {
+    if inflight.load(Ordering::Acquire) < 512 {
+        inflight.fetch_add(1, Ordering::Relaxed);
+        let chunk = AudioChunk {
+            source_id: state.raw.info.id.clone(),
+            label: state.raw.info.label.clone(),
+            host_ns: ns,
+            samples,
+            discontinuity: state.listen_gap,
+        };
+        if events.send(CaptureEvent::Audio(chunk)).is_err() {
+            inflight.fetch_sub(1, Ordering::Relaxed);
+        }
+        state.listen_gap = false;
+        state.receiver_lag = false;
+    } else if !state.receiver_lag {
+        let _ = events.send(CaptureEvent::Gap {
+            source_id: Some(state.raw.info.id.clone()),
+            host_ns: ns,
+            detail: format!("listen receiver lagged; raw archive retained{note}"),
+        });
+        state.listen_gap = true;
+        state.receiver_lag = true;
+    }
 }
 fn drain(
     state: &mut State,
@@ -718,29 +798,8 @@ fn finish_audio(state: &mut State, events: &Sender<CaptureEvent>, inflight: &Ato
         let index = state.emitted;
         let ns = output_timestamp(state, index);
         let samples = std::mem::take(&mut state.output);
-        if inflight.load(Ordering::Acquire) < 512 {
-            inflight.fetch_add(1, Ordering::Relaxed);
-            if events
-                .send(CaptureEvent::Audio(AudioChunk {
-                    source_id: state.raw.info.id.clone(),
-                    label: state.raw.info.label.clone(),
-                    host_ns: ns,
-                    samples,
-                    discontinuity: state.listen_gap,
-                }))
-                .is_err()
-            {
-                inflight.fetch_sub(1, Ordering::Relaxed);
-            }
-            state.receiver_lag = false;
-        } else if !state.receiver_lag {
-            let _ = events.send(CaptureEvent::Gap {
-                source_id: Some(state.raw.info.id.clone()), host_ns: ns,
-                detail: format!("listen receiver lagged; raw archive retained; tail {} samples", samples.len()),
-            });
-            state.receiver_lag = true;
-            state.listen_gap = true;
-        }
+        let note = format!("; tail {} samples", samples.len());
+        send_chunk(state, ns, samples, events, inflight, &note);
     }
     Ok(())
 }
@@ -1135,6 +1194,55 @@ mod tests {
         }
         fn flush(&mut self) -> Result<()> { Ok(()) }
         fn commit_wait(&self) -> Option<Duration> { None }
+    }
+    /// The phone's microphone (`PushInput`): 100-ms chunks stamped back to back reach listen as one continuous 16 kHz
+    /// stream (no discontinuity per chunk), every sample is archived, a reported loss is one discontinuity, and the
+    /// source ends with an archived removal. A pipeline that stopped refuses new sources.
+    #[test]
+    fn a_pushed_phone_source_is_archived_and_heard_like_a_microphone() {
+        let archived = Arc::new(Mutex::new(vec![]));
+        let (mut pipeline, receiver) = start_pipeline_with_archive(Box::new(RecordingArchive(archived.clone()))).unwrap();
+        let input = pipeline.push_input();
+        let info = SourceInfo::new(SourceKind::Phone { kind: "airpods".into(), name: "AirPods Pro".into(), capture: "headset".into(), voice_processing: true },
+            NativeFormat { sample_rate: 16000, channels: 1 }, 7);
+        assert_eq!(info.id.0, "phone:airpods:7");
+        let source = input.open(info).unwrap();
+        let first = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(&first, CaptureEvent::SourceAdded(i) if i.id.0 == "phone:airpods:7"), "{first:?}");
+        let base = 50_000_000_000u64;
+        for k in 0..20u64 {
+            assert!(source.push(base + k * 100_000_000, &[0.25; 1600]));
+        }
+        // 300 ms lost before the next chunk, reported by the bridge.
+        source.mark_loss(4800);
+        assert!(source.push(base + 2_300_000_000, &[0.25; 1600]));
+        source.close("phone stream stopped");
+        let mut audio = vec![];
+        let mut removed = None;
+        while let Ok(e) = receiver.recv_timeout(Duration::from_secs(5)) {
+            match e {
+                CaptureEvent::Audio(c) => audio.push(c),
+                CaptureEvent::SourceRemoved { source_id, reason, .. } => { removed = Some((source_id, reason)); break; }
+                _ => {}
+            }
+        }
+        assert_eq!(removed, Some((SourceId("phone:airpods:7".into()), "phone stream stopped".into())));
+        let before: Vec<_> = audio.iter().filter(|c| c.host_ns < base + 2_000_000_000).collect();
+        assert!(before.len() > 80, "{}", before.len());
+        assert!(before.iter().all(|c| !c.discontinuity), "a back-to-back chunk was heard as a gap");
+        for pair in before.windows(2) {
+            assert_eq!(pair[1].host_ns, pair[0].host_ns + pair[0].samples.len() as u64 * 62_500, "listen's clock moved");
+        }
+        assert!(audio.iter().any(|c| c.host_ns >= base + 2_300_000_000 && c.discontinuity), "the loss reached listen");
+        // SourceRemoved is sent while the commit thread may still be appending (the archive never holds up listen):
+        // the count is final once close has joined the archive thread, which joins the commit thread first
+        // (`Committer::close`). `close` waits 2 s before handing that off; a loaded test machine gets as long as it needs.
+        pipeline.close_within(Duration::from_secs(60));
+        assert_eq!(archived.lock().unwrap().len(), 21 * 1600, "every pushed sample is archived");
+        // A stopped pipeline: the handle is dead and opens nothing.
+        assert!(!input.alive());
+        assert!(input.open(SourceInfo::new(SourceKind::Phone { kind: "iphone".into(), name: "iPhone".into(), capture: "room".into(), voice_processing: false },
+            NativeFormat { sample_rate: 16000, channels: 1 }, 8)).is_err());
     }
     /// The user's decision (23 Oct): the archive holds the raw microphone, never the echo-cancelled signal, even while echo
     /// cancellation runs; listen (transcription, the decider's clip) hears the cleaned one.

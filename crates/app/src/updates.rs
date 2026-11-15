@@ -443,14 +443,16 @@ impl Host for AppHost {
     }
 }
 
-/// At launch (public edition, from the app bundle): starts updates, shows the menu row, and has each agent start
-/// upgrade the bundled skills. Nothing in the personal edition.
+/// At launch: has each agent start upgrade the bundled general skills (both editions), and, in the public edition from
+/// the app bundle, starts updates and shows the menu row.
 pub fn launch(ui: ui::Ui, tools: &Arc<crate::bridge::Tools>) {
+    // General skills follow the build in both editions (docs/skills.md, "Two layers"): an unedited one is replaced by
+    // this build's copy, an edited one is kept. The user's own skills are in another folder and are never touched.
+    agent::skills::after_seed(upgrade_skills);
     let host = Arc::new(AppHost { ui, tools: Arc::downgrade(tools) });
     let Some(updates) = Updates::start(host) else { return };
     ui.send(ui::UiUpdate::UpdateRow(Some(ui_row(&updates.menu_row()))));
     let _ = RUNNING.set(updates);
-    agent::skills::after_seed(upgrade_skills);
 }
 
 /// The menu row clicked: its current command.
@@ -467,9 +469,16 @@ pub fn install_clicked() {
     }
 }
 
+/// Where the skill upgrade keeps its baseline: the updater's state folder in the public edition (where its releases
+/// have kept it since the first one), and beside the profile's skills in the personal edition, which has no updater
+/// and whose lab runs on other data folders must never share a baseline with the real profile.
+fn skill_store(profile: &Path) -> PathBuf {
+    if edition::PUBLIC { state_dir() } else { profile.parent().unwrap_or(profile).join("skill-updates") }
+}
+
 /// After the agent's skill seeding: unedited bundled skills follow this release; edited ones are kept.
 fn upgrade_skills(sets: &[PathBuf], profile: &Path) {
-    match heimdall_update::skills::upgrade(sets, profile, &state_dir(), edition::VERSION) {
+    match heimdall_update::skills::upgrade(sets, profile, &skill_store(profile), edition::VERSION) {
         Ok(r) if !r.updated.is_empty() || !r.conflicts.is_empty() => {
             eprintln!("Bundled skills: updated {:?}; kept edited {:?}", r.updated, r.conflicts)
         }

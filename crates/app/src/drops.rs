@@ -25,7 +25,7 @@ pub(crate) struct Message {
 impl Message {
     /// Sent alone: the user's typed message.
     pub(crate) fn alone(&self) -> String {
-        format!("User dropped onto the notch:\n{}", self.lines.join("\n"))
+        format!("{} dropped onto the notch:\n{}", agent::identity::user_start(), self.lines.join("\n"))
     }
 
     /// Joined to his words: the lines under what he said.
@@ -312,7 +312,7 @@ mod tests {
         assert!(l[4].starts_with(&format!("- video: {} (", clip.display())) && l[4].ends_with("2.4 MB)"), "{}", l[4]);
         assert_eq!(l[5], "- link: https://www.apple.com");
         assert_eq!(l[6], "- text:\n```\nselected words\n```");
-        assert!(m.alone().starts_with("User dropped onto the notch:\n- image: "));
+        assert!(m.alone().starts_with("The user dropped onto the notch:\n- image: "));
         assert!(m.with_speech().starts_with("[and dropped onto the notch as he said it:\n- image: ") && m.with_speech().ends_with(']'));
     }
 

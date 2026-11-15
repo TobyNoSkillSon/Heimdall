@@ -803,13 +803,14 @@ impl AgentWindow {
         match turn {
             Some(t) => {
                 let h = agent_debug::turn_heading(t);
-                let what = match (h.what, live) {
-                    ("Context", Some(e)) if !e.sent && !e.queued => "Would send",
-                    (crate::identity::USER_HEADING, Some(e)) if e.queued && !e.sent => if cfg!(feature = "public") { "You · queued" } else { "User · queued" },
-                    (what, _) => what,
+                let typed = h.what == crate::identity::user_heading();
+                let what = match (h.what.as_str(), live) {
+                    ("Context", Some(e)) if !e.sent && !e.queued => "Would send".to_string(),
+                    (what, Some(e)) if typed && e.queued && !e.sent => format!("{what} · queued"),
+                    (what, _) => what.to_string(),
                 };
                 append(&out, &format!("{}   ", time_label(row.time_ms())), &digits(11.0), &tertiary(), &head_style, None);
-                append(&out, what, &semibold(13.0), &label(), &head_style, None);
+                append(&out, &what, &semibold(13.0), &label(), &head_style, None);
                 if !h.outcome.is_empty() {
                     append(&out, "   ", &font(12.0), &tertiary(), &head_style, None);
                     append(&out, h.outcome, &medium(12.0), &color(h.outcome_tone), &head_style, None);

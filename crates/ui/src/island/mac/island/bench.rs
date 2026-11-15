@@ -98,7 +98,7 @@ pub(crate) fn day(n: usize, seed: u64) -> Vec<ChatEntry> {
     while out.len() < n {
         at += 30_000;
         let kind = match r.range(0, 19) {
-            0..=6 => ChatKind::Owner(sentence(&mut r, 3, 25)),
+            0..=6 => ChatKind::User(sentence(&mut r, 3, 25)),
             7..=14 => ChatKind::Heimdall { text: reply(&mut r), heard: if r.range(0, 9) == 0 { Heard::Cut } else { Heard::Whole } },
             15..=18 => ChatKind::Action { kind: if r.range(0, 1) == 0 { ActionKind::Started } else { ActionKind::Finished }, text: sentence(&mut r, 3, 9), answer: None },
             _ => ChatKind::Note { id: format!("n{}", out.len()), title: sentence(&mut r, 2, 5), shape: NoteShape::Table },
@@ -216,7 +216,7 @@ pub(crate) fn run(n: usize) -> String {
         super::measure::STALL_NEXT_MS.store(ms, Relaxed);
     }
     let mut rows = day(n, 7);
-    let chars: usize = rows.iter().map(|e| match &e.kind { ChatKind::Owner(t) => t.len(), ChatKind::Heimdall { text, .. } => text.len(), ChatKind::Action { text, .. } => text.len(), ChatKind::Note { title, .. } => title.len() }).sum();
+    let chars: usize = rows.iter().map(|e| match &e.kind { ChatKind::User(t) => t.len(), ChatKind::Heimdall { text, .. } => text.len(), ChatKind::Action { text, .. } => text.len(), ChatKind::Note { title, .. } => title.len() }).sum();
     let _ = writeln!(out, "conversation: {} rows, {chars} chars", rows.len());
     let t0 = Instant::now();
     super::apply(Event::Chat(rows.clone()));
@@ -332,7 +332,7 @@ pub(crate) fn run(n: usize) -> String {
     open("SECOND ⌃⌘H (same rows)", &mut out);
     close(&mut out);
 
-    rows.push(ChatEntry { at_ms: rows.last().unwrap().at_ms + 1000, kind: ChatKind::Owner("And what about tomorrow?".into()) });
+    rows.push(ChatEntry { at_ms: rows.last().unwrap().at_ms + 1000, kind: ChatKind::User("And what about tomorrow?".into()) });
     super::apply(Event::Chat(rows.clone()));
     advance(1.0);
     open("THIRD ⌃⌘H (one new row since)", &mut out);

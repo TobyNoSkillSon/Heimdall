@@ -94,15 +94,32 @@ fn v3_plays_the_line_the_decider_picked() {
     assert_eq!(records(&a, "agent_wake").len(), 1);
     // Polish: the decider's Polish line no longer exists (English-only acks), so nothing plays, though the
     // store still has last night's Polish take.
+    // A question: the ack gate used to turn the unknown line into its neutral English "Got it." (VOX-A3).
+    take(&a, "en_got_it", "Got it.", "en");
     a.hooks.send_v3.push_back(Some("pl_sprawdzam".into()));
-    turn(&mut a, &mic, 40 * S, "sprawdź czy build już przeszedł", Detect::Final, 0, None, 0, |_| {});
+    turn(&mut a, &mic, 40 * S, "Sprawdź czy build już przeszedł?", Detect::Final, 0, None, 0, |_| {});
     settle(&a);
     let ack = records(&a, "voice_ack");
-    // Day 26: the ack gate may stop it first (no_request: the gate reads English requests only); either way nothing plays.
-    assert_eq!(ack[1]["outcome"].as_str(), Some("nothing"), "{:#}", ack[1]);
-    assert!(matches!(ack[1]["reason"].as_str(), Some("unknown_line" | "no_request")), "{:#}", ack[1]);
-    assert_eq!(log.lock().unwrap().len(), 1, "no Polish take played");
+    assert_eq!((ack[1]["outcome"].as_str(), ack[1]["reason"].as_str()), (Some("nothing"), Some("unknown_line")), "{:#}", ack[1]);
+    assert_eq!(log.lock().unwrap().len(), 1, "no Polish take played, nor an English one");
     assert_eq!(records(&a, "agent_wake").len(), 2, "the wake still goes");
+}
+
+/// An English line the decider picks on a Polish turn plays nothing: never answer Polish in English (VOX-A3).
+#[test]
+fn v3_an_english_line_on_a_polish_turn_says_nothing() {
+    let (_t, mut a, mic, _cue, log) = v3_rig(true);
+    take(&a, "en_got_it", "Got it.", "en");
+    a.hooks.send_v3.push_back(Some("en_will_do".into()));
+    turn(&mut a, &mic, 10 * S, "Zrób zrzut ekranu i otwórz to w podglądzie.", Detect::Final, 0, None, 0, |_| {});
+    settle(&a);
+    a.hooks.send_v3.push_back(Some("en_will_do".into()));
+    turn(&mut a, &mic, 40 * S, "Sprawdź czy build już przeszedł?", Detect::Final, 0, None, 0, |_| {});
+    settle(&a);
+    let reasons: Vec<_> = records(&a, "voice_ack").iter().map(|r| (r["outcome"].as_str().unwrap().to_owned(), r["reason"].as_str().unwrap_or("").to_owned())).collect();
+    assert_eq!(reasons, [("nothing".into(), "other_language".into()), ("nothing".into(), "other_language".into())]);
+    assert!(log.lock().unwrap().is_empty(), "nothing played");
+    assert_eq!(records(&a, "agent_wake").len(), 2, "the wakes still go");
 }
 
 /// Plain send, a line without a take, an unknown id: nothing is said, the wake sound plays, the wake still goes.

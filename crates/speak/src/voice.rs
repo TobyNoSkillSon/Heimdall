@@ -12,8 +12,6 @@ pub const PLAYBACK_RATE: u32 = 44_100;
 
 /// A voice that streams one sentence of PCM at natural speed.
 pub trait StreamingVoice: Send {
-    /// Short name for log lines ("Phonon S", "ElevenLabs").
-    fn label(&self) -> &str;
     /// Say `text` (one sentence, plain), calling `emit(samples, sample_rate)` for each chunk as it is made. Returns
     /// early with an error when `cancel` turns true.
     fn stream_sentence(&mut self, text: &str, cancel: &dyn Fn() -> bool, emit: &mut dyn FnMut(&[f32], u32) -> Result<()>) -> Result<()>;
@@ -124,7 +122,6 @@ mod tests {
     /// A voice that streams a fixed tone in 3 chunks per sentence at 24 kHz, recording what it was asked.
     struct Fake { said: Vec<String>, rate: u32 }
     impl StreamingVoice for Fake {
-        fn label(&self) -> &str { "fake" }
         fn stream_sentence(&mut self, text: &str, cancel: &dyn Fn() -> bool, emit: &mut dyn FnMut(&[f32], u32) -> Result<()>) -> Result<()> {
             self.said.push(text.into());
             for _ in 0..3 {

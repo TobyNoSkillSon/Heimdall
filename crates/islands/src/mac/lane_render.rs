@@ -1,4 +1,4 @@
-//! Lab (Swift `LaneRender.swift`): the three island fixes of 22 Oct afternoon, driven through the real event path
+//! Lab: the three island fixes of 22 Oct afternoon, driven through the real event path
 //! offscreen and rendered.
 //!   FLOATING_ISLANDS_DIR=<lab dir> FloatingIslands --render-lane <out dir>   (lab/lane_islands.sh runs it)
 //! 1. A 40-item Scheduled list is capped under the display's height and scrolls (trackpad gesture with momentum,

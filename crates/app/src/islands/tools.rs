@@ -25,7 +25,7 @@ pub fn style_problem(id: &str, over: &Map<String, Value>, new: bool) -> Option<S
         if !(1..=3).contains(&n) { return Some(format!("title is 1-3 words naming the thing; \"{t}\" has {n}")) }
         let norm = |s: &str| s.to_lowercase().replace(['_', ' '], "-");
         if t == t.to_lowercase() && norm(t) == norm(id) {
-            return Some(format!("title names the thing for User, not an id: \"{t}\""));
+            return Some(format!("title names the thing for {}, not an id: \"{t}\"", super::user()));
         }
     }
     if let Some(s) = over.get("stage").and_then(Value::as_str) {
@@ -108,7 +108,8 @@ pub fn put(h: &super::Host, a: &Value) -> Result<String> {
     }
     // The goal it serves (a Goals id; "" clears): a chip on the island, and the goal's segment lit blue while it runs.
     if let Some(g) = a.get("goal").and_then(Value::as_str) {
-        let g = g.trim();
+        let g = goal_id(&h.root, g.trim());
+        let g = g.as_str();
         if g.is_empty() { over.insert("goal".into(), Value::Null); } else {
             ensure!(goal_known(&h.root, g), "goal: no goal {g} (plan_edit show list goals gives the ids)");
             over.insert("goal".into(), json!(g));
@@ -116,9 +117,21 @@ pub fn put(h: &super::Host, a: &Value) -> Result<String> {
     }
     let sent = a.get("sent").and_then(Value::as_str).map(|s| s.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|s| !s.is_empty());
     if let Some(s) = &sent { ensure!(s.chars().count() <= 110, "sent is one line: what it was sent to do (110 characters at most)"); }
+    // Who named it (`names`): a title Heimdall gives is the agent's and sticks; code passes its own `titleBy`.
+    if over.contains_key("title") {
+        let by = match a.get("titleBy").and_then(Value::as_str) { Some(b @ (super::names::BY_TASK | super::names::BY_WORKER)) => b, _ => super::names::BY_AGENT };
+        over.insert("titleBy".into(), json!(by));
+    }
     let thread = a["thread"].as_str().map(str::to_owned);
     let (out, new, newly_bound) = h.root.locked(|| {
         let old = h.root.read(&id);
+        // Review 1111 S2: the agent re-sending the island's current title (the placeholder, with an update) is not a
+        // naming: the stored title keeps who named it, so the island agent may still rename a placeholder.
+        let same = |o: &Map<String, Value>| o.get("title").and_then(Value::as_str).map(str::trim) == over.get("title").and_then(Value::as_str).map(str::trim);
+        if over.get("titleBy").and_then(Value::as_str) == Some(super::names::BY_AGENT) && old.as_ref().is_some_and(same) {
+            over.remove("title");
+            over.remove("titleBy");
+        }
         if let Some(p) = style_problem(&id, &over, old.is_none()) { bail!("{p}. See islands/docs/island-style.md.") }
         let mut o = old.clone().unwrap_or_default();
         // What it was sent to do is written once and never replaced (a status line ages; the errand does not).
@@ -140,6 +153,10 @@ pub fn put(h: &super::Host, a: &Value) -> Result<String> {
         h.bindings.bind(&id, t);
         h.t3_job(super::binding::Job::Sync(id.clone()));
     }
+    // The agent's name for a thread's island outlives the island (bug note 2026-11-10T18-32-39).
+    if over.get("titleBy").and_then(Value::as_str) == Some(super::names::BY_AGENT) {
+        if let (Some(th), Some(t)) = (super::names::thread_of(&out), out.get("title").and_then(Value::as_str)) { super::names::remember(&h.root, th, t, super::names::BY_AGENT) }
+    }
     let title = title_of(&out, &id);
     let line = match (new, newly_bound) {
         (_, true) => format!("Island '{title}' shown, following T3 thread {}.", thread.unwrap_or_default()),
@@ -156,6 +173,18 @@ pub fn put(h: &super::Host, a: &Value) -> Result<String> {
 pub fn goal_known(root: &super::files::Root, g: &str) -> bool {
     root.read("goals").is_some_and(|o| o["goals"].as_array().into_iter().flatten().any(|x| x["id"] == g))
 }
+
+// A goal named by its title where an id is expected ("Ship Arsenal" for g-ship-arsenal)
+/// The goal id `g` names: itself when it is an id, else the one goal whose title it is (case-insensitive).
+pub fn goal_id(root: &super::files::Root, g: &str) -> String {
+    if goal_known(root, g) { return g.to_owned() }
+    let want = g.trim().to_lowercase();
+    let hits: Vec<String> = root.read("goals").and_then(|o| o["goals"].as_array().cloned()).unwrap_or_default().iter()
+        .filter(|x| x["title"].as_str().is_some_and(|t| t.trim().to_lowercase() == want))
+        .filter_map(|x| x["id"].as_str().map(str::to_owned)).collect();
+    if hits.len() == 1 { hits.into_iter().next().unwrap() } else { g.to_owned() }
+}
+// ---- end lane T ----
 
 /// The goal a job serves, from facts in the file only: the job's title names one of a goal's open steps (`now` or
 /// `next`, the Settled rule's same words). None otherwise: Heimdall names it with `islands_put` goal (review 2 Nov: a
@@ -245,10 +274,10 @@ pub fn remove(h: &super::Host, a: &Value) -> Result<String> {
 
 /// The one answer to a promise refused at Scheduled's door: both ways in, by field name, so an agent with an older tool
 /// list still finds them (bug note 2026-11-02T23-28-44).
-const SCHEDULED_DOOR: &str = "a promise enters Scheduled on User's yes. If he asked for it, add it with his own words in the quote field (action add, list scheduled, item, due, quote: \"<his exact words>\"), never words he did not say. If he did not, use action propose (list scheduled, item, due, why) and he says yes or clicks it";
+fn scheduled_door() -> String { format!("a promise enters Scheduled on {}'s yes. If they asked for it, add it with their own words in the quote field (action add, list scheduled, item, due, quote: \"<their exact words>\"), never words they did not say. If they did not, use action propose (list scheduled, item, due, why) and they say yes or click it", super::user()) }
 
 /// The same for a move into Scheduled: the move itself takes his words (an add would leave the original behind).
-const SCHEDULED_MOVE: &str = "a promise enters Scheduled on User's yes. If he asked for it, move it with his own words in the quote field (action move, list scheduled, item, due, quote: \"<his exact words>\"), never words he did not say. If he did not, use action propose (list scheduled, item, due, why) and he says yes or clicks it";
+fn scheduled_move() -> String { format!("a promise enters Scheduled on {}'s yes. If they asked for it, move it with their own words in the quote field (action move, list scheduled, item, due, quote: \"<their exact words>\"), never words they did not say. If they did not, use action propose (list scheduled, item, due, why) and they say yes or click it", super::user()) }
 
 /// A quoted span that opens `s` (straight or curly double quotes), trimmed: the user's words written at the head of a detail.
 fn leading_quote(s: &str) -> Option<&str> {
@@ -267,6 +296,12 @@ fn leading_quote(s: &str) -> Option<&str> {
 /// a list on screen again and returns what it holds, proposals included. "todo" is Goals (old callers).
 pub fn plan_edit(h: &super::Host, a: &Value) -> Result<String> {
     let root = &h.root;
+    // Lane T: `goal` may name the goal by its title; it becomes the id before anything reads it.
+    let fixed;
+    let a = match a.get("goal").and_then(Value::as_str) {
+        Some(g) if !g.trim().is_empty() && goal_id(root, g.trim()) != g => { let mut c = a.clone(); c["goal"] = json!(goal_id(root, g.trim())); fixed = c; &fixed }
+        _ => a,
+    };
     let action = a["action"].as_str().context("action: required")?;
     let list = a["list"].as_str().map(plan::canonical);
     if action == "show" {
@@ -297,21 +332,25 @@ pub fn plan_edit(h: &super::Host, a: &Value) -> Result<String> {
                 about: a.get("about").and_then(Value::as_str).unwrap_or("").into(),
                 why: a.get("why").and_then(Value::as_str).or_else(|| a.get("detail").and_then(Value::as_str)).unwrap_or(quote).into(),
                 by: "heimdall".into(),
+                ongoing: list == "goals" && a.get("ongoing").and_then(Value::as_bool) == Some(true),
             };
             let (id, shown) = super::proposals::propose(root, &d, now)?;
-            return Ok(format!("Proposed '{item}' in {} [{id}]{}; say it to User in one short line. His yes: accept; his no: decline; unanswered, it is archived in two days.",
-                plan::list_title(list), if shown { ", on screen" } else { ", queued behind the one on screen" }));
+            return Ok(format!("Proposed '{item}' in {} [{id}]{}; say it to {} in one short line. Their yes: accept; their no: decline; unanswered, it is archived in two days.",
+                plan::list_title(list), if shown { ", on screen" } else { ", queued behind the one on screen" }, super::user()));
         }
         "accept" => {
-            ensure!(!quote.is_empty(), "accept is User's yes: quote his words");
+            ensure!(!quote.is_empty(), "accept is {}'s yes: quote their words", super::user());
             let (title, l, next) = super::proposals::accept(root, list, item, super::proposals::Yes::Voice(quote.into()), due_at, now)?;
-            return Ok(format!("'{title}' is in {} on User's yes.{}", plan::list_title(l), next_line(l, next)));
+            return Ok(format!("'{title}' is in {} on {}'s yes.{}", plan::list_title(l), super::user(), next_line(l, next)));
         }
         "decline" => {
             let (title, l, next) = super::proposals::decline(root, list, item, now)?;
             return Ok(format!("Declined '{title}': it left {} and is not proposed again.{}", plan::list_title(l), next_line(l, next)));
         }
         _ => {}
+    }
+    if matches!(action, "tick" | "undo" | "remove" | "move" | "complete") {
+        if let Some(line) = goal_edit(h, a, action, item, quote, now)? { return Ok(line) }
     }
     let mut changes = Map::new();
     for k in ["group", "when", "detail", "proposal", "kind"] {
@@ -342,7 +381,7 @@ pub fn plan_edit(h: &super::Host, a: &Value) -> Result<String> {
     }
     if changes.contains_key("proposal") || changes.contains_key("kind") || changes.contains_key("goal") {
         // A promise is proposed with the action, not a proposal object (bug note 2026-11-02T23-28-44): say how.
-        ensure!(list != Some("scheduled") || !changes.contains_key("proposal"), "{SCHEDULED_DOOR}");
+        ensure!(list != Some("scheduled") || !changes.contains_key("proposal"), "{}", scheduled_door());
         ensure!(list.unwrap_or("goals") == "goals", "proposals, kinds and goals belong to Goals' asks (list goals)");
     }
     match action {
@@ -353,7 +392,7 @@ pub fn plan_edit(h: &super::Host, a: &Value) -> Result<String> {
             if list == "scheduled" {
                 // No time, no promise; and only his own words put one there (else: propose it).
                 ensure!(changes.get("due").is_some_and(|d| !d.is_null()), "Scheduled holds promises with a time: give due (or propose it)");
-                ensure!(!promise_quote.is_empty(), "{SCHEDULED_DOOR}");
+                ensure!(!promise_quote.is_empty(), "{}", scheduled_door());
                 changes.insert("yes".into(), json!({"by": "voice", "at": now, "quote": crate::goals::ops::cap(promise_quote, 200)}));
                 changes.remove("when");
             }
@@ -368,7 +407,7 @@ pub fn plan_edit(h: &super::Host, a: &Value) -> Result<String> {
                     _ => false,
                 });
                 let proof = checked.or_else(|| (!quote.is_empty()).then(|| crate::goals::proof::quote(quote, now)))
-                    .context("Settled takes proof code can check: a commit hash in a repo or an output file's path (proof), or User's own words (quote)")?;
+                    .with_context(|| format!("Settled takes proof code can check: a commit hash in a repo or an output file's path (proof), or {}'s own words (quote)", super::user()))?;
                 changes.insert("proof".into(), proof);
                 changes.insert("done".into(), json!(true));
                 changes.insert("at".into(), json!(now));
@@ -393,13 +432,13 @@ pub fn plan_edit(h: &super::Host, a: &Value) -> Result<String> {
             ensure!(to == "scheduled" || !changes.contains_key("due"), "due belongs to Scheduled items: move it with list scheduled");
             // Moving between lists is entering one: Settled only from proof (add with proof), Scheduled only on his
             // words (review 2 Nov: an ask moved into Scheduled became a promise with no yes).
-            ensure!(to != "settled" || f.list == "settled", "Settled takes proof: add it there with proof (a commit or an output file) or User's own words");
+            ensure!(to != "settled" || f.list == "settled", "Settled takes proof: add it there with proof (a commit or an output file) or {}'s own words", super::user());
             if to == "scheduled" {
                 let has_due = changes.get("due").is_some_and(|d| !d.is_null()) || (f.list == "scheduled" && f.item.get("due").is_some_and(|d| !d.is_null()) && !changes.contains_key("when"));
                 ensure!(has_due, "Scheduled holds promises with a time: give due");
                 changes.remove("when");
                 if f.list != "scheduled" {
-                    ensure!(!promise_quote.is_empty(), "{SCHEDULED_MOVE}");
+                    ensure!(!promise_quote.is_empty(), "{}", scheduled_move());
                     changes.insert("yes".into(), json!({"by": "voice", "at": now, "quote": crate::goals::ops::cap(promise_quote, 200)}));
                 }
             }
@@ -438,15 +477,68 @@ pub fn plan_edit(h: &super::Host, a: &Value) -> Result<String> {
             }
             Ok(format!("Removed '{}' from {}.", f.item["title"].as_str().unwrap_or(item), plan::list_title(f.list)))
         }
-        other => bail!("action: {other} is not propose, accept, decline, add, move, tick, undo, remove or show"),
+        other => bail!("action: {other} is not propose, accept, decline, add, move, tick, undo, remove, complete or show"),
     }
 }
+
+// ---- plan_edit on goals and their steps (bug note 2026-11-06T11-42-43) ----
+
+/// `plan_edit` tick, undo, remove, move or complete when `item` names a goal or a step under one (`None`: an item of
+/// a list, handled as before). A goal finishes only on the user's yes: with his words (`quote`) at once, else as a
+/// "done?" card he answers; undo makes it active again; move with `ongoing` marks it open-ended or gives it an end; a
+/// goal is never removed. A step is ticked, unticked or removed (a finished one stays; a removed one is not written
+/// again).
+fn goal_edit(h: &super::Host, a: &Value, action: &str, item: &str, quote: &str, now: i64) -> Result<Option<String>> {
+    use plan::Kind;
+    let root = &h.root;
+    let f = plan::find(root, item)?;
+    let id = f.item.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
+    let title = f.item.get("title").and_then(Value::as_str).unwrap_or(item).to_owned();
+    Ok(Some(match (&f.kind, action) {
+        (Kind::Goal, "tick" | "complete") if quote.is_empty() => {
+            let why = a.get("why").and_then(Value::as_str).unwrap_or("");
+            let (pid, shown) = super::proposals::propose(root, &crate::goals::ops::complete_draft(&f.item, why, "heimdall"), now)?;
+            format!("Asked {} whether '{title}' is done [{pid}]{}; say it in one short line. Their yes: accept; their no: decline. A goal finishes only on their yes (with their words in quote it finishes now).",
+                super::user(), if shown { ", on screen" } else { ", queued behind the one on screen" })
+        }
+        (Kind::Goal, "tick" | "complete") => {
+            let yes = json!({"by": "voice", "at": now, "quote": crate::goals::ops::cap(quote, 200)});
+            plan::finish_goal(root, &id, yes, now)?;
+            format!("Finished the goal '{title}' on {}'s words; it left Goals.", super::user())
+        }
+        (Kind::Goal, "undo") => { plan::reopen_goal(root, &id, now)?; format!("The goal '{title}' is active again.") }
+        (Kind::Goal, "move") => {
+            let on = a.get("ongoing").and_then(Value::as_bool)
+                .context("a goal does not move: move with ongoing true marks it open-ended (no end), false gives it an end")?;
+            plan::set_ongoing(root, &id, on, now)?;
+            if on { format!("'{title}' is ongoing now: no end, never asked done.") } else { format!("'{title}' has an end again.") }
+        }
+        (Kind::Goal, _) => bail!("a goal is not removed (its steps are the memory): complete it (their words in quote, else a \"done?\" card they answer)"),
+        (Kind::Task { .. }, "tick" | "complete") => {
+            plan::tick(root, "goals", &id, true)?;
+            format!("Ticked '{title}' done under its goal.")
+        }
+        (Kind::Task { .. }, "undo") => { plan::tick(root, "goals", &id, false)?; format!("Unticked '{title}'.") }
+        (Kind::Task { goal }, "remove") => {
+            plan::remove_task(root, goal, &id, now)?;
+            format!("Removed the step '{title}' from its goal; it is not written there again.")
+        }
+        (Kind::Task { .. }, _) => bail!("a step stays under its goal: tick it, remove it, or propose a new one"),
+        (Kind::Item, "complete") => {
+            let t = plan::tick(root, f.list, &id, true)?.unwrap_or(title);
+            if f.list == "goals" { format!("Answered '{t}'; it left Goals.") } else { format!("Ticked '{t}'.") }
+        }
+        (Kind::Item, _) => return Ok(None),
+    }))
+}
+
+// ---- end plan_edit on goals and their steps ----
 
 /// What a list holds, for `plan_edit` show: Goals as the shadow reads them (goals, their tasks, the asks), the other
 /// lists one item a line.
 fn list_text(list: &str, o: &Map<String, Value>) -> String {
     let props = super::proposals::text(o, now_s() as i64);
-    let props = if props.is_empty() { String::new() } else { format!("\nProposals (waiting for User's yes):\n{}", props.trim_end()) };
+    let props = if props.is_empty() { String::new() } else { format!("\nProposals (waiting for {}'s yes):\n{}", super::user(), props.trim_end()) };
     if list == "goals" { return format!("Goals (on screen):\n{}{props}", crate::goals::ops::compact(o, true).trim_end()) }
     let lines: Vec<String> = plan::items(o).iter().map(|i| {
         let mut l = format!("- {} · {}", i.get("id").and_then(Value::as_str).unwrap_or(""), i.get("title").and_then(Value::as_str).unwrap_or(""));
@@ -460,7 +552,7 @@ fn list_text(list: &str, o: &Map<String, Value>) -> String {
     let mut out = format!("{} (on screen):\n{}{props}", plan::list_title(list), if lines.is_empty() { "nothing".to_owned() } else { lines.join("\n") });
     if let Some(g) = o.get("guarantee") {
         let w: Vec<&str> = g["waiting"].as_array().into_iter().flatten().filter_map(|w| w["title"].as_str()).collect();
-        out.push_str(&if w.is_empty() { "\nWaiting on User: nothing".to_owned() } else { format!("\nWaiting on User: {}", w.join("; ")) });
+        out.push_str(&if w.is_empty() { format!("\nWaiting on {}: nothing", super::user()) } else { format!("\nWaiting on {}: {}", super::user(), w.join("; ")) });
     }
     out
 }
@@ -474,6 +566,117 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let h = Host::new(Root(d.path().join("fi")), None);
         (d, h)
+    }
+
+    /// Goals as the user's file held them on 6 Nov 11:40 (ids and states copied, titles shortened): a goal whose aim was
+    /// met, a stale step in hand, a finished step, an open-ended goal, and a step proposal under the finished goal.
+    fn goals_of_6_nov(h: &Host) {
+        h.root.ensure().unwrap();
+        h.root.put("goals", json!({"preset": "todo", "list": "goals", "title": "Goals", "items": [], "goals": [
+            {"id": "g-get-a-job", "title": "Get a job", "state": "active", "icon": "briefcase", "tasks": [
+                {"id": "t-728cec13", "title": "Apply to mechanic-parts startup job", "state": "now"},
+                {"id": "t-90baf5e3", "title": "RINVO CV beauty climb to 9.5", "state": "now"},
+                {"id": "t-e05a1507", "title": "RINVO CV PDF and cover letter drafted", "state": "done"}]},
+            {"id": "g-ship-arsenal", "title": "Ship Arsenal", "state": "active", "icon": "shippingbox", "tasks": [
+                {"id": "t-1fb75168", "title": "Arsenal 1.0.2 published", "state": "done"}]},
+            {"id": "g-improve-heimdall-and-arsenal", "title": "Improve Heimdall and Arsenal", "state": "active", "tasks": []}],
+            "proposals": [{"id": "t-0000aaaa", "title": "Arsenal 1.0.4 release notes", "kind": "step", "goal": "g-ship-arsenal", "proposed": 1, "front": 1, "shown": 1}]
+        }).as_object().unwrap()).unwrap();
+    }
+
+    fn goal_of(h: &Host, id: &str) -> Value {
+        h.root.read("goals").unwrap()["goals"].as_array().unwrap().iter().find(|g| g["id"] == id).cloned().unwrap()
+    }
+
+    /// Bug note 2026-11-06T11-42-43, item 2: plan_edit refused goal ids and step ids ("no item 'g-ship-arsenal' in
+    /// Goals' asks, Scheduled or Settled"; "remove t-728cec13 → same error"), so stale steps stayed on screen.
+    #[test]
+    fn plan_edit_ticks_and_removes_steps_under_a_goal_by_id_or_title() {
+        let (_d, h) = host();
+        goals_of_6_nov(&h);
+        let line = plan_edit(&h, &json!({"action": "remove", "item": "t-728cec13"})).unwrap();
+        assert!(line.starts_with("Removed the step 'Apply to mechanic-parts startup job'"), "{line}");
+        let job = goal_of(&h, "g-get-a-job");
+        assert!(job["tasks"].as_array().unwrap().iter().all(|t| t["id"] != "t-728cec13"));
+        // Remembered: neither the Goals job nor a proposal writes it there again.
+        let o = h.root.read("goals").unwrap();
+        assert!(o["removed"].as_array().unwrap().iter().any(|r| r["title"] == "Apply to mechanic-parts startup job"));
+        // By title, and a tick: done, his.
+        assert!(plan_edit(&h, &json!({"action": "tick", "item": "RINVO CV beauty climb to 9.5"})).unwrap().starts_with("Ticked"));
+        let t = goal_of(&h, "g-get-a-job")["tasks"].as_array().unwrap().iter().find(|t| t["id"] == "t-90baf5e3").cloned().unwrap();
+        assert_eq!((t["state"].as_str(), t["ticked"].as_bool()), (Some("done"), Some(true)));
+        plan_edit(&h, &json!({"action": "undo", "item": "t-90baf5e3"})).unwrap();
+        let t = goal_of(&h, "g-get-a-job")["tasks"].as_array().unwrap().iter().find(|t| t["id"] == "t-90baf5e3").cloned().unwrap();
+        assert_eq!((t["state"].as_str(), t.get("ticked")), (Some("now"), None));
+        // A finished step stays (the memory); a fragment never picks a finished one.
+        assert!(plan_edit(&h, &json!({"action": "remove", "item": "t-e05a1507"})).unwrap_err().to_string().contains("stays"));
+        assert!(plan_edit(&h, &json!({"action": "remove", "item": "cover letter drafted"})).unwrap_err().to_string().contains("no item"));
+        // A goal is never removed; a step does not move.
+        assert!(plan_edit(&h, &json!({"action": "remove", "item": "g-ship-arsenal"})).unwrap_err().to_string().contains("not removed"));
+        assert!(plan_edit(&h, &json!({"action": "move", "item": "t-90baf5e3", "list": "scheduled"})).unwrap_err().to_string().contains("stays under its goal"));
+        // Asks still work as before.
+        plan_edit(&h, &json!({"action": "add", "list": "goals", "item": "Arsenal: pick the icon", "kind": "pick"})).unwrap();
+        assert!(plan_edit(&h, &json!({"action": "tick", "item": "Arsenal: pick the icon"})).unwrap().starts_with("Answered"));
+    }
+
+    /// Bug note 2026-11-06T11-42-43, items 1 and 4: a goal whose aim is met is asked about ("this goal is done,
+    /// continue?") with a card his Yes answers, or finished at once on his words; it is never closed on Heimdall's
+    /// word alone. What was proposed under it leaves with it, so no Yes shows for dropped work.
+    #[test]
+    fn a_goal_completes_only_on_owners_yes_and_its_stale_proposals_leave() {
+        let (_d, h) = host();
+        goals_of_6_nov(&h);
+        let line = plan_edit(&h, &json!({"action": "complete", "item": "g-ship-arsenal", "why": "Arsenal 1.0.3 is out and installed"})).unwrap();
+        assert!(line.starts_with("Asked the user whether 'Ship Arsenal' is done"), "{line}");
+        assert_eq!(goal_of(&h, "g-ship-arsenal")["state"], "active", "not closed without his yes");
+        let o = h.root.read("goals").unwrap();
+        let card = crate::islands::proposals::queue(&o).into_iter().find(|p| p["kind"] == "complete").unwrap();
+        assert_eq!((card["goal"].as_str(), card["title"].as_str()), (Some("g-ship-arsenal"), Some("Ship Arsenal looks done: close it?")));
+        // Asked once.
+        assert!(plan_edit(&h, &json!({"action": "complete", "item": "g-ship-arsenal"})).is_err());
+        // Another goal's card is not taken for this one's, though the titles share most words (night review, 6 Nov).
+        let other = plan_edit(&h, &json!({"action": "complete", "item": "g-get-a-job", "why": "test"})).unwrap();
+        assert!(other.starts_with("Asked the user whether 'Get a job' is done"), "{other}");
+        let o = h.root.read("goals").unwrap();
+        let other_id = crate::islands::proposals::queue(&o).into_iter().find(|p| p["goal"] == "g-get-a-job").unwrap()["id"].as_str().unwrap().to_owned();
+        crate::islands::proposals::decline(&h.root, Some("goals"), &other_id, 5).unwrap();
+        // His Yes (a click arrives as accept): finished, and the step proposed under it is gone to the record as stale.
+        let id = card["id"].as_str().unwrap().to_owned();
+        crate::islands::proposals::accept(&h.root, Some("goals"), &id, crate::islands::proposals::Yes::Click, None, 5).unwrap();
+        let g = goal_of(&h, "g-ship-arsenal");
+        assert_eq!((g["state"].as_str(), g["finish_yes"]["by"].as_str()), (Some("done"), Some("click")));
+        let o = h.root.read("goals").unwrap();
+        assert!(crate::islands::proposals::queue(&o).is_empty(), "no Yes left for work under a finished goal: {:?}", o["proposals"]);
+        let rec = std::fs::read_to_string(crate::islands::proposals::record_dir(&h.root).join("proposals.jsonl")).unwrap();
+        assert!(rec.contains("\"outcome\":\"stale\"") && rec.contains("Arsenal 1.0.4 release notes"), "{rec}");
+        // undo opens it again.
+        assert!(plan_edit(&h, &json!({"action": "undo", "item": "g-ship-arsenal"})).unwrap().contains("active again"));
+        assert_eq!(goal_of(&h, "g-ship-arsenal")["state"], "active");
+        // His words finish it at once.
+        let line = plan_edit(&h, &json!({"action": "complete", "item": "Ship Arsenal", "quote": "Arsenal is shipped, close that goal"})).unwrap();
+        assert!(line.starts_with("Finished the goal 'Ship Arsenal'"), "{line}");
+        assert_eq!(goal_of(&h, "g-ship-arsenal")["finish_yes"]["quote"], "Arsenal is shipped, close that goal");
+    }
+
+    /// Bug note 2026-11-06T11-42-43, item 3: an open-ended goal is marked ongoing (drawn with a loop, no ring) and is
+    /// never asked "done?" or finished.
+    #[test]
+    fn an_ongoing_goal_is_marked_by_move_or_proposed_so_and_never_completes() {
+        let (_d, h) = host();
+        goals_of_6_nov(&h);
+        assert!(plan_edit(&h, &json!({"action": "move", "item": "g-improve-heimdall-and-arsenal"})).unwrap_err().to_string().contains("ongoing"));
+        let line = plan_edit(&h, &json!({"action": "move", "item": "g-improve-heimdall-and-arsenal", "ongoing": true})).unwrap();
+        assert!(line.contains("ongoing now"), "{line}");
+        assert_eq!(goal_of(&h, "g-improve-heimdall-and-arsenal")["ongoing"], true);
+        assert!(plan_edit(&h, &json!({"action": "complete", "item": "g-improve-heimdall-and-arsenal"})).unwrap_err().to_string().contains("ongoing"));
+        assert!(plan_edit(&h, &json!({"action": "complete", "item": "g-improve-heimdall-and-arsenal", "quote": "we are done improving it"})).unwrap_err().to_string().contains("ongoing"));
+        assert!(plan_edit(&h, &json!({"action": "show", "list": "goals"})).unwrap().contains("ongoing (no end)"));
+        plan_edit(&h, &json!({"action": "move", "item": "g-improve-heimdall-and-arsenal", "ongoing": false})).unwrap();
+        assert!(goal_of(&h, "g-improve-heimdall-and-arsenal").get("ongoing").is_none());
+        // A new goal proposed as ongoing is ongoing on his yes.
+        plan_edit(&h, &json!({"action": "propose", "list": "goals", "item": "Keep fit", "icon": "figure.run", "ongoing": true})).unwrap();
+        crate::islands::proposals::accept(&h.root, Some("goals"), "Keep fit", crate::islands::proposals::Yes::Click, None, 5).unwrap();
+        assert_eq!(goal_of(&h, "g-keep-fit")["ongoing"], true);
     }
 
     #[test]
@@ -525,11 +728,11 @@ mod tests {
         // The detail form is Scheduled's only: Settled's proof and accept take the quote field alone (fresh review, 3 Nov).
         let e = plan_edit(&h, &json!({"action": "add", "list": "settled", "item": "Release notes", "detail": "\"Release notes\" draft"})).unwrap_err().to_string();
         assert!(e.contains("Settled takes proof"), "{e}");
-        assert!(plan_edit(&h, &json!({"action": "accept", "item": "Arsenal: release notes", "detail": "\"yes\""})).unwrap_err().to_string().contains("quote his words"));
+        assert!(plan_edit(&h, &json!({"action": "accept", "item": "Arsenal: release notes", "detail": "\"yes\""})).unwrap_err().to_string().contains("quote their words"));
         // A refused move into Scheduled names move, not add; the example is a placeholder, never words to copy.
         plan_edit(&h, &json!({"action": "add", "list": "goals", "item": "Arsenal: pick a date", "kind": "decide"})).unwrap();
         let e = plan_edit(&h, &json!({"action": "move", "list": "scheduled", "item": "Arsenal: pick a date", "due": due})).unwrap_err().to_string();
-        assert!(e.contains("action move") && e.contains("<his exact words>"), "{e}");
+        assert!(e.contains("action move") && e.contains("<their exact words>"), "{e}");
         // And the propose door the refusal names exists for Scheduled.
         let line = plan_edit(&h, &json!({"action": "propose", "list": "scheduled", "item": "Arsenal: release notes", "due": due, "why": "talked about it"})).unwrap();
         assert!(line.starts_with("Proposed 'Arsenal: release notes' in Scheduled"), "{line}");
@@ -652,7 +855,7 @@ mod tests {
         let shown = plan_edit(&h, &json!({"action": "show", "list": "scheduled"})).unwrap();
         assert!(shown.contains("proposal s-") && shown.contains("on screen"), "{shown}");
         assert!(plan_edit(&h, &json!({"action": "accept", "item": "licences"})).is_err(), "a yes quotes him");
-        assert_eq!(plan_edit(&h, &json!({"action": "accept", "item": "licences", "quote": "yes"})).unwrap(), "'Release: check model licences' is in Scheduled on User's yes.");
+        assert_eq!(plan_edit(&h, &json!({"action": "accept", "item": "licences", "quote": "yes"})).unwrap(), "'Release: check model licences' is in Scheduled on the user's yes.");
         assert_eq!(plan::items(&h.root.read("scheduled").unwrap()).len(), 1);
         // A goal, then a step under it.
         plan_edit(&h, &json!({"action": "propose", "item": "Get a job", "list": "goals", "icon": "briefcase"})).unwrap();
@@ -712,7 +915,7 @@ mod tests {
             {"id": "g-arsenal", "title": "Ship Arsenal", "state": "active", "tasks": [{"id": "t-1", "title": "Promote the allowed models into 1.0", "state": "next"}]},
             {"id": "g-pub", "title": "Ship Heimdall publicly", "state": "active", "tasks": []}]}).as_object().unwrap()).unwrap();
         crate::islands::binding::task_island(&h, "th-1", "Arsenal 1.0: Promote the allowed models into the 1.0 release [heimdall:abc]", "").unwrap();
-        let o = h.root.read("task-arsenal-1-0").or_else(|| h.root.all().into_iter().find(|(i, _)| i.starts_with("task-arsenal")).map(|x| x.1)).unwrap();
+        let o = h.root.all().into_iter().find(|(_, o)| crate::islands::names::thread_of(o) == Some("th-1")).map(|x| x.1).unwrap();
         assert_eq!((o["sent"].as_str(), o["goal"].as_str()), (Some("Promote the allowed models into the 1.0 release"), Some("g-arsenal")));
         let id = o["id"].as_str().unwrap().to_owned();
         put(&h, &json!({"id": id, "sent": "Something else"})).unwrap();
@@ -733,4 +936,37 @@ mod tests {
         assert!(line.contains("no such list"), "{line}");
         assert!(!h.root.read("goals").unwrap().contains_key("hidden"));
     }
+
+    // Errors that carry the fix (tool-call study 10 Nov, proposal 6)
+    /// "no item 'X'" (11 failures 27 Oct - 10 Nov) now lists the closest items with their ids; the 31 Oct input that
+    /// matched nothing says where to look.
+    #[test]
+    fn no_item_names_the_closest_items_with_their_ids() {
+        let (_d, h) = host();
+        goals_of_6_nov(&h);
+        let e = plan_edit(&h, &json!({"action": "remove", "item": "Mechanic parts job application"})).unwrap_err().to_string();
+        assert!(e.contains("closest: 'Apply to mechanic-parts startup job' (t-728cec13)"), "{e}");
+        let e = plan_edit(&h, &json!({"action": "tick", "item": "Arsenal release"})).unwrap_err().to_string();
+        assert!(e.contains("'Ship Arsenal' (g-ship-arsenal)"), "{e}");
+        let e = plan_edit(&h, &json!({"action": "remove", "item": "GitHub: check new apps and key", "list": "todo"})).unwrap_err().to_string();
+        assert!(e.starts_with("no item 'GitHub: check new apps and key'") && e.ends_with("plan_edit show lists what is there, with ids"), "{e}");
+    }
+
+    /// A goal named by its title where its id is expected: a step proposed under "Get a job" lands under g-get-a-job.
+    #[test]
+    fn a_goal_title_stands_for_its_id() {
+        let (_d, h) = host();
+        goals_of_6_nov(&h);
+        assert_eq!(goal_id(&h.root, "ship arsenal"), "g-ship-arsenal");
+        assert_eq!(goal_id(&h.root, "g-get-a-job"), "g-get-a-job");
+        assert_eq!(goal_id(&h.root, "No such goal"), "No such goal");
+        // (Ship Arsenal already has a step proposed in the 6 Nov file, so the step goes under Get a job.)
+        plan_edit(&h, &json!({"action": "propose", "list": "goals", "goal": "Get a job", "item": "Jobs: send the RINVO application"})).unwrap();
+        let o = h.root.read("goals").unwrap();
+        let p = crate::islands::proposals::queue(&o).into_iter().find(|p| p["title"] == "Jobs: send the RINVO application").unwrap();
+        assert_eq!(p["goal"], "g-get-a-job");
+        put(&h, &json!({"id": "job-1", "title": "Release notes", "goal": "Ship Arsenal"})).unwrap();
+        assert_eq!(h.root.read("job-1").unwrap()["goal"], "g-ship-arsenal");
+    }
+    // ---- end lane T ----
 }

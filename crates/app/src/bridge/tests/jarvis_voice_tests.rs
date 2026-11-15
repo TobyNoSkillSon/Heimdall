@@ -44,7 +44,7 @@ fn voiced(x: &[f32]) -> Vec<f32> {
 }
 
 fn similarity(net: &mut speakers::embedding::ReDimNet, reference: &speakers::embedding::Embedding, a: &speak::Audio) -> f32 {
-    let pcm = crate::audio::mono_16k(&a.samples, a.sample_rate, 1).unwrap();
+    let pcm = heimdall_archive::audio::mono_16k(&a.samples, a.sample_rate, 1).unwrap();
     net.embed_short(&voiced(&pcm)).unwrap().cosine(reference)
 }
 
@@ -80,7 +80,7 @@ fn jarvis_voice_with_listening_off_is_really_jarvis() {
         let spec = r.spec();
         let x: Vec<f32> = if spec.sample_format == hound::SampleFormat::Float { r.samples::<f32>().map(Result::unwrap).collect() }
             else { let s = 2f32.powi(spec.bits_per_sample as i32 - 1); r.samples::<i32>().map(|v| v.unwrap() as f32 / s).collect() };
-        let pcm = crate::audio::mono_16k(&x, spec.sample_rate, spec.channels).unwrap();
+        let pcm = heimdall_archive::audio::mono_16k(&x, spec.sample_rate, spec.channels).unwrap();
         net.embed_short(&voiced(&pcm)).unwrap()
     };
 
@@ -167,7 +167,7 @@ fn jarvis_long_reply_on_the_default_engine_plays_without_gaps() {
         let spec = r.spec();
         let x: Vec<f32> = if spec.sample_format == hound::SampleFormat::Float { r.samples::<f32>().map(Result::unwrap).collect() }
             else { let s = 2f32.powi(spec.bits_per_sample as i32 - 1); r.samples::<i32>().map(|v| v.unwrap() as f32 / s).collect() };
-        net.embed_short(&voiced(&crate::audio::mono_16k(&x, spec.sample_rate, spec.channels).unwrap())).unwrap()
+        net.embed_short(&voiced(&heimdall_archive::audio::mono_16k(&x, spec.sample_rate, spec.channels).unwrap())).unwrap()
     };
     let sim = similarity(&mut net, &reference, &audio);
     let switches = events.iter().filter(|e| e["event"] == "voice_switch").count();

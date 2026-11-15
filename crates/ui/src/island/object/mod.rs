@@ -30,6 +30,9 @@ mod ask_tests;
 mod open_chat_tests;
 #[cfg(test)]
 mod composer_drop_tests;
+// Night 1111 [input]: the composer's lock and secret field.
+#[cfg(test)]
+mod secret_field_tests;
 #[cfg(test)]
 mod heard_exit_tests;
 #[cfg(test)]
@@ -38,6 +41,7 @@ mod notch_tests;
 mod switch_tests;
 #[cfg(test)]
 mod vella_tests;
+#[cfg(test)]
 mod emergency_tests;
 #[cfg(test)]
 mod busy_tests;
@@ -50,7 +54,7 @@ use std::sync::Arc;
 
 pub use engine::Island;
 pub use geom::{Display, Point, Rect, Shape};
-pub use layout::{question_fits_one_line, composer_placeholder, note_max_w, reply_max_w, Class, Ear, Glyph, Lip, NoteView, QLook, ReaderFace, Scene, CHUNK_SIDE, NOTE_PIN_GAP, REPLY_CUT, VEIL_INTO};
+pub use layout::{question_fits_one_line, composer_placeholder, SECRET_PLACEHOLDER, SECRET_EMPTY_PLACEHOLDER, note_max_w, reply_max_w, Class, Ear, Glyph, Lip, NoteView, QLook, ReaderFace, Scene, CHUNK_SIDE, NOTE_PIN_GAP, REPLY_CUT, VEIL_INTO};
 pub use measure::{Approx, Font, Fuzz, FuzzWidth, Measure};
 pub use scene::{rubber, BUSY_READ, EMERGENCY_SYMBOL, MAX_TURN_NOTES, NOTE_UNATTENDED, NUDGE_COALESCE, NUDGE_QUEUE, NUDGE_SECONDS, NUDGE_WOBBLE, PULL_OUT, RESTART_READ};
 
@@ -247,6 +251,9 @@ pub enum Capsule {
     Chosen,
     /// An unchosen answer after a choice: 12 % white, dim text (a state, not a button).
     Dim,
+    /// A secondary action beside or without a primary one (Dismiss, drawing's Close): a dark grey fill and white
+    /// text, so only the one primary action in a state is white (islands climb, 11 Nov).
+    Quiet,
 }
 
 impl Content {
@@ -363,6 +370,11 @@ pub enum Target {
     Composer,
     /// The remove badge of the composer's attachment at this index (a drop on the pull-down while he types).
     ComposerDetach(usize),
+    // ---- Night 1111 [input]: the secret field (bug note 2026-11-10T16-30-03) ----
+    /// The lock at the composer's right end: the composer turns into a secure field for one secret, or back.
+    ComposerLock,
+    /// The composer while locked: a secure field; Return hands its text to the app as a secret, never as a message.
+    ComposerSecret,
     Dismiss(String),
     Connect(String),
     /// The problem's fix button ("Open Settings").
@@ -424,6 +436,9 @@ pub enum Output {
     Read(ReadResult),
     /// Put this text on the clipboard (`Target::ReplyCopy`).
     Copy(String),
+    /// Night 1111 [input]: a secret from the locked composer (`UiAction::Secret`): kept by the app, never shown to the
+    /// agent or the transcript.
+    Secret(crate::model::SecretText),
     /// The user pressed Stop while Heimdall spoke (`Target::StopSpeech`): cut the voice now (`UiAction::StopSpeaking`).
     StopSpeech,
     /// Capture the display with the user's ink; the island's keys retract with the light.
@@ -498,6 +513,9 @@ pub enum Event {
     ComposerEmpty(bool),
     /// A drop on the open pull-down while he writes (`drop::route`): its items ride with the composer's message.
     ComposerAttach(Vec<crate::island::drop::DropItem>),
+    /// Night 1111 [input]: Return in the locked composer: `text` goes to the app as a secret (`Output::Secret`), and the
+    /// composer unlocks.
+    SecretSent(crate::model::SecretText),
     /// ⌃⌘H: the conversation pulled down to type in, as the user's own pull-down, with its composer even
     /// when there is no turn or conversation to show yet.
     OpenChat,

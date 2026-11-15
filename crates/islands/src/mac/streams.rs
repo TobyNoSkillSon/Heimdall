@@ -61,6 +61,7 @@ pub fn set(v: bool) {
 /// capture: one island window parked 24 pt square behind the notch at 3 % opacity for about half a second, captured by
 /// macOS's `screencapture -l` (an image with the switch on, none with it off), then out again (without a notch, a
 /// 3 % square at the top centre for under a second). Quits by itself; the windows go with the process whatever happens.
+#[cfg(feature = "lab")]
 pub fn check() {
     use crate::jobj;
     use crate::model::file::Streams;

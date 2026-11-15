@@ -1,4 +1,4 @@
-//! Lab flick test (Swift `FlickTest.swift`): islands thrown at speed with synthetic drags sent through each window's own
+//! Lab flick test: islands thrown at speed with synthetic drags sent through each window's own
 //! event path, in real time (8 ms apart, real timestamps), so the release velocity and the landing spring are the ones
 //! a hand produces. Each throw's flight is sampled every frame into flick-<name>.csv.
 //!   FLOATING_ISLANDS_DIR=<lab dir> FloatingIslands --flicktest

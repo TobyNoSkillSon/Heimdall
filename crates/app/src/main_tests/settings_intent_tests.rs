@@ -341,7 +341,6 @@
     #[async_trait::async_trait]
     impl agent::mcp::ToolHost for NoTools {
         fn speak(&self, _: &str, _: &str, _: &agent::delivery::DeliveryPermit) -> Result<u64> { anyhow::bail!("unused") }
-        async fn screenshot_now(&self, _: &agent::delivery::DeliveryPermit) -> Result<agent::mcp::ScreenshotResult> { anyhow::bail!("unused") }
     }
     struct HeldArchive { began: Arc<tokio::sync::Notify>, release: Arc<tokio::sync::Notify> }
     #[async_trait::async_trait]
@@ -390,7 +389,7 @@
         let python = include_str!("../../tests/fixtures/blocked-pi.py").replace("p=Path.cwd()", "p=Path.cwd()\nfirst=os.read(sys.stdin.fileno(),1)\nassert first\n(p/'write-progress.marker').write_bytes(first)");
         std::fs::write(&fixture, python)?; std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700))?;
         let (mut app, mut watch, _callback, _rx) = launch(&data, temp.path(), Some(Settings { dry_run: false, ..Default::default() }))?;
-        bridge::test_harness(Some(fixture)); let started = act(&mut app, ui::UiAction::RestartSession); bridge::test_harness(None); started?;
+        bridge::test_harness(Some(fixture)); let started = app.restart_agent(); bridge::test_harness(None); started?;
         app.test_agent().send(bridge::Command::Observe(agent::protocol::Observation { id: "busy-private".into(), timestamp_ms: 1, source: "mic".into(), speaker: "User".into(), language: "en".into(), text: "a".repeat(256 * 1024) }))?;
         app.test_agent().barrier()?;
         app.test_agent().send(bridge::Command::Wake { images: vec![], urgent: false })?;
@@ -493,8 +492,8 @@
         app.finish()?;
         Ok(())
     }
-    /// Seeing off stops the stream owner and frees every buffered frame; the screenshot tool then answers that
-    /// screen capture is unavailable, without naming the switch. A settings-file edit turns it back on (the live loop
+    /// Seeing off stops the stream owner and frees every buffered frame; the screenshot tool then fails with
+    /// `SCREEN_OFF`, naming Seeing (bug note 2026-11-10T15-35-42). A settings-file edit turns it back on (the live loop
     /// reconciles the stream).
     #[test]
     fn seeing_applies_even_when_the_settings_save_fails() -> Result<()> {
@@ -589,8 +588,8 @@
         assert_eq!(app.screen_buffer.lock().unwrap().frame_count(), 0, "a frame survived Seeing off");
         assert!(Settings::load(&data.join("settings.json"))?.screen_off);
         let runtime = tokio::runtime::Builder::new_current_thread().build()?;
-        let shot = runtime.block_on(app.tools.screenshot_now(&app.tools.agent_enabled.permit()?))?;
-        assert!(shot.images.is_empty() && shot.notes == [bridge::SCREEN_OFF]);
+        let err = runtime.block_on(app.tools.look(None, &app.tools.agent_enabled.permit()?)).err().expect("Seeing off is an error");
+        assert!(err.to_string().starts_with(bridge::SCREEN_OFF), "{err}");
         // A later relaunch or file edit to Seeing on reaches the app as a change for the live loop.
         edit(&data, |s| s.screen_off = false)?;
         let old = reload_settings(&mut app, &mut watch).expect("file edit applied");

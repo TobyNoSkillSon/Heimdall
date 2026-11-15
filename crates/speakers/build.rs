@@ -25,35 +25,9 @@ fn main() {
         .define("GGML_BLAS", "OFF")
         .define("GGML_OPENMP", "OFF")
         .define("CMAKE_POLICY_VERSION_MINIMUM", "3.5")
-        .build_arg("-j4");
+        // cargo's job count (NUM_JOBS: two while the user uses the Mac), not a fixed four.
+        .build_arg(format!("-j{}", std::env::var("NUM_JOBS").unwrap_or_else(|_| "2".into())));
     if mac {
-        println!("cargo:rerun-if-changed=src/kernels.metal");
-        let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
-        for args in [
-            vec![
-                "metal",
-                "-std=metal4.0",
-                "-fno-fast-math",
-                "-c",
-                "src/kernels.metal",
-                "-o",
-            ],
-            vec!["metallib"],
-        ] {
-            let mut cmd = std::process::Command::new("xcrun");
-            if args[0] == "metal" {
-                cmd.args(args).arg(out.join("speakers.air"));
-            } else {
-                cmd.args(args)
-                    .arg(out.join("speakers.air"))
-                    .arg("-o")
-                    .arg(out.join("speakers.metallib"));
-            }
-            assert!(
-                cmd.status().expect("Metal toolchain").success(),
-                "speaker shader compilation failed"
-            );
-        }
         cfg.define("CMAKE_C_COMPILER", "/usr/bin/clang")
             .define("CMAKE_CXX_COMPILER", "/usr/bin/clang++");
         let version = std::process::Command::new("/usr/bin/clang")

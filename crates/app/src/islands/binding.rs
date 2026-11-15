@@ -9,7 +9,7 @@
 //! Bindings persist in `<Heimdall data>/islands-bindings.json`.
 //!
 //! Code-driven islands (30 Oct, background-jobs redesign): the live source also reads each bound thread's new activity
-//! items (only when its item count moved), its sub-agents and the TrainingLab run its commands point at, into one
+//! items (only when its item count moved), its sub-agents and the ModelLab run its commands point at, into one
 //! `stages::Reducer` per run kept in memory; `sync_patch` then writes, within the pass, what code owns on a bound
 //! island: the stage, the clock (`started`), the compact history (`steps`), counters (`kv`), the agent's latest
 //! sentence (`summary`), `progress` where it is measurable and the latest picture (copied into the islands folder,
@@ -162,6 +162,9 @@ pub struct Bindings {
     pictures: Mutex<BTreeMap<String, (String, String)>>,
     /// Where each bound island's signals go after a sync (the island agent).
     agent: Mutex<Option<tokio::sync::mpsc::UnboundedSender<crate::island_agent::Snapshot>>>,
+    /// Bug note 2026-11-13T12-27-46: when each thread's latest result reached Heimdall (epoch seconds), in memory
+    /// (`told`): a done job island leaves `RESULT_GRACE` after it (`Retire`).
+    told: Mutex<BTreeMap<String, f64>>,
 }
 
 /// The island keys code owns on a bound island while it has signals.
@@ -177,7 +180,7 @@ impl Bindings {
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
         Bindings { path, map: Mutex::new(map), cards: Mutex::new(None), answered: Mutex::new(BTreeMap::new()),
-                   wrote: Mutex::default(), pictures: Mutex::default(), agent: Mutex::new(None) }
+                   wrote: Mutex::default(), pictures: Mutex::default(), agent: Mutex::new(None), told: Mutex::default() }
     }
     /// Where bound islands' signals go after each sync (`island_agent::spawn_live`).
     pub fn set_agent(&self, tx: Option<tokio::sync::mpsc::UnboundedSender<crate::island_agent::Snapshot>>) {
@@ -256,6 +259,16 @@ impl Bindings {
         let sink = self.cards.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if let Some(sink) = sink { f(&sink) }
     }
+    // ---- result told (bug note 2026-11-13T12-27-46) ----
+    /// The thread's result reached Heimdall at `at` (epoch seconds): its final notice was delivered (`t3::Workers::on_result_delivered`).
+    pub fn told(&self, thread: &str, at: f64) {
+        self.told.lock().unwrap_or_else(|e| e.into_inner()).insert(thread.to_owned(), at);
+    }
+    /// When the thread's latest result reached Heimdall, if it did in this process.
+    pub fn told_at(&self, thread: &str) -> Option<f64> {
+        self.told.lock().unwrap_or_else(|e| e.into_inner()).get(thread).copied()
+    }
+    // ---- end result told ----
     /// Records the thread's run as synced.
     pub fn set_run(&self, island: &str, run: &str) {
         self.edit(|m| if let Some(b) = m.get_mut(island) { b.run = Some(run.into()) })
@@ -397,6 +410,14 @@ fn ours(part: &Value) -> bool {
         || part.get("action").and_then(Value::as_str).is_some_and(|a| a.starts_with("t3q:"))
 }
 
+/// The stage of a run whose turn ended while its background work goes on: the work's own stage, else the stage the
+/// run was in (never "Background", never the weak Reading that only says the agent looked at files).
+pub fn background_stage(g: &stages::Signals) -> String {
+    g.background_stage.clone()
+        .or_else(|| Some(g.stage.clone()).filter(|s| !["Starting", "Reading", "Editing", "Done", "Your answer"].contains(&s.as_str())))
+        .unwrap_or_else(|| "Checking".into())
+}
+
 /// The island's parts without Heimdall's question parts, plus `extra`.
 fn parts_with(island: &Map<String, Value>, extra: Vec<Value>) -> Value {
     let mut parts: Vec<Value> = island.get("parts").and_then(Value::as_array).into_iter().flatten().filter(|p| !ours(p)).cloned().collect();
@@ -404,9 +425,18 @@ fn parts_with(island: &Map<String, Value>, extra: Vec<Value>) -> Value {
     if parts.is_empty() { Value::Null } else { Value::Array(parts) }
 }
 
+/// A command as the island shows it: paths without the home folder ("~/…") and the Vault's own prefix, so what would
+/// run fits the island's three lines (6 Nov: a 200-character `rm -rf /Users/…/Work/Assistant/…` was cut mid-word).
+pub fn short_paths(text: &str) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    if home.len() < 2 { return text.to_owned() }
+    text.replace(&format!("{home}/Work/"), "").replace(&format!("{home}/"), "~/")
+}
+
 /// The floating island says what is asked; the answer is on the notch's card (no buttons here, 24 Oct).
 fn question_parts(q: &Question) -> Vec<Value> {
-    let first = q.items.first().map(|i| i.text.as_str()).unwrap_or_default();
+    let first = short_paths(q.items.first().map(|i| i.text.as_str()).unwrap_or_default());
+    let first = first.as_str();
     let more = q.items.len().saturating_sub(1);
     let value = if more == 0 { first.to_owned() } else { format!("{first} (+{more} more)") };
     vec![json!({"type": "text", "value": value, "t3q": true})]
@@ -416,7 +446,7 @@ fn question_parts(q: &Question) -> Vec<Value> {
 /// the thread in T3, where only the user can give it. Heimdall's parts, gone once the wait ends.
 fn approval_parts(a: &Approval) -> Vec<Value> {
     let mut parts = vec![];
-    if let Some(t) = &a.text { parts.push(json!({"type": "text", "value": t, "t3q": true})) }
+    if let Some(t) = &a.text { parts.push(json!({"type": "text", "value": short_paths(t), "t3q": true})) }
     if let Some(l) = &a.link { parts.push(json!({"type": "openButton", "target": l, "t3q": true})) }
     parts
 }
@@ -470,12 +500,14 @@ pub fn sync_patch(island: &Map<String, Value>, view: &ThreadView) -> (Map<String
     } else if sig.is_none() && background {
         // Without signals, the same record (`background`): "the island says it's finished, but it's not" (bug note
         // 2026-11-03T22-49-42). Running, not settled, until they end.
-        ("running", json!("Background"), Value::Null, vec![], false)
+        // "Background" is no stage (bug note 2026-11-06T12-02-01): the stage it held stays.
+        ("running", keep_stage("Working"), Value::Null, vec![], false)
     } else if let Some(g) = sig.filter(|g| s == "completed" && (view.recent_children > 0 || g.background_open > 0)) {
         // Code read the run: the turn ended, but sub-agents changed within the hour (one may wait on a GPU lock) or a
         // background command it started has not reported back. Still the job, running; an hour of quiet settles it.
-        let stage = if view.recent_children > 0 { "Sub-agents" } else { "Background" };
-        let _ = g;
+        // What the open work is (bug note 2026-11-06T12-02-01: "Arsenal promo · Background" while judges scored a climb):
+        // sub-agents, else the background command's own stage, else the stage the run ended in.
+        let stage = if view.recent_children > 0 { "Sub-agents".to_owned() } else { background_stage(g) };
         ("running", json!(stage), Value::Null, vec![], false)
     } else if sig.is_none() && s == "completed" && (view.recent_children > 0 || view.ended_recently) {
         // The turn ended within the hour, or sub-agents changed within it: the job may go on in sub-agents or
@@ -506,6 +538,8 @@ pub fn sync_patch(island: &Map<String, Value>, view: &ThreadView) -> (Map<String
         return (Map::new(), false);
     };
     let mut patch = Map::new();
+    // Lane R: a file the user opened from the last run's done island says nothing about this run's report.
+    if fresh && island.contains_key("opened") { patch.insert("opened".into(), Value::Null); }
     patch.insert("state".into(), json!(state));
     patch.insert("stage".into(), stage);
     patch.insert("attention".into(), attention);
@@ -530,6 +564,11 @@ pub fn sync_patch(island: &Map<String, Value>, view: &ThreadView) -> (Map<String
             parts.retain(|p| !is_band(p));
             parts.push(g.band(shown, state, island.get("helpers")));
             patch.insert("parts".into(), Value::Array(parts));
+            // Lane R (bug note 2026-11-11T12-05-15): a finished job's island opens the file its final reply named when
+            // nothing else gave it one that exists, so the report outlives the island (`kept_report`).
+            if state == "done" && super::kept_report::open_free(island) {
+                if let Some(f) = g.delivered.as_deref().and_then(super::kept_report::file_of) { patch.insert("open".into(), json!(f)); }
+            }
         }
         // Without signals the stage is written only on a change of state, as before (another writer named it).
         None => if island.get("state").and_then(Value::as_str) == Some(state) && !fresh { patch.remove("stage"); },
@@ -592,7 +631,7 @@ pub struct T3Source {
     quiet: Mutex<std::collections::HashMap<String, (u64, std::time::Instant)>>,
     /// Each bound thread's reducer and what was last read of it, in memory (a restart re-reads the latest run's tail).
     tracks: Mutex<std::collections::HashMap<String, Track>>,
-    /// TrainingLab's runs folder (`train::runs_root`; none in the public edition).
+    /// ModelLab's runs folder (`train::runs_root`; none in the public edition).
     runs: Option<std::path::PathBuf>,
 }
 
@@ -798,7 +837,7 @@ impl ThreadSource for T3Source {
                 .map(|k| super::digest::without_tag(k["title"].as_str().unwrap_or("sub-agent")).to_owned()).collect();
             tr.reducer.subagents(&open, tr.children.len(), now);
         }
-        // A TrainingLab run its commands point at: Training while it is live, Paused while it is stopped.
+        // A ModelLab run its commands point at: Training while it is live, Paused while it is stopped.
         if let Some(root) = &self.runs {
             if tr.train.is_none() && (!tr.reducer.runs_named.is_empty() || !tr.reducer.train_hints.is_empty()) {
                 tr.train = super::train::find(root, &tr.reducer.runs_named, &tr.reducer.train_hints);
@@ -927,16 +966,18 @@ pub async fn sync_one(root: &Root, bindings: &Bindings, src: &dyn ThreadSource, 
     // A real failure stays for the user to see; done and stopped (a cancel) go. Read again and removed under the folder's
     // lock, so a writer between the patch and the removal is not lost.
     if view.archived && settled {
+        // Lane R (bug note 2026-11-11T12-05-15): a done island that delivered a file becomes its report island instead.
+        let now = super::tools::now_s() as i64;
         let gone = root.locked(|| {
-            let ends = root.read(island).is_some_and(|o| {
-                let (state, stage) = (o.get("state").and_then(Value::as_str), o.get("stage").and_then(Value::as_str));
-                state == Some("done") || (state == Some("failed") && stage == Some("Stopped"))
-            });
-            if ends { std::fs::remove_file(root.file(island))? }
-            Ok(ends)
+            let Some(o) = root.read(island) else { return Ok(None) };
+            let (state, stage) = (o.get("state").and_then(Value::as_str), o.get("stage").and_then(Value::as_str));
+            if state == Some("done") { return Ok(Some((super::kept_report::leave_locked(root, island, &o, &b.thread, now)?, o))) }
+            if state == Some("failed") && stage == Some("Stopped") { std::fs::remove_file(root.file(island))?; return Ok(Some((None, o))) }
+            Ok(None)
         })?;
-        if gone {
+        if let Some((file, o)) = gone {
             bindings.unbind(island);
+            if let Some(f) = file { super::kept_report::settled(root, &o, &f, now) }
             return Ok(true);
         }
     }
@@ -945,9 +986,16 @@ pub async fn sync_one(root: &Root, bindings: &Bindings, src: &dyn ThreadSource, 
 }
 
 /// How long a done job island stays on screen once the user has seen it: shown (islands not hidden) and closed, counted
-/// only while he could see it, or after he opened and closed it (bug 25 Oct 23:26: "not closing themselves").
-pub const DONE_SHOWN_FOR: std::time::Duration = std::time::Duration::from_secs(10 * 60);
-pub const DONE_AFTER_OPENED: std::time::Duration = std::time::Duration::from_secs(60);
+/// only while he could see it, or after he opened and closed it (bug 25 Oct 23:26: "not closing themselves"). Two
+/// minutes, not ten (bug note 2026-11-06T12-02-01: three green islands piled up beside the running ones; the relay
+/// has told him the result by then, and the task stays in T3).
+pub const DONE_SHOWN_FOR: std::time::Duration = std::time::Duration::from_secs(2 * 60);
+pub const DONE_AFTER_OPENED: std::time::Duration = std::time::Duration::from_secs(30);
+/// Bug note 2026-11-13T12-27-46 ("the islands, I don't think you're closing fast enough": an island stayed 20 minutes
+/// after its result was told, the user on a call and not touching the Mac, so no shown time counted): once the run's
+/// result reached Heimdall (spoken, or shown on the island when speech was held) a done island leaves this long
+/// after, present or not, hidden or not; never while the user has it open.
+pub const RESULT_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// One done island's time on screen, for `Retire`.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -956,15 +1004,29 @@ pub struct DoneClock {
     pub shown: std::time::Duration,
     /// The user opened it while done; time since he closed it.
     pub since_opened: Option<std::time::Duration>,
+    /// Time since the run's result was told and the island was done, whatever the user could see (`RESULT_GRACE`).
+    pub since_told: Option<std::time::Duration>,
 }
 
 impl DoneClock {
-    /// One tick of `dt`: whether the island is done, every island is shown (not hidden), and this one is open now.
-    /// Returns whether it should leave now. An open island never leaves; hidden time does not count.
-    pub fn step(&mut self, done: bool, shown: bool, open: bool, dt: std::time::Duration) -> bool {
+    /// One tick of `dt`: whether the island is done, every island is shown (not hidden), this one is open now, and
+    /// its run's result was told. Returns whether it should leave now. An open island never leaves; hidden time does
+    /// not count, except after the result was told.
+    pub fn step(&mut self, done: bool, shown: bool, open: bool, told: bool, dt: std::time::Duration) -> bool {
         if !done {
             *self = DoneClock::default();
             return false;
+        }
+        if open && shown {
+            // He is looking at it: the grace starts again once he closes it.
+            self.since_told = told.then_some(std::time::Duration::ZERO);
+        } else if told {
+            // The first tick it is done and told starts the grace; it counts from there.
+            match &mut self.since_told {
+                Some(t) => *t += dt,
+                None => self.since_told = Some(std::time::Duration::ZERO),
+            }
+            if self.since_told.is_some_and(|t| t >= RESULT_GRACE) { return true }
         }
         if !shown {
             return false;
@@ -987,18 +1049,25 @@ fn is_done(o: &Map<String, Value>) -> bool {
 /// screen or a Mac left alone counts as unseen.
 pub const PRESENT_WITHIN_S: f64 = 60.0;
 
-/// Seconds since the user's last input in this login session (keyboard, pointer, trackpad).
+/// Seconds since the last input of any type (keyboard, pointer, trackpad) by the event source `state`.
 #[cfg(target_os = "macos")]
-pub fn idle_seconds() -> f64 {
+fn seconds_since_input(state: i32) -> f64 {
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
         fn CGEventSourceSecondsSinceLastEventType(state: i32, event_type: u32) -> f64;
     }
-    // SAFETY: a pure query; combined session state (0), any input event type (!0).
-    unsafe { CGEventSourceSecondsSinceLastEventType(0, !0u32) }
+    // SAFETY: a pure query; any input event type (!0).
+    unsafe { CGEventSourceSecondsSinceLastEventType(state, !0u32) }
 }
 #[cfg(not(target_os = "macos"))]
-pub fn idle_seconds() -> f64 { 0.0 }
+fn seconds_since_input(_state: i32) -> f64 { 0.0 }
+
+/// Seconds since the user's last input in this login session (combined session state).
+pub fn idle_seconds() -> f64 { seconds_since_input(0) }
+
+/// Seconds since the last keyboard, pointer or trackpad input from the hardware (HID system state): events other
+/// processes post (cliclick, UI drivers, computer use) do not count, so another agent's click is not the user at the Mac.
+pub fn hid_idle_seconds() -> f64 { seconds_since_input(1) }
 
 /// Done job islands leaving by themselves: each bound island's `DoneClock`, stepped from the helper's `state.json`.
 #[derive(Default)]
@@ -1009,12 +1078,15 @@ pub struct Retire {
 impl Retire {
     /// One tick: every bound island that is done steps its clock; those due are removed and unbound. Returns them,
     /// each with its thread.
-    /// `hidden`: every island is hidden, or the user is away (no input within `PRESENT_WITHIN_S`, a locked screen).
-    pub fn tick(&mut self, root: &Root, bindings: &Bindings, hidden: bool, dt: std::time::Duration) -> Vec<(String, String)> {
-        let screen = root.screen_state();
-        let on_screen = screen.get("islands").and_then(Value::as_object);
+    /// `hidden`: every island is hidden, or the user is away (no input within `PRESENT_WITHIN_S`, a locked screen); asked
+    /// only when an island is bound. With none bound, neither `state.json` nor `hidden` is read (cleanup 14 Nov, ISL-17).
+    pub fn tick(&mut self, root: &Root, bindings: &Bindings, hidden: impl FnOnce() -> bool, dt: std::time::Duration) -> Vec<(String, String)> {
         let bound: Vec<(String, String)> = bindings.all().into_iter().map(|(id, b)| (id, b.thread)).collect();
         self.clocks.retain(|id, _| bound.iter().any(|(b, _)| b == id));
+        if bound.is_empty() { return vec![] }
+        let hidden = hidden();
+        let screen = root.screen_state();
+        let on_screen = screen.get("islands").and_then(Value::as_object);
         let mut gone = vec![];
         for (id, thread) in bound {
             let Some(o) = root.read(&id) else { continue };
@@ -1023,15 +1095,18 @@ impl Retire {
             // Not on screen yet (the helper has not drawn it): nothing counts.
             let shown = !hidden && shown_here.is_some();
             let open = shown_here.and_then(|s| s.get("open")).and_then(Value::as_bool).unwrap_or(false);
-            if self.clocks.entry(id.clone()).or_default().step(done, shown, open, dt) {
-                // Still done at the moment of removal, under the folder's lock: a rewrite meanwhile keeps it.
+            let told = told_this_run(&o, bindings.told_at(&thread));
+            if self.clocks.entry(id.clone()).or_default().step(done, shown, open, told, dt) {
+                // Still done at the moment of removal, under the folder's lock: a rewrite meanwhile keeps it. Lane R
+                // (bug note 2026-11-11T12-05-15): one that delivered a file becomes its report island instead.
+                let now = super::tools::now_s() as i64;
                 let removed = root.locked(|| {
-                    let still = root.read(&id).is_some_and(|o| is_done(&o));
-                    if still { std::fs::remove_file(root.file(&id))? }
-                    Ok(still)
+                    let Some(o) = root.read(&id).filter(is_done) else { return Ok(None) };
+                    Ok(Some((super::kept_report::leave_locked(root, &id, &o, &thread, now)?, o)))
                 });
-                if removed.unwrap_or(false) {
+                if let Ok(Some((file, o))) = removed {
                     bindings.unbind(&id);
+                    if let Some(f) = file { super::kept_report::settled(root, &o, &f, now) }
                     gone.push((id.clone(), thread));
                 }
                 self.clocks.remove(&id);
@@ -1039,6 +1114,13 @@ impl Retire {
         }
         gone
     }
+}
+
+/// Whether a result told at `told` (epoch seconds) belongs to the island's current run: told after the run
+/// started (`started`), so an earlier run's result never closes a later one early.
+pub fn told_this_run(o: &Map<String, Value>, told: Option<f64>) -> bool {
+    let Some(t) = told else { return false };
+    o.get("started").and_then(Value::as_f64).is_none_or(|s| t >= s)
 }
 
 /// Bind every island whose file names a thread (`"thread": {"id": …}` or a plain id) and is not bound to it yet.
@@ -1055,22 +1137,98 @@ pub fn adopt(root: &Root, bindings: &Bindings) {
     }
 }
 
-/// A job island's title from a task title: 1-3 words naming the thing (islands/docs/island-style.md). The part
-/// before a colon when it is short ("Arsenal: push branch" → "Arsenal"), else the first three words without a
-/// trailing small word ("Install planned voice pipeline" → "Install planned voice").
-pub fn job_title(task: &str) -> String {
-    // T3 thread titles carry Heimdall's launch marker; it is never shown.
+/// Small words a title never ends on: joiners (mcp_contract's JOINERS among them), and the pronouns and verbs a cut
+/// title is left dangling on (review 1111: "the user said about", "Phone its own").
+const SMALL: [&str; 38] = ["a", "an", "the", "of", "for", "and", "or", "to", "in", "on", "at", "by", "with", "from", "into",
+    "about", "then", "plus", "vs", "&", "-", "—", "–", "·", "+", "/", "its", "own", "his", "her", "their", "my", "your",
+    "our", "said", "says", "is", "are"];
+
+/// A task title without Heimdall's launch marker and a trailing note in brackets ("(prepare, don't send)").
+fn bare_task(task: &str) -> &str {
     let t = task.split(" [heimdall:").next().unwrap_or(task).trim();
-    if let Some((head, _)) = t.split_once(':') {
-        let n = head.split_whitespace().count();
-        if (1..=3).contains(&n) { return head.trim().to_string() }
-    }
+    match t.rfind(" (") { Some(i) if t.ends_with(')') && i > 0 => t[..i].trim(), _ => t }
+}
+
+/// At most three words of `t` up to its first comma or bracket, within `TITLE_CHARS`, not ending on a small word.
+fn words_of(t: &str) -> String {
+    let t = t.split([',', '(', ';']).next().unwrap_or(t);
     let mut words: Vec<&str> = t.split_whitespace().take(3).collect();
-    while words.len() > 1 && ["a", "an", "the", "of", "for", "and", "to", "in", "on", "with", "&", "-", "·"].contains(&words[words.len() - 1].to_lowercase().as_str()) {
-        words.pop();
+    loop {
+        while words.len() > 1 && SMALL.contains(&words[words.len() - 1].to_lowercase().as_str()) { words.pop(); }
+        if words.len() > 1 && words.join(" ").chars().count() > crate::island_agent::TITLE_CHARS { words.pop(); continue }
+        break;
     }
     let out = words.join(" ");
-    if out.is_empty() { "Task".into() } else { out }
+    // One long word: cut to the limit (an island title is never over it, island_agent::check).
+    if out.chars().count() > crate::island_agent::TITLE_CHARS { out.chars().take(crate::island_agent::TITLE_CHARS).collect::<String>().trim_end_matches(['-', '_']).to_owned() } else { out }
+}
+
+/// Lead words that name the kind of work, not the thing (bug note 2026-11-10T17-12-35: "Report: how to build a
+/// Heimdall benchmark" showed as "Report"; "Gather everything", "Rebuild the office", "Give the phone").
+const LEAD: [&str; 44] = ["report", "reports", "rebuild", "build", "gather", "fix", "check", "make", "write", "do", "run",
+    "rerun", "redo", "give", "get", "find", "look", "research", "investigate", "review", "add", "update", "create",
+    "prepare", "plan", "test", "try", "how", "why", "what", "to", "into", "at", "about", "please", "quick", "new",
+    "finish", "start", "a", "an", "the", "of", "everything"];
+
+/// `t` without its generic lead words ("how to build a Heimdall benchmark" → "Heimdall benchmark"); all of it when
+/// nothing would be left.
+fn without_lead(t: &str) -> &str {
+    let mut rest = t.trim_start();
+    loop {
+        let (w, tail) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+        let bare = w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+        if tail.trim().is_empty() || !LEAD.contains(&bare.as_str()) { return if rest.trim().is_empty() { t.trim() } else { rest } }
+        rest = tail.trim_start();
+    }
+}
+
+fn capitalized(t: &str) -> String {
+    let mut c = t.chars();
+    c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+}
+
+/// How many words of `t` are not generic lead words.
+fn subject_words(t: &str) -> usize {
+    t.split_whitespace().filter(|w| { let b = w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase(); !b.is_empty() && !LEAD.contains(&b.as_str()) }).count()
+}
+
+/// The two sides of a task title as candidate names, best first: the head before a colon when it names the thing in
+/// two words or more ("Rebuild the office AI hardware page: people in…" → the page), else the errand after it
+/// ("Report: how to build a Heimdall benchmark", "CV: Globex.ai"); each without its generic lead words.
+fn title_sides(task: &str) -> Vec<String> {
+    let t = bare_task(task);
+    let name = |x: &str| capitalized(&words_of(without_lead(x.trim())));
+    let mut out: Vec<String> = match t.split_once(':') {
+        Some((head, errand)) => {
+            let (h, e) = (name(head), name(errand));
+            if subject_words(head) >= 2 { vec![h, e] } else { vec![e, h] }
+        }
+        None => vec![name(t)],
+    };
+    out.retain(|x| !x.is_empty());
+    out
+}
+
+/// A job island's placeholder title from a task title, until the island agent names it (bug notes
+/// 2026-11-10T17-12-35, 17-13-24): 1-3 words without generic lead words such as Report, Rebuild, Gather, Fix, Check
+/// ("Report: how to build a Heimdall benchmark" → "Heimdall benchmark", "Rebuild the office AI hardware page: people
+/// in, hardware and price out" → "Office AI hardware").
+pub fn job_title(task: &str) -> String {
+    title_sides(task).into_iter().next().unwrap_or_else(|| "Task".into())
+}
+
+/// The job title no other live island has (bug note 2026-11-06T12-02-01: three islands said "Feedback inbox"). The
+/// best side of the task title first; taken, the other side of its colon; taken too, the first numbered
+/// ("Tako page 2"). Compared without case.
+pub fn unique_job_title(task: &str, taken: &[String]) -> String {
+    let free = |t: &str| !taken.iter().any(|x| x.trim().eq_ignore_ascii_case(t.trim()));
+    let sides = title_sides(task);
+    let first = sides.first().cloned().unwrap_or_else(|| "Task".into());
+    if let Some(t) = sides.iter().find(|t| free(t)) { return t.clone() }
+    // Numbered within three words ("Tako page v2" → "Tako page 2").
+    let head: Vec<&str> = first.split_whitespace().take(2).collect();
+    let head: String = head.join(" ").chars().take(crate::island_agent::TITLE_CHARS - 3).collect();
+    (2..).map(|n| format!("{} {n}", head.trim_end())).find(|t| free(t)).unwrap_or(first)
 }
 
 /// Every task Heimdall starts gets a running job island bound to its thread at once, docked right and born from the
@@ -1084,21 +1242,27 @@ pub fn task_island(h: &super::Host, thread: &str, title: &str, brief: &str) -> O
     static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
     let page = super::report_link::output_page(brief);
+    // Lane R: the job is back; its report island goes (its island carries the file again).
+    super::kept_report::job_back(&h.root, thread);
     if let Some((id, o)) = h.bindings.all().into_iter().find_map(|(id, b)| (b.thread == thread).then(|| h.root.read(&id).map(|o| (id, o))).flatten()) {
         if let Some(p) = page.filter(|_| o.get("open").and_then(Value::as_str).is_none_or(|t| t.trim().is_empty())) {
             if let Err(e) = super::tools::put(h, &json!({"id": id, "open": p})) {
                 eprintln!("islands: no open target on '{id}': {}", super::short_error(&e));
             }
         }
-        return Some(format!("Its job island is '{id}'; add details with islands_put on that id."));
+        return Some(format!("Its job island is '{id}'."));
     }
-    let name = job_title(title);
+    let taken: Vec<String> = h.root.all().into_iter().filter_map(|(_, o)| o.get("title").and_then(Value::as_str).map(str::to_owned)).collect();
+    // A thread whose island the agent or the island agent named before (the island retired, a new run brought it
+    // back) keeps that name (bug note 2026-11-10T18-32-39); else the task title's placeholder.
+    let kept = super::names::named(&h.root, thread).filter(|(t, _)| !taken.iter().any(|x| x.trim().eq_ignore_ascii_case(t.trim())));
+    let (name, by) = match &kept { Some((t, by)) => (t.clone(), by.clone()), None => (unique_job_title(title, &taken), super::names::BY_TASK.to_owned()) };
     let base = format!("task-{}", super::files::safe_id(&name.to_lowercase().replace(' ', "-")));
     // Another thread's island may hold the name: the next free one.
     let id = std::iter::once(base.clone()).chain((2..).map(|n| format!("{base}-{n}")))
         .find(|id| h.root.read(id).is_none() && h.bindings.get(id).is_none_or(|b| b.thread == thread))
         .unwrap_or(base);
-    let mut a = json!({"id": id, "title": name, "state": "running", "stage": "Starting", "side": "right", "thread": thread});
+    let mut a = json!({"id": id, "title": name, "titleBy": by, "state": "running", "stage": "Starting", "side": "right", "thread": thread});
     // What it was sent to do, once (the task title after its project, "Arsenal 1.0: Promote the allowed models…"), and
     // the goal it serves when its project names exactly one (docs/one-system.md).
     let bare = title.split(" [heimdall:").next().unwrap_or(title).trim();
@@ -1107,9 +1271,9 @@ pub fn task_island(h: &super::Host, thread: &str, title: &str, brief: &str) -> O
     if !sent.is_empty() { a["sent"] = json!(sent) }
     if let Some(g) = super::tools::goal_for(&h.root, bare) { a["goal"] = json!(g) }
     if let Some(p) = page { a["open"] = json!(p) }
-    let r = super::tools::put(h, &a).or_else(|_| { a["title"] = json!("Task"); super::tools::put(h, &a) });
+    let r = super::tools::put(h, &a).or_else(|_| { a["title"] = json!("Task"); a["titleBy"] = json!(super::names::BY_TASK); super::tools::put(h, &a) });
     match r {
-        Ok(_) => Some(format!("Its job island '{id}' follows the thread; add details with islands_put on that id.")),
+        Ok(_) => Some(format!("Its job island '{id}' follows the thread.")),
         Err(e) => { eprintln!("islands: no job island for thread {thread}: {}", super::short_error(&e)); None }
     }
 }
@@ -1145,11 +1309,11 @@ pub async fn answer(root: &Root, bindings: &Bindings, src: &dyn ThreadSource, is
                 super::files::merge(o, &patch);
                 super::tools::stamp_now(o, &patch);
             })?;
-            Ok(format!("User answered {} on the island '{title}'; sent to T3 thread {}.", said.join("; "), b.thread))
+            Ok(format!("{} answered {} on the island '{title}'; sent to T3 thread {}.", super::user_cap(), said.join("; "), b.thread))
         }
         Err(e) => {
             bindings.set_question(island, None);
-            Ok(format!("User answered {} on the island '{title}', but T3 refused the answer: {}", said.join("; "), crate::islands::short_error(&e)))
+            Ok(format!("{} answered {} on the island '{title}', but T3 refused the answer: {}", super::user_cap(), said.join("; "), crate::islands::short_error(&e)))
         }
     }
 }
@@ -1158,17 +1322,45 @@ pub async fn answer(root: &Root, bindings: &Bindings, src: &dyn ThreadSource, is
 const RETIRE_TICK: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// The binding loop: runs beside the T3 watcher until `stop`.
+/// Why one run of the binding loop ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ended {
+    /// The agent stopped (its watcher's stop signal): the next agent start runs the loop again.
+    Stopped,
+    /// The T3 workers are gone (their pass signal closed): nothing can be followed any more.
+    WorkersGone,
+    /// The job queue closed (its sender was replaced).
+    JobsClosed,
+}
+
+/// One island's sync on its own task: a panic in it (bug note 2026-11-07T13-12-26: a slice inside 'Ł') is that
+/// island's error, logged, never the loop's end.
+async fn sync_guarded(host: &Arc<super::Host>, src: &Arc<dyn ThreadSource>, island: &str) -> Result<bool> {
+    let (h, s, id) = (host.clone(), src.clone(), island.to_owned());
+    match tokio::spawn(async move { sync_one(&h.root, &h.bindings, s.as_ref(), &id).await }).await {
+        Ok(r) => r,
+        Err(e) => anyhow::bail!("sync panicked: {}", panic_text(e)),
+    }
+}
+
+/// A finished task's panic message, else what ended it.
+fn panic_text(e: tokio::task::JoinError) -> String {
+    if !e.is_panic() { return e.to_string() }
+    let p = e.into_panic();
+    p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "a panic without a message".into())
+}
+
 pub async fn run(
     host: Arc<super::Host>,
     src: Arc<dyn ThreadSource>,
     mut passes: tokio::sync::watch::Receiver<u64>,
     mut stop: tokio::sync::watch::Receiver<bool>,
     mut jobs: tokio::sync::mpsc::UnboundedReceiver<Job>,
-) {
+) -> Ended {
     let sync_all = |host: Arc<super::Host>, src: Arc<dyn ThreadSource>| async move {
         adopt(&host.root, &host.bindings);
         for (island, _) in host.bindings.all() {
-            if let Err(e) = sync_one(&host.root, &host.bindings, src.as_ref(), &island).await {
+            if let Err(e) = sync_guarded(&host, &src, &island).await {
                 eprintln!("islands: thread sync for {island}: {}", crate::islands::short_error(&e));
             }
         }
@@ -1178,33 +1370,80 @@ pub async fn run(
     let mut tick = tokio::time::interval(RETIRE_TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
+        if *stop.borrow() { return Ended::Stopped }
         tokio::select! {
             biased;
-            r = stop.changed() => { if r.is_err() || *stop.borrow() { break } }
+            r = stop.changed() => { if r.is_err() || *stop.borrow() { return Ended::Stopped } }
             _ = tick.tick() => {
-                let away = super::visibility::hidden() || idle_seconds() > PRESENT_WITHIN_S;
+                let away = || super::visibility::hidden() || idle_seconds() > PRESENT_WITHIN_S;
                 for (id, thread) in retire.tick(&host.root, &host.bindings, away, RETIRE_TICK) {
-                    eprintln!("islands: done island '{id}' left after User saw it");
+                    eprintln!("islands: done island '{id}' left after User saw it or was told its result");
                     island_cleared(&host.bindings, src.as_ref(), &thread).await;
                 }
             }
             job = jobs.recv() => match job {
-                None => break,
+                None => return Ended::JobsClosed,
                 Some(Job::Sync(island)) => {
-                    if let Err(e) = sync_one(&host.root, &host.bindings, src.as_ref(), &island).await {
+                    if let Err(e) = sync_guarded(&host, &src, &island).await {
                         eprintln!("islands: thread sync for {island}: {}", crate::islands::short_error(&e));
                     }
                 }
                 Some(Job::Cleared(thread)) => island_cleared(&host.bindings, src.as_ref(), &thread).await,
                 Some(Job::Answer { island, request, picks }) => {
                     let line = answer(&host.root, &host.bindings, src.as_ref(), &island, &request, &picks).await
-                        .unwrap_or_else(|e| format!("User clicked an answer on the island '{island}', but it could not be sent: {}", crate::islands::short_error(&e)));
+                        .unwrap_or_else(|e| format!("{} clicked an answer on the island '{island}', but it could not be sent: {}", super::user_cap(), crate::islands::short_error(&e)));
                     host.deliver(super::Class::Context, &line);
-                    let _ = sync_one(&host.root, &host.bindings, src.as_ref(), &island).await;
+                    let _ = sync_guarded(&host, &src, &island).await;
                 }
             },
-            r = passes.changed() => { if r.is_err() { break } sync_all(host.clone(), src.clone()).await }
+            r = passes.changed() => { if r.is_err() { return Ended::WorkersGone } sync_all(host.clone(), src.clone()).await }
         }
+    }
+}
+
+/// The first wait before a restart; it doubles up to `RESTART_MAX` while runs keep dying young.
+pub const RESTART_FIRST: std::time::Duration = std::time::Duration::from_secs(1);
+pub const RESTART_MAX: std::time::Duration = std::time::Duration::from_secs(60);
+/// A run that lived this long resets the wait.
+const RESTART_HEALTHY: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// The binding loop for one agent start, kept alive (bug note 2026-11-07T13-12-26: a panic at 03:07 ended it, nothing
+/// started it again, and for ten hours job islands neither followed their threads nor left when their tasks were
+/// cancelled, bug note 2026-11-07T04-42-33). Each run gets a fresh job queue on the host; a run that panics or ends
+/// while the agent runs is logged with why and started again after a short wait, and its first pass syncs every bound
+/// island, so what happened meanwhile (a cancel, an archive) reaches the islands. Ends with `stop`, or when the T3
+/// workers are gone.
+pub async fn supervise(
+    host: Arc<super::Host>,
+    src: Arc<dyn ThreadSource>,
+    passes: tokio::sync::watch::Receiver<u64>,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+    first_wait: std::time::Duration,
+) {
+    let mut wait = first_wait;
+    let mut restarts = 0u32;
+    loop {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        host.set_t3(Some(tx));
+        let began = tokio::time::Instant::now();
+        let why = match tokio::spawn(run(host.clone(), src.clone(), passes.clone(), stop.clone(), rx)).await {
+            Ok(Ended::Stopped) => return,
+            Ok(Ended::WorkersGone) => {
+                eprintln!("islands: thread binding loop ended: the T3 workers are gone; it starts again with the agent");
+                return;
+            }
+            Ok(Ended::JobsClosed) => "its job queue closed".to_owned(),
+            Err(e) => format!("it panicked: {}", panic_text(e)),
+        };
+        if *stop.borrow() { return }
+        if began.elapsed() >= RESTART_HEALTHY { wait = first_wait }
+        restarts += 1;
+        eprintln!("islands: thread binding loop ended ({why}); restart {restarts} in {} s", wait.as_secs_f32());
+        tokio::select! {
+            r = stop.changed() => { if r.is_err() || *stop.borrow() { return } }
+            _ = tokio::time::sleep(wait) => {}
+        }
+        wait = (wait * 2).min(RESTART_MAX);
     }
 }
 
@@ -1498,6 +1737,88 @@ mod tests {
         async fn answer(&self, _: &str, _: &Question, _: &[Pick]) -> Result<()> { Ok(()) }
     }
 
+    /// A source whose first `view` (or `cleared`) panics as the live one did at 03:07 on 7 Nov, then reports the
+    /// thread archived after a cancel (bug notes 2026-11-07T13-12-26 and 2026-11-07T04-42-33).
+    struct Flaky { view_panics: std::sync::atomic::AtomicBool, cleared_panics: std::sync::atomic::AtomicBool }
+    #[async_trait::async_trait]
+    impl ThreadSource for Flaky {
+        async fn view(&self, _: &str) -> Result<ThreadView> {
+            if self.view_panics.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                panic!("start byte index 469 is not a char boundary; it is inside 'Ł' (bytes 468..470 of string)")
+            }
+            Ok(ThreadView { archived: true, ..view("completed", 0, None) })
+        }
+        async fn answer(&self, _: &str, _: &Question, _: &[Pick]) -> Result<()> { Ok(()) }
+        async fn cleared(&self, _: &str) -> Result<Vec<String>> {
+            if self.cleared_panics.swap(false, std::sync::atomic::Ordering::SeqCst) { panic!("cleared blew up") }
+            Ok(vec![])
+        }
+    }
+
+    fn flaky(view_panics: bool, cleared_panics: bool) -> Arc<Flaky> {
+        Arc::new(Flaky { view_panics: view_panics.into(), cleared_panics: cleared_panics.into() })
+    }
+
+    async fn until(what: &str, f: impl Fn() -> bool) {
+        for _ in 0..200 {
+            if f() { return }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("timed out waiting: {what}");
+    }
+
+    /// A panic while one island syncs is that island's error: the loop lives on, and the next pass ends the cancelled
+    /// task's island (bug note 2026-11-07T13-12-26: the panic ended the loop for ten hours).
+    #[tokio::test]
+    async fn a_panicking_sync_does_not_end_the_binding_loop() {
+        let d = tempfile::tempdir().unwrap();
+        let host = Arc::new(super::super::Host::new(Root(d.path().join("fi")), None));
+        host.root.put("task-map", &obj(json!({"title": "Map", "state": "running", "stage": "Working"}))).unwrap();
+        host.bindings.bind("task-map", "mcp:1");
+        let (pass_tx, passes) = tokio::sync::watch::channel(0u64);
+        let (stop_tx, stop) = tokio::sync::watch::channel(false);
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let src: Arc<dyn ThreadSource> = flaky(true, false);
+        let task = tokio::spawn(run(host.clone(), src, passes, stop, rx));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(host.root.read("task-map").is_some(), "the first sync panicked: the island is still there");
+        assert!(!task.is_finished(), "the loop survived the panic");
+        // task_cancel archived the thread; the next T3 pass ends its island.
+        pass_tx.send_modify(|n| *n += 1);
+        until("the archived task's island leaves", || host.root.read("task-map").is_none()).await;
+        assert!(host.bindings.get("task-map").is_none());
+        stop_tx.send(true).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), task).await.unwrap().unwrap();
+    }
+
+    /// The loop itself dying is logged and it starts again, with a fresh job queue on the host; its first pass ends
+    /// the islands of tasks cancelled meanwhile (bug notes 2026-11-07T13-12-26 and 2026-11-07T04-42-33).
+    #[tokio::test]
+    async fn a_dead_binding_loop_restarts_and_catches_up_with_cancelled_tasks() {
+        let d = tempfile::tempdir().unwrap();
+        let host = Arc::new(super::super::Host::new(Root(d.path().join("fi")), None));
+        let (_pass_tx, passes) = tokio::sync::watch::channel(0u64);
+        let (stop_tx, stop) = tokio::sync::watch::channel(false);
+        let src = flaky(false, true);
+        let task = tokio::spawn(supervise(host.clone(), src.clone(), passes, stop, std::time::Duration::from_millis(20)));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // A task got its island after the loop's first pass and was cancelled (archived); no pass has run since.
+        host.root.put("task-map", &obj(json!({"title": "Map", "state": "running", "stage": "Working"}))).unwrap();
+        host.bindings.bind("task-map", "mcp:1");
+        // A job whose handling panics outside any island's sync ends the run.
+        host.t3_job(Job::Cleared("mcp:gone".into()));
+        until("the clear's panic happened", || !src.cleared_panics.load(std::sync::atomic::Ordering::SeqCst)).await;
+        // The restarted run's first pass ends it, with no T3 pass needed.
+        until("the restarted loop ends the cancelled task's island", || host.root.read("task-map").is_none()).await;
+        // Jobs reach the new run: a sync job for a new island is taken.
+        host.root.put("task-2", &obj(json!({"title": "Two", "state": "running"}))).unwrap();
+        host.bindings.bind("task-2", "mcp:2");
+        host.t3_job(Job::Sync("task-2".into()));
+        until("the job reached the restarted loop", || host.root.read("task-2").is_none()).await;
+        stop_tx.send(true).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), task).await.unwrap().unwrap();
+    }
+
     /// A deleted thread's island leaves at its next sync, with its card; T3 being down or a lost request does not
     /// take an island away (bug note 2026-11-02T16-27-21: islands of finished tasks stayed on "Reading").
     #[tokio::test]
@@ -1597,7 +1918,7 @@ mod tests {
         assert_eq!(root.read("voices").unwrap()["attention"], "question");
         let bright = [pick("q1", &["Bright"], None)];
         let line = answer(&root, &bindings, &fake, "voices", "r1", &bright).await.unwrap();
-        assert_eq!(line, "User answered 'Bright' to 'Which voice?' on the island 'Voices'; sent to T3 thread th.");
+        assert_eq!(line, "The user answered 'Bright' to 'Which voice?' on the island 'Voices'; sent to T3 thread th.");
         assert_eq!(fake.answered.lock().unwrap()[0], ("th".into(), "r1".into(), bright.to_vec()));
         let o = root.read("voices").unwrap();
         assert_eq!((o["state"].as_str(), o.get("parts"), o.get("attention")), (Some("running"), None, None));
@@ -1727,7 +2048,7 @@ mod tests {
         let mut bg = signals("Testing");
         bg.background_open = 1;
         let (p, settled) = sync_patch(&island, &ThreadView { ended_recently: true, signals: Some(bg), ..view("completed", 0, None) });
-        assert_eq!((p.get("state"), p["stage"].as_str(), settled), (None, Some("Background"), false), "still running: {p:?}");
+        assert_eq!((p.get("state"), p["stage"].as_str(), settled), (None, Some("Testing"), false), "still running, in the stage it held, never \"Background\": {p:?}");
         let (p, _) = sync_patch(&island, &ThreadView { ended_recently: true, recent_children: 1, signals: Some(signals("Testing")), ..view("completed", 0, None) });
         assert_eq!(p["stage"], "Sub-agents");
         // Without signals (the items unreadable this pass): the old rule, the hour is waited out.
@@ -1736,14 +2057,14 @@ mod tests {
         // Heimdall's record of the task still has a background restore and its monitor running: not finished.
         let (p, settled) = sync_patch(&island, &ThreadView { background: 2, signals: Some(signals("Testing")), ..view("completed", 0, None) });
         let state = p.get("state").or(island.get("state")).and_then(Value::as_str);
-        assert_eq!((state, p.get("stage").and_then(Value::as_str), settled), (Some("running"), Some("Background"), false), "{p:?}");
+        assert_eq!((state, p.get("stage").and_then(Value::as_str), settled), (Some("running"), Some("Testing"), false), "{p:?}");
         // Without signals: still running and not settled (the stage changes only with the state, as before); an island
-        // that had said done goes back to running Background.
+        // that had said done goes back to running, Working (never "Background", bug note 2026-11-06T12-02-01).
         let (p, settled) = sync_patch(&island, &ThreadView { background: 1, ..view("completed", 0, None) });
         assert_eq!((p.get("state"), settled), (None, false), "{p:?}");
         let done = obj(json!({"title": "Release", "state": "done", "stage": "Done"}));
         let (p, settled) = sync_patch(&done, &ThreadView { background: 1, ..view("completed", 0, None) });
-        assert_eq!((p.get("state").and_then(Value::as_str), p.get("stage").and_then(Value::as_str), settled), (Some("running"), Some("Background"), false), "{p:?}");
+        assert_eq!((p.get("state").and_then(Value::as_str), p.get("stage").and_then(Value::as_str), settled), (Some("running"), Some("Working"), false), "{p:?}");
         // A run the plan refresher marked waiting on the user keeps that mark while its monitor runs.
         let picked = obj(json!({"title": "Release", "state": "waiting", "stage": "Your pick"}));
         assert_eq!(sync_patch(&picked, &ThreadView { background: 1, ..view("completed", 0, None) }), (Map::new(), true));
@@ -1846,25 +2167,104 @@ mod tests {
     }
 
     #[test]
-    fn a_done_island_leaves_after_ten_shown_minutes_or_a_minute_after_owner_opened_it() {
+    fn a_done_island_leaves_after_two_shown_minutes_or_half_a_minute_after_owner_opened_it() {
+        // Bug note 2026-11-06T12-02-01: done islands piled up beside the running ones for ten minutes.
         use std::time::Duration as D;
         let m = D::from_secs(60);
         let mut c = DoneClock::default();
         // Hidden time and running time do not count.
-        assert!(!c.step(true, false, false, 30 * m));
-        assert!(!c.step(false, true, false, 30 * m));
-        for _ in 0..9 { assert!(!c.step(true, true, false, m)) }
-        assert!(c.step(true, true, false, m), "ten minutes shown closed");
-        // Opened: never while open; a minute after he closes it.
+        assert!(!c.step(true, false, false, false, 30 * m));
+        assert!(!c.step(false, true, false, false, 30 * m));
+        assert!(!c.step(true, true, false, false, m));
+        assert!(!c.step(true, true, false, false, D::from_secs(59)));
+        assert!(c.step(true, true, false, false, D::from_secs(1)), "two minutes shown closed");
+        // Opened: never while open; half a minute after he closes it.
         let mut c = DoneClock::default();
-        assert!(!c.step(true, true, true, 20 * m));
-        assert!(!c.step(true, true, false, D::from_secs(45)));
-        assert!(c.step(true, true, false, D::from_secs(15)));
+        assert!(!c.step(true, true, true, false, 20 * m));
+        assert!(!c.step(true, true, false, false, D::from_secs(20)));
+        assert!(c.step(true, true, false, false, D::from_secs(10)));
         // Back to running resets it.
         let mut c = DoneClock::default();
-        assert!(!c.step(true, true, false, 9 * m));
-        assert!(!c.step(false, true, false, m));
-        assert!(!c.step(true, true, false, 9 * m));
+        assert!(!c.step(true, true, false, false, D::from_secs(110)));
+        assert!(!c.step(false, true, false, false, m));
+        assert!(!c.step(true, true, false, false, D::from_secs(110)));
+    }
+
+    /// Bug note 2026-11-13T12-27-46: once the result was told, a done island leaves a minute later, the user present or
+    /// not (he was on a call, so no shown time counted and it stayed 20 minutes); never while he has it open.
+    #[test]
+    fn a_told_result_closes_its_done_island_a_minute_later_whatever_owner_could_see() {
+        use std::time::Duration as D;
+        let s = D::from_secs(15);
+        // Away or hidden the whole time (shown false): the told grace still counts.
+        let mut c = DoneClock::default();
+        assert!(!c.step(true, false, false, false, 10 * 60 * s), "untold and unseen: it stays");
+        assert!(!c.step(true, false, false, true, s), "the grace starts at the first tick it is done and told");
+        for _ in 0..3 { assert!(!c.step(true, false, false, true, s)) }
+        assert!(c.step(true, false, false, true, s), "{RESULT_GRACE:?} after the result was told");
+        // Told while still running: the grace starts only once it is done.
+        let mut c = DoneClock::default();
+        assert!(!c.step(false, true, false, true, 10 * s));
+        assert!(!c.step(true, false, false, true, s));
+        assert!(!c.step(true, false, false, true, D::from_secs(59)));
+        assert!(c.step(true, false, false, true, D::from_secs(1)));
+        // Open on screen: never leaves, and the grace starts again when he closes it.
+        let mut c = DoneClock::default();
+        assert!(!c.step(true, true, true, true, 10 * 60 * s));
+        assert!(!c.step(true, true, false, true, D::from_secs(29)));
+        assert!(c.step(true, true, false, true, D::from_secs(1)), "half a minute after he closed it (the opened rule)");
+        // A new run resets it.
+        let mut c = DoneClock::default();
+        assert!(!c.step(true, false, false, true, D::from_secs(50)));
+        assert!(!c.step(false, false, false, true, s));
+        assert!(!c.step(true, false, false, true, D::from_secs(50)));
+        assert!(!c.step(true, false, false, true, D::from_secs(9)));
+    }
+
+    /// Bug note 2026-11-13T12-27-46: the fake-clock path through `Retire`: the user away (hidden), the task's result told,
+    /// the island leaves after the grace; a result told before the island's run started does not count; a viewer
+    /// island is never bound, so it stays.
+    #[test]
+    fn retire_closes_a_told_done_island_after_the_grace_even_while_owner_is_away() {
+        let d = tempfile::tempdir().unwrap();
+        let h = crate::islands::Host::new(Root(d.path().to_path_buf()), None);
+        h.root.put("task-told", &obj(json!({"title": "Voice isolation", "state": "done", "started": 1000.0}))).unwrap();
+        h.bindings.bind("task-told", "th-told");
+        h.root.put("task-old", &obj(json!({"title": "Old result", "state": "done", "started": 1000.0}))).unwrap();
+        h.bindings.bind("task-old", "th-old");
+        h.root.put("view-report.html", &obj(json!({"title": "Report", "preset": "viewer", "path": "/tmp/r.html"}))).unwrap();
+        let state = json!({"islands": {"task-told": {"open": false}, "task-old": {"open": false}, "view-report.html": {"open": true}}});
+        crate::islands::files::write_atomic(&h.root.state(), &state).unwrap();
+        h.bindings.told("th-told", 1200.0);
+        h.bindings.told("th-old", 900.0);
+        let mut r = Retire::default();
+        let tick = std::time::Duration::from_secs(15);
+        for _ in 0..4 { assert!(r.tick(&h.root, &h.bindings, || true, tick).is_empty(), "within the grace") }
+        assert_eq!(r.tick(&h.root, &h.bindings, || true, tick), vec![("task-told".to_string(), "th-told".to_string())]);
+        assert!(h.root.read("task-told").is_none() && h.bindings.get("task-told").is_none());
+        for _ in 0..40 { assert!(r.tick(&h.root, &h.bindings, || true, tick).is_empty()) }
+        assert!(h.root.read("task-old").is_some(), "an earlier run's result does not close the current run's island");
+        assert!(h.root.read("view-report.html").is_some(), "a viewer stays until User closes it");
+    }
+
+    /// Cleanup 14 Nov (ISL-17): with no island bound, a tick asks nothing (no idle query, no state.json), and a clock
+    /// left from an unbound island is gone, so a later binding of the same id starts afresh.
+    #[test]
+    fn retire_with_nothing_bound_asks_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let h = crate::islands::Host::new(Root(d.path().to_path_buf()), None);
+        let mut r = Retire::default();
+        assert!(r.tick(&h.root, &h.bindings, || panic!("idle queried with nothing bound"), DONE_SHOWN_FOR).is_empty());
+        h.root.put("task-a", &obj(json!({"title": "T", "state": "done"}))).unwrap();
+        h.bindings.bind("task-a", "th-a");
+        crate::islands::files::write_atomic(&h.root.state(), &json!({"islands": {"task-a": {"open": false}}})).unwrap();
+        let half = DONE_SHOWN_FOR / 2;
+        assert!(r.tick(&h.root, &h.bindings, || false, half).is_empty(), "half the time shown");
+        h.bindings.unbind("task-a");
+        assert!(r.tick(&h.root, &h.bindings, || panic!("idle queried with nothing bound"), half).is_empty());
+        h.bindings.bind("task-a", "th-a");
+        assert!(r.tick(&h.root, &h.bindings, || false, half).is_empty(), "its clock started again on the new binding");
+        assert_eq!(r.tick(&h.root, &h.bindings, || false, half).len(), 1);
     }
 
     #[test]
@@ -1879,9 +2279,9 @@ mod tests {
         let state = json!({"islands": {"task-a": {"open": false}, "task-b": {"open": false}, "task-d": {"open": false}}});
         crate::islands::files::write_atomic(&h.root.state(), &state).unwrap();
         let mut r = Retire::default();
-        let ten = std::time::Duration::from_secs(600);
-        assert!(r.tick(&h.root, &h.bindings, true, ten).is_empty(), "hidden: nothing counts");
-        assert_eq!(r.tick(&h.root, &h.bindings, false, ten), vec![("task-a".to_string(), "th-task-a".to_string())], "with its thread, for the archive");
+        let ten = DONE_SHOWN_FOR;
+        assert!(r.tick(&h.root, &h.bindings, || true, ten).is_empty(), "hidden: nothing counts");
+        assert_eq!(r.tick(&h.root, &h.bindings, || false, ten), vec![("task-a".to_string(), "th-task-a".to_string())], "with its thread, for the archive");
         assert!(h.root.read("task-a").is_none() && h.bindings.get("task-a").is_none());
         for id in ["task-b", "task-c", "task-d"] { assert!(h.root.read(id).is_some(), "{id} stays") }
     }
@@ -1935,12 +2335,51 @@ mod tests {
 
     #[test]
     fn job_titles_are_one_to_three_words_naming_the_thing() {
-        assert_eq!(job_title("Arsenal: push branch"), "Arsenal");
+        // Bug note 2026-11-10T17-12-35: the errand after a colon, without generic lead words.
+        assert_eq!(job_title("Report: how to build a Heimdall benchmark"), "Heimdall benchmark");
+        assert_eq!(job_title("Rebuild the office AI hardware page: people in, hardware and price out"), "Office AI hardware");
+        // Review 1111: a cut title never ends on a joiner, pronoun or dangling verb.
+        assert_eq!(job_title("Gather everything User said about Vella"), "User");
+        assert_eq!(job_title("Give the phone its own Goals screen"), "Phone");
+        assert_eq!(job_title("Research Vella or the Arsenal app"), "Vella", "never ends on or");
+        assert_eq!(job_title("Fix: islands viewer zoom"), "Islands viewer zoom");
+        assert_eq!(job_title("Check Arsenal 1.0.3 install"), "Arsenal 1.0.3 install");
+        assert_eq!(job_title("Arsenal: push branch"), "Push branch", "a one-word label before a colon goes");
+        assert_eq!(job_title("Arsenal 1.0.3: fresh-VM install and first-use test"), "Arsenal 1.0.3");
         assert_eq!(job_title("Install planned voice pipeline"), "Install planned voice");
         assert_eq!(job_title("Tako page v2 [heimdall:abc123]"), "Tako page v2");
         assert_eq!(job_title("Port of the islands"), "Port");
-        assert_eq!(job_title("Heimdall voice lane: ack, bench"), "Heimdall voice lane");
         assert_eq!(job_title("  "), "Task");
+        assert_eq!(job_title("Report"), "Report", "a lone lead word is kept rather than nothing");
+        assert_eq!(job_title("CV: Globex.ai Prompt Engineer (prepare, don't send) [heimdall:90b5]"), "Globex.ai Prompt");
+        assert_eq!(job_title("CV climb + review page: Globex.ai [heimdall:e365]"), "CV climb", "a head that names the thing stays; never ends on a +");
+        assert_eq!(job_title("Review: (later)"), "Review", "an errand that gives no words: the head");
+    }
+
+    #[test]
+    fn a_question_shows_paths_without_the_home_folder() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(short_paths(&format!("rm -rf {home}/Work/Assistant/Temp/x; ls {home}/Downloads")), "rm -rf Assistant/Temp/x; ls ~/Downloads");
+    }
+
+    #[test]
+    fn job_titles_come_from_the_task_and_are_unique_among_live_islands() {
+        // Bug note 2026-11-06T12-02-01: today's real task titles; three islands said "Feedback inbox".
+        let mut taken: Vec<String> = vec![];
+        let mut add = |task: &str| { let t = unique_job_title(task, &taken); taken.push(t.clone()); t };
+        assert_eq!(add("Feedback inbox: one-call endpoint for agents and users [heimdall:8e3a]"), "Feedback inbox");
+        assert_eq!(add("Feedback inbox: curl-only skill, lenient intake, hardening [heimdall:a9e1]"), "Curl-only skill", "the head taken: the errand");
+        assert_eq!(add("CV: Globex.ai Prompt Engineer (prepare, don't send) [heimdall:90b5]"), "Globex.ai Prompt");
+        assert_eq!(add("CV: Belvedere Gourmet Group, AI innovation (prepare, don't send)"), "Belvedere Gourmet Group");
+        assert_eq!(add("CV: RTV Euro AGD AI Rapid Prototyping (prepare, don't send)"), "RTV Euro AGD");
+        assert_eq!(add("Arsenal 1.0.3: fresh-VM install and first-use test"), "Arsenal 1.0.3");
+        assert_eq!(add("Arsenal promo material for X (prepare, don't post)"), "Arsenal promo material");
+        // Errand and head both taken: numbered. Case does not make a title new.
+        assert_eq!(unique_job_title("CV: Globex.ai", &["Globex.ai".into(), "cv".into()]), "Globex.ai 2");
+        // Review: one long word, and a numbered title, stay within the limit.
+        assert_eq!(job_title("Internationalization-refactoring of app"), "Internationalization-ref");
+        assert!(unique_job_title("Heimdall voicepipelines", &["Heimdall voicepipelines".into()]).chars().count() <= crate::island_agent::TITLE_CHARS);
+        assert!(taken.iter().all(|t| t.chars().count() <= crate::island_agent::TITLE_CHARS && t.split_whitespace().count() <= 3), "{taken:?}");
     }
 
     #[test]
@@ -1958,8 +2397,13 @@ mod tests {
         assert!(task_island(&h, "th-1", "Tako page v2", "").unwrap().contains("'task-tako-page-v2'"));
         assert_eq!(h.root.all().len(), 1);
         // Another task with the same title gets its own island.
-        assert!(task_island(&h, "th-2", "Tako page v2", "").unwrap().contains("'task-tako-page-v2-2'"));
-        assert_eq!(h.bindings.get("task-tako-page-v2-2").unwrap().thread, "th-2");
+        assert!(task_island(&h, "th-2", "Tako page v2", "").unwrap().contains("'task-tako-page-2'"));
+        assert_eq!(h.bindings.get("task-tako-page-2").unwrap().thread, "th-2");
+        assert_eq!(h.root.read("task-tako-page-2").unwrap()["title"], "Tako page 2", "never two islands with one title");
+        task_island(&h, "th-5", "Feedback inbox: one-call endpoint [heimdall:8e3a]", "").unwrap();
+        task_island(&h, "th-6", "Feedback inbox: curl-only skill, lenient intake [heimdall:a9e1]", "").unwrap();
+        let titles: Vec<String> = h.root.all().into_iter().filter_map(|(_, o)| o["title"].as_str().map(str::to_owned)).collect();
+        assert!(titles.contains(&"Feedback inbox".to_string()) && titles.contains(&"Curl-only skill".to_string()), "{titles:?}");
         // A thread the agent already showed under its own id keeps that island.
         crate::islands::tools::put(&h, &json!({"id": "voices", "title": "Male voices", "thread": "th-3"})).unwrap();
         assert!(task_island(&h, "th-3", "Voices", "").unwrap().contains("'voices'"));

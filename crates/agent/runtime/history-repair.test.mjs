@@ -1,4 +1,6 @@
 import test from 'node:test';
+// The personal profile's label of the user's own lines, as the harness passes it (`HEIMDALL_USER_LABEL`).
+process.env.HEIMDALL_USER_LABEL ??= 'User';
 import assert from 'node:assert/strict';
 import { historyRejection, imageInfo, imageFix, imageRepairs, failedAttempt, rebuiltSummary, requestMessage, pendingRequests, userLine, registerHistoryRepair, MAX_IMAGE_BASE64, REBUILT_CHARS, REQUEST_TYPE } from './history-repair.mjs';
 

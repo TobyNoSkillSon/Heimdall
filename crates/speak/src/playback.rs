@@ -678,8 +678,12 @@ struct PlaybackCursor {
     last_frame: Option<u64>,
 }
 /// Sentences kept for a rewind: the one at the cursor and the two before it. A short sentence ("Yes.") can be shorter
-/// than a Bluetooth route's latency, so the speaker may still be two sentences behind the cursor.
+/// than a Bluetooth route's latency, so the speaker may still be two sentences behind the cursor. More are kept while
+/// the speaker has not reached the start of the second-oldest (`forget_heard`): night 10–11 Nov sweep, item 5, the
+/// fixed three dropped the tail of a sentence still at the speaker behind three short ones, and the resume skipped it.
 const KEPT_SENTENCES: usize = 3;
+/// The most sentences kept whatever the speaker (a bound on memory; `MAX_LATENCY_SECONDS` is far shorter).
+const MAX_KEPT_SENTENCES: usize = 32;
 /// One sentence's audio as the cursor rendered it, kept so a reopened device can say it again from its start.
 struct Said {
     /// 1-based position in the stream (the recovery log line names it).
@@ -731,7 +735,14 @@ impl PlaybackCursor {
     fn begin_sentence(&mut self, label: Option<Arc<str>>) {
         let number = self.said.back().map_or(1, |said| said.number + 1);
         self.said.push_back(Said { number, label, chunks: vec![], frame: None, produced: self.produced });
-        while self.said.len() > KEPT_SENTENCES {
+        while self.said.len() > MAX_KEPT_SENTENCES {
+            self.said.pop_front();
+        }
+    }
+    /// Drops the kept sentences the speaker has finished (`played` frames of this device's timeline are past it),
+    /// keeping at least `KEPT_SENTENCES`: the oldest goes once the next one's first sample has been heard.
+    fn forget_heard(&mut self, played: u64) {
+        while self.said.len() > KEPT_SENTENCES && self.said.get(1).is_some_and(|next| next.frame.is_some_and(|frame| played > frame)) {
             self.said.pop_front();
         }
     }
@@ -987,6 +998,7 @@ fn fill<T: Copy>(
         energy += v * v;
         frame.fill(convert(v));
     }
+    cursor.forget_heard(timeline.played());
     energy
 }
 /// What the pre-buffer wait ended with.
@@ -2544,6 +2556,52 @@ mod tests {
         // The next device is lost too before it plays a sample: still nothing heard is said again.
         let (_, from) = next.resume(0);
         assert_eq!(from, None, "a loss after a lossless recovery replays nothing heard");
+    }
+    /// Night 10–11 Nov sweep, item 5 (six "output moved … mid-reply; resumed from sentence N"): three short sentences
+    /// inside the latency pushed the one at the speaker out of the kept three, and the resume skipped its tail and the
+    /// next sentence. Now every sample from the start of the sentence at the speaker is said once, nothing before it.
+    #[test]
+    fn resume_never_skips_a_sentence_behind_several_short_ones() {
+        let samples = |k: usize, n: usize| (0..n).map(|i| 0.1 * k as f32 + i as f32 * 1e-6).collect::<Vec<f32>>();
+        let (s1, s2, s3, s4, s5) = (samples(1, 4_410), samples(2, 4_410), samples(3, 250), samples(4, 250), samples(5, 4_410));
+        let (mut cursor, tx) = fed(s1.clone(), Some("One."));
+        for (s, label) in [(&s2, "Two."), (&s3, "Yes."), (&s4, "No."), (&s5, "Five.")] {
+            let audio = Audio { samples: s.clone(), sample_rate: SIM_RATE, first_audio_ms: 0., synthesis_ms: 0. };
+            tx.send(crate::PlaybackChunk { audio, generation: 0, label: Some(label.into()) }).unwrap();
+        }
+        drop(tx);
+        // In 10 ms buffers, as a device pulls them: the cursor is 100 frames into "Five.", the speaker 882 frames
+        // behind it, still in "Two." (frames 4410–8820).
+        let timeline = Timeline::new(SIM_RATE);
+        timeline.set_latency_frames(FAKE_LATENCY);
+        let never = Cancellation::new(|| false);
+        let total = 4_410 + 4_410 + 250 + 250 + 100;
+        let mut done = 0;
+        while done < total {
+            let mut data = vec![0f32; (total - done).min(441)];
+            fill(&mut data, 1, &mut cursor, &timeline, &never, |v| v);
+            done += data.len();
+        }
+        assert!(timeline.played() > 4_410 && timeline.played() < 8_820);
+        let (mut next, from) = cursor.resume(timeline.played());
+        assert_eq!(from, Some(2), "the sentence at the speaker");
+        let mut again = vec![0f32; 14_000];
+        fill(&mut again, 1, &mut next, &Timeline::new(SIM_RATE), &never, |v| v);
+        let real: Vec<f32> = again.into_iter().filter(|v| *v != 0.).collect();
+        assert_eq!(real, [&s2[..], &s3[..], &s4[..], &s5[..]].concat(), "every sample from the start of \"Two.\", once");
+        // Heard sentences are still let go: far past "Two.", only three are kept.
+        let (mut cursor, tx) = fed(samples(1, 441), Some("A."));
+        for k in 2..=8 {
+            let audio = Audio { samples: samples(k, 441), sample_rate: SIM_RATE, first_audio_ms: 0., synthesis_ms: 0. };
+            tx.send(crate::PlaybackChunk { audio, generation: 0, label: Some(format!("S{k}.").into()) }).unwrap();
+        }
+        drop(tx);
+        let timeline = Timeline::new(SIM_RATE);
+        for _ in 0..12 {
+            let mut data = vec![0f32; 441];
+            fill(&mut data, 1, &mut cursor, &timeline, &never, |v| v);
+        }
+        assert_eq!(cursor.said.len(), KEPT_SENTENCES);
     }
     #[test]
     fn a_recovery_is_one_line_naming_both_routes_and_the_sentence() {

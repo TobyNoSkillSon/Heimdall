@@ -317,6 +317,11 @@ impl Actions {
         if !db.prepare("PRAGMA table_info(ask_answers)")?.query_map([], |r| r.get::<_,String>(1))?.collect::<rusqlite::Result<Vec<_>>>()?.iter().any(|n| n == "clicked") {
             db.execute_batch("ALTER TABLE ask_answers ADD COLUMN clicked INTEGER NOT NULL DEFAULT 0")?;
         }
+        // Bug note 2026-11-13T18-04-30: the card as the user clicked it (its questions as JSON), kept after the receipt body
+        // is retired, so a batch archive checks the thread titles it showed (`ask_card`).
+        if !db.prepare("PRAGMA table_info(ask_answers)")?.query_map([], |r| r.get::<_,String>(1))?.collect::<rusqlite::Result<Vec<_>>>()?.iter().any(|n| n == "card") {
+            db.execute_batch("ALTER TABLE ask_answers ADD COLUMN card TEXT")?;
+        }
         let outbox_columns = db.prepare("PRAGMA table_info(outbox)")?.query_map([], |r| r.get::<_,String>(1))?.collect::<rusqlite::Result<Vec<_>>>()?;
         if !outbox_columns.iter().any(|n| n == "epoch") {
             db.execute_batch("ALTER TABLE outbox ADD COLUMN epoch INTEGER NOT NULL DEFAULT -1")?;
@@ -373,11 +378,9 @@ impl Actions {
     }
     pub fn retire(&self)->Result<()> {
         let db=self.db.lock().unwrap();
-        let rows=db.prepare("SELECT id,body,state FROM receipts WHERE state IN ('shown','completed','answered','declined','closed','cancelled','failed') AND NOT (kind IN ('ask','fastread') AND state='shown') AND NOT EXISTS(SELECT 1 FROM retired_payloads WHERE kind='receipt' AND retired_payloads.id=receipts.id) AND NOT EXISTS(SELECT 1 FROM outbox WHERE outbox.id=receipts.id AND delivered=0) LIMIT 100")?.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-        for (id,body,state) in rows {
-            // Shown questions still need their body for the future click.
-            let kind:String=db.query_row("SELECT kind FROM receipts WHERE id=?",[&id],|r|r.get(0))?;
-            if matches!(kind.as_str(),"ask"|"fastread") && state=="shown" {continue;}
+        let rows=db.prepare("SELECT id,kind,body,state FROM receipts WHERE state IN ('shown','completed','answered','declined','closed','cancelled','failed') AND NOT (kind IN ('ask','fastread') AND state='shown') AND NOT EXISTS(SELECT 1 FROM retired_payloads WHERE kind='receipt' AND retired_payloads.id=receipts.id) AND NOT EXISTS(SELECT 1 FROM outbox WHERE outbox.id=receipts.id AND delivered=0) LIMIT 100")?.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        // Shown questions still need their body for the future click: the query leaves them out.
+        for (id,kind,body,state) in rows {
             if let Some(reference)=self.archive_payload(&serde_json::json!({"store":"receipt","id":id,"kind":kind,"body":body,"state":state}))?{let tx=db.unchecked_transaction()?;tx.execute("INSERT OR REPLACE INTO retired_payloads VALUES('receipt',?,?)",params![id,reference])?;tx.execute("UPDATE receipts SET body=? WHERE id=?",params![crate::body_digest(&body),id])?;tx.commit()?;}
         }
         let rows=db.prepare("SELECT id,text FROM outbox WHERE delivered!=0 AND NOT EXISTS(SELECT 1 FROM retired_payloads WHERE kind='outbox' AND retired_payloads.id=outbox.id) LIMIT 100")?.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -581,7 +584,7 @@ impl Actions {
         let (delivered, stored) = match (items.len(), answers) {
             (1, [only]) if only.labels.len() == 1 && only.other.is_none() => {
                 let choice = &only.labels[0];
-                (format!("Question {id}: User clicked {choice}. Question: {question}"), choice.clone())
+                (format!("Question {id}: {} clicked {choice}. Question: {question}", crate::identity::user_start()), choice.clone())
             }
             _ => {
                 // A question he left without a pick says so (bug note 2026-11-02T16-27-21: Send works with some
@@ -590,8 +593,8 @@ impl Actions {
                     .iter()
                     .zip(&parts)
                     .map(|(item, (qid, part))| match part {
-                        Some(part) => format!("Question {id}: User answered {qid} \"{}\": {part}", item.question),
-                        None => format!("Question {id}: User left {qid} \"{}\" unanswered", item.question),
+                        Some(part) => format!("Question {id}: {} answered {qid} \"{}\": {part}", crate::identity::user_start(), item.question),
+                        None => format!("Question {id}: {} left {qid} \"{}\" unanswered", crate::identity::user_start(), item.question),
                     })
                     .collect();
                 let shown = |part: &Option<String>| part.clone().unwrap_or_else(|| UNANSWERED.to_string());
@@ -607,7 +610,7 @@ impl Actions {
             db.execute_batch("BEGIN IMMEDIATE")?;
             let r = (|| -> Result<()> {
                 db.execute("UPDATE receipts SET state='answered' WHERE id=?", params![id])?;
-                db.execute("INSERT OR IGNORE INTO ask_answers(id,question,answer,clicked) VALUES(?1,?2,?3,1)", params![id, question, stored])?;
+                db.execute("INSERT OR IGNORE INTO ask_answers(id,question,answer,clicked,card) VALUES(?1,?2,?3,1,?4)", params![id, question, stored, serde_json::to_string(&items)?])?;
                 db.execute(
                     "INSERT OR IGNORE INTO outbox(id,text,delivered,epoch) VALUES(?1,?2,0,?3)",
                     params![id, delivered, permit.generation() as i64],
@@ -733,6 +736,17 @@ impl Actions {
     /// The question and the label the user clicked; `None` for an unanswered question or one closed by voice.
     pub fn ask_click(&self, id: &str) -> Result<Option<(String, String)>> {
         Ok(self.db.lock().unwrap().query_row("SELECT question,answer FROM ask_answers WHERE id=? AND clicked=1", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?)
+    }
+    /// Bug note 2026-11-13T18-04-30: the card the user clicked (its questions, as shown) and when it was asked; `None`
+    /// unless he answered it by click.
+    pub fn ask_card(&self, id: &str) -> Result<Option<(Vec<AskItem>, u64)>> {
+        let row: Option<(Option<String>, Option<i64>)> = self.db.lock().unwrap().query_row(
+            "SELECT a.card, r.expires_ms FROM ask_answers a LEFT JOIN receipts r ON r.id=a.id WHERE a.id=? AND a.clicked=1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).optional()?;
+        let Some((Some(card), Some(expires))) = row else { return Ok(None) };
+        Ok(Some((serde_json::from_str(&card)?, (expires as u64).saturating_sub(QUESTION_LIFETIME_MS))))
     }
     fn record_answer(&self, id: &str, answer: &str) -> Result<()> {
         let db = self.db.lock().unwrap();

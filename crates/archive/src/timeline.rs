@@ -27,6 +27,11 @@ CREATE INDEX IF NOT EXISTS tag_lookup ON chunk_tags(key,value,chunk_id);
 CREATE TABLE IF NOT EXISTS chunk_links(chunk_id TEXT NOT NULL, relation TEXT NOT NULL, target TEXT NOT NULL, PRIMARY KEY(chunk_id,relation,target)) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS chunk_link_target ON chunk_links(relation,target,chunk_id);
 CREATE TABLE IF NOT EXISTS chunk_embeddings(chunk_id TEXT NOT NULL, model_id TEXT NOT NULL, model_version TEXT NOT NULL, dimensions INTEGER NOT NULL CHECK(dimensions>0), vector_id TEXT NOT NULL, content_hash TEXT NOT NULL, created_wall_ns INTEGER NOT NULL, PRIMARY KEY(chunk_id,model_id,model_version)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS chunk_embedding_changes(seq INTEGER PRIMARY KEY AUTOINCREMENT, chunk_id TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS chunk_embedding_change_chunk ON chunk_embedding_changes(chunk_id);
+CREATE TRIGGER IF NOT EXISTS chunk_embedding_added AFTER INSERT ON chunk_embeddings BEGIN DELETE FROM chunk_embedding_changes WHERE chunk_id=new.chunk_id; INSERT INTO chunk_embedding_changes(chunk_id) VALUES(new.chunk_id); END;
+CREATE TRIGGER IF NOT EXISTS chunk_embedding_updated AFTER UPDATE ON chunk_embeddings BEGIN DELETE FROM chunk_embedding_changes WHERE chunk_id IN (old.chunk_id,new.chunk_id); INSERT INTO chunk_embedding_changes(chunk_id) VALUES(old.chunk_id); INSERT INTO chunk_embedding_changes(chunk_id) SELECT new.chunk_id WHERE new.chunk_id<>old.chunk_id; END;
+CREATE TRIGGER IF NOT EXISTS chunk_embedding_removed AFTER DELETE ON chunk_embeddings BEGIN DELETE FROM chunk_embedding_changes WHERE chunk_id=old.chunk_id; INSERT INTO chunk_embedding_changes(chunk_id) VALUES(old.chunk_id); END;
 CREATE TABLE IF NOT EXISTS chunk_embedding_errors(chunk_id TEXT NOT NULL,model_id TEXT NOT NULL,model_version TEXT NOT NULL,content_hash TEXT NOT NULL,retry_wall_ns INTEGER NOT NULL,error TEXT NOT NULL,PRIMARY KEY(chunk_id,model_id,model_version)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS cold_capture_spans(chunk_id INTEGER NOT NULL,source TEXT NOT NULL,start_ns INTEGER NOT NULL,end_ns INTEGER NOT NULL,PRIMARY KEY(chunk_id,source)) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS cold_capture_source ON cold_capture_spans(source,start_ns,end_ns);
@@ -68,6 +73,9 @@ pub struct Chunk {
     /// Query result only; captured details are never overwritten with a rank score.
     #[serde(default,skip_serializing_if="Option::is_none")]
     pub similarity: Option<f64>,
+    /// Query result only: the reranker's probability that this hit answers the query (`rerank`).
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub rerank: Option<f64>,
 }
 impl Chunk {
     fn new(
@@ -96,6 +104,7 @@ impl Chunk {
             links: vec![],
             content_hash: String::new(),
             similarity: None,
+            rerank: None,
         }
     }
     fn tag(&mut self, key: &str, value: &str) {
@@ -222,7 +231,7 @@ fn remove(db: &Connection, id: &str) -> Result<()> {
 }
 pub fn load(db: &Connection, id: &str) -> Result<Chunk> {
     let mut c=db.prepare_cached("SELECT id,session,kind,role,source,start_ns,end_ns,start_wall_ns,end_wall_ns,text,details,content_hash FROM main.timeline_chunks WHERE id=?1")?.query_row([id],|r|Ok(Chunk {
-        id:r.get(0)?,session:r.get(1)?,kind:r.get(2)?,role:r.get(3)?,source:r.get(4)?,start_ns:r.get::<_,i64>(5)? as u64,end_ns:r.get::<_,i64>(6)? as u64,start_wall_ns:r.get::<_,i64>(7)? as u64,end_wall_ns:r.get::<_,i64>(8)? as u64,text:r.get(9)?,details:serde_json::from_str(&r.get::<_,String>(10)?).unwrap_or(Value::Null),content_hash:r.get(11)?,tags:vec![],links:vec![],similarity:None }))?;
+        id:r.get(0)?,session:r.get(1)?,kind:r.get(2)?,role:r.get(3)?,source:r.get(4)?,start_ns:r.get::<_,i64>(5)? as u64,end_ns:r.get::<_,i64>(6)? as u64,start_wall_ns:r.get::<_,i64>(7)? as u64,end_wall_ns:r.get::<_,i64>(8)? as u64,text:r.get(9)?,details:serde_json::from_str(&r.get::<_,String>(10)?).unwrap_or(Value::Null),content_hash:r.get(11)?,tags:vec![],links:vec![],similarity:None,rerank:None }))?;
     c.tags = db
         .prepare_cached(
             "SELECT key,value FROM main.chunk_tags WHERE chunk_id=?1 ORDER BY key,value",
@@ -732,7 +741,8 @@ pub fn audio_span(
     end: u64,
     wall: u64,
 ) -> Result<()> {
-    if end <= start || source == "mic" || source.starts_with("mic:") {
+    // The user's microphones, the phone's live microphone included, are speech, not other audio.
+    if end <= start || source == "mic" || source.starts_with("mic:") || source.starts_with("phone:") {
         return Ok(());
     }
     for bucket in start / SOUND_NS..=(end - 1) / SOUND_NS {
@@ -917,29 +927,39 @@ impl Default for Search {
         }
     }
 }
+/// How one search ran, for the app's search log.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SearchStats {
+    /// `memory` (the vector copy), `scan` (every row read from SQLite) or `sql` (no vector).
+    pub path: &'static str,
+    /// Rows the vector copy scored, and rows re-scored exactly from SQLite.
+    pub scored: usize,
+    pub rescored: usize,
+    pub returned: usize,
+    /// Copy load/build/refresh, coarse scoring, exact re-score and row loading, in milliseconds.
+    pub prepare_ms: f64,
+    pub scan_ms: f64,
+    pub verify_ms: f64,
+    /// What preparing the copy did ("built 402084 vectors from the index", "3 changed"), if anything.
+    pub prepared: Option<String>,
+    /// Why the copy was not used, when the search fell back to the scan.
+    pub fallback: Option<String>,
+}
+/// Rows re-scored exactly per round: the 8-bit copy's order matched float32 within the top 100 for every one of the
+/// 60 test questions with 200-1000 (lab/vector-index/README.md); 400 leaves margin. At least four per requested row.
+pub const RESCORE_POOL: usize = 400;
+/// Largest `limit` for a vector search (rerank candidates); 100 for the others.
+pub const VECTOR_LIMIT: usize = 500;
+/// The deepest the exact re-score goes before trusting the order (a guard; the stopping rule ends far earlier).
+pub const RESCORE_MAX: usize = 4000;
+
 /// Read-only SQL API; all tag filters are exact and conjunctive. Vector requests
 /// require a matching current model/version/dimension and never silently fall back.
 pub fn search(db: &Connection, q: &Search) -> Result<Vec<Chunk>> {
-    let vector = q.vector.as_ref().map(|v| serde_json::from_value::<VectorSearch>(v.clone()))
-        .transpose().map_err(|e| anyhow::anyhow!("no embedding vector identity/values: {e}"))?;
-    if let Some(v) = &vector {
-        v.validate()?;
-        ensure!(db.query_row("SELECT EXISTS(SELECT 1 FROM main.chunk_embeddings e JOIN main.timeline_chunks c ON c.id=e.chunk_id WHERE e.model_id=?1 AND e.model_version=?2 AND e.dimensions=?3 AND e.content_hash=c.content_hash)",params![v.model_id,v.model_version,v.values.len() as i64],|r|r.get::<_,bool>(0))?,"no embeddings available for this model/version/dimensions");
-    }
-    ensure!(
-        (1..=100).contains(&q.limit)
-            && q.kinds.len() <= 5
-            && q.tags.len() <= 32
-            && q.text.as_ref().is_none_or(|s| s.len() <= 8192),
-        "invalid chunk search bounds"
-    );
-    ensure!(
-        q.start_wall_ns
-            .zip(q.end_wall_ns)
-            .is_none_or(|(a, b)| a <= b),
-        "reversed search interval"
-    );
-    let mut sql = String::from("SELECT c.id FROM main.timeline_chunks c WHERE 1=1");
+    Ok(search_with_stats(db, q)?.0)
+}
+fn filters(q: &Search, vector: Option<&VectorSearch>) -> Result<(String, Vec<rusqlite::types::Value>)> {
+    let mut sql = String::new();
     let mut args: Vec<rusqlite::types::Value> = vec![];
     let mut condition = |s: &str, value: rusqlite::types::Value| {
         sql.push_str(s);
@@ -979,12 +999,135 @@ pub fn search(db: &Connection, q: &Search) -> Result<Vec<Chunk>> {
         args.push(t.key.clone().into());
         args.push(t.value.clone().into());
     }
-    // Sound chunks entirely covered by known speech are not other-audio hits.
-    if let Some(v) = &vector {
+    if let Some(v) = vector {
         sql.push_str(" AND EXISTS(SELECT 1 FROM main.chunk_embeddings e WHERE e.chunk_id=c.id AND e.content_hash=c.content_hash AND e.model_id=? AND e.model_version=? AND e.dimensions=?)");
         args.extend([v.model_id.clone().into(),v.model_version.clone().into(),(v.values.len() as i64).into()]);
     }
-    sql.push_str(" ORDER BY c.start_wall_ns DESC,c.id");
+    Ok((sql, args))
+}
+/// `search`, and how it ran. A vector search ranks from the in-memory copy (`vector_index`) and re-scores its best
+/// rows exactly; if the copy cannot be used it scans every row like before and says why in `fallback`.
+pub fn search_with_stats(db: &Connection, q: &Search) -> Result<(Vec<Chunk>, SearchStats)> {
+    let vector = q.vector.as_ref().map(|v| serde_json::from_value::<VectorSearch>(v.clone()))
+        .transpose().map_err(|e| anyhow::anyhow!("no embedding vector identity/values: {e}"))?;
+    if let Some(v) = &vector {
+        v.validate()?;
+        ensure!(db.query_row("SELECT EXISTS(SELECT 1 FROM main.chunk_embeddings e JOIN main.timeline_chunks c ON c.id=e.chunk_id WHERE e.model_id=?1 AND e.model_version=?2 AND e.dimensions=?3 AND e.content_hash=c.content_hash)",params![v.model_id,v.model_version,v.values.len() as i64],|r|r.get::<_,bool>(0))?,"no embeddings available for this model/version/dimensions");
+    }
+    let max = if vector.is_some() { VECTOR_LIMIT } else { 100 };
+    ensure!(
+        (1..=max).contains(&q.limit)
+            && q.kinds.len() <= 5
+            && q.tags.len() <= 32
+            && q.text.as_ref().is_none_or(|s| s.len() <= 8192),
+        "invalid chunk search bounds"
+    );
+    ensure!(
+        q.start_wall_ns
+            .zip(q.end_wall_ns)
+            .is_none_or(|(a, b)| a <= b),
+        "reversed search interval"
+    );
+    let mut stats = SearchStats { path: if vector.is_some() { "memory" } else { "sql" }, ..Default::default() };
+    if let Some(v) = &vector {
+        match search_memory(db, q, v, &mut stats) {
+            Ok(Some(rows)) => { stats.returned = rows.len(); return Ok((rows, stats)); }
+            Ok(None) => stats.fallback = Some("the index has no file path".into()),
+            // Cancellation and SQLite interrupts end the search; anything else falls back to the scan.
+            Err(e) if is_interrupt(&e) => return Err(e),
+            Err(e) => stats.fallback = Some(format!("{e:#}")),
+        }
+        stats.path = "scan";
+        crate::vector_index::reset_one(db);
+    }
+    let started = std::time::Instant::now();
+    let rows = search_scan(db, q, vector.as_ref())?;
+    stats.scan_ms = started.elapsed().as_secs_f64() * 1e3;
+    stats.returned = rows.len();
+    Ok((rows, stats))
+}
+fn is_interrupt(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| matches!(c.downcast_ref::<rusqlite::Error>(), Some(rusqlite::Error::SqliteFailure(f, _)) if f.code == rusqlite::ErrorCode::OperationInterrupted))
+}
+fn search_memory(db: &Connection, q: &Search, v: &VectorSearch, stats: &mut SearchStats) -> Result<Option<Vec<Chunk>>> {
+    use crate::vector_index as vi;
+    let key = vi::Key { model_id: v.model_id.clone(), model_version: v.model_version.clone(), dimensions: v.values.len() };
+    let (sql, args) = filters(q, Some(v))?;
+    // Time, text and tag filters select ids in SQL (indexed, ids only); kind and session filter in memory.
+    let ids = if q.start_wall_ns.is_some() || q.end_wall_ns.is_some() || q.text.is_some() || !q.tags.is_empty() {
+        let mut stmt = db.prepare(&format!("SELECT c.id FROM main.timeline_chunks c WHERE 1=1{sql}"))?;
+        let set = stmt.query_map(rusqlite::params_from_iter(args.iter()), |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
+        Some(set)
+    } else { None };
+    let filter = vi::Filter { kinds: q.kinds.iter().filter_map(|k| vi::kind_code(k)).collect(), session: q.session, ids };
+    let pool = RESCORE_POOL.max(4 * q.limit);
+    vi::with(db, &key, |index, prepared| {
+        stats.prepare_ms = prepared.ms;
+        stats.prepared = prepared.event.clone();
+        let mut check = db.prepare(&format!("SELECT c.content_hash FROM main.timeline_chunks c WHERE c.id=?{sql}"))?;
+        let mut vector_of = db.prepare_cached("SELECT vector_id FROM main.chunk_embeddings WHERE chunk_id=?1 AND model_id=?2 AND model_version=?3 AND content_hash=?4")?;
+        let mut exact: Vec<(f64, String)> = vec![];
+        let mut seen = std::collections::HashSet::new();
+        // The largest gap between an 8-bit score and its exact cosine seen in this search.
+        let mut error = 0f64;
+        let mut skip = 0;
+        loop {
+            let started = std::time::Instant::now();
+            let candidates = index.top_after(&v.values, skip, pool, &filter)?;
+            stats.scan_ms += started.elapsed().as_secs_f64() * 1e3;
+            stats.scored = index.entries();
+            let started = std::time::Instant::now();
+            for c in &candidates {
+                if !seen.insert(c.id.clone()) { continue; }
+                // The current row must pass every filter with a current embedding, exactly as the scan requires.
+                let mut values: Vec<rusqlite::types::Value> = vec![c.id.clone().into()];
+                values.extend(args.iter().cloned());
+                let Some(hash) = check.query_row(rusqlite::params_from_iter(values), |r| r.get::<_, String>(0)).optional()? else { continue };
+                if c.kind == 2 {
+                    let chunk = load(db, &c.id)?;
+                    if sound_ranges(db, &chunk)?.is_empty() { continue; }
+                }
+                let id: String = vector_of.query_row(params![c.id, v.model_id, v.model_version, hash], |r| r.get(0))?;
+                let values = crate::records::vector_values(db, &id)?;
+                ensure!(values.len() == v.values.len(), "stored embedding dimension mismatch");
+                let score = cosine(&v.values, &values)?;
+                error = error.max((score - c.approx as f64).abs());
+                exact.push((score, c.id.clone()));
+                stats.rescored += 1;
+            }
+            stats.verify_ms += started.elapsed().as_secs_f64() * 1e3;
+            skip += candidates.len();
+            if candidates.len() < pool { break; }
+            // Done when the limit-th exact score beats anything left outside the pool could reach: the last
+            // candidate's 8-bit score plus twice the largest 8-bit error seen (and a small floor). Otherwise one more
+            // pool, so the result does not rest on the pool size alone.
+            if exact.len() >= q.limit {
+                let mut scores: Vec<f64> = exact.iter().map(|e| e.0).collect();
+                scores.sort_by(|a, b| b.total_cmp(a));
+                let reach = candidates.last().map_or(f64::NEG_INFINITY, |c| c.approx as f64) + 2. * error + 0.005;
+                if scores[q.limit - 1] > reach || skip >= RESCORE_MAX { break; }
+            }
+        }
+        let started = std::time::Instant::now();
+        exact.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        exact.truncate(q.limit);
+        let mut out = Vec::with_capacity(exact.len());
+        for (score, id) in exact {
+            let mut c = load(db, &id)?;
+            if c.kind == "other_audio" { c.details["sound_ranges_ns"] = json!(sound_ranges(db, &c)?); }
+            c.similarity = Some(score);
+            out.push(c);
+        }
+        stats.verify_ms += started.elapsed().as_secs_f64() * 1e3;
+        Ok(out)
+    })
+}
+/// The original linear search: every matching row loaded from SQLite, vectors decompressed and scored one by one.
+/// Used for non-vector searches, as the vector fallback, and as the parity reference in tests.
+pub fn search_scan(db: &Connection, q: &Search, vector: Option<&VectorSearch>) -> Result<Vec<Chunk>> {
+    let (filter, args) = filters(q, vector)?;
+    let sql = format!("SELECT c.id FROM main.timeline_chunks c WHERE 1=1{filter} ORDER BY c.start_wall_ns DESC,c.id");
     let mut stmt = db.prepare(&sql)?;
     let mut rows = stmt.query(rusqlite::params_from_iter(args))?;
     let mut out = vec![];
@@ -999,7 +1142,7 @@ pub fn search(db: &Connection, q: &Search) -> Result<Vec<Chunk>> {
             }
             c.details["sound_ranges_ns"] = json!(ranges);
         }
-        if let Some(v) = &vector {
+        if let Some(v) = vector {
             let id:String=db.query_row("SELECT vector_id FROM main.chunk_embeddings WHERE chunk_id=?1 AND model_id=?2 AND model_version=?3 AND content_hash=?4",params![c.id,v.model_id,v.model_version,c.content_hash],|r|r.get(0))?;
             let values=crate::records::vector_values(db,&id)?;
             ensure!(values.len()==v.values.len(),"stored embedding dimension mismatch");
@@ -1120,15 +1263,11 @@ pub fn backfill(root: &Path, more: &mut impl FnMut() -> bool) -> Result<usize> {
         let view = crate::View::session(&root.join(name))?;
         let db = &view.db;
         let session = view.session_id();
-        db.execute(
-            "INSERT OR IGNORE INTO main.timeline_backfill(session) VALUES(?1)",
-            [session],
-        )?;
-        let checkpoint: i64 = db.query_row(
-            "SELECT evidence_id FROM main.timeline_backfill WHERE session=?1",
-            [session],
-            |r| r.get(0),
-        )?;
+        // The session's row is written inside the replay's first transaction, in the writer's turn.
+        let checkpoint: i64 = db
+            .query_row("SELECT evidence_id FROM main.timeline_backfill WHERE session=?1", [session], |r| r.get(0))
+            .optional()?
+            .unwrap_or(0);
         let next:Option<i64>=db.query_row("SELECT min(n) FROM (SELECT min(id) n FROM main.evidence WHERE session=?1 AND id>?2 UNION ALL SELECT min(max(first_id,?2+1)) FROM main.cold_chunks WHERE kind='evidence' AND scope=?1 AND last_id>?2)",params![session,checkpoint],|r|r.get(0))?;
         let mut evidence_through = checkpoint;
         if let Some(next) = next {
@@ -1139,16 +1278,18 @@ pub fn backfill(root: &Path, more: &mut impl FnMut() -> bool) -> Result<usize> {
         let mut pending = 0;
         let mut last = checkpoint;
         // Write lock first: record() reads before it writes (see `transaction`). This idle-only catch-up writes on its
-        // own connection (the View's temp tables live there): at raised QoS, `BATCH` records per transaction, and it
-        // stops as soon as the store's writer has live jobs waiting.
+        // own connection (the View's temp tables live there): at raised QoS, in the store's writer's turn (polling the
+        // lock against the writer lost every poll: "database is locked", night 10-11 Nov), `BATCH` records per
+        // transaction, and it stops as soon as the store's writer has live jobs waiting.
         let _raised = crate::live::Raised::new();
+        writer_turn(root, || -> Result<()> {
         db.execute_batch("BEGIN IMMEDIATE")?;
-        let replay = if next.is_none() {
+        let replay = db.execute("INSERT OR IGNORE INTO main.timeline_backfill(session) VALUES(?1)", [session]).map_err(anyhow::Error::from).and_then(|_| if next.is_none() {
             Ok(())
         } else {
             view.scan_record_kinds(checkpoint, ",settings_applied,timeline_settings,heimdall_on,heimdall_off,gap,source_removed,listen_event,agent_context_routing,command_decision,speaker_name,speaker_segments_delta,", |id, r| {
                 // One batch per call always runs, so the catch-up advances even under continuous live writes.
-                if !more() || (count >= BATCH && crate::live::backlog().is_some_and(|(_, at)| at.elapsed() >= LIVE_FIRST)) {
+                if !more() || (count >= BATCH && live_waiting()) {
                     open = false;
                     return Ok(false);
                 }
@@ -1167,26 +1308,26 @@ pub fn backfill(root: &Path, more: &mut impl FnMut() -> bool) -> Result<usize> {
                 }
                 Ok(true)
             })
-        };
-        if let Err(e) = replay {
-            if !db.is_autocommit() {
-                let _ = db.execute_batch("ROLLBACK");
+        }).and_then(|()| {
+            if open && evidence_through > checkpoint {
+                // Never checkpoint past the snapshot's last real row at a partial tail:
+                // later appends can occupy the unused remainder of this numeric window.
+                let seen: Option<i64> =
+                    db.query_row("SELECT max(id) FROM temp.evidence", [], |r| r.get(0))?;
+                last = last.max(seen.unwrap_or(evidence_through));
+                count += usize::from(pending == 0);
             }
-            return Err(e);
+            db.execute(
+                "UPDATE main.timeline_backfill SET evidence_id=?2 WHERE session=?1",
+                params![session, last],
+            )?;
+            Ok(db.execute_batch("COMMIT")?)
+        });
+        if replay.is_err() && !db.is_autocommit() {
+            let _ = db.execute_batch("ROLLBACK");
         }
-        if open && evidence_through > checkpoint {
-            // Never checkpoint past the snapshot's last real row at a partial tail:
-            // later appends can occupy the unused remainder of this numeric window.
-            let seen: Option<i64> =
-                db.query_row("SELECT max(id) FROM temp.evidence", [], |r| r.get(0))?;
-            last = last.max(seen.unwrap_or(evidence_through));
-            count += usize::from(pending == 0);
-        }
-        db.execute(
-            "UPDATE main.timeline_backfill SET evidence_id=?2 WHERE session=?1",
-            params![session, last],
-        )?;
-        db.execute_batch("COMMIT")?;
+        replay
+        })?;
         if !open {
             break;
         }
@@ -1206,20 +1347,33 @@ pub fn backfill(root: &Path, more: &mut impl FnMut() -> bool) -> Result<usize> {
             .prepare("SELECT rowid,id FROM main.utterances WHERE session=?1 AND rowid>?2 ORDER BY rowid")?
             .query_map(params![session, checkpoint], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
-        for (rowid, id) in pending {
-            if !more() {
-                open = false;
-                break;
-            }
-            transaction(db, || {
-                utterance(db, session, &id)?;
-                db.execute(
-                    "UPDATE main.timeline_backfill SET utterance_rowid=?2 WHERE session=?1",
-                    params![session, rowid],
-                )?;
+        // `BATCH` projections per writer turn, fewer once live jobs wait.
+        let mut pending = pending.into_iter().peekable();
+        while open && pending.peek().is_some() {
+            writer_turn(root, || -> Result<()> {
+                let mut steps = 0;
+                while let Some((rowid, id)) = pending.peek() {
+                    if !more() {
+                        open = false;
+                        break;
+                    }
+                    if steps > 0 && (steps >= BATCH || live_waiting()) {
+                        break;
+                    }
+                    transaction(db, || {
+                        utterance(db, session, id)?;
+                        db.execute(
+                            "UPDATE main.timeline_backfill SET utterance_rowid=?2 WHERE session=?1",
+                            params![session, rowid],
+                        )?;
+                        Ok(())
+                    })?;
+                    pending.next();
+                    count += 1;
+                    steps += 1;
+                }
                 Ok(())
             })?;
-            count += 1;
         }
         if !open {
             break;
@@ -1240,30 +1394,44 @@ pub fn backfill(root: &Path, more: &mut impl FnMut() -> bool) -> Result<usize> {
         let buckets: Vec<(String, i64, i64, i64, i64, i64)> = db.prepare("SELECT b.source_id,min(b.host_ns),max(b.host_ns+b.frames*1000000000/b.rate),min(b.wall_ns),max(b.id),b.host_ns/20000000000 FROM temp.blocks b LEFT JOIN main.timeline_audio_backfill a ON a.session=?2 AND a.source=b.source_id AND a.bucket=b.host_ns/20000000000 WHERE b.id>?1 AND b.codec<>'zero' GROUP BY b.source_id,b.host_ns/20000000000 HAVING max(b.id)>coalesce(max(a.last_id),0) ORDER BY max(b.id)")?
             .query_map(params![checkpoint, session], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
             .collect::<rusqlite::Result<_>>()?;
-        for (source, start, end, wall, id, bucket) in buckets {
-            if !more() {
-                open = false;
-                break;
-            }
-            transaction(db, || {
-                audio_span(db, session, &source, start as u64, end as u64, wall as u64)?;
-                db.execute(
-                    "INSERT OR REPLACE INTO main.timeline_audio_backfill VALUES(?1,?2,?3,?4)",
-                    params![session, source, bucket, id],
-                )?;
+        let mut buckets = buckets.into_iter().peekable();
+        while open && buckets.peek().is_some() {
+            writer_turn(root, || -> Result<()> {
+                let mut steps = 0;
+                while let Some((source, start, end, wall, id, bucket)) = buckets.peek() {
+                    if !more() {
+                        open = false;
+                        break;
+                    }
+                    if steps > 0 && (steps >= BATCH || live_waiting()) {
+                        break;
+                    }
+                    transaction(db, || {
+                        audio_span(db, session, source, *start as u64, *end as u64, *wall as u64)?;
+                        db.execute(
+                            "INSERT OR REPLACE INTO main.timeline_audio_backfill VALUES(?1,?2,?3,?4)",
+                            params![session, source, bucket, id],
+                        )?;
+                        Ok(())
+                    })?;
+                    buckets.next();
+                    count += 1;
+                    steps += 1;
+                }
                 Ok(())
             })?;
-            count += 1;
         }
         if !open {
             break;
         }
         let seen: Option<i64> =
             db.query_row("SELECT max(id) FROM temp.blocks", [], |r| r.get(0))?;
-        db.execute(
-            "UPDATE main.timeline_backfill SET block_id=?2 WHERE session=?1",
-            params![session, seen.unwrap_or(block_through)],
-        )?;
+        writer_turn(root, || {
+            Ok(db.execute(
+                "UPDATE main.timeline_backfill SET block_id=?2 WHERE session=?1",
+                params![session, seen.unwrap_or(block_through)],
+            )?)
+        })?;
         count += 1;
         return Ok(count);
     }
@@ -1278,7 +1446,31 @@ pub fn backfill(root: &Path, more: &mut impl FnMut() -> bool) -> Result<usize> {
 /// Nested inside a caller's transaction it is a savepoint of that transaction.
 /// Never call it while a statement on `db` is still stepping: that statement holds a read
 /// snapshot and the write lock would again be an upgrade.
+/// Off the writer, outermost, while this process runs the store's writer, it takes its turn
+/// from the writer first (`writer_turn`).
+#[track_caller]
 pub fn transaction<T>(db: &Connection, body: impl FnOnce() -> Result<T>) -> Result<T> {
+    if db.is_autocommit() && !crate::live::on_writer() && !crate::live::in_turn() {
+        if let Some(writer) = store::root_of(db).ok().and_then(|root| crate::live::Queue::existing(&root)) {
+            return writer.turn(|| projection(db, body));
+        }
+    }
+    projection(db, body)
+}
+/// Runs `f` while the store's writer of `root` stands aside, when this process runs one (`live::Queue::turn`):
+/// a write on a connection of its own (the backfill's) then never races the writer for the lock.
+#[track_caller]
+pub(crate) fn writer_turn<T>(root: &Path, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    match crate::live::Queue::existing(root) {
+        Some(writer) => writer.turn(f),
+        None => f(),
+    }
+}
+/// Ends a turn of maintenance steps early once live jobs have waited `LIVE_FIRST` (one step always runs).
+fn live_waiting() -> bool {
+    crate::live::backlog().is_some_and(|(_, at)| at.elapsed() >= LIVE_FIRST)
+}
+fn projection<T>(db: &Connection, body: impl FnOnce() -> Result<T>) -> Result<T> {
     let outer = db.is_autocommit();
     let _raised = (outer && !crate::live::on_writer()).then(crate::live::Raised::new);
     db.execute_batch(if outer { "BEGIN IMMEDIATE" } else { "SAVEPOINT timeline_projection" })?;
@@ -1366,12 +1558,41 @@ fn pending_condition() -> String {
     let member_overlaps = SPEAKER_CAPTURE_OVERLAPS.replace("c.", "member.");
     format!("(c.role<>'speaker_turn' OR ({SPEAKER_CAPTURE_REACHED} AND {SPEAKER_CAPTURE_OVERLAPS})) AND (c.kind<>'moment' OR NOT EXISTS(SELECT 1 FROM main.chunk_links l JOIN main.timeline_chunks member ON member.id=l.target WHERE l.chunk_id=c.id AND l.relation='member' AND member.role='speaker_turn' AND NOT ({member_reached} AND {member_overlaps}))) AND (?4 IS NULL OR c.end_wall_ns>=?4) AND (c.kind<>'other_audio' OR coalesce(json_array_length(json_extract(c.details,'$.sound_ranges_ns')),1)>0) AND NOT EXISTS(SELECT 1 FROM main.chunk_embeddings e WHERE e.chunk_id=c.id AND e.model_id=?1 AND e.model_version=?2 AND e.dimensions=?5 AND e.content_hash=c.content_hash) AND NOT EXISTS(SELECT 1 FROM main.chunk_embedding_errors e WHERE e.chunk_id=c.id AND e.model_id=?1 AND e.model_version=?2 AND e.content_hash=c.content_hash AND e.retry_wall_ns>?6 AND e.error NOT LIKE '%database is locked%' AND e.error NOT LIKE '%database table is locked%')")
 }
+/// Chunks one statement of a pending scan covers (`by_slices`).
+pub(crate) const SLICE: i64 = 512;
+/// A live scan looks at chunks that started at most this long before the live window (`live_since`); an older chunk
+/// still running into it is left to the backlog pass.
+pub(crate) const LIVE_SLACK_NS: i64 = 3_600_000_000_000;
+/// Runs `each(lo, hi)` over `timeline_chunks` newest first, in slices of about `SLICE` chunks by start (`lo <= start_wall_ns
+/// < hi`), down to `floor`. Each slice is its own statement, so no read snapshot outlives one slice. Log sweep F2 (6-9
+/// Nov): one pending selection over every chunk held its snapshot 1-13 s, again and again, the WAL could not restart
+/// and grew to 620 MB, and its restart checkpoints then held the writer up to 7.3 s. Stops when `each` says so.
+pub(crate) fn by_slices(db:&Connection,floor:i64,mut each:impl FnMut(i64,i64)->Result<bool>)->Result<()> {
+    let mut hi=i64::MAX;
+    while hi>floor {
+        let lo:Option<i64>=db.prepare_cached("SELECT start_wall_ns FROM main.timeline_chunks WHERE start_wall_ns<?1 ORDER BY start_wall_ns DESC LIMIT 1 OFFSET ?2")?.query_row(params![hi,SLICE-1],|r|r.get(0)).optional()?;
+        let lo=lo.unwrap_or(i64::MIN).max(floor);
+        if !each(lo,hi)? {break;}
+        hi=lo;
+    }
+    Ok(())
+}
+/// Where a scan for `since` stops (`i64::MIN`: every chunk).
+fn scan_floor(since:Option<u64>)->i64 {
+    since.map_or(i64::MIN,|s|(s.min(i64::MAX as u64) as i64).saturating_sub(LIVE_SLACK_NS))
+}
 /// `end_wall_ns` of the oldest chunk `embed_live` would select at `now`, if any.
 pub fn oldest_pending_live(root:&Path,model:&Model,now:u64)->Result<Option<u64>> {
     if !store::exists(root) {return Ok(None);}
     let db=store::read_index(root)?;
-    let sql=format!("SELECT min(c.end_wall_ns) FROM main.timeline_chunks c WHERE {} AND ?3 IS NOT NULL",pending_condition());
-    let oldest:Option<i64>=db.query_row(&sql,params![model.id,model.version,0i64,live_since(now) as i64,model.dimensions as i64,crate::wall_ns() as i64],|r|r.get(0))?;
+    let sql=format!("SELECT min(c.end_wall_ns) FROM main.timeline_chunks c WHERE c.start_wall_ns>=?7 AND c.start_wall_ns<?8 AND {} AND ?3 IS NOT NULL",pending_condition());
+    let since=live_since(now);
+    let mut oldest:Option<i64>=None;
+    by_slices(&db,scan_floor(Some(since)),|lo,hi| {
+        let found:Option<i64>=db.prepare_cached(&sql)?.query_row(params![model.id,model.version,0i64,since as i64,model.dimensions as i64,crate::wall_ns() as i64,lo,hi],|r|r.get(0))?;
+        oldest=match (oldest,found) {(Some(a),Some(b))=>Some(a.min(b)),(a,b)=>a.or(b)};
+        Ok(true)
+    })?;
     Ok(oldest.map(|n|n as u64))
 }
 /// Decides each pass whether live work runs. Once the oldest pending chunk is `buffer`
@@ -1457,8 +1678,16 @@ fn embed_selected(
         })?;
         Ok(())
     };
-    let selection = format!("SELECT c.id,c.kind FROM main.timeline_chunks c WHERE {} ORDER BY c.start_wall_ns DESC,c.id LIMIT ?3", pending_condition());
-    let rows:Vec<(String,String)>=db.prepare(&selection)?.query_map(params![model.id,model.version,(limit+GROUP_WINDOW) as i64,since.map(|n|n as i64),model.dimensions as i64,crate::wall_ns() as i64],|r|Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+    // Newest first, one slice of chunks per statement (`by_slices`): the selection never holds a snapshot long.
+    let selection = format!("SELECT c.id,c.kind FROM main.timeline_chunks c WHERE c.start_wall_ns>=?7 AND c.start_wall_ns<?8 AND {} ORDER BY c.start_wall_ns DESC,c.id LIMIT ?3", pending_condition());
+    let want = limit + GROUP_WINDOW;
+    let mut rows:Vec<(String,String)>=vec![];
+    by_slices(&db,scan_floor(since),|lo,hi| {
+        let left=(want-rows.len()) as i64;
+        let slice=db.prepare_cached(&selection)?.query_map(params![model.id,model.version,left,since.map(|n|n as i64),model.dimensions as i64,crate::wall_ns() as i64,lo,hi],|r|Ok((r.get(0)?,r.get(1)?)))?.collect::<rusqlite::Result<Vec<(String,String)>>>()?;
+        rows.extend(slice);
+        Ok(rows.len()<want)
+    })?;
     let mut taken = vec![false; rows.len()];
     let (mut done, mut groups, mut head) = (0, 0, 0);
     'groups: while groups < limit {
@@ -1475,7 +1704,10 @@ fn embed_selected(
             if picks.len() >= size { break; }
             if !taken[j] && rows[j].1 == *kind { taken[j] = true; picks.push(j); }
         }
-        let _reader = crate::compact::reader_lock(root)?;
+        // The archive is held for the selection checks only. Media preparation takes its own lock and copies what it
+        // reads, so inference holds nothing: held through inference, the indexer kept the archive all day and video
+        // tiering, which needs a moment without readers, tiered nothing from 10:22 to 20:03 on 13 Nov.
+        let reader = crate::compact::reader_lock(root)?;
         let mut chunks = vec![];
         for id in picks.iter().map(|&i| &rows[i].0) {
             // Selection and work are not one transaction: a concurrent revision may
@@ -1493,6 +1725,7 @@ fn embed_selected(
             }
             chunks.push(chunk);
         }
+        drop(reader);
         if chunks.is_empty() {
             continue;
         }
@@ -1640,4 +1873,40 @@ pub fn audio_refs_from_view(view:&crate::View,chunk:&Chunk) -> Result<Vec<Value>
         for row in stmt.query_map(params![chunk.source,start as i64,end as i64],|r|Ok(json!({"block_id":r.get::<_,i64>(0)?,"segment":r.get::<_,i64>(1)?,"source":r.get::<_,String>(2)?,"host_ns":r.get::<_,i64>(3)?,"native_rate":r.get::<_,i64>(4)?,"native_channels":r.get::<_,i64>(5)?,"native_frames":r.get::<_,i64>(6)?,"codec":r.get::<_,String>(7)?,"object_id":r.get::<_,Option<String>>(8)?,"offset_frames":r.get::<_,i64>(9)?,"gain":r.get::<_,f64>(10)?,"discontinuity":r.get::<_,bool>(11)?,"clip_start_ns":start,"clip_end_ns":end})))? {out.push(row?);}
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod slice_tests {
+    use super::*;
+    /// The sliced scan visits every chunk once, newest first and in the selection's order, ties on a slice's edge
+    /// included, each slice found through the time index; a live scan stops `LIVE_SLACK_NS` before its window.
+    #[test]
+    fn slices_cover_every_chunk_in_order_through_the_time_index() {
+        let t = tempfile::tempdir().unwrap();
+        let db = store::open(t.path()).unwrap();
+        let n = 3 * SLICE + 7;
+        for i in 0..n {
+            // Runs of five chunks share a start, so ties fall across slice edges.
+            db.execute("INSERT INTO main.timeline_chunks VALUES(?1,1,'text','utterance','mic',0,0,?2,?2,'','{}','h')", params![format!("c{:04}", (i * 7919) % n), (i / 5) * 1000]).unwrap();
+        }
+        let all: Vec<String> = db.prepare("SELECT id FROM main.timeline_chunks ORDER BY start_wall_ns DESC,id").unwrap().query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        let (mut got, mut slices) = (vec![], 0);
+        by_slices(&db, i64::MIN, |lo, hi| {
+            slices += 1;
+            got.extend(db.prepare("SELECT id FROM main.timeline_chunks WHERE start_wall_ns>=?1 AND start_wall_ns<?2 ORDER BY start_wall_ns DESC,id").unwrap().query_map([lo, hi], |r| r.get::<_, String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap());
+            Ok(true)
+        }).unwrap();
+        assert_eq!(got, all);
+        assert_eq!(slices, 4);
+        let plan: Vec<String> = db.prepare("EXPLAIN QUERY PLAN SELECT start_wall_ns FROM main.timeline_chunks WHERE start_wall_ns<?1 ORDER BY start_wall_ns DESC LIMIT 1 OFFSET ?2").unwrap()
+            .query_map(params![i64::MAX, SLICE - 1], |r| r.get::<_, String>(3)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        assert!(plan.iter().any(|l| l.contains("timeline_time")) && !plan.iter().any(|l| l.contains("TEMP B-TREE")), "{plan:?}");
+        // A live scan stops at its floor.
+        let floor = scan_floor(Some(LIVE_SLACK_NS as u64 + 200_000));
+        assert_eq!(floor, 200_000);
+        let mut lowest = i64::MAX;
+        by_slices(&db, floor, |lo, _| { lowest = lowest.min(lo); Ok(true) }).unwrap();
+        assert_eq!(lowest, floor);
+        assert_eq!(scan_floor(None), i64::MIN);
+    }
 }

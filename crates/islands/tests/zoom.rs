@@ -217,3 +217,95 @@ fn the_memory_sits_in_the_islands_folder() {
     assert!(Memory::default_path().ends_with("viewer-zoom.json"));
     assert_eq!(Memory::default_path().parent(), islands::model::Paths::state().parent());
 }
+
+// Pictures (bug note 2026-11-10T10-52-07): a tall 1072×5559 PNG was shrunk to the island's height and could not be
+// zoomed; it now fits the width and scrolls, zooms out to the whole of it, and ⌘-scroll and double-click zoom.
+
+/// The note's picture: 1072×5559 px, 536×2779.5 points on a 2× screen.
+const STRIP: (f64, f64) = (536.0, 2779.5);
+
+#[test]
+fn a_tall_picture_asks_for_its_width_and_caps_its_height() {
+    // Room 728×800: as wide as its own points, as tall as the room (the rest scrolls), not shrunk to the height.
+    let (w, h) = zoom::picture_content(STRIP.0, STRIP.1, 728.0, 800.0);
+    assert_eq!((w, h), (536.0, 800.0));
+    // Narrower room: the width fits it, the height is still the room's.
+    assert_eq!(zoom::picture_content(STRIP.0, STRIP.1, 400.0, 800.0), (400.0, 800.0));
+    // A wide picture that fits whole is unchanged: its points, or the room's width.
+    assert_eq!(zoom::picture_content(800.0, 450.0, 728.0, 800.0), (728.0, 409.0));
+    assert_eq!(zoom::picture_content(300.0, 200.0, 728.0, 800.0), (300.0, 200.0));
+}
+
+#[test]
+fn a_tall_picture_fits_the_width_and_scrolls() {
+    let f = zoom::picture_fit(STRIP.0, STRIP.1, 536.0, 807.0);
+    assert!(near(f.shown_w, 536.0), "{f:?}");
+    assert!(near(f.doc_w, 536.0) && near(f.doc_h, 2779.5), "{f:?}");
+    assert!(f.doc_h > 807.0);
+    assert!(near(f.whole, 807.0 / 2779.5), "{f:?}");
+    // Narrower than its points: still the view's width.
+    let f = zoom::picture_fit(STRIP.0, STRIP.1, 400.0, 807.0);
+    assert!(near(f.shown_w, 400.0) && near(f.doc_h, 400.0 * STRIP.1 / STRIP.0), "{f:?}");
+}
+
+#[test]
+fn a_picture_that_fits_whole_fills_as_before() {
+    // A wide picture in a view of its shape: the document is the view, nothing scrolls, it cannot zoom out.
+    let f = zoom::picture_fit(800.0, 450.0, 728.0, 409.0);
+    assert!(near(f.doc_w, 728.0) && near(f.doc_h, 409.0) && near(f.whole, 1.0), "{f:?}");
+    assert_eq!(zoom::picture_range(f.whole), Range::PICTURE);
+    // A small picture is not blown up past its points to fill the width.
+    let f = zoom::picture_fit(100.0, 100.0, 240.0, 100.0);
+    assert!(near(f.shown_w, 100.0) && near(f.doc_h, 100.0), "{f:?}");
+    // Junk sizes: the view, at 1.
+    let f = zoom::picture_fit(0.0, f64::NAN, 300.0, 200.0);
+    assert!(near(f.doc_w, 300.0) && near(f.doc_h, 200.0) && near(f.whole, 1.0), "{f:?}");
+}
+
+#[test]
+fn a_tall_picture_zooms_out_to_the_whole_of_it() {
+    let r = zoom::picture_range(0.29);
+    assert!(near(r.min, 0.29) && near(r.max, 4.0));
+    // ⌘− walks the steps below 1, then stops at the whole picture.
+    assert_eq!(zoom::step_out(1.0, r), 0.9);
+    assert_eq!(zoom::step_out(0.5, r), 0.29);
+    assert_eq!(zoom::step_out(0.29, r), 0.29);
+    // A sliver never goes below the floor; junk is "fits whole".
+    assert_eq!(zoom::picture_range(0.01).min, zoom::PICTURE_FLOOR);
+    assert_eq!(zoom::picture_range(f64::NAN).min, 1.0);
+}
+
+#[test]
+fn command_scroll_zooms_like_a_browser() {
+    // Away from you (positive) zooms in, toward you out; nothing is no change.
+    assert!(zoom::scroll_factor(10.0, true) > 1.0);
+    assert!(zoom::scroll_factor(-10.0, true) < 1.0);
+    assert_eq!(zoom::scroll_factor(0.0, true), 1.0);
+    assert_eq!(zoom::scroll_factor(f64::NAN, false), 1.0);
+    // A wheel notch is about a tenth; one event never more than doubles or halves.
+    assert!(near(zoom::scroll_factor(1.0, false), 0.1f64.exp()));
+    assert_eq!(zoom::scroll_factor(1000.0, true), 2.0);
+    assert_eq!(zoom::scroll_factor(-1000.0, true), 0.5);
+    // In and back out by the same amount comes home.
+    assert!(near(zoom::scroll_factor(40.0, true) * zoom::scroll_factor(-40.0, true), 1.0));
+}
+
+#[test]
+fn double_click_toggles_fit_and_two() {
+    assert_eq!(zoom::double_click_zoom(1.0), 2.0);
+    assert_eq!(zoom::double_click_zoom(1.001), 2.0);
+    assert_eq!(zoom::double_click_zoom(2.0), 1.0);
+    assert_eq!(zoom::double_click_zoom(0.4), 1.0);
+}
+
+#[test]
+fn a_picture_loads_at_its_own_size_within_a_cap() {
+    // The note's strip at its full 5559 px (it was 2400: half its width when fitted, soft).
+    assert_eq!(zoom::picture_load_side(1072.0, 5559.0), 5559);
+    // Small pictures still ask for 2400 (no upscaling happens in the decoder).
+    assert_eq!(zoom::picture_load_side(800.0, 600.0), 2400);
+    // A 100 MP photo is capped near 48 MP.
+    let side = zoom::picture_load_side(12000.0, 8400.0) as f64;
+    assert!(side * side * 8400.0 / 12000.0 <= zoom::PICTURE_MAX_PIXELS * 1.001, "{side}");
+    assert_eq!(zoom::picture_load_side(0.0, 10.0), 2400);
+}

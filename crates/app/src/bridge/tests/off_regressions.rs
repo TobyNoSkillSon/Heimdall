@@ -83,7 +83,6 @@
     fn queued_recovery_cannot_cross_recorded_adapter_while_off() -> Result<()> {
         let temp=tempfile::tempdir()?;let gate=Arc::new(agent::delivery::DeliveryGate::new(false));
         let mut bridge=agent::Bridge::open(RecordedAdapter{inner:Adapter::Unavailable(Unavailable),journal:heimdall_archive::Journal::open(&temp.path().join("session-pi"))?,gate:Some(gate.clone()),ids:Default::default(),queries:HashMap::new()},temp.path().join("spool.sqlite"))?;
-        bridge.handle(&Event::Limit{rejected:true,reset:Some(0),status:"fixture".into()})?;
         let rt=tokio::runtime::Runtime::new()?;
         // A recovery flush uses the exact same boundary as observations and new wakes.
         let error=rt.block_on(bridge.wake("queued wake",&[],false)).unwrap_err();

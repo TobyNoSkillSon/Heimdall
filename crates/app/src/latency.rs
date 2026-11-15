@@ -13,7 +13,9 @@
 //! started the model call (`turn_start`), `stream` the provider's response began (`message_start`), `think`/`text`/
 //! `toolcall` the first thinking, text and tool-call tokens, `tool` the first tool started, `speak` the first speech
 //! was queued, `audio` Heimdall's answer became audible (the first sample at the speaker; never an acknowledgement),
-//! `done` the turn completed.
+//! `done` the turn completed. A request answered in relay mode (a T3 thread; Pi only keeps the record) ends with
+//! ` agent=relay`: its `request` is the relay's send to the thread, `done` the relay run's end, and `stream`, `think`,
+//! `text`, `toolcall` and `tool` stay `-` (the relay reports no provider events).
 //!
 //! After `total` (26 Oct 22:26, the user: end of his speech to the first audible actual answer): `ack=<ms|->` the instant
 //! acknowledgement became audible (pipeline/ack.rs; before this field it was counted as `audio`: a line with `audio`
@@ -91,6 +93,9 @@ pub struct Record {
     pub first_text_ns: Option<u64>,
     /// Speech synthesis started (the first line's).
     pub tts_ns: Option<u64>,
+    /// Answered in relay mode (a T3 thread, Pi only the record): `request` is the relay's send and `done` its run's
+    /// end; the provider's stream marks are not seen.
+    pub relayed: bool,
 }
 impl Record {
     pub fn mark(&self, stage: Stage) -> Option<u64> {
@@ -132,6 +137,9 @@ impl Record {
                 None => out.push_str(&format!(" {key}=-")),
             }
         }
+        if self.relayed {
+            out.push_str(" agent=relay");
+        }
         out
     }
 }
@@ -147,6 +155,8 @@ pub struct Tracker {
     received: Vec<Record>,
     pending: Vec<Record>,
     current: Option<Record>,
+    /// A relay send that came before its request's `delivered` (F6, 10 Nov): joined to the next delivered request.
+    early_relay: Option<u64>,
     /// The last `RECENT_REPLIES` settled requests' first speech (`speak`, ms after his last word), oldest first.
     replies: std::collections::VecDeque<u64>,
 }
@@ -225,11 +235,29 @@ impl Tracker {
         let mut r = self.pending.remove(i);
         r.set(Stage::Deliver, now);
         r.busy = busy;
+        if let Some(at) = self.early_relay.take().filter(|at| *at >= r.mark(Stage::Admit).unwrap_or(r.speech_end_ns)) {
+            r.calls += 1;
+            r.set(Stage::Request, at);
+            r.relayed = true;
+        }
         if let Some(old) = self.current.take() {
             lines.push(old.line(if old.mark(Stage::Done).is_some() { "done" } else { "superseded" }));
         }
         self.current = Some(r);
         lines
+    }
+    /// Relay mode handed the user's words to its T3 thread (F6, 10 Nov: since 2 Nov the agent answered in relay mode, where
+    /// no Pi turn runs, and 911 of 912 lines were `calls=0 … settled=superseded`). The relay's send is the request;
+    /// one that comes before the request's `delivered` waits for it.
+    pub fn relay_sent(&mut self, now: u64) {
+        match self.current.as_mut().filter(|r| r.mark(Stage::Done).is_none() && r.mark(Stage::Request).is_none()) {
+            Some(r) => {
+                r.calls += 1;
+                r.set(Stage::Request, now);
+                r.relayed = true;
+            }
+            None => self.early_relay = Some(now),
+        }
     }
     /// A Pi RPC event (`Event::Other`).
     pub fn agent_event(&mut self, v: &serde_json::Value, now: u64) {
@@ -316,6 +344,11 @@ impl Tracker {
 }
 
 static TRACKER: Mutex<Option<Tracker>> = Mutex::new(None);
+/// The live tracker's current request, for tests driving the real supervisor.
+#[cfg(test)]
+pub(crate) fn live_current() -> Option<Record> {
+    TRACKER.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|t| t.current.clone())
+}
 fn with(f: impl FnOnce(&mut Tracker, u64) -> Vec<String>) {
     let lines = {
         let mut guard = TRACKER.lock().unwrap_or_else(|e| e.into_inner());
@@ -361,6 +394,16 @@ pub fn agent_event(event: &agent::protocol::Event) {
         _ => {}
     }
 }
+pub fn relay_sent() {
+    with(|t, now| {
+        t.relay_sent(now);
+        vec![]
+    });
+}
+/// The relay's run for the user's words ended (its reply, if any, is spoken next): the turn's `done`.
+pub fn relay_completed() {
+    with(|t, now| t.completed(now));
+}
 pub fn speak_queued() {
     with(|t, now| {
         t.speak_queued(now);
@@ -383,6 +426,7 @@ pub fn ack_audible() {
     });
 }
 /// `Tracker::expected_reply_ms` for the live requests.
+#[cfg_attr(test, allow(dead_code))] // the live path only; tests take a hook instead
 pub fn expected_reply_ms() -> Option<u64> {
     TRACKER.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(Tracker::expected_reply_ms)
 }
@@ -403,6 +447,38 @@ mod tests {
     }
     fn field<'a>(line: &'a str, key: &str) -> &'a str {
         line.split(' ').find_map(|kv| kv.strip_prefix(&format!("{key}="))).unwrap()
+    }
+    /// F6 (10 Nov): in relay mode no Pi turn runs, and every line was `calls=0 … settled=superseded`. The relay's send
+    /// is the request and its run's end the turn's end, so the line is joined and closed, at its audio.
+    #[test]
+    fn a_relayed_request_is_joined_and_closed_by_the_relays_send_and_run_end() {
+        let end = 100 * S;
+        let mut t = Tracker::default();
+        t.admitted("u:1", "mic:a", end, false, end + 400 * MS);
+        t.decided("u:1", Some("name"), end + 500 * MS);
+        // Relay mode: the wake did not start a Pi delivery (busy=1, as the live lines say).
+        assert!(t.delivered("u:1", true, end + 600 * MS).is_empty());
+        t.relay_sent(end + 700 * MS);
+        assert!(t.completed(end + 9 * S).is_empty(), "waits for the reply's audio");
+        t.speak_queued(end + 9100 * MS);
+        let line = t.audio(end + 9800 * MS).pop().expect("the reply's audio settles the line");
+        assert_eq!((field(&line, "settled"), field(&line, "calls"), field(&line, "request"), field(&line, "done"), field(&line, "total")), ("done", "1", "700", "9000", "9800"), "{line}");
+        assert!(line.ends_with(" agent=relay"), "{line}");
+        // The next request: a relay send that lands before its `delivered` waits for it, and never joins the
+        // previous (done) line. A silent relay run still closes its line.
+        t.admitted("u:2", "mic:a", 200 * S, false, 200 * S + 300 * MS);
+        t.relay_sent(200 * S + 350 * MS);
+        assert!(t.delivered("u:2", true, 200 * S + 400 * MS).is_empty());
+        assert_eq!(t.current().unwrap().mark(Stage::Request), Some(200 * S + 350 * MS));
+        let line = settle(&mut t, 205 * S);
+        assert_eq!((field(&line, "settled"), field(&line, "calls"), field(&line, "request")), ("done", "1", "350"), "{line}");
+        // A stale relay send (before the next words were admitted) is not theirs.
+        t.relay_sent(250 * S);
+        t.admitted("u:3", "mic:a", 300 * S, false, 300 * S + 300 * MS);
+        assert!(t.delivered("u:3", true, 300 * S + 400 * MS).is_empty());
+        assert_eq!(t.current().unwrap().mark(Stage::Request), None);
+        // Pi's lines are unchanged: no relay field.
+        assert!(!settle(&mut t, 301 * S).contains("agent="));
     }
     /// A typical voice request: d1 send, one model call that speaks, a second that writes the final text.
     #[test]

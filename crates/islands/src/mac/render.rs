@@ -1,4 +1,4 @@
-//! Lab renders (Swift `Render.swift`): islands built offscreen (no window is ever ordered on screen), their layer trees
+//! Lab renders: islands built offscreen (no window is ever ordered on screen), their layer trees
 //! drawn into PNGs at 2× on a dark desktop-like backdrop; animations as contact sheets of presentation frames.
 //!   FLOATING_ISLANDS_DIR=<lab dir> FloatingIslands --render <out dir>
 //! With FLOATING_ISLANDS_RENDER_EXISTING=1 the lab folder's own islands are drawn as they are (one PNG per island);
@@ -6,7 +6,7 @@
 //! Timeline rows keyed `tl:<start>`, Settled's `settled:all` and `proof:<key>`, and a proposal's `why:<id>`.
 
 use std::cell::RefCell;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use objc2::msg_send;
@@ -535,6 +535,10 @@ fn existing(r: Rc<Render>) {
                     for k in keys.split(',').filter(|k| ["settled:", "why:", "proof:"].iter().any(|p| k.starts_with(p))) {
                         c.lab_perform(Control::Disclose { key: k.into() });
                     }
+                    // "no:<proposal id>": its No clicked (the lab folder's responses), drawn answered.
+                    for pid in keys.split(',').filter_map(|k| k.strip_prefix("no:")) {
+                        c.lab_perform(Control::No { list: "goals".into(), id: pid.into() });
+                    }
                 } else if let Some(it) = i.plan_items().into_iter().find(|p| p.proposal.is_some() && !p.done && p.group.as_deref() == Some("waiting")) {
                     c.lab_perform(Control::Disclose { key: it.key });
                 }
@@ -606,6 +610,3 @@ fn existing(r: Rc<Render>) {
     });
 }
 
-pub fn write_image(img: &draw::Image, path: &Path) -> bool {
-    draw::write_png(img, path)
-}

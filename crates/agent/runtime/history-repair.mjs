@@ -131,8 +131,9 @@ export function userLine(body) {
   return `${who(m[1])}: ${body.slice(m[0].length)}`;
 }
 const STAMP = /^(?:\[Heimdall delivery: [^\]\n]+\]\n)?(?:\[Now: ([^\]\n]+)\]\n)?/;
-// Who asked, as the summary names them: the owner in the personal edition, "User" in the public one (VM finding P-04).
-const owner = () => (process.env.HEIMDALL_EDITION === 'public' ? 'User' : 'User');
+// Who asked, as the summary names them: the label of the user's own lines as Heimdall sends them (HEIMDALL_USER_LABEL,
+// from Personalise; 14 Nov), "User" in the public edition (VM finding P-04) or when unset.
+const owner = () => (process.env.HEIMDALL_EDITION === 'public' ? 'User' : (process.env.HEIMDALL_USER_LABEL || 'User'));
 const who = (when) => (when ? `${owner()} (or Heimdall's wake), ${when}` : `${owner()} (or Heimdall's wake)`);
 
 /** A request's own words: the delivery marker goes (the `[Now: …]` line stays); a request an earlier rebuild carried

@@ -1,279 +1,194 @@
-# Island — the notch object
+# Notch island
 
-Everything the user sees at the notch is one object on one clock (DESIGN.md: `lab/island-design/`): lines, the agent's
-turn, the voice and its words, questions, notes (pull-downs), the fast reader, drawing mode's keys, light and Send,
-pointing marks, commands and health. One black shape grows out of the notch and returns into it; every element is a
-function of its one spring. `lab/island-design/` (DESIGN.md) and `lab/testing/` (TOOLING.md) are untracked: they exist
-only in the main checkout, not in worktrees.
+Everything Heimdall shows at the notch is one object on one clock: one black shape grows out of the notch and returns
+into it, and every element (lines, the agent's turn, the voice and its words, questions, notes, the reader, drawing
+mode, pointing, drops, health) is a function of its spring. This README owns the island's behaviour rules.
 
-**The object (platform-neutral, `object/`, `ui::island::object`):**
-- `engine.rs` — `Island`: the interface (lab/testing/TOOLING.md §1.2). `apply(event, t)` is the only way state
-  changes; `frame(t)` is pure (shape, every slot, the drawing light, the pointing marks); `needs_frames(t)` says
-  Moving / Loop / None (`needs_ticks(t)` is the live window's clock: a loop of thinking dots or the spinner alone
-  needs none, their layers loop as Core Animation in the render server; GPU trace 28 Oct 20:05); `deadline()` is the next one-shot change; `hit(t, p)` what a click lands on (only stable
-  targets during a motion, so Send keeps taking taps); `track(t)` the shape's motion, never empty. One transition
-  rule: the shape springs (DESIGN.md §4), shared elements glide, incoming content fades in scaled to fit, outgoing
-  content leaves with the shape; one content layer per place (what leaves a place clears before what arrives there,
-  ear pairs and button rows swap together); at most three motions a second, but a change while the shape is still
-  growing redirects that growth; never shorter than the notch while as wide; live content (reader units, numerals,
-  the waveform, pointer feedback) cuts.
-- `scene.rs` — the one state machine: the voice (its look waits up to 0.25 s for its words; ends at once when its audio is cut
-  (`SpeechCut`, `Stop`), at the audio's end + 0.45 s otherwise, or 3 s after its last sign of life; then it simply
-  retracts), the reply's words (each `SpokenText` sentence is added below the last, none replaced, until the voice
-  ends; a voice starting again within 3 s continues the same reply; the row shows the newest sentences within six
-  lines, each starting its own line, evenly broken), the last reply (`LastReply` as written, else the spoken
-  sentences) and its pull-down, the turn (sent, thinking, working words, compacting), lines (`read_seconds`: 1.8–3.4 s by kind, a little longer for long text, ≤ 8 s; errors too, keeping
-  their kind; only health problems rest as a token; a different line replaces one after 1 s, but a line to read, a
-  reply shown as text, keeps the island its whole read time and the next waits), questions, notes (each belongs to the agent's turn that showed
-  it: a turn ends with its `LastReply` or when a new run starts (idle to thinking: a NO_REPLY run sends no reply), and
-  the next reply, spoken reply or note then starts the next turn and retires the last turn's notes; a note opens the pull-down, which pulls itself up after `NOTE_UNATTENDED` = 12 s on screen
-  without the pointer over it, `Event::Pointer`, leaving nothing beside the notch; its X, `Target::NoteClose`,
-  removes it for good), the reader, drawing mode and its light,
-  pointing, and commands/health through `Cues` (`mod.rs`, the queue of results and health moments). `scene(t)` picks
-  the one thing to say; `deadline()` the next change.
-- `layout.rs` — DESIGN.md §2's template and size classes, numbers from `lab/island-design/render/render.swift`.
-- `measure.rs` — the `Measure` trait (`Approx` for the simulator, `Fuzz` adversarial widths) and the wrap: lines break
-  on per-word widths (`Measure::words`: each word shaped once, a line's width the sum of its words and spaces), and a
-  sum within `EDGE` of the fit is measured whole, so every break matches shaping the whole line.
-- `chat_layout.rs` — the conversation's rows, each laid out once and cached (two generations), so a new message lays
-  out that message alone.
-- `spring.rs`, `geom.rs`,
-  `reader.rs` (crates/rsvp plans on the island's clock), `gallery.rs` (one named scenario per state, for the tests
-  and the gallery).
-- `sim.rs` — the simulator: drives the real `Island` on virtual time and checks invariants I1–I22 every frame (I19 no
-  success mark after speech, I20 a reply's words only grow while spoken, I22 an agent's note never stays open
-  unattended).
-  `tests.rs` — recon bugs as scenarios, the user's flows, grid pairs at 8 phases, a triple slice, seeded random
-  sequences, adversarial widths, determinism, coverage, speed.
+Read this when: you want to change what the island shows or when, add an island event or card, change its timing,
+debug a click or drop at the notch, or run the island's tests and visual judge.
+Code: `crates/ui/src/island/object/` (platform-neutral model), `crates/ui/src/island/mac/` (AppKit), `crates/ui/src/island/drop.rs`, `crates/ui/src/island/chat.rs`.
 
-**Switches (24 Oct).** `Event::Switch` comes from ⌃⌘. ⌃⌘/ ⌃⌘, or a menu tile. Its glyph (mic, eye, islands)
-shows in its ear and turns slashed or whole at `SWITCH_TURN` on the same image view, where the system's magic replace
-draws or lifts the slash. While Listening or Seeing is off, the ears hold both glyphs at the same dim
-(`SWITCH_TOKEN_ALPHA`), the off one slashed, and a click opens the last turn. Under Reduce Motion, symbols change
-without a transition and one-off bounces do not play.
+## Interface to the app
 
-**Vella (docs/vella.md).** `Event::Vella` (`UiUpdate::Vella` from the app's Vella link) says the user is dictating to
-Vella. On: Vella's mark over "Dictating to Vella" for `VELLA_SECONDS` (a stack), then the mark rests in the left ear
-beside Vella's shortcut keys (`Ear::Num`, the keyboard symbol when they are longer than four characters), drawn once
-with no effect or timer; a keybind change while on changes only the token. Off: the token goes in one motion. With
-Listening off the Listening token shows instead. The mark is `Content::Vella`, Vella's own icon embedded from
-`assets/island/vella.png` (rendered by Vella's `scripts/icon.swift`, `assets/island/SOURCES.md`), never redrawn.
-Gallery cards `vella_dictating`, `vella_stopped`; renders `lab/ui-renders/vella-dictation/`.
+- Only `ui::Ui::send(UiUpdate::…)` in and `UiAction` callbacks out (`crates/ui/src/model.rs`).
+- `HeimdallSpeaking(false)` is the audio-ended input; `SpokenText` and `SpeechLevel` feed the words and the bars;
+  `LastReply` is the reply as written, for the pull-down; `Chat` is today's conversation, built by
+  `crates/app/src/chat_history.rs`.
+- Out: `StopSpeaking`, `PullOut`, `TypedWithDrop`, `Secret` (a `SecretText`, its `Debug` prints `<secret>`), question
+  answers (with `by_hand`), drops.
 
-**Older models still used:** `agent_notice.rs` (questions and their answers), `drawing/` (strokes, pointing specs),
-`reader.rs` (`ui::reader` types the app uses).
+## The object (`object/`)
 
-**Countdown (30 Oct, the quota recovery card).** `NoticeAction::Ask { countdown: true, .. }` shows the time left until
-`expires_ms` as m:ss (rounded up, so `0:00` only once time is out) beside a 20 pt ring that empties clockwise from
-twelve, at the right of the question's first line over the options' dots (with step chips, at the left of their row).
-Both are live elements: each second is a cut, no motion. The scene asks for a deadline at each second only while such
-a card is on screen (`Model::countdown_until`), none once it is closed, hidden or at `0:00`. The UI never expires a
-countdown card: at `0:00` it stays open for the controller to close or replace. Tests `countdown_tests.rs`; renders
-`heimdall-ui-demo --recovery-countdown lab/ui-renders/recovery-countdown/`.
+- `engine.rs`, `Island`: `apply(event, t)` is the only way state changes; `frame(t)` is pure (shape, every slot, the
+  drawing light, pointing marks); `needs_frames(t)` says Moving / Loop / None; `needs_ticks(t)` is the live clock (a
+  loop of thinking dots or the spinner alone needs none: those layers loop in Core Animation); `deadline()` is the next
+  one-shot change; `hit(t, p)` returns only stable targets during a motion, so Send keeps taking taps; `track(t)` is
+  never empty; `delay_motion` pushes back a motion whose first frame could not paint in time.
+- Transition rule: the shape springs (`spring::GROW`, `spring::CALM`), shared elements glide, incoming content fades
+  in scaled to fit, outgoing content leaves with the shape; one content layer per place (what leaves clears before what
+  arrives; ear pairs and button rows swap together); at most three motion starts a second (`MOTION_GAP`), but a change
+  while the shape still grows redirects that growth; never shorter than the notch while as wide; live content (reader
+  units, numerals, the waveform, pointer feedback) cuts.
+- Endings retract: no check after a spoken turn, no "back" after a restart, no chosen-answer stage, no "Attached" after
+  drawing mode's Send, no dimmed words when the voice stops. A command's own result still shows.
+- Pace budgets (`every_motion_keeps_apples_pace` in `tests.rs`): `GROW` and `CALM` reach 90 % within 0.255 s; an
+  arrival effect starts within 0.30 s of its motion; a retraction stops asking for frames by 0.6 s, a growth by 0.7 s.
+- `scene.rs`, the one state machine (`scene(t)` picks the one thing to say). Its constants:
+  - Voice: its look waits up to `WORDS_WAIT` (0.25 s) for words; ends at once on `SpeechCut` or `Stop`, else at the
+    audio's end + `GRACE` (0.45 s), or `VOICE_STALL` (3 s) after its last sign of life. Each `SpokenText` sentence is
+    added below the last, none replaced; a voice starting again within `REPLY_JOIN` (3 s) continues the same reply;
+    the row shows the newest sentences within `SPEAK_LINES` (6).
+  - Lines: `read_seconds` (`object/mod.rs`): 1.8–3.4 s by kind, +50 ms a character past 12, at most 8 s. A different
+    line replaces one after `MIN_LINE` (1 s), but a line to read keeps its whole read time and the next waits. Only
+    health problems rest as a token.
+  - Notes and turns: each note belongs to the turn that showed it; a turn ends with its `LastReply` or when a new run
+    starts (a `NO_REPLY` run sends no reply); the next reply or note starts the next turn and retires the last turn's
+    notes (at most `MAX_TURN_NOTES`, 6). A note opens the pull-down, which pulls itself up after `NOTE_UNATTENDED`
+    (12 s) on screen with the pointer away (`Event::Pointer`); its X (`Target::NoteClose`) removes it for good.
+  - Switches (`Event::Switch`, from ⌃⌘. ⌃⌘/ ⌃⌘, or a tile): the glyph turns slashed or whole at `SWITCH_TURN`
+    (0.45 s) of its `SWITCH_SECONDS` (1.5 s) moment. While Listening or Seeing is off, both ear glyphs rest at
+    `SWITCH_TOKEN_ALPHA` (0.5), the off one slashed; a click opens the last turn. Reduce Motion: no transitions, no bounces.
+  - Vella (`Event::Vella`): Vella's mark over "Dictating to Vella" for `VELLA_SECONDS` (1.6 s), then the mark rests in
+    the left ear beside Vella's shortcut (`Ear::Num`; the keyboard symbol past `VELLA_KEYS_MAX`, 4 characters). With
+    Listening off the Listening token shows instead. The mark is `Content::Vella` from `crates/ui/assets/island/vella.png`,
+    never redrawn.
+  - Catching up (`HealthCue::Busy { key, part, label }`): the stack symbol over its words, layers lighting in turn
+    (`Fx::Variable` for `VARIABLE_SYMBOLS`, else breathing; still under Reduce Motion) for `BUSY_READ` (4 s), then the
+    stack and a dim hourglass rest in the ears until `Recovered` or `Clear` for its key. The same key with new words
+    changes only the words in place. It ranks below a restart and an unacknowledged problem, above the pending command
+    glyph and tokens; it never makes the helmet red.
+  - Emergency (`Event::Emergency`, from `UiUpdate::AgentRelay`): the agent's glyph and an orange triangle rest in the
+    ears; the emergency notice alone leaves nothing; chosen relay mode draws nothing at rest.
+  - Nudge (`Event::Nudge`, from `crates/app/src/islands/nudge.rs`): one small pill (bell or question mark), bursts
+    coalesce (`NUDGE_COALESCE`), it waits while the island shows anything else. Its landing jiggle is intended:
+    `FrameModel::jiggle` marks those frames and the motion judge leaves them out of its width-reversal count.
+- `layout.rs`: the template, size classes and constants (`STOP`, `WIDE_W` 700, `SCREEN_MARGIN` 160, `ATTACH` 52,
+  `ASK_RING_D` 20), `reply_max_w`, `composer_placeholder` (the composer's only placeholder words).
+- `measure.rs`: the `Measure` trait (`Approx` for the simulator, `Fuzz` adversarial widths); lines break on per-word
+  widths, and a sum within `EDGE` (0.5 pt) of the fit is measured whole; `wrap_path` wraps a path whole.
+- `chat_layout.rs` (conversation rows laid out once, cached two generations), `prose.rs` (paragraph gaps, hanging list
+  items, first sentence bold), `reader.rs` (plays `crates/rsvp` plans), `gallery.rs` (one named scenario per state),
+  `spring.rs`, `geom.rs`.
+- `sim.rs`: drives the real `Island` on virtual time and checks invariants I1–I22 every frame; the table at its top
+  defines each (e.g. I6 nothing draws at rest, I13 three motions a second, I19 no success mark after speech, I20 a
+  reply's words only grow while spoken, I22 an agent's note never stays open unattended).
+- Older models in `island/`: `agent_notice.rs` (questions, answers, grants), `drawing/` (strokes, pointing specs),
+  `reader.rs` (`ui::reader` types), `click_source.rs` (hardware click check).
 
-**Sending a card with questions left.** On a card with several questions, Send is an arrow disc after the step chips, lit (the accent, and a target)
-once anything is answered; it sends what is answered and every other question with an empty answer, which the agent
-hears as left unanswered (`Question <id>: User left q1 "…" unanswered`; a T3 question gets the words "(unanswered)",
-and Send stays dim on a T3 card while a question that takes only its options is open, as T3 needs every answer). Each chip leads with its state: a tick once
-answered, an accent dot while it still needs a pick; the chip is the way to it. The Other row is then for words only;
-Return in it brings up the next open question and sends once none is left (`Event::AskReturn`). A one-question card
-keeps Send in its Other row, lit with the first tick or typed word. Tests `ask_tests.rs`, `agent_notice` tests;
-renders `heimdall-ui-demo --agent` (`island-question-partial*.png`, `island-question-tabs.png`) in
-`lab/ui-renders/ask-card/`.
+## Questions (`agent_notice.rs`, `object/layout.rs`)
 
-**Copying the island's words.** The words are drawn as layers, so a message is
-copied whole rather than selected by the character: a right-click or Control-click on a message of the pulled-down
-conversation (the user's or Heimdall's) or on the reply offers Copy (`Layout::copies`, `Island::copy_at`,
-`mac/island/copy.rs`); ⌘C while the island has the keyboard copies the field's selection, else the reply
-(`Island::copy_shown`); the copy glyph in the reply's band stays. Test `a_message_under_the_pointer_and_the_reply_copy_as_written`.
+- Several questions: Send is an arrow disc after the step chips, lit once anything is answered; it sends the answers
+  and every other question empty (the agent hears it as unanswered; T3 gets "(unanswered)", and Send stays dim on a
+  T3 card while an options-only question is open). Chips show a tick when answered, an accent dot while open. Return in
+  the Other row brings up the next open question and sends once none is left (`Event::AskReturn`). One question: Send
+  sits in its Other row.
+- Countdown (`NoticeAction::Ask { countdown: true, .. }`): m:ss rounded up beside a ring of `ASK_RING_D` that empties
+  clockwise; each second is a cut. A deadline per second only while such a card is on screen (`countdown_until`). The
+  UI never expires it: at `0:00` it stays open for the controller to close or replace.
+- Grants (`GrantItem::Delete`, `LoginItem`, `Keychain`: trash, power, key glyphs): a recessed well in `Font::Path`
+  wrapped by `measure::wrap_path`. A click grants only when press and release came from the HID system
+  (`click_source`, `Event::HardwareClick`); those picks go out as `by_hand`.
+- An open card has no close X: its lip (`Target::AskTuck`) tucks it away unanswered (picks kept, digit keys gone); the
+  notch brings it back ahead of the last turn. Esc in its field dismisses it. A new question shows at once while another
+  is tucked. Without a notch the card has no lip and never tucks.
+- While Heimdall speaks the card docks under his words; with the conversation pulled down, at its bottom outside the scroll.
 
-**Catching up (31 Oct, the archive locked for about four minutes and speech stalled with no sign).** `HealthCue::Busy
-{ key, part, label }` from the app ("Catching up · 6,489 notes to save"): the stack `square.stack.3d.up.fill` in soft
-white over its words (one line; five-digit counts fit), its layers lighting in turn (`Fx::Variable`, the system's
-iterative, reversing variable colour with the others dimmed; breathe without the class or for a symbol not in
-`VARIABLE_SYMBOLS`; still under Reduce Motion), for `BUSY_READ` (4 s) from its arrival, then the stack and a dim
-hourglass rest in the ears until `Recovered` or `Clear` for its key, silently. The app resends it every few seconds:
-the same key with new words changes only the words in place (no new arrival, the read time keeps running, a resting
-token stays a token). It sits below a restart and an unacknowledged problem and above the pending command glyph and
-the tokens; it never makes the helmet red. Gallery cards `health_catching_up`, `health_catching_up_restart`; check
-`heimdall-ui-demo --catching-up <dir>` (renders `lab/archive-lock-1031/renders/`; the restart's arrow turning back
-into the stack is a replace transition `renderInContext` never steps, so that state is the gallery's).
+## Pull-down, conversation and composer
 
-**AppKit (`mac/`, declared from `src/mac/mod.rs` with `#[path]`, module paths `crate::mac::*`):**
-- `mac/island/` — `paint.rs` (`Tree::apply(&FrameModel)`: the one draw call, live and offscreen; SF Symbols are
-  `NSImageView`s playing Apple's `NSSymbolEffect`s; `LightLayers`, the island's outline and the screen's edge as one
-  soft line),
-  `raster.rs` (each distinct content drawn once, with a blurred twin; note drawings sized to their content, tables
-  with columns as wide as their cells up to the screen-bound width, then wrapping), `measure.rs` (CoreText widths,
-  per-word sums for SF's text cut under 20 pt, display-cut runs shaped whole; its width cache rotates generations
-  instead of emptying, `CACHE_MAX`),
-  `host.rs` (the window, the click target, the clock: display link while moving, a timer for loops, one one-shot
-  timer per deadline, nothing at rest; an arrival at rest wakes the symbol renderer, `Tree::wake_renderer`, before the
-  motion's clock starts, and every frame is painted at its paint time; an apply that runs past a 120 Hz frame delays
-  the motion it started, `Island::delay_motion`, so an opening spring starts when its first frame can paint; the
-  composer's text editing is readied at install, `Fields::prepare_composer`), `bench.rs` (`--bench-chat`), `mod.rs` (the interface the UI uses: `apply`, `notice`, `alerting`),
-  `checks.rs` (`--island`).
-- `mac/draw/` — the drawing overlay (strokes, keys, capture; its keys and light are the island's), pointing (opacity
-  from the island's frame), ink, hotkey, system profile, the app switch, and `check.rs` (`--drawing`). The overlay
-  sits above menus (pop-up menu level + 1) and the island rises above it while it is up (`island::pin`). Only
-  drawing mode's own controls take a press (`host::draw_control`); any other press is ink, over an open island too
-  (bug note 2026-11-04T21-56-52), and FloatingIslands keeps an open viewer open while the overlay is up. Over an
-  open menu (the menu stays while they draw) it holds a still (`still.rs`): another app's menu survives
-  the overlay ordered above it but closes when the overlay takes the keyboard, so the still goes under the ink first;
-  Heimdall's own menu is captured shortly after it opens and comes back as the still once Drawing Mode is chosen
-  (AppKit fades it out first, about 0.4 s). Send then marks the still.
-- `mac/space.rs` (`crate::mac::overlay_space`) — still during Space swipes ("it should always be in
-  front, an overlay on top of whatever is behind"): every live island window (the island, its click target, drawing
-  mode's overlay, pointing) joins a SkyLight space of Heimdall's own at absolute level 100 each time it is ordered in
-  (`CGSSpaceCreate` → `CGSSpaceSetAbsoluteLevel` → `CGSShowSpaces` → `CGSAddWindowsToSpaces`, the Floating Islands
-  prototype's proven path), joins again after a display change (the space is made again if it was lost) and leaves it
-  at quit. Symbols are resolved at run time; any missing one or failed step leaves today's `overlay_behavior()` path
-  alone (the windows slide with the Space) and writes one `island: overlay space …` line to heimdall.log, as does
-  the first verified join of each window. Checks and renders never reach SkyLight, except `--island`'s one probe with
-  an invisible window parked off every display.
-- `mac/streams.rs` (`crate::mac::streams`) — Show Islands on Streams: off by default, the
-  island, its click target, drawing mode's overlay and pointing are unshared (`NSWindowSharingType::None`), so Discord,
-  OBS, QuickTime and screenshots never show them; on, they are shared read-only, live and for windows made later.
-  The floating islands follow the same switch through the helper's `streams.json` (crates/app `islands::streams`).
-  Heimdall's own captures exclude them by title either way (`cargo run -p screen --example island_exclusion`).
-  `--streams` checks it with macOS's `screencapture` (lab/ui-renders/islands-on-streams/).
-- `mac/gallery.rs` — the animation gallery and the visual judge (`--gallery`, `--motion`).
+- At rest, while the last turn has anything, the notch alone is a transparent click target (only under a real notch;
+  nothing drawn, no timer). The pointer at the notch shows a peek lip (`Lip::Peek`) that goes when it leaves. While
+  Heimdall sends, thinks, compacts, works or speaks, the whole shape is the target.
+- A click, drag down or two-finger swipe down shows the last turn: reply, then that turn's notes, scrolling inside half
+  the screen; a wide table widens it up to `reply_max_w`. A click or drag up on the lip band pulls it up.
+- Stop: while Heimdall speaks the left ear is `layout::STOP`; `Target::StopSpeech` ends the look and sends
+  `UiAction::StopSpeaking` (the app cuts the voice and labels the waking line; see decision-chain.md).
+- ⌃⌘H (`Event::OpenChat`) pulls down the user's conversation with the keyboard in the composer (`Fields::focus_composer`;
+  the click target is a non-activating panel). Pressed again while it shows (`owners_reply_open`) it pulls it up; one
+  hidden under the reader or drawing mode stays. A pull-down a note opened stays that note's alone.
+- The conversation (`chat.rs`) opens on the latest exchange; `chat::split` places the live turn by its replies and note
+  ids so nothing shows twice; it follows the end unless the user scrolled up; what scrolls up goes under the top bar as
+  a veil (`Content::Body` `veil`). Pull out: the band's pin or a drag sends `UiAction::PullOut`.
+- Native fields (composer and Other) have no placeholder and sit `field::TEXT_SHIFT` off their slots so typed text lands
+  where the drawn placeholder was. The composer scrolls on one line; it never wraps. Text editing is readied at install
+  (`Fields::prepare_composer`).
+- Copy (`mac/island/copy.rs`): words are layers, so a right-click on a message or the reply offers Copy of the whole
+  message (`Layout` `copies`, `Island::copy_at`); ⌘C copies the field's selection, else the reply (`Island::copy_shown`).
+- Edit keys: Heimdall has no main menu, so the key panel performs ⌘V ⌘X ⌘A ⌘Z ⇧⌘Z itself (`copy::edit_command`; ⌘C is
+  `copy::command_c`).
+- Secret field: the lock (`Target::ComposerLock`) swaps in an `NSSecureTextField` (`Target::ComposerSecret`); Return
+  sends `Event::SecretSent` → `UiAction::Secret`, never a typed message, and unlocks; closing the pull-down unlocks and
+  wipes it. The app stores it (`crates/app/src/secrets.rs`).
 
-**Interface to the app:** only through `ui::Ui::send(UiUpdate::…)` and `ui::UiAction` callbacks. `HeimdallSpeaking(false)`
-is the audio-ended input; `SpokenText` and `SpeechLevel` feed the words and the bars; `LastReply` is the reply as written
-for the pull-down.
+## Drops (`drop.rs`, `mac/drop/`)
 
-**Endings and pace ("we don't need success after everything that happened … animations should be
-simple").** A sequence ends by retracting: no check after a spoken turn, no "back" after a restart (it leaves), no
-chosen-answer stage (an answered question retracts at once), no "Attached" after drawing mode's Send (the flash is the
-confirmation), no dimmed words when the voice stops. A command's own result still shows (wanted every
-screenshot counted). Springs are unchanged and already quicker than Apple's presets (measured on this Mac with
-SwiftUI's `Spring`: smooth 90 % at 0.310 s, snappy 0.254 s, bouncy 0.210 s; the island's grow 0.220 s, retract
-0.211 s). Around them: arrival effects start as the shape lands (0.23 s after the motion, was 0.48 s), a swap in place
-overlaps its leaving and arriving content below a fifth of their opacity instead of passing an empty frame (readable
-by 0.18 s, was 0.27 s), and a motion stops asking for frames once it is within a fifth of a pixel (0.63 s for a growth,
-0.52 s for a retraction; was 0.82 s and 0.78 s). `every_motion_keeps_apples_pace` holds those budgets.
+- `drop.rs` is platform-neutral: `classify` (files, links, image data, text; long text kept as a file; temporary
+  screenshots and image data copied to `drops_dir()`, `drops/` in the data folder), `summary`, `route`, and the pure
+  motion (`SWELL` 26 × 10 pt, glow, the thumbnail's flight). While the island shows more than the notch the swell is
+  the island's own shape (`Tree::drop`, `Host::set_drop`).
+- `mac/drop/` is two windows titled `Heimdall Drop Target`: the drawn one joins the island's overlay space and never
+  takes the mouse; an empty catcher outside that space takes the drag. Why: macOS offers no drag to a window in a
+  process's own SkyLight space.
+- Both are ordered in only while a drag is under way (pasteboard count change; a late-writing source is polled every
+  `POLL_S`, 40 ms, while the button is down, `DragWatch`; the button checked every 0.2 s while armed), and out once the
+  button is up and the motion ended. Catch area: `ZONE_W` × `ZONE_H` (340 × 100 pt) at the notch's top centre, or the
+  island's frame plus `ISLAND_MARGIN` (18 pt).
+- While a drag is armed the click target ignores the mouse (`Host::pass_drags`). `drop::route`: with the pull-down
+  showing and text or focus in the composer, the drop attaches (`Event::ComposerAttach`, `ATTACH` thumbnails,
+  `Target::ComposerDetach`) and Return sends `UiAction::TypedWithDrop`; otherwise it is a notch drop.
+- Late takes (`End::TakeLate`, `late_take`): a drag let go over the notch that macOS never dropped is taken from the
+  pasteboard, unless it started in Heimdall, a key went down, another app's window covers the notch, or the pasteboard
+  changed. The app decides when a drop reaches the agent (`crates/app/src/pipeline/drops.rs`).
 
-**The pull-down: the last turn.** While the last turn has anything to show, the notch itself is a target at rest
-(only under a real notch): the click target stays over it alone, transparent, drawing nothing, no timer; nothing
-rests beside the notch ("I would actually prefer if there is nothing on the left and right"). A click,
-a drag down or a two-finger swipe down shows the last turn under the voice's ears (live bars while it speaks, the
-waveform glyph when quiet): its reply left-aligned in a centred column, then that turn's notes only (each under a
-header with its icon, title and close X), scrolling as one inside half the screen; a wide table widens the shape up
-to `layout::reply_max_w` (700, never closer than 160 to the screen's sides). A click or a drag up on its lip band
-pulls it up.
-**Stop (5 Nov, bug notes 2026-11-05T00-10-37 and 2026-11-05T02-32-17).** While Heimdall speaks, the left ear is a
-stop glyph (`layout::STOP`, in the helmet's slot; dimmed with nothing to press for the grace once the audio ended; the
-pull-down has the helmet back when quiet). A press (`Target::StopSpeech`) ends the speaking look at once and sends
-`UiAction::StopSpeaking`: the app cuts the voice and labels the line that woke the agent `not_for_heimdall`
-(docs/decision-chain.md). Renders: `lab/ui-renders/stop-button/`.
-When the pointer reaches the notch (the click target's tracking area, no polling), a short lip with a grabber shows
-just below the notch's bottom edge (`Lip::Peek`); the notch and the lip open the last turn,
-and it goes as soon as the pointer leaves, so no strip below the notch takes clicks at rest. While Heimdall sends, thinks,
-compacts, works or speaks, the whole shape is that target too. ⌃⌘H (`Event::OpenChat`)
-pulls the conversation down as the user's, with only its composer when there is nothing yet, and puts the keyboard in the
-composer (`Fields::focus_composer`; the click target is a non-activating panel, so Heimdall does not come forward); a
-pull-down a note opened becomes their conversation. Pressed again while their conversation shows (`owners_reply_open`),
-however it opened and wherever the keyboard is, it pulls it up; one hidden under the reader or drawing mode stays. A field that had the keyboard and leaves gives it back (the panel is
-ordered out and in). The composer's placeholder is the island's drawn one only (`layout::composer_placeholder`, its
-one source of words); the native fields (composer and Other) have none, and sit `field::TEXT_SHIFT` off their slots so
-typed text lands exactly where the placeholder was drawn. The composer scrolls on its one line; it never wraps. Check: `heimdall-ui-demo --composer <dir>`
-(test `island_composer`, half a second): the island with its native views composited (empty, focused, typed, long,
-2x crops), real key presses, backspace, ⌃⌘H. A send (`Event::ComposerSent`, then `Event::Sent`) keeps the user's
-conversation open through the turn and scrolls it to the end; a pull-down a note opened pulls up into the send arrow.
-**The conversation.**
-Pulled down by the user, the last turn sits inside today's conversation (`chat.rs`, sent whole by the app as
-`UiUpdate::Chat`, built by `crates/app/src/chat_history.rs` from the agent's session file and the archive's
-`utterances`): their words to Heimdall in blue bubbles on the right, Heimdall's replies and spoken lines as plain text on
-the left (faint with a muted speaker when they never reached them, a small cut-waveform when they talked over them),
-quiet centred rows for a task started or finished and a question with the option they chose, and a small card per
-notice with a table, text, SVG or image (`object/chat_layout.rs`, drawn as `Mark`s in the pull-down's bodies). It
-opens on the latest exchange (their last words, then the turn) and scrolls up through the day, a fade at the bottom
-while more is there; what scrolls up goes on under the top bar as a veil; renders
-`lab/ui-renders/island-chat-veil-*.png`; with no turn of its own (after a restart) it opens at the end. After a send, and on each new
-message, it follows the end (`ReplyView::tail`) unless the user scrolled up away from it. A reply beside a wide table
-wraps to the widened column. A pull-down a note opened stays
-the note's alone. `chat::split` places the live turn in the conversation by the replies it holds and its notes' ids, so
-nothing shows twice. Pulling out (23 Oct: a table could not be pulled out): the band's pin and the drag take the turn's
-notes with its reply (`UiAction::PullOut`; text and tables go into the document, an SVG or an image becomes its own
-viewer island), each note's header has its own pin beside its X, and a notice's card in the conversation pulls that
-notice out. Renders: `lab/ui-renders/island-chat-*.png` (gallery cards `chat_history`, `chat_only`).
-A question never hides Heimdall's voice ("I should see you talking, and the decision goes down"):
-while they speak, the card docks under their words (the speaking row's own lines, live as sentences arrive) and stays
-alone once the voice ends; with the conversation pulled down, it docks at its bottom above the band, outside the
-scroll. Renders: `lab/ui-renders/island-question-*.png` (cards `question_while_speaking`, `question_in_chat`).
-An open card has no close X; it ends in the pull-down's lip (the same grabber and band, `Target::AskTuck`). A click or a drag up on it tucks the card away unanswered:
-nothing goes to the agent, their picks stay, its digit keys go, and the notch (a click, a drag or a swipe down, the
-peek lip under the pointer) brings it back ahead of the last turn; their pulled-down conversation docks it. Esc in its
-field still dismisses it. A question that arrives while another is tucked shows at once; the tucked one waits behind
-the notch, and an answered, closed or expired one is tucked no longer. Without a notch the card has no lip and never
-tucks (nothing there could bring it back; moving to such a display brings a tucked card back). Renders:
-`lab/question-lip/` (cards `question_tuck`, `no_notch_question`).
-**Drops onto the notch.** `drop.rs` is
-platform-neutral: the drag's pasteboard as a `Snapshot`, `classify` (files by extension, a temporary screenshot copied
-into `~/Library/Application Support/Heimdall/drops/`, links, image data saved there with its web source, text; long
-text kept as a file), `summary` (the island's word: "1 image", "Link", "Folder", "3 items") and `Motion`, the drop
-target's pure motion: under a drag the notch swells 26 × 10 pt and a cool glow lights its edge; on a drop the item's
-thumbnail flies into the shape, shrinking, slides under its edge, and the shape takes it with one soft bounce and
-returns into the notch; then the island's own result cue (`CommandKind::Drop`) says what it took. Reduce Motion:
-fades only. While the island shows more than the notch (speaking, a line, the conversation) the swell and glow are
-the island's own ("the Dynamic Island as a whole isn't lighting up and swelling a little"):
-`Motion::swell` gives the same springs as `drop::Swell`, the island's tree draws its shape that much larger with the
-halo (`Tree::drop`, set by `Host::set_drop`; content and its mask stay put), the drop window draws only the carried
-item, and the hand-over as the island grows or retracts mid-drag is seamless. `mac/drop/` is two windows over the notch, both `Heimdall Drop Target` (excluded from captures, level
-above the click target): the drawn one joins the island's overlay space and never takes the mouse; an empty catcher
-outside that space takes the drag, because macOS offers no drag to a window in a process's own SkyLight space (24 Oct
-12:26, the first build drew nothing for a real drag). Both are ordered in only while a drag is under way anywhere (a global monitor sees the drag pasteboard's count change; a
-press-drag whose source writes the pasteboard late is polled every 40 ms while the button is down, `DragWatch`; a
-0.2 s check of the button while armed), on the display with the pointer, ordered out with no clock once the button
-is up and the motion ended, so it never takes a click or covers the menu bar. Drops are taken within 340 × 100 pt
-of the notch's top centre, or over the island's frame and 18 pt round it while it shows: the catcher is exactly that
-area and follows the island as it resizes (`Host::render` tells it); the drawn window is the island window's frame. File promises (Photos, Mail) are received into the drops folder. The app decides when
-the drop reaches the agent (`crates/app/src/pipeline/drops.rs`). Check: `heimdall-ui-demo --drop <dir>` (synthetic
-pasteboards through a fake drag session sent to the view's own drag callbacks, the island's word, rest, and the
-contact sheets `drop-sheet.png` and `drop-island-sheet.png`, each island state with the hover off and on and a
-drag held while the island grows and retracts; renders in `lab/ui-renders/drop-on-notch/`). Live: `heimdall-ui-demo --drop-live`
-with a real Finder or screenshot-thumbnail drag driven by `lab/drop-on-notch-live/`.
-**Drops on the open pull-down (dropping attaches to the message being typed, or sends it like a notch drop).** While a drag is armed the click target ignores the mouse (`Host::pass_drags`): it joins the
-overlay space, which sits above the catcher's ordinary window stack whatever their levels, so over the pull-down (and
-over the notch at rest) a drag found it first and was never offered to the catcher (the journal's "macOS never offered
-it to the notch" at 03:00:08). Where a drop goes is `drop::route`: with the pull-down showing and text in the composer
-or the keyboard in it, `Event::ComposerAttach` puts it in the composer (a 52 pt thumbnail row above its line, each
-with a remove badge, `Target::ComposerDetach`; the swell settles, no flight, no cue) and Return sends their words with it
-(`Output::TypedDrop` → `UiAction::TypedWithDrop`, sent at once as one typed message with the images, the relay holding
-it like a notch drop); otherwise it goes as a notch drop. Check: `heimdall-ui-demo --pulldown-drop <dir>` (test
-`island_pulldown_drop`); renders in `lab/ui-renders/pulldown-drop/`.
-**Late takes (bug note 2026-11-03T18-33-35).** A drag let go over the notch that macOS never dropped on the catcher
-(never offered, or offered and not dropped: 4 Nov 19:27 and 5 Nov 00:00, each a few seconds after the agent started
-working) is taken from the drag pasteboard (`End::TakeLate`), skipped when it started in Heimdall, a key went down,
-another app's window covers the notch (named in the log) or the pasteboard changed (`late_take`). A drop the notch
-itself turns down in `prepareForDragOperation:` is logged with where it was let go.
-Reply text (the pull-down and island lines) is laid out by `object/prose.rs`:
-paragraph gaps, list items with hanging lines, the first sentence bold.
-**Emergency mode (docs/claude-relay.md).** `Event::Emergency` (`UiUpdate::AgentRelay`): while a backup agent covers,
-the agent's glyph and an orange warning triangle rest in the ears, still, after any moment; the notch still opens the
-last turn. The emergency `Notice` alone reads and leaves nothing Oct 19:40). Chosen relay mode draws
-nothing at rest. Gallery: `health_emergency_rest`, and `no_relay_*` for `crates/app/src/emergency_local.rs`'s cards.
-**Nudge.** `Event::Nudge` (`UiUpdate::FloatingNudge` from `crates/app/src/islands/nudge.rs`: a floating island newly needs the user) plays one small
-pill at the notch, a bell or a question mark; bursts coalesce and it waits while the island shows anything else. Its
-landing jiggle is intended: `FrameModel::jiggle` marks its frames, and the motion judge leaves them out
-of its width-reversal count (`mac/gallery.rs`; host test `crates/ui/tests/island_motion_nudge.rs`).
+## AppKit (`mac/`, declared from `crates/ui/src/mac/mod.rs` with `#[path]`)
 
-**Testing (offscreen, nothing reaches the screen, unless marked live):**
-- `cargo test -p ui --lib island::` — the object and the simulator: grid and random sequences under every invariant.
-- `heimdall-ui-demo --island <dir>` — stills of every card's states, window properties, clicks through the click
-  target's real event path (answers, the last reply pulled down by a tap and a drag on the notch and up by its band),
-  the cost at rest (measured, 3 s).
-- `heimdall-ui-demo --drawing <dir>` — drawing mode and pointing in process, Send by a tap (through the overlay, the
-  click target, and while the island moves), a Send end to end with a stand-in capture, and over an open menu: the
-  levels, the still held before the keyboard is taken, Heimdall's menu's still, and Send marking the still.
-- `heimdall-ui-demo --drawing-over-menu <other|own> [secs]` — a live lab check (on screen for a few seconds, no
-  pointer events): real drawing mode over an open menu, each change printed with its uptime for a recorder in another
-  process (24 Oct: every 60 Hz frame kept the menu from open to close over another app's status menu).
-- `heimdall-ui-demo --gallery <dir>` / `--motion <dir>` — every card at 120 Hz through the same draw call, judged
-  (symmetry, clipping, smoothness, rest) with the main thread's cost per frame (`anims/judge.json`).
-- `heimdall-ui-demo --bench-chat N` / `--bench-layout N` — the first ⌃⌘H of an N-row conversation timed on the
-  offscreen host (CoreText calls, cache rotations, apply and commit); env knobs in `mac/island/bench.rs`, results in
-  `lab/ui-bench/README.md`. `crates/ui/tests/island_chat_bench.rs` runs it at 400 rows.
-- Never run the demo without one of these flags' intent: without a flag it only prints its help; `--live`,
-  `--drop-live` and `--drawing-over-menu` are the only flags that show anything on screen.
+- `mac/island/paint.rs`: `Tree::apply(&FrameModel)`, the one draw call, live and offscreen; SF Symbols are
+  `NSImageView`s playing `NSSymbolEffect`s; `Tree::wake_renderer` wakes the symbol renderer before an arrival's clock.
+- `mac/island/raster.rs` (each distinct content drawn once, with a blurred twin), `measure.rs` (CoreText widths, cache
+  rotating generations at `CACHE_MAX` 8192), `field.rs`, `copy.rs`, `bench.rs`, `checks.rs`, `mod.rs` (`apply`,
+  `notice`, `pin`).
+- `mac/island/host.rs`: window, click target, clock (display link while moving, a timer for loops, one one-shot timer
+  per deadline, nothing at rest). Display: the island opens on the pointer's display, or on the one settings
+  `islands_display` locks it to while connected (drawing mode's display wins while it is up); a display change lays it
+  out again at once, and each arrival reads its display afresh (`display_tests`).
+- `mac/draw/`: drawing overlay at `NSPopUpMenuWindowLevel + 1`, with the island raised above it (`island::pin`); only
+  drawing mode's own controls take a press (`host::draw_control`), any other press is ink. Over an open menu it holds a
+  still (`still.rs`) placed under the ink before the overlay takes the keyboard.
+- `mac/space.rs` (`crate::mac::overlay_space`): every island window joins a SkyLight space of Heimdall's own at
+  absolute level 100 when ordered in, again after a display change, and leaves at quit. A missing symbol or failed step
+  falls back to `overlay_behavior()` and logs one `island: overlay space …` line.
+- `mac/streams.rs`: Show Islands on Streams, off by default: island windows are `NSWindowSharingType::None`; on, shared
+  read-only. Heimdall's own captures exclude them by title either way (`cargo run -p screen --example island_exclusion`).
+- `mac/gallery.rs`: the animation gallery and the motion judge.
+
+## Test
+
+1. `cargo test -p ui --lib island::`: the object and the simulator (grid and seeded random sequences, adversarial
+   widths, determinism, pace) under every invariant. Modules: `object/tests.rs`, `ask_tests.rs`, `busy_tests.rs`,
+   `composer_drop_tests.rs`, `countdown_tests.rs`, `emergency_tests.rs`, `heard_exit_tests.rs`, `notch_tests.rs`,
+   `open_chat_tests.rs`, `secret_field_tests.rs`, `stuck_reply_tests.rs`, `switch_tests.rs`, `vella_tests.rs`,
+   `island/tests.rs`, and the tests in `drop.rs`, `chat.rs`, `agent_notice.rs`, `click_source.rs`, `host.rs`.
+2. `cargo test -p ui --test island_composer --test island_pulldown_drop --test island_chat_bench --test island_motion_nudge`.
+
+Demo flags (`heimdall-ui-demo`, build in [crates/ui/README.md](../../README.md); offscreen, exit 1 on a failure):
+
+- `--island <dir>`: stills of every card, window properties, clicks through the real event path, cost at rest.
+- `--motion <dir>`, `--gallery <dir> [--only a,b] [--fps n]`: every card at 120 Hz through the same draw call, judged
+  (symmetry, clipping, smoothness, rest) with main-thread cost per frame (`<dir>/anims/judge.json`).
+- `--sheet <dir> (--seed N | --grid a,b,phase | --card name)`: key frames of a simulated sequence.
+- `--island-loops`, `--composer`, `--pulldown-drop`, `--drop`, `--drawing`, `--recovery-countdown`, `--catching-up`,
+  `--relay-activity`, `--streams`, `--islands-display`, `--agent` (question cards).
+- `--bench-chat N`, `--bench-layout N`: the first ⌃⌘H of an N-row conversation (default 400); knobs in `mac/island/bench.rs`.
+- On screen, only when the user is away: `--drop-live [secs]` (default 60), `--drawing-over-menu <other|own> [secs]`
+  (default 3), `--live`.
+
+## See also
+
+- [crates/ui/README.md](../../README.md): the crate's code map, menu and demo build
+- [islands-capabilities.md](../../../../docs/islands-capabilities.md): what islands show
+- [agent-window.md](../../../../docs/agent-window.md): the question card from the agent's side
+- [harness-autonomy.md](../../../../docs/harness-autonomy.md): approval grants
+- [claude-relay.md](../../../../docs/claude-relay.md), [emergency.md](../../../../docs/emergency.md): relay and emergency mode
+- [vella.md](../../../../docs/vella.md): dictation to Vella
+- [decision-chain.md](../../../../docs/decision-chain.md): what Stop labels
+- [viewer.md](../../../../docs/viewer.md): pulled-out notes as viewer islands
+- [settings.md](../../../../docs/settings.md): `islands_display`, Show Islands on Streams

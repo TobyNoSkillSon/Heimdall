@@ -203,7 +203,9 @@ mod tests {
         assert_eq!(rank("don't"), rank("do"));
         assert_eq!(rank("problem's"), rank("problem"));
         assert!(rank("się").unwrap() < 100);
-        assert!(rank("timeouts").is_none() || rank("timeouts").unwrap() > 1000);
+        // An unlisted word has no rank; a regular inflection of a listed one ranks at twice its stem's.
+        assert_eq!(rank("timeouts"), None);
+        assert_eq!(rank("deadlines"), Some(rank("deadline").unwrap() * 2));
     }
 
     #[test]

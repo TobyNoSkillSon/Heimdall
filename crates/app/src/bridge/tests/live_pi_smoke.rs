@@ -61,7 +61,7 @@
         runtime.barrier()?;
         let session_lines=std::fs::read_to_string(&path)?;
         let parsed:Vec<Value>=session_lines.lines().map(serde_json::from_str).collect::<std::result::Result<_,_>>()?;
-        anyhow::ensure!(parsed.iter().any(|e|e["customType"]=="heimdall_reload"&&e["content"].as_str().is_some_and(|n|n.contains("reload-")&&n.contains("resumed successfully"))),"missing receipt/outcome resume notice");
+        anyhow::ensure!(session_lines.matches("you have just been restarted").count()>=2,"the reload's start appended no restart message");
         let tool_count=agent::mcp_contract::tools().as_array().map_or(0,Vec::len);anyhow::ensure!(parsed.iter().filter(|e|e["customType"]=="heimdall_bridge").all(|e|e["data"]["toolCount"]==tool_count),"bridge did not register exactly {tool_count} tools");
         let action_db=rusqlite::Connection::open(data.join("agent/mcp-actions.sqlite"))?;
         let receipt_operations:Vec<String>=action_db.prepare("SELECT operation FROM receipts WHERE kind IN ('notice','reload') ORDER BY kind")?.query_map([],|r|r.get(0))?.collect::<rusqlite::Result<_>>()?;

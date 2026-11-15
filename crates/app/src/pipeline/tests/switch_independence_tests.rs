@@ -155,13 +155,11 @@ fn agent_off_leaves_listening_and_the_decider_running() {
     a.tools.shutdown();
 }
 
-/// What the agent can read about the screen and its tools never names Listening or Seeing: a screenshot with Seeing
-/// off fails plainly, and no tool description, prompt line or transcript note says a switch is off.
+/// What the agent can read about the screen and its tools never names Listening or Seeing (no tool description or
+/// prompt line says a switch is off), except where it asks for the screen while Seeing is off: then it is told why.
 #[test]
 fn no_agent_visible_text_names_listening_or_seeing() {
     let mut texts: Vec<(String, String)> = vec![
-        ("SCREEN_OFF".into(), crate::bridge::SCREEN_OFF.into()),
-        ("SCREEN_OFF_NOTE".into(), super::commands::SCREEN_OFF_NOTE.into()),
         ("screen_frames".into(), crate::mcp_frames::SCREEN_FRAMES_UNAVAILABLE.into()),
         ("prompt".into(), include_str!("../../../../agent/prompt/heimdall.md").into()),
         ("compaction prompt".into(), include_str!("../../../../agent/prompt/compaction.md").into()),
@@ -172,15 +170,16 @@ fn no_agent_visible_text_names_listening_or_seeing() {
     for (name, text) in &texts {
         assert!(tells_a_switch(text).is_none(), "{name} tells the agent {:?}: {text}", tells_a_switch(text));
     }
-    // The tool itself, with Seeing off and the agent on.
+    // The one exception (bug notes 2026-11-10T15-35-42, 2026-11-10T17-55-57): asking for the screen while Seeing is
+    // off fails with an error that names Seeing, since when, and that only the user turns it back on.
     let t = tempfile::tempdir().unwrap();
     let tools = crate::bridge::Tools::new(t.path(), t.path());
-    tools.screen_off.store(true, Ordering::Release);
+    tools.set_screen_off(true, false);
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     use agent::mcp::ToolHost;
-    let shot = rt.block_on(tools.screenshot_now(&tools.agent_enabled.permit().unwrap())).unwrap();
-    assert!(shot.images.is_empty() && !shot.notes.is_empty(), "{:?}", shot.notes);
-    assert!(shot.notes.iter().all(|n| tells_a_switch(n).is_none()), "{:?}", shot.notes);
+    let err = rt.block_on(tools.look(None, &tools.agent_enabled.permit().unwrap())).err().expect("Seeing off is an error").to_string();
+    assert!(err.starts_with("SEEING_OFF:") && err.contains("Seeing is switched off") && err.contains("off since ") && err.contains("only if he asks"), "{err}");
+    assert!(super::commands::SCREEN_OFF_NOTE.contains("Seeing is switched off"));
 }
 
 /// [n23-menu] Seeing off stops only the screen: the sources stay open, finals are still transcribed, decided and

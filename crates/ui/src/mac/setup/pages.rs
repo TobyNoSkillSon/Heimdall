@@ -75,6 +75,25 @@ impl Frame {
         Self { view: Retained::into_super(doc.clone()), doc, scroll: None }
     }
 
+    /// The part of `doc` on screen now (flipped: y from the top).
+    pub(super) fn visible(&self) -> objc2_foundation::NSRect {
+        match &self.scroll {
+            Some(scroll) => scroll.documentVisibleRect(),
+            None => self.doc.bounds(),
+        }
+    }
+
+    /// Scrolls (no animation) just enough that `doc` down to `bottom` and its padding is on screen.
+    pub(super) fn reveal(&self, bottom: f64) {
+        let Some(scroll) = &self.scroll else { return };
+        let seen = scroll.documentVisibleRect();
+        let end = (bottom + 16.0).min(self.doc.frame().size.height);
+        if end <= seen.origin.y + seen.size.height + 0.5 { return; }
+        let clip = scroll.contentView();
+        clip.scrollToPoint(NSPoint::new(seen.origin.x, (end - seen.size.height).max(0.0)));
+        scroll.reflectScrolledClipView(&clip);
+    }
+
     /// The scrolled content's height: its last element's bottom and the page's bottom padding.
     pub(super) fn set_height(&self, bottom: f64) {
         if self.scroll.is_none() {

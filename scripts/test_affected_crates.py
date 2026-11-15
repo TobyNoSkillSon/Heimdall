@@ -43,12 +43,21 @@ class Selection(unittest.TestCase):
 
     def test_lab_reaches_only_the_crates_naming_its_fixtures(self):
         self.assertEqual(pick("lab/some-experiment/run.log"), set())
-        self.assertIn("speak", pick("lab/phonon/voice.json"))
+        self.assertIn("speak", pick("lab/word-check-1027/takes.jsonl"))  # crates/speak/tests/word_check_takes.rs
         self.assertIn("app", pick("lab/goals/mock-runner.py"))
         self.assertIn("ui", pick("lab/ui-renders/personalise/test-mark.svg"))
 
     def test_a_tasks_brief_selects_nothing(self):
         self.assertEqual(pick("BRIEF.md", "COORD.md"), set())
+
+    def test_agent_worktrees_and_research_notes_select_nothing(self):
+        # Untracked in the main checkout (13 Nov): they made every --change run there select ALL.
+        self.assertEqual(pick(".claude/worktrees/cn-app/crates/app/src/main.rs", ".claude/settings.local.json",
+                              "research/notes.md"), set())
+
+    def test_the_standalone_ming_crates_select_nothing(self):
+        # Their own workspace since 14 Nov; nothing in Heimdall's reads them.
+        self.assertEqual(pick("crates/ming-tts/src/lib.rs", "crates/ming-arsenal-runner/Cargo.toml"), set())
 
     def test_a_moved_file_counts_its_old_place_too(self):
         # git reports a rename under its new name only; a fixture moved out of a crate must still select that crate.

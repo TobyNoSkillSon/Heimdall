@@ -73,14 +73,6 @@ impl Pipeline {
     pub fn runtime_settings_value(&self) -> ui::RuntimeSettings {
         ui::RuntimeSettings {
             dry_run: self.menu_agent_off(),
-            archive_format: match self.settings.archive_format {
-                settings::ArchiveFormat::NativeLossless => 0,
-                settings::ArchiveFormat::Flac24 => 1,
-                settings::ArchiveFormat::Flac16kMono => 2,
-            },
-            archive_choice_pending: self.settings.archive_choice_pending,
-            retention_days: self.settings.retention_days,
-            archive_status: self.disk_status.lock().unwrap().clone(),
             screen: self.settings.screen.ui(),
             seeing: !self.settings.screen_off,
             pending_reload: self.pending_reload.keys().cloned().collect(),
@@ -103,7 +95,7 @@ impl Pipeline {
             task_models: self.settings.task_models.iter().filter_map(|m| m.ui()).collect(),
             background_off: crate::background_model::off_tasks(&self.settings.background_off),
             islands_shown: !self.settings.islands_hidden,
-            islands_on_streams: self.settings.islands_on_streams, agent_relay: self.settings.agent_relay,
+            islands_on_streams: self.settings.islands_on_streams, computer_control: self.settings.computer_control, islands_display: self.settings.islands_display_lock(), agent_relay: self.settings.agent_relay,
             agent_relay_model: self.settings.agent_relay_model.clone(), agent_relay_account: self.settings.agent_relay_account.clone(), engine_added: self.settings.engine_added,
             relay_added: self.settings.relay_added || self.settings.agent_relay, collapsed: self.settings.collapsed_sections() }
     }
@@ -220,7 +212,18 @@ impl Pipeline {
         self.accept_file_stop(file);
         next.dry_run = self.tools.agent_enabled.stopped_for(StopReason::Agent);
         next.paused = self.tools.stopped_for(StopReason::Heimdall);
-        self.apply_menu_settings(next)?;
+        let kept_off = computer_from_file(&self.settings, &mut next);
+        self.applying_file = true;
+        let applied = self.apply_menu_settings(next);
+        self.applying_file = false;
+        applied?;
+        if !kept_off.is_empty() {
+            eprintln!("settings: settings.json turned on {}; kept off: only User's Control Apps click or the settings tool with his words turns it on", kept_off.join(" and "));
+            crate::diagnostics::record(&self.evidence, "settings_file", "heimdall:settings", serde_json::json!({"event":"computer_kept_off","keys":kept_off}));
+            // The file is rewritten with the value in force, so a relaunch does not take the edit either.
+            self.save_or_note();
+            return Ok(());
+        }
         // A value the latch did not take is rewritten, so relaunch starts from the effective intent.
         // A failed rewrite is retried by `persist_settings`; the settings above are applied either way.
         if (self.settings.dry_run, self.settings.paused) != file { self.save_or_note(); }
@@ -302,6 +305,7 @@ impl Pipeline {
     /// Stop fields only follow the latch here; this path never changes it.
     pub fn apply_menu_settings(&mut self, mut next: Settings) -> Result<()> {
         next.validate()?;
+        heimdall_archive::rerank::set_candidates(next.memory_rerank);
         // A removed selection leaves nothing chosen (never another model). The agent's model and the engine are
         // independent (30 Oct): a pick in Agent ▸ Model never runs or stops the engine; the Engine tile and section do.
         next.normalize_agent_model();
@@ -315,7 +319,6 @@ impl Pipeline {
         if self.agent_preflight_pending.is_some() {
             next.dry_run = true;
         }
-        next.normalize_archive();
         next.screen.normalize();
         let old = self.settings.clone();
         if old.launch_at_login != next.launch_at_login {
@@ -330,7 +333,7 @@ impl Pipeline {
         let was = decide::precision::Pick::new(old.decider_model, old.decider_precision);
         if was != self.decider_pick() { self.decider_pick_changed(was); }
         self.tools.archive_floor.store(self.settings.free_space_floor_bytes, Ordering::Release);
-        self.tools.screen_off.store(self.settings.screen_off, Ordering::Release);
+        self.tools.set_screen_off(self.settings.screen_off, false);
         self.tools.voice_speed.store(self.settings.voice_speed_percent, Ordering::Release);
         if old.speech_voice != self.settings.speech_voice { self.tools.speech_voices.set_choice(self.settings.speech_voice.clone()); } // night 1022 menu
         // Speaking follows its own switch only: with Listening off the agent still talks.
@@ -341,6 +344,14 @@ impl Pipeline {
         if old.islands_hidden != self.settings.islands_hidden { crate::islands::visibility::set(self.settings.islands_hidden) }
         self.tools.speech_policy.set_echo_cancel_off(self.settings.echo_cancel_off); // echo guard (23 Oct)
         crate::islands::streams::set(self.settings.islands_on_streams); // Show Islands on Streams: the floating islands
+        // Control Apps: the computer tool reads this switch on every call. Turned on without Accessibility, macOS asks
+        // (its own prompt) once; nothing asks while it stays off.
+        heimdall_computer::gate::set_enabled(self.settings.computer_control);
+        heimdall_computer::gate::set_clicks(self.settings.computer_clicks);
+        if self.settings.computer_control && !old.computer_control && !heimdall_computer::trusted() && !cfg!(test) {
+            heimdall_computer::request_access();
+        }
+        if old.islands_display != self.settings.islands_display { crate::islands::display::set(self.settings.islands_display_lock()) } // Islands Display (night 1107)
         if !self.settings.speak_replies && self.settings.drama3_residency == "speaking" && !self.tools.sample_holds_jarvis() {self.tools.drama3.stop();}
         if old.tts_backend != self.settings.tts_backend {
             self.tools.shutdown();
@@ -353,11 +364,7 @@ impl Pipeline {
                 if let Err(e) = result { self.settings_result("Transcription Backend", Some(format!("{e:#}"))); }
             }
         }
-        if old.speakers_backend != self.settings.speakers_backend {
-            for d in self.discord.values() { d.actor.send(crate::speakers_runtime::Work::Backend(self.settings.speakers_backend.clone()))?; }
-        }
-        if old.agent_model != self.settings.agent_model || old.api_models != self.settings.api_models
-            || (old.anthropic_credit_usd, old.anthropic_credit_day) != (self.settings.anthropic_credit_usd, self.settings.anthropic_credit_day) {
+        if old.agent_model != self.settings.agent_model || old.api_models != self.settings.api_models {
             self.tools.api.set_settings(&self.settings);
         }
         // The selected model's own settings (its context slider) are Pi's configuration too; its thinking level is not
@@ -377,7 +384,22 @@ impl Pipeline {
         if old.dry_run != self.settings.dry_run || old.agent_model != self.settings.agent_model || model_changed || old.agent_relay != self.settings.agent_relay
             || (self.settings.agent_relay && (old.agent_relay_model != self.settings.agent_relay_model || old.agent_relay_account != self.settings.agent_relay_account)) {
             self.tools.interrupt();
+            // A switch the user asked for is confirmed once by the agent that completes it (bug note 2026-11-10T06-19-44):
+            // the relay's first message says so (set before the restart, whose start builds it); the built-in agent
+            // gets a wake right after its start.
+            let switched = switch_label(&old, &self.settings);
+            // Review 1111: the user's own change is a menu click; the agent's settings tool and a settings.json edit are not.
+            let by_owner = switched.is_some() && !self.applying_file && !crate::settings_tool::take_agent_set();
+            if let Some((true, what)) = &switched { self.tools.emergency.switch_requested(what.clone(), by_owner); }
             let result = self.restart_agent();
+            if let (Ok(()), Some((false, what))) = (&result, switched) {
+                let tools = self.tools.clone();
+                // Off this thread: the notice waits for the supervisor, which is starting the new agent.
+                std::thread::spawn(move || {
+                    let sent = tools.agent_enabled.permit().and_then(|permit| tools.notice(format!("{}{}", agent::notice::SWITCH_DONE, agent::now_ms()), agent::notice::switch_done_message(&what, by_owner), &permit));
+                    if let Err(e) = sent { eprintln!("agent: the switch confirmation was not queued: {e:#}"); }
+                });
+            }
             // Agent back on: a first-run greeting that waited for it goes now (setup_wizard.rs).
             if result.is_ok() && self.settings.first_run_greeting_due {
                 if let Some(agent) = self.agent.as_ref() { let _ = agent.barrier(); }
@@ -409,7 +431,8 @@ impl Pipeline {
         self.ui(ui::UiUpdate::Settings(self.ui_settings_value()));
         self.runtime_settings_ui();
         // Applied is applied: a journal error (writer down, below the disk floor) must not skip the caller's save.
-        if let Err(e) = self.index.event("settings_applied", "heimdall", capture::host_now_ns(), &serde_json::json!({"settings":self.settings,"pending":self.pending_reload.keys().collect::<Vec<_>>()})) {
+        if let Err(e) = self.index.event("settings_applied", "heimdall", capture::host_now_ns(), &serde_json::json!({"settings":self.settings,"pending":self.pending_reload.keys().collect::<Vec<_>>(),
+            "from":if self.applying_file { "settings.json" } else { "Heimdall" }})) {
             eprintln!("settings: applied, journal entry failed: {e:#}");
         }
         Ok(())
@@ -442,14 +465,22 @@ impl Pipeline {
             relay_models,
             relay_accounts,
             data: self.data.clone(),
-            recent_owner: {
-                let snapshot = self.tools.send_context.lock().unwrap().snapshot();
-                let lines = snapshot.turns.iter().chain(&snapshot.pending).filter(|t| t.speaker.starts_with(decide::names::USER_LABEL));
-                let mut lines: Vec<String> = lines.map(|t| t.text.clone()).collect();
-                lines.drain(..lines.len().saturating_sub(30));
-                lines
-            },
+            recent_user: self.tools.recent_user_lines(),
         }
+    }
+    /// The phone's copy of the menu (remote_settings.rs): a new `settings` frame when a value it shows changed.
+    pub fn phone_settings_tick(&self) {
+        if crate::edition::PUBLIC { return; }
+        crate::remote_settings::tick(
+            || {
+                let s = &self.settings;
+                format!("{}|{}|{}|{}|{}|{:?}|{}|{}|{}|{}|{}|{:?}|{}", s.voice_speed_percent, s.speak_replies, s.screen_off, s.wake_sound, s.islands_hidden, s.agent_model,
+                    s.engine_model, s.agent_relay, s.api_models.len(), self.menu_agent_off(), self.tools.stopped_for(agent::delivery::StopReason::Heimdall),
+                    self.tools.speech_voices.choice(), self.tools.voice_now())
+            },
+            || self.settings_view(),
+            || self.tools.voice_now(),
+        );
     }
     /// The agent turned itself off (or the engine under it) with the user's words: kept in the evidence and the log.
     pub fn record_agent_off(&self, key: &str, words: &str) {
@@ -476,7 +507,7 @@ impl Pipeline {
         Ok(())
     }
     /// The agent restarts whatever Listening says: Listening off never stops it.
-    pub(super) fn restart_agent(&mut self) -> Result<()> {
+    pub(crate) fn restart_agent(&mut self) -> Result<()> {
         if self.agent.as_ref().is_some_and(AgentRuntime::is_running) {
             self.agent
                 .as_ref()
@@ -493,5 +524,76 @@ impl Pipeline {
             )?);
         }
         Ok(())
+    }
+}
+
+/// A settings.json edit never turns Control Apps (`computer_control`) or its pointer clicks (`computer_clicks`) on: any
+/// shell can write that file, and the deny list does not judge writes to it, so the edit would skip the `owner_asked`
+/// check. Only the user's click on Control Apps or the `settings` tool with his words turns them on; the file may turn them
+/// off. Returns the keys kept off (`next` then holds the value in force).
+pub(crate) fn computer_from_file(now: &Settings, next: &mut Settings) -> Vec<&'static str> {
+    let mut kept = vec![];
+    if next.computer_control && !now.computer_control {
+        next.computer_control = false;
+        kept.push("computer_control");
+    }
+    if next.computer_clicks && !now.computer_clicks {
+        next.computer_clicks = false;
+        kept.push("computer_clicks");
+    }
+    kept
+}
+
+/// The switch a settings change makes that the agent must confirm (bug note 2026-11-10T06-19-44): `(true, what)` when
+/// the relay completes it (relay mode on, or another relay model or account), `(false, what)` when the built-in agent
+/// does (relay mode off, or another model). `what` names the model or account it now runs on. Agent on or off, or a
+/// change while the agent is off, is no switch.
+pub(crate) fn switch_label(old: &Settings, new: &Settings) -> Option<(bool, String)> {
+    if old.dry_run || new.dry_run { return None; }
+    let model = |s: &Settings| match &s.agent_model {
+        agent::provider::AgentModel::Local => "the local model on this Mac".to_string(),
+        agent::provider::AgentModel::Api { id, .. } => s.selected_api_model().map(|m| m.name.trim()).filter(|n| !n.is_empty()).unwrap_or(id).to_string(),
+        agent::provider::AgentModel::Unchosen => "no model".to_string(),
+    };
+    if new.agent_relay {
+        let moved = old.agent_relay_model != new.agent_relay_model || old.agent_relay_account != new.agent_relay_account;
+        if old.agent_relay && !moved { return None; }
+        let m = new.agent_relay_model.as_deref().unwrap_or("its default Claude model");
+        let account = new.agent_relay_account.as_deref().map(|a| format!(" on the {a} account")).unwrap_or_default();
+        return Some((true, format!("{m}{account} (Claude via T3)")));
+    }
+    if old.agent_relay { return Some((false, format!("your built-in agent on {}", model(new)))); }
+    (old.agent_model != new.agent_model).then(|| (false, model(new)))
+}
+
+#[cfg(test)]
+mod switch_label_tests {
+    use super::*;
+    /// Bug note 2026-11-10T06-19-44: which settings changes are a switch the agent confirms, and who confirms it.
+    #[test]
+    fn a_requested_switch_is_named_and_a_plain_restart_is_not() {
+        let base = Settings { dry_run: false, agent_relay: true, agent_relay_account: Some("claudeAgent_2".into()), ..Default::default() };
+        // 10 Nov 06:18: the relay moved to the user's main account.
+        let moved = Settings { agent_relay_account: Some("claudeAgent".into()), ..base.clone() };
+        assert_eq!(switch_label(&base, &moved), Some((true, "its default Claude model on the claudeAgent account (Claude via T3)".into())));
+        let model = Settings { agent_relay_model: Some("claude-opus-5-5".into()), ..moved.clone() };
+        assert_eq!(switch_label(&moved, &model).unwrap().1, "claude-opus-5-5 on the claudeAgent account (Claude via T3)");
+        // Relay mode on, and back off to the built-in agent.
+        let pi = Settings { agent_relay: false, ..base.clone() };
+        assert!(switch_label(&pi, &base).is_some_and(|(relay, _)| relay));
+        assert!(switch_label(&base, &pi).is_some_and(|(relay, what)| !relay && what.starts_with("your built-in agent on ")));
+        // Another built-in model.
+        let other = Settings { agent_model: agent::provider::AgentModel::Api { provider: "anthropic".into(), id: "claude-opus-5-5".into() }, ..pi.clone() };
+        // Named as the menu names it when the model is added, else by its id.
+        assert!(switch_label(&pi, &other).is_some_and(|(relay, what)| !relay && (what == "claude-opus-5-5" || what.contains("Opus"))));
+        // Nothing switched, Agent on or off, or a change while the agent is off: the quiet rule stands.
+        assert_eq!(switch_label(&base, &base), None);
+        assert_eq!(switch_label(&pi, &Settings { dry_run: true, ..other.clone() }), None);
+        assert_eq!(switch_label(&Settings { dry_run: true, ..pi.clone() }, &other), None);
+        assert!(agent::notice::switch_done_message("claude-opus-5-5", true).contains("Confirm it to them once"));
+        // Review 1111: the agent's own change is confirmed without saying the user asked.
+        let own = agent::notice::switch_done_message("claude-opus-5-5", false);
+        assert!(own.contains("Confirm it to them once") && !own.contains("The user asked"), "{own}");
+        assert!(agent::notice::restart_message(0).contains("Don't do anything unless the user talks to you"), "a plain restart stays quiet");
     }
 }

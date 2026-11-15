@@ -391,6 +391,16 @@ fn the_download_lock_pins_the_bundled_files_from_their_official_repos() {
     let extra = include_str!("../../../scripts/extra-models.lock.json");
     let night = &lock.group(NIGHT).unwrap().files[0];
     assert!(extra.contains(&night.sha256) && night.url.starts_with("https://huggingface.co/ipsilondev/MossFormer2-SS-16K-ONNX/resolve/abd8b1268dfded6b0e972ddae4c2dd6a3faf4f8a/"));
+    // The reranker: Qwen's published files at rev e61197ed, the SHA-256s the personal bundle ships, the weights last.
+    let reranker = lock.group(RERANKER).unwrap();
+    assert_eq!(reranker.files.len(), 4);
+    assert!(reranker.files.last().unwrap().path.ends_with("model.safetensors"), "the weights land last: the reranker starts on them");
+    for f in &reranker.files {
+        assert!(extra.contains(&f.sha256), "{}", f.path);
+        assert!(f.path.starts_with(&format!("{}/", heimdall_archive::rerank::MODEL_DIR)), "{}", f.path);
+        assert!(f.url.starts_with("https://huggingface.co/Qwen/Qwen3-Reranker-0.6B/resolve/e61197ed45024b0ed8a2d74b80b4d909f1255473/"));
+    }
+    assert!(!extra.contains("personal_only"), "the reranker is a first-run download in the public edition");
     let bundle = include_str!("../../../scripts/bundle_models.py");
     for f in &lock.group(SPEAKERS).unwrap().files {
         assert!(bundle.contains(&f.sha256), "{} is the bundled speaker model", f.path);
@@ -453,4 +463,14 @@ fn a_test_mirror_replaces_only_the_origin_and_keeps_every_checksum() {
     let dir = tempfile::tempdir().unwrap();
     let err = fetch_file(&client(), dir.path(), &row("p/a.bin", &data), &Options { origin: mirror(Some(server.origin.clone())), ..options(&server) }, &mut |_| {}, &|| false).unwrap_err();
     assert!(format!("{err:#}").contains(CHECKSUM));
+}
+
+/// VM run 14 Nov: Getting ready showed the reranker's row as "Qwen3-Reranker-0.6B". Its row says what it is for.
+#[test]
+fn the_rerankers_row_says_memory_ranking_not_the_model_name() {
+    let r = Row { id: RERANKER.into(), title: "Qwen3-Reranker-0.6B".into(), done: 0, total: 1_203_021_367, state: State::Waiting };
+    let v = view_row(r);
+    assert_eq!((v.title.as_str(), v.symbol.as_str(), v.detail), ("Memory ranking", "list.number", None));
+    let p = view_row(Row { id: PARAKEET.into(), title: "Parakeet".into(), done: 1, total: 1, state: State::Done });
+    assert_eq!(p.title, "Parakeet");
 }

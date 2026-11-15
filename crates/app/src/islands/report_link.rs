@@ -84,7 +84,7 @@ fn paths(s: &str) -> Vec<(usize, usize)> {
 }
 
 /// `~/` expanded; `%xx` decoded (only `file://` paths carry them, and a real `%` in a path is rare).
-fn absolute(p: &str) -> String {
+pub(crate) fn absolute(p: &str) -> String {
     let p = match p.strip_prefix("~/") {
         Some(rest) => format!("{}/{rest}", std::env::var("HOME").unwrap_or_default().trim_end_matches('/')),
         None => p.to_string(),

@@ -4,11 +4,6 @@ use listen::{
     features::WhisperFeatures,
     onnx::{Silero, SmartTurn, VadState},
 };
-use ort::{
-    ep::{self, ExecutionProvider},
-    session::{builder::GraphOptimizationLevel, Session},
-    value::Tensor,
-};
 use serde_json::{json, Value};
 use std::{
     io::{self, BufRead, Write},
@@ -24,93 +19,17 @@ fn main() -> Result<()> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let args: Vec<_> = std::env::args().collect();
     let mode = args.get(1).map(String::as_str).unwrap_or("vad");
-    if mode == "providers" {
-        println!(
-            "{}",
-            json!({"coreml":ep::CoreML::default().is_available()?,"cpu":ep::CPU::default().is_available()?})
-        );
-        return Ok(());
-    }
     let path = args
         .get(2)
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join("models/smart-turn/owner-turn.onnx"));
     let backend = args.get(3).map(String::as_str).unwrap_or("cpu");
-    let accelerated = matches!(backend, "coreml-gpu" | "coreml-ane");
-    // Directly converted ML Program (.mlmodelc): mlmodel-cpu|gpu|all|ane.
-    let mut mlmodel = match backend.strip_prefix("mlmodel-") {
-        Some(u) => Some(listen::onnx::CoreMlTurn::load(
-            &path,
-            match u {
-                "cpu" => 0,
-                "gpu" => 1,
-                "all" => 2,
-                "ane" => 3,
-                _ => anyhow::bail!("unknown Core ML units"),
-            },
-        )?),
-        None => None,
-    };
-    let cpu_threads = backend
-        .strip_prefix("cpu-")
-        .map(str::parse::<usize>)
-        .transpose()?
-        .unwrap_or(1);
-    ensure!((1..=4).contains(&cpu_threads), "CPU thread bounds");
-    let direct_cpu = mode == "turn" && cpu_threads > 1;
-    let specialized =
-        mode == "vad" && path.file_name().and_then(|x| x.to_str()) == Some("silero-16k.onnx");
-    let mut ep_session = if accelerated || specialized || direct_cpu {
-        if accelerated {
-            ensure!(
-                ep::CoreML::default().is_available()?,
-                "CoreML EP unavailable in linked runtime"
-            );
-        }
-        let unit = if backend == "coreml-gpu" {
-            ep::coreml::ComputeUnits::CPUAndGPU
-        } else {
-            ep::coreml::ComputeUnits::CPUAndNeuralEngine
-        };
-        let model = if mode == "vad" && !specialized {
-            root.join("models/silero/silero_vad.onnx")
-        } else {
-            path.clone()
-        };
-        let mut builder = Session::builder()?;
-        macro_rules! option {
-            ($call:expr) => {
-                $call.map_err(|e| anyhow::anyhow!(e.to_string()))?
-            };
-        }
-        builder = option!(builder.with_intra_threads(cpu_threads));
-        builder = option!(builder.with_inter_threads(1));
-        builder = option!(builder.with_no_environment_execution_providers());
-        builder = option!(builder.with_intra_op_spinning(false));
-        builder = option!(builder.with_inter_op_spinning(false));
-        builder = option!(builder.with_parallel_execution(false));
-        builder = option!(builder.with_optimization_level(GraphOptimizationLevel::Level3));
-        if accelerated {
-            builder = option!(builder.with_execution_providers([ep::CoreML::default()
-                .with_compute_units(unit)
-                .with_model_format(ep::coreml::ModelFormat::MLProgram)
-                .with_subgraphs(true)
-                .with_profile_compute_plan(
-                    std::env::var("HEIMDALL_SMALL_PROBE_PLAN").as_deref() == Ok("1")
-                )
-                .build()
-                .error_on_failure()]));
-        }
-        Some(builder.commit_from_file(model)?)
-    } else {
-        None
-    };
-    let mut vad = if mode == "vad" && !accelerated && !specialized {
+    let mut vad = if mode == "vad" {
         Some(Silero::load(&root.join("models/silero/silero_vad.onnx"))?)
     } else {
         None
     };
-    let mut turn = if mode == "turn" && !accelerated && !direct_cpu && mlmodel.is_none() {
+    let mut turn = if mode == "turn" {
         Some(if backend == "default" {
             SmartTurn::load(&path)?
         } else {
@@ -194,11 +113,7 @@ fn main() -> Result<()> {
                 let end = end.as_u64().unwrap_or(0) as usize;
                 let mut audio = full[..end.min(full.len())].to_vec();
                 audio.resize(end, 0.0);
-                probabilities.push(if let Some(m) = &mut mlmodel {
-                    m.probability(&frontend.extract(&audio))?
-                } else {
-                    turn.as_mut().expect("turn backend").probability(&audio)?
-                });
+                probabilities.push(turn.as_mut().expect("turn backend").probability(&audio)?);
             }
             println!("{}", json!({ "probabilities": probabilities }));
             io::stdout().flush()?;
@@ -209,8 +124,6 @@ fn main() -> Result<()> {
         let audio = &full[..(full.len() as f64 * fraction) as usize];
         ensure!(audio.len() >= 512, "audio too short");
         let mut state = VadState::default();
-        let mut hidden = vec![0_f32; 256];
-        let mut context = [0_f32; 64];
         let u0 = usage()?;
         let start = Instant::now();
         let mut times = Vec::with_capacity(count);
@@ -232,32 +145,11 @@ fn main() -> Result<()> {
                 "vad" => {
                     let off = i * 512 % (audio.len() / 512 * 512);
                     let block: &[f32; 512] = audio[off..off + 512].try_into()?;
-                    let p = if let Some(s) = &mut ep_session {
-                        let mut input = context.to_vec();
-                        input.extend_from_slice(block);
-                        let out = if specialized {
-                            s.run(ort::inputs!["input"=>Tensor::from_array(([1,576],input))?,"hidden"=>Tensor::from_array(([2,1,128],hidden.clone()))?])?
-                        } else {
-                            s.run(ort::inputs!["input"=>Tensor::from_array(([1,576],input))?,"state"=>Tensor::from_array(([2,1,128],hidden.clone()))?,"sr"=>Tensor::from_array((Vec::<usize>::new(),vec![16000_i64]))?])?
-                        };
-                        hidden.copy_from_slice(out["stateN"].try_extract_tensor::<f32>()?.1);
-                        context.copy_from_slice(&block[448..]);
-                        out["output"].try_extract_tensor::<f32>()?.1[0]
-                    } else {
-                        vad.as_mut().unwrap().probability(block, &mut state)?
-                    };
+                    let p = vad.as_mut().unwrap().probability(block, &mut state)?;
                     probabilities.push(p);
                 }
                 "turn" => {
-                    let p = if let Some(m) = &mut mlmodel {
-                        m.probability(&frontend.extract(audio))?
-                    } else if let Some(s) = &mut ep_session {
-                        let features = frontend.extract(audio);
-                        let out = s.run(ort::inputs!["input_features"=>Tensor::from_array(([1,80,800],features))?])?;
-                        out[0].try_extract_tensor::<f32>()?.1[0]
-                    } else {
-                        turn.as_mut().unwrap().probability(audio)?
-                    };
+                    let p = turn.as_mut().unwrap().probability(audio)?;
                     probabilities.push(p);
                 }
                 "features" => features = frontend.extract(audio),

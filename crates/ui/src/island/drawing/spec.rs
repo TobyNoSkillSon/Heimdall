@@ -80,14 +80,14 @@ pub const DEFAULT_HOLD: f64 = 2.5;
 const COMMANDS: &str = "size, circle, box, underline, arrow, path, hold, display";
 
 /// What the agent is told, verbatim: the tool description and the instruction to act without deliberating.
-pub const AGENT_GUIDE: &str = "Draw on User's screen to show him something. Do not deliberate: look at the screenshot \
+pub const AGENT_GUIDE: &str = "Draw on {user}'s screen to show them something. Do not deliberate: look at the screenshot \
 and draw at once; approximate is fine. One command per line, coordinates in the screenshot's pixels from its top-left:
 size W H  (the screenshot's size; first)
 circle|box|underline|arrow X Y W H \"label\"  (the target's box; arrow also takes a point X Y)
 path <SVG path: M L H V Q C Z> \"label\"
 Labels are optional, 1-3 words, never the target's own text. Optional after a label: left|right|above|below. \
 Optional after an arrow: from X Y. Optional lines: hold SECONDS, display N (1 is the main display; default: the one \
-User is on).";
+{user} is on).";
 
 /// Splits a line into words, keeping a "quoted label" as one word (marked by its leading quote).
 fn words(text: &str) -> Result<Vec<String>, String> {

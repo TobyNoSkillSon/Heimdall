@@ -4,7 +4,7 @@
   "max_memory": "48G",
   "max_cache_disk": "100G",
   "default_model": "qwen3.8-27b",
-  "ram_formula": "ram_bytes (derived, not measured): GGUF weights + vision projector (if any) + DFlash2 draft + int8 KV cache bytes per token x context (262,144) + 1 GB (1e9) runtime overhead. Source: Assistant/Plans/heimdall-engine-models/catalog.json, sizes from Hugging Face file metadata 2026-10-28.",
+  "ram_formula": "ram_bytes (derived, not measured): GGUF weights + vision projector (if any) + DFlash2 draft + int8 KV cache bytes per token x context (262,144) + 1 GB (1e9) runtime overhead. Sizes from Hugging Face file metadata 2026-10-28.",
   "models": [
     {
       "id": "qwen3.8-27b",

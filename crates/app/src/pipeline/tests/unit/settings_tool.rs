@@ -175,14 +175,14 @@
         let mut r = rig();
         r.a.tools.relay_catalog.set(
             vec![ui::RelayModel { id: "claude-opus-5-5".into(), name: "Claude Opus 5.5".into() }, ui::RelayModel { id: "claude-sonnet-5-5".into(), name: "Claude Sonnet 5.5".into() }],
-            vec![ui::RelayAccount { id: "claudeAgent".into(), name: "Claude".into() }, ui::RelayAccount { id: "claudeAgent_claude_code_2".into(), name: "Claude (work)".into() }]);
+            vec![ui::RelayAccount { id: "claudeAgent".into(), name: "Claude".into() }, ui::RelayAccount { id: "claudeAgent_2".into(), name: "Claude (work)".into() }]);
         let model = r.a.settings.agent_model.clone();
         r.set("agent_relay", None, json!(true)).unwrap();
         assert_eq!((r.get("agent_relay", None), r.menu().agent_relay, r.a.settings.agent_model == model), (json!(true), true, true));
         r.set("agent_relay_model", None, json!("Sonnet")).unwrap();
         assert_eq!((r.get("agent_relay_model", None), r.menu().agent_relay_model.as_deref()), (json!("claude-sonnet-5-5"), Some("claude-sonnet-5-5")));
-        r.set("agent_relay_account", None, json!("claudeAgent_claude_code_2")).unwrap();
-        assert_eq!((r.get("agent_relay_account", None), r.menu().agent_relay_account.as_deref()), (json!("claudeAgent_claude_code_2"), Some("claudeAgent_claude_code_2")));
+        r.set("agent_relay_account", None, json!("claudeAgent_2")).unwrap();
+        assert_eq!((r.get("agent_relay_account", None), r.menu().agent_relay_account.as_deref()), (json!("claudeAgent_2"), Some("claudeAgent_2")));
         r.set("agent_relay_account", None, json!("automatic")).unwrap();
         assert_eq!((r.get("agent_relay_account", None), r.a.settings.agent_relay_account.clone()), (json!("automatic"), None));
         let before = r.a.settings.clone();

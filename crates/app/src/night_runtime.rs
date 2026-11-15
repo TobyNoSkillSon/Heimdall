@@ -3,33 +3,20 @@ use anyhow::{Context, Result};
 use std::{
     collections::HashSet,
     path::PathBuf,
-    process::{Child, Command, Stdio},
+    process::Child,
     sync::{Arc, Condvar, Mutex},
     thread,
     time::{Duration, Instant},
 };
-pub const SPEECH_QUIET: Duration = Duration::from_secs(120);
+/// The speech quiet the scheduler tests wait out.
+#[cfg(test)]
+const SPEECH_QUIET: Duration = Duration::from_secs(120);
 pub const POLL: Duration = Duration::from_millis(250);
 
 pub fn child_mode() -> Result<bool> {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("--speech-split-helper") => { heimdall_night::correction::helper(PathBuf::from(args.next().context("correction models")?))?; }
-        Some("worker") => {
-            heimdall_night::gate::background()?;
-            std::env::set_var("HEIMDALL_SPEAKERS_METAL", "0");
-            heimdall_night::job::worker(&PathBuf::from(args.next().context("night request")?))?;
-        }
-        Some("--night-process") => {
-            heimdall_night::gate::background()?;
-            std::env::set_var("HEIMDALL_SPEAKERS_METAL", "0");
-            let archive = PathBuf::from(args.next().context("night archive")?);
-            let models = PathBuf::from(args.next().context("night models")?);
-            let output = PathBuf::from(args.next().context("night output")?);
-            let enrollments = args.next().map(PathBuf::from);
-            let outcome = heimdall_night::job::process(&archive, &models, &output, enrollments.as_deref())?;
-            if outcome.pending { std::process::exit(76); }
-        }
         _ => return Ok(false),
     }
     Ok(true)
@@ -88,49 +75,6 @@ pub struct Scheduler {
     thread: Option<thread::JoinHandle<()>>,
 }
 impl Scheduler {
-    pub fn start(
-        data: PathBuf,
-        models: PathBuf,
-        floor: Arc<std::sync::atomic::AtomicU64>,
-    ) -> Result<Self> {
-        let output = data.join("night");
-        heimdall_night::storage::cleanup(&output)?;
-        crate::settings::private_dir(&output)?;
-        let floor_file = output.join("live-floor");
-        let mut previous = floor.load(std::sync::atomic::Ordering::Acquire);
-        crate::settings::private_write(&floor_file, previous.to_string().as_bytes())?;
-        let probe_file = floor_file.clone();
-        Self::start_managed(
-            move || {
-                let current = floor.load(std::sync::atomic::Ordering::Acquire);
-                if current != previous {
-                    crate::settings::private_write(&probe_file, current.to_string().as_bytes())?;
-                    previous = current;
-                    anyhow::bail!("disk floor changed; restart night job");
-                }
-                heimdall_night::gate::state()
-            },
-            move || {
-                use std::os::unix::process::CommandExt;
-                let mut cmd = Command::new(std::env::current_exe()?);
-                cmd.arg("--night-process")
-                    .arg(data.join("archive"))
-                    .arg(&models)
-                    .arg(data.join("night"));
-                let enrollments = data.join("speakers.json");
-                if enrollments.is_file() {
-                    cmd.arg(enrollments);
-                }
-                cmd.env("HEIMDALL_NIGHT_FLOOR_FILE", &floor_file);
-                cmd.process_group(0)
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::inherit());
-                Ok(cmd.spawn()?)
-            },
-            SPEECH_QUIET,
-            move || heimdall_night::storage::cleanup(&output),
-        )
-    }
     // Only explicit isolated diagnostics inject observations/shorten the quiet wait.
     pub(crate) fn start_with(
         probe: impl FnMut() -> Result<heimdall_night::gate::State> + Send + 'static,
@@ -268,6 +212,7 @@ impl Drop for Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
     fn wait(s: &Scheduler, running: bool) {
         let begin = Instant::now();
         while s.running() != running {

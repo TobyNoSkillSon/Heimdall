@@ -8,7 +8,7 @@
 //! - Who answers: a background job on the background model (Haiku 5.5 by default), through `background_call`: the
 //!   one-hour prompt cache, the $0.50 limit a run, the usage in the ledger. Its tools are read-only: `search_files`
 //!   (Spotlight, under his home, Library caches out) and `search_timeline` (the archive). It has no web access.
-//! - Output: `submit_suggestion` with `suggest: false` (silence, the usual answer) or one card of one to three questions.
+//! - Output: `submit_suggestion` with `suggest: false` (silence) or one card of one to three questions.
 //!   `verify` checks it in code. Every path it cites must come from a search in the same run, and a card that proposes
 //!   contacting anyone is refused.
 //! - Pacing (`Pacer`): one model call a minute, at most one card every three minutes, no repeat topic within two hours,
@@ -120,7 +120,7 @@ pub struct Line {
     pub speaker: String,
     pub text: String,
     /// The user's own voice (his microphone).
-    pub owner: bool,
+    pub user: bool,
 }
 
 /// The last `WINDOW_MS` of talk, at most `WINDOW_LINES` lines, oldest first.
@@ -138,18 +138,16 @@ impl Window {
             self.lines.pop_front();
         }
     }
+    #[cfg(test)]
     pub fn lines(&self) -> impl Iterator<Item = &Line> {
         self.lines.iter()
     }
     pub fn last(&self) -> Option<&Line> {
         self.lines.back()
     }
-    pub fn is_empty(&self) -> bool {
-        self.lines.is_empty()
-    }
     /// Someone other than the user spoke within `RECENT_MS` before `now`.
     pub fn others_talking(&self, now: u64) -> bool {
-        self.lines.iter().any(|l| !l.owner && l.at_ms + RECENT_MS >= now)
+        self.lines.iter().any(|l| !l.user && l.at_ms + RECENT_MS >= now)
     }
     /// The talk as the model reads it: `[HH:MM Speaker] words`, one line each.
     pub fn transcript(&self) -> String {
@@ -162,7 +160,7 @@ impl Window {
     /// Who is in the talk, in the order they first spoke (the user excluded).
     pub fn people(&self) -> Vec<String> {
         let mut names: Vec<String> = vec![];
-        for l in self.lines.iter().filter(|l| !l.owner && !l.speaker.is_empty()) {
+        for l in self.lines.iter().filter(|l| !l.user && !l.speaker.is_empty()) {
             if !names.contains(&l.speaker) {
                 names.push(l.speaker.clone());
             }
@@ -176,7 +174,7 @@ impl Window {
 /// or what something was. It never fires on a line to Heimdall, which the main agent answers.
 pub fn stub_suggest_now(w: &Window) -> bool {
     let Some(last) = w.last() else { return false };
-    if !last.owner || !w.others_talking(last.at_ms) {
+    if !last.user || !w.others_talking(last.at_ms) {
         return false;
     }
     let text = last.text.to_lowercase();
@@ -187,21 +185,15 @@ pub fn stub_suggest_now(w: &Window) -> bool {
 /// What a decision came to, for pacing and the log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    Shown,
     Picked,
     Dismissed,
-    Ignored,
-    Feedback,
 }
 
 impl Outcome {
     pub fn name(self) -> &'static str {
         match self {
-            Outcome::Shown => "shown",
             Outcome::Picked => "picked",
             Outcome::Dismissed => "dismissed",
-            Outcome::Ignored => "ignored",
-            Outcome::Feedback => "feedback",
         }
     }
 }
@@ -256,9 +248,9 @@ impl Pacer {
                     self.dismissed_in_row = 0;
                 }
             }
-            Outcome::Shown | Outcome::Ignored | Outcome::Feedback => {}
         }
     }
+    #[cfg(test)]
     pub fn paused(&self, now: u64) -> bool {
         now < self.paused_until_ms
     }
@@ -310,10 +302,13 @@ pub enum Verdict {
 
 /// The `submit_suggestion` input: the one answer, last.
 pub fn submit_schema() -> Value {
+    let user = user();
     json!({
         "type": "object",
         "properties": {
-            "suggest": {"type": "boolean", "description": "false: show nothing. This is the usual answer."},
+            // Night 1112 lane G: "This is the usual answer" stayed here when b036cf31 took the "most passes end silent"
+            // bias out of the prompt; on 11 Nov all 7 passes Decider V5 started in calls answered false.
+            "suggest": {"type": "boolean", "description": "false: show nothing."},
             "topic": {"type": "string", "description": "Two to six words naming the subject. Used to avoid repeats."},
             "questions": {
                 "type": "array",
@@ -322,7 +317,7 @@ pub fn submit_schema() -> Value {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "text": {"type": "string", "description": "One question User can answer with a click."},
+                        "text": {"type": "string", "description": format!("One question {user} can answer with a click.")},
                         "options": {
                             "type": "array",
                             "minItems": 2,
@@ -345,7 +340,7 @@ pub fn submit_schema() -> Value {
                     "additionalProperties": false
                 }
             },
-            "handoff": {"type": "string", "description": "What Heimdall should know to act on User's pick, at most 400 characters."}
+            "handoff": {"type": "string", "description": format!("What Heimdall should know to act on {user}'s pick, at most 400 characters.")}
         },
         "required": ["suggest", "topic", "questions", "found", "handoff"],
         "additionalProperties": false
@@ -358,15 +353,16 @@ fn words_schema() -> Value {
 
 /// The tools of a run: two read-only searches and the answer.
 pub fn tools() -> Vec<Tool> {
+    let user = user();
     vec![
         Tool {
             name: SEARCH_FILES,
-            description: "Search User's Mac for files, by name and contents, under his home folder (Spotlight). Returns up to 12 paths. Library caches are left out.",
+            description: interned(format!("Search {user}'s Mac for files, by name and contents, under his home folder (Spotlight). Returns up to 12 paths. Library caches are left out.")),
             schema: words_schema(),
         },
         Tool {
             name: SEARCH_TIMELINE,
-            description: "Search Heimdall's archive of what was said, User's and the people he talks with. Returns up to 8 matching lines with their times.",
+            description: interned(format!("Search Heimdall's archive of what was said, {user}'s and the people he talks with. Returns up to 8 matching lines with their times.")),
             schema: words_schema(),
         },
         Tool {
@@ -389,12 +385,45 @@ pub fn prompt(w: &Window, now: u64, known: &[String]) -> Prompt {
     if !known.is_empty() {
         p.stable(format!("People Heimdall knows by name: {}.\n\n", known.join(", ")));
     }
+    // The transcript labels the user's own microphone with the internal label (pipeline/utterances.rs), which the
+    // send words per edition (`agent::identity::for_agent`); the label named here is the one the model reads.
+    let user = user();
     p.push(format!(
-        "Now: {}. The talk below is the last ten minutes, oldest first. User is the one labelled User.\n<transcript>\n{}\n</transcript>\n\nDecide whether one card is worth showing User now. Then call {SUBMIT} once.",
+        "Now: {}. The talk below is the last ten minutes, oldest first. {} is the one labelled {}.\n<transcript>\n{}\n</transcript>\n\nDecide whether one card is worth showing {user} now. Then call {SUBMIT} once.",
         agent::clock::local_hm(now),
+        capitalised(&user),
+        agent::identity::sent_label(&agent::identity::current()),
         w.transcript()
     ));
     p
+}
+
+/// The user's name as Personalise sets it ("the user" by default, "the user" while none is chosen), for the strings that
+/// reach the model and the agent. Tests can set it for their own thread (`tests::USER`).
+fn user() -> String {
+    #[cfg(test)]
+    if let Some(name) = tests::USER.with(|u| u.borrow().clone()) {
+        return name;
+    }
+    crate::remote_presence::user_name()
+}
+
+/// `text` as the `&'static str` a `Tool` description is: one copy per distinct text, kept for the run (two per user name).
+fn interned(text: String) -> &'static str {
+    static SEEN: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    let mut seen = SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(t) = seen.iter().find(|t| **t == text) {
+        return t;
+    }
+    let t: &'static str = Box::leak(text.into_boxed_str());
+    seen.push(t);
+    t
+}
+
+/// `name` at the start of a sentence: "The user", "the user".
+fn capitalised(name: &str) -> String {
+    let mut chars = name.chars();
+    chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }
 
 /// Collapses whitespace and cuts to `max` characters.
@@ -410,26 +439,95 @@ fn is_person(w: &str) -> bool {
         || (w.chars().next().is_some_and(char::is_uppercase) && w.chars().skip(1).any(char::is_lowercase))
 }
 
+/// Words right before a reaching word that make it a noun ("on the call the user asked", "a text Priya sent"), not a verb.
+/// Night 1112 lane G review: a look-up card's handoff "On a call the user wondered whether…" read as "call the user".
+const NOUN_BEFORE: &[&str] = &["a", "an", "the", "this", "that", "our", "my", "his", "their", "your", "whose"];
+
+/// Words before "a"/"the" that place a reaching noun ("on a call", "during the call"), so the name after it is not
+/// the one being reached. Night 1112 fresh review: the noun rule alone let "Reply to the email Anna sent?" through.
+const PLACE_BEFORE: &[&str] = &["on", "in", "during", "after", "before", "from", "about", "of"];
+
+/// Verbs that answer someone ("Reply to the email Anna sent", "Answer the message Priya left", "Return the call Mom
+/// made"): like a send verb, a person within four words makes it contact, unless the word is a noun ("the answer").
+const ANSWER: &[&str] = &["reply", "answer", "respond", "return", "forward"];
+
 /// Whether a card's wording proposes contacting someone: a reaching verb with a person right after it, or a send
 /// verb with a person within four words. A safety net; the prompt says it too.
 pub fn proposes_contact(text: &str) -> bool {
     let words: Vec<&str> = text.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    let lowers: Vec<String> = words.iter().map(|w| w.to_lowercase()).collect();
     words.iter().enumerate().any(|(i, w)| {
         let lower = w.to_lowercase();
-        (REACH.contains(&lower.as_str()) && words.get(i + 1).is_some_and(|n| is_person(n)))
+        let after_article = i > 0 && NOUN_BEFORE.contains(&lowers[i - 1].as_str());
+        // A reaching word is a noun only where it is placed ("on a call") or looked up ("Find the text Priya sent"),
+        // and only when no answering verb came before it in the wording.
+        let placed = i > 1 && PLACE_BEFORE.contains(&lowers[i - 2].as_str());
+        let looked_up = lowers[..i].iter().any(|l| LOOK_UP.contains(&l.as_str()));
+        let answered = lowers[..i].iter().enumerate().any(|(j, l)| ANSWER.contains(&l.as_str()) && !(j > 0 && NOUN_BEFORE.contains(&lowers[j - 1].as_str())));
+        let noun = after_article && (placed || looked_up) && !answered;
+        (REACH.contains(&lower.as_str()) && !noun && words.get(i + 1).is_some_and(|n| is_person(n)))
             || (SEND.contains(&lower.as_str()) && words[i + 1..].iter().take(4).any(|n| is_person(n)))
+            || (ANSWER.contains(&lower.as_str()) && !after_article && words[i + 1..].iter().take(4).any(|n| is_person(n)))
             || (lower == "mail" && i > 0 && words[i - 1].eq_ignore_ascii_case("e") && words.get(i + 1).is_some_and(|n| is_person(n)))
     })
 }
 
+/// Words right before an outward verb that make it Heimdall's offer whatever came before ("Want me to delete…",
+/// "Shall I buy…", "Look up which files to delete", "See what we can remove").
+const OFFERED_BY: &[&str] = &["to", "i", "me", "ll", "let", "lets", "can", "could", "should", "shall", "will", "would", "please", "now", "just"];
+
+/// Words that open a look-up: an outward word after one of them in the same clause is what the look-up asks about
+/// ("Check how much we paid", "Look up what Poland did pay", "Did the chip transfer reach China?").
+const LOOK_UP: &[&str] = &["look", "check", "find", "search", "see", "research", "investigate", "compare", "how", "what", "which", "whether", "when", "where", "why", "who", "did", "does"];
+
+/// Words that start a new clause: a look-up before them no longer covers what follows ("Find the build and post it").
+const CLAUSE_BREAK: &[&str] = &["and", "then", "or", "but", "so", "also", "about", "if"];
+
 /// Whether a card's wording asks for an action outside a look-up (deleting, buying, installing, publishing).
+/// Review fix Blocker 1 (night 1111 fresh review): an outward word is an offer unless it is clearly a look-up's
+/// subject: a noun ("the purchase", "Huang's share") or inside a clause a look-up word opened ("Check how much we
+/// paid"). Clauses break at punctuation and at "and", "then", "or"; "to", "I", "can", "should" right before the word
+/// make it an offer even inside a look-up. Lane U's rule (only after 18 listed words) let "Yes, delete them", "Should
+/// we buy the drawings?" and "Okay, post it" through. Bug note 2026-11-05T02-32-17 item 2 still holds: the look-ups
+/// about what someone paid, sold or is worth (8 Nov 12:36:44 "Can you check how much did we pay for Abrams tanks",
+/// 9 Nov 15:00:00, 15:18:21) stay cards.
 pub fn acts_outward(text: &str) -> bool {
-    text.to_lowercase().split(|c: char| !c.is_alphanumeric()).any(|w| OUTWARD.contains(&w))
+    let lower = text.to_lowercase();
+    lower.split(|c: char| matches!(c, ',' | ';' | ':' | '.' | '!' | '?' | '\u{2014}' | '\u{2013}' | '(' | ')' | '\n')).any(|clause| {
+        let words: Vec<&str> = clause.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+        let mut looking = false;
+        words.iter().enumerate().any(|(i, w)| {
+            let before = i.checked_sub(1).map(|j| words[j]);
+            if CLAUSE_BREAK.contains(w) {
+                looking = false;
+            }
+            if LOOK_UP.contains(w) {
+                looking = true;
+            }
+            // Night 1111 second review B1: a noun ("the order", "the purchase") is a look-up's subject only inside a
+            // look-up clause; outside one, "Want me to place the order?" is an offer.
+            is_outward(w) && (before.is_some_and(|b| OFFERED_BY.contains(&b)) || !looking)
+        })
+    })
 }
 
-/// Typed feedback: "bad suggestion", "irrelevant" or "not relevant", said alone or with "that was a" / "thanks" around it.
-/// Anything more (an instruction after it, a question) is an ordinary message and is not feedback.
-pub fn feedback_phrase(text: &str) -> Option<&'static str> {
+/// An outward word in any of its forms (night 1111 second review S2): "deleting", "posted", "removes", "bought",
+/// "sold", "paid" count as "delete", "post", "remove", "buy", "sell", "pay".
+fn is_outward(w: &str) -> bool {
+    if OUTWARD.contains(&w) || ["bought", "sold", "paid", "ordered"].contains(&w) {
+        return true;
+    }
+    ["ing", "ed", "es", "s", "d"].iter().any(|suf| {
+        w.strip_suffix(suf).is_some_and(|stem| {
+            stem.len() >= 3 && (OUTWARD.contains(&stem) || OUTWARD.iter().any(|o| o.strip_suffix('e') == Some(stem)))
+        })
+    })
+}
+
+/// The feedback phrase the user typed, if it is one: "bad suggestion", "irrelevant" or "not relevant", said alone or with
+/// "that was a" / "thanks" around it. Anything more (an instruction after it, a question) is an ordinary message and is
+/// not feedback.
+pub fn feedback(text: &str) -> Option<&'static str> {
     let lower = text.to_lowercase();
     let mut words: Vec<&str> = lower.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
     if words.len() > 6 {
@@ -447,6 +545,69 @@ pub fn feedback_phrase(text: &str) -> Option<&'static str> {
         "not relevant" => Some("irrelevant"),
         _ => None,
     }
+}
+
+/// Words that open a request when a clause starts with them (after `REQUEST_FILLERS` such as "okay", "so", "bro"):
+/// "Run it in four-bit", "Look at some other profiles", "Sprawdź to".
+const REQUEST_VERBS: &[&str] = &[
+    "run", "find", "look", "check", "search", "open", "show", "make", "give", "tell", "get", "put", "do", "start", "stop",
+    "research", "investigate", "compare", "update", "fix", "write", "read", "play", "pull", "bring", "summarize",
+    "summarise", "translate", "transcribe", "try", "build", "add", "set", "turn", "close", "take", "save", "note",
+    "remember", "remind", "use", "keep", "list", "explain", "figure", "help", "change", "generate", "create", "draft",
+    "go", "download", "rerun", "retry", "continue", "load", "restart", "test", "record", "how", "which", "where", "when",
+    "why", "who",
+    "zrób", "zrob", "sprawdź", "sprawdz", "znajdź", "znajdz", "pokaż", "pokaz", "otwórz", "otworz", "uruchom", "puść",
+    "pusc", "napisz", "zobacz", "poszukaj", "przeczytaj", "przetłumacz", "zapisz", "dodaj", "włącz", "wlacz", "wyłącz",
+    "wylacz", "daj", "odpal", "wyszukaj", "porównaj", "porownaj", "przygotuj", "czy", "jak", "ile", "gdzie",
+];
+/// Words skipped at a clause's start before its first real word.
+const REQUEST_FILLERS: &[&str] = &[
+    "okay", "ok", "so", "bro", "dude", "sorry", "just", "and", "then", "now", "also", "please", "um", "uh", "yeah", "hey",
+    "heimdall", "oh", "well", "alright", "right", "dobra", "no", "teraz", "jeszcze", "yes", "okej", "hej",
+];
+/// Phrases that make a request wherever they stand: "can you", "I want you to", "możesz".
+const REQUEST_PHRASES: &[&str] = &[
+    "can you", "could you", "would you", "will you", "please", "i want you", "i need you", "i'd like you", "let's",
+    "remind me", "it would be cool", "would be nice", "możesz", "mozesz", "mógłbyś", "moglbys", "proszę", "prosze",
+    "chcę, żebyś", "chce zebys", "chcę żebyś",
+];
+
+/// Whether a line of the user's asks for something: a question, a request phrase, or a clause that opens with a request
+/// verb. Night 1112 lane G: on 11 Nov the call gate held "Okay, hi Doll, I'm back." (14:28:02) and "But the scrolling is
+/// very smooth. I like the scrolling." (18:19:44); their passes rightly answered "quiet: Call greeting" and "quiet:
+/// Smooth scrolling", and `held_card` showed both as "Do it" cards anyway (one ignored, one dismissed in 6 s).
+pub fn asks_for_something(line: &str) -> bool {
+    let lower = line.to_lowercase().replace('\u{2019}', "'");
+    if lower.contains('?') || REQUEST_PHRASES.iter().any(|p| lower.contains(p)) {
+        return true;
+    }
+    lower.replace(" - ", ". ").split(|c: char| matches!(c, ',' | ';' | ':' | '.' | '!' | '\u{2014}' | '\u{2013}' | '\n')).any(|clause| {
+        clause
+            .split(|c: char| !c.is_alphanumeric() && c != '\'')
+            .filter(|w| !w.is_empty())
+            .find(|w| !REQUEST_FILLERS.contains(w))
+            .is_some_and(|w| REQUEST_VERBS.contains(&w))
+    })
+}
+
+/// The card a line of the user's that the call gate held gets when its pass stays silent or fails (bug note
+/// 2026-11-05T02-32-17 item 2, night 1111: on 8 Nov 01:45:02 "Okay, bro, sorry, run it in eight in in four-bit. Just
+/// run it once…", d1 send 0.99, held in the call, and the pass answered "quiet"): his own words, offered to Heimdall.
+/// None when the words themselves would fail `verify` (a contact, an outward action), are empty, or ask for nothing
+/// (`asks_for_something`).
+pub fn held_card(line: &str) -> Option<Suggestion> {
+    let words = clean(line, 400);
+    if words.is_empty() || proposes_contact(&words) || acts_outward(&words) || !asks_for_something(&words) {
+        return None;
+    }
+    let quoted = clean(line, 150);
+    let topic = clean(&words.split_whitespace().take(6).collect::<Vec<_>>().join(" "), 60);
+    Some(Suggestion {
+        topic,
+        questions: vec![Question { id: "q1".into(), text: format!("\u{201c}{quoted}\u{201d}"), options: vec!["Do it".into(), "Not now".into()], multi_select: false }],
+        found: vec![],
+        handoff: format!("In the call {} just said this, and the decider read it as meant for you: \"{words}\". Do what he asked; the transcript has the context.", user()),
+    })
 }
 
 /// Checks the answer in code. `seen` are the paths the searches of this run returned; a `found` entry must be one of them.
@@ -479,8 +640,9 @@ pub fn verify(answer: &str, seen: &[String]) -> Result<Verdict> {
         if proposes_contact(&text) || options.iter().any(|o| proposes_contact(o)) {
             return Ok(Verdict::Silent("proposes contacting someone".into()));
         }
-        if acts_outward(&text) || options.iter().any(|o| acts_outward(o)) {
-            return Ok(Verdict::Silent("asks for an action outside a look-up".into()));
+        // The wording is logged with the reason, so a dropped card can be judged later (night 1111: it was not).
+        if let Some(outward) = std::iter::once(&text).chain(options.iter()).find(|t| acts_outward(t)) {
+            return Ok(Verdict::Silent(format!("asks for an action outside a look-up: {outward}")));
         }
         // Every question carries "Not now": it is the dismissal the pacing counts on. Added in place of the last option
         // when the model left it out of a full list.
@@ -565,16 +727,18 @@ pub fn dismissed(answers: &[ui::agent_notice::QuestionAnswer]) -> bool {
 /// The structured notice that wakes the main agent when the user picks an option: the suggestion, the talk before it, what
 /// the search found, and his answer, in the words the agent needs to act at once.
 pub fn handoff(s: &Suggestion, answers: &[ui::agent_notice::QuestionAnswer], shown_ms: u64, during_call: bool, transcript: &str) -> String {
+    let user = user();
     let mut out = format!(
-        "[Heimdall suggestion, picked by User] This was a suggestion from the island, made at {} from the talk below. User picked this; act on it now with the context here.\nTopic: {}\n",
+        "[Heimdall suggestion, picked by {user}] This was a suggestion from the island, made at {} from the talk below. {} picked this; act on it now with the context here.\nTopic: {}\n",
         agent::clock::local_hm(shown_ms),
+        capitalised(&user),
         s.topic
     );
     for a in answered(answers) {
         let text = s.questions.iter().find(|q| q.id == a.question_id).map_or("", |q| q.text.as_str());
         let picked = if a.labels.is_empty() { String::new() } else { a.labels.join(", ") };
         let typed = a.other.as_deref().map(|o| format!(" (typed: {o})")).unwrap_or_default();
-        out.push_str(&format!("Question \"{text}\": User picked {picked}{typed}.\n"));
+        out.push_str(&format!("Question \"{text}\": {user} picked {picked}{typed}.\n"));
     }
     if !s.found.is_empty() {
         out.push_str("Found by Heimdall's search:\n");
@@ -586,15 +750,10 @@ pub fn handoff(s: &Suggestion, answers: &[ui::agent_notice::QuestionAnswer], sho
         out.push_str(&format!("Notes: {}\n", s.handoff));
     }
     if during_call {
-        out.push_str("User is on a call: answer on screen only, and do not speak.\n");
+        out.push_str(&format!("{} is on a call: answer as usual; speech waits for a pause in the others' talk unless it matters now.\n", capitalised(&user)));
     }
     out.push_str(&format!("Talk before the card (oldest first):\n{transcript}"));
     out
-}
-
-/// The feedback phrase the user typed, if it is one: "bad suggestion" or "irrelevant" (or "not relevant") in a short line.
-pub fn feedback(text: &str) -> Option<&'static str> {
-    feedback_phrase(text)
 }
 
 /// Where the suggester reads and writes: the user's home (the files), Heimdall's data folder (the log, never searched) and

@@ -124,6 +124,22 @@ pub fn yes_chip(answered: bool, scale: f64) -> (Retained<CALayer>, f64) {
     (c, w)
 }
 
+/// The No chip beside Yes on a proposal's ghost (24 pt, a small cross then "No"), one step quieter than Yes; answered,
+/// a check stands where the cross was. Returns the chip and its width; its top-left is at (0, 0).
+pub fn no_chip(answered: bool, scale: f64) -> (Retained<CALayer>, f64) {
+    let f = system(12.5, Weight::Semibold);
+    let t = text1("No", &f, &*if answered { ink2() } else { white(0.85) }, 60.0, scale);
+    let tw = t.bounds().size.width;
+    let w = 10.0 + 10.0 + 5.0 + tw + 10.0;
+    let c = boxed(0.0, 0.0, w, YES_H, &white(0.08), YES_H / 2.0);
+    let s = symbol_layer(if answered { "checkmark" } else { "xmark" }, 9.0, &[if answered { ink2() } else { white(0.85) }], Weight::Semibold, scale);
+    s.setPosition(pt(15.0, YES_H / 2.0));
+    c.addSublayer(&s);
+    t.setPosition(pt(25.0, (YES_H - t.bounds().size.height) / 2.0));
+    c.addSublayer(&t);
+    (c, w)
+}
+
 /// "+2": how many proposals queue behind the shown one.
 pub fn plus(n: usize, scale: f64) -> Option<Retained<CATextLayer>> {
     (n > 0).then(|| text1(&format!("+{n}"), &digits(11.5, Weight::Semibold), &white(0.5), 40.0, scale))

@@ -70,13 +70,7 @@ pub fn oauth_code(v: &Value) -> String {
 const TERMINAL_REFRESH: [&str; 6] = ["invalid_grant", "invalid_refresh_token", "token_expired", "refresh_token_expired", "refresh_token_invalidated", "refresh_token_reused"];
 
 fn client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .user_agent(concat!("heimdall/", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(20))
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .expect("HTTP client")
+    crate::provider::http_client(false)
 }
 
 fn random() -> String {

@@ -1,5 +1,5 @@
-# The longest completed test in retained full-check logs took 16.187 s.
-# Allow over seven times that before terminating a hung test (also under load).
+# The longest tests in the retained full-check logs take about 25 s (13 Nov). Allow nearly five times that before
+# terminating a hung test (also under load).
 [profile.default]
 slow-timeout = { period = "30s", terminate-after = 4 }
 
@@ -8,13 +8,6 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 # Keep all 15,120 orderings, the 12 internal workers and the 50 ms bound.
 [[profile.default.overrides]]
 filter = 'test(=stop_interleaving_tests::all_5040_orders_of_settings_file_off_on_send_mcp_and_held_speech)'
-threads-required = "num-test-threads"
-
-# A latency assertion must measure the native decision, without simultaneous
-# workspace inference competing for its CPU/GPU. Preserve the 120 ms median
-# and every native distribution assertion in this test.
-[[profile.default.overrides]]
-filter = 'test(=barge_in_question_is_native_and_fast)'
 threads-required = "num-test-threads"
 
 # This fixture distinguishes the execution deadline from inherited-pipe drain.
@@ -56,6 +49,14 @@ threads-required = "num-test-threads"
 filter = '(package(heimdall-archive) & binary(fd_bound)) | test(=records::durability_tests::notes_and_events_behind_a_held_lock_never_fail_and_commit_in_order)'
 threads-required = "num-test-threads"
 
-# scripts/check.sh keeps each run's JUnit report beside its log (per-test times for profiling the suite).
+# scripts/check.sh keeps each run's JUnit report beside its log (per-test times for profiling the suite). nextest
+# writes it to target/nextest/<profile>/ under the checkout, whatever CARGO_TARGET_DIR says.
 [profile.default.junit]
 path = "junit.xml"
+
+# Night 8 Nov: both assert wall-clock bounds (the archive's 1.2 s live-event wait under compaction; Jarvis's synthesis
+# finishing every chunk while the user talks) and failed only inside the full parallel run on a loaded Mac (the archive one
+# also on 7 Nov, 23:02 and 23:15). Run them alone; keep every bound and assertion.
+[[profile.default.overrides]]
+filter = 'test(=compaction_never_holds_live_writers) | test(=bridge::hold::tests::jarvis_keeps_his_voice_when_owner_talks_through_synthesis)'
+threads-required = "num-test-threads"

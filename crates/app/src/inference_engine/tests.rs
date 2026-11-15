@@ -449,11 +449,19 @@ fn true_native_orphan_blocks_launch() {
         .arg(&paths.cache)
         .spawn()
         .unwrap();
+    // The fixture starts through `/usr/bin/env python3`: while it execs, `ps` can show it without its arguments for a
+    // moment, so one sighting is not yet the orphan launch will see. Wait for three in a row.
     let deadline = Instant::now() + Duration::from_secs(5);
+    let mut seen = 0;
     let error = loop {
-        let result = find_owner(&paths);
-        if let Err(error) = result {
-            break error;
+        match find_owner(&paths) {
+            Err(error) => {
+                seen += 1;
+                if seen == 3 {
+                    break error;
+                }
+            }
+            Ok(_) => seen = 0,
         }
         assert!(Instant::now() < deadline, "native fixture did not exec");
         thread::sleep(Duration::from_millis(25));
@@ -696,7 +704,7 @@ fn engine_error_is_written_to_the_existing_splash_log() {
 
 #[test]
 fn bundled_server_runs_beside_heimdall_and_owns_its_cache() {
-    // The bundled default names heimdall-splash, the Rust server beside Heimdall's own binary (docs/splash-native.md).
+    // The bundled default names heimdall-splash, the Rust server beside Heimdall's own binary (docs/inference-engine.md).
     let config = Config::bundled();
     let exe = std::env::current_exe().unwrap();
     assert_eq!(config.executable(), exe.parent().unwrap().join("heimdall-splash"));
@@ -712,4 +720,64 @@ fn bundled_server_runs_beside_heimdall_and_owns_its_cache() {
     let mut homebrew = config.clone();
     homebrew.executable = "/opt/homebrew/bin/splash".into();
     assert_eq!(homebrew.executable(), PathBuf::from("/opt/homebrew/bin/splash"));
+}
+
+/// Cleanup 14 Nov (DEC-12): a Ready health tick (every 30 s all day) spawned two `ps` and four `curl`. Now one `ps`,
+/// and the four probes are in-process GETs.
+#[test]
+fn a_ready_tick_spawns_one_process() {
+    let (_t, config, paths) = fixture();
+    let (mut w, rx) = worker(config.clone(), paths.clone());
+    w.set(true, config.default_model.clone());
+    ready(&config);
+    w.tick();
+    assert_eq!(w.state, EngineState::Ready);
+    SPAWNS.with(|n| n.set(0));
+    w.tick();
+    let spawned = SPAWNS.with(|n| n.get());
+    eprintln!("processes spawned by one Ready tick: {spawned}");
+    assert_eq!(w.state, EngineState::Ready);
+    assert!(rx.try_iter().any(|u| matches!(u, UiUpdate::Engine { state: EngineState::Ready, context_limit: Some(262144), .. })));
+    assert_eq!(spawned, 1, "one process table read, no curl");
+    w.set(false, config.default_model.clone());
+}
+
+/// Cleanup 14 Nov (DEC-12): the in-process GET keeps curl's rules: JSON on success; a status of 400 or more, a body
+/// over 1 MiB, a redirect (not followed, no JSON) or no server fail with the words the menu shows.
+#[test]
+fn the_probe_get_reads_json_and_fails_as_curl_did() {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let big = format!("{{\"pad\":\"{}\"}}", "x".repeat(PROBE_MAX_BYTES as usize));
+    let replies = vec![
+        ("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 27\r\n\r\n".to_owned(), r#"{"weights":{"released":1}} "#.to_owned()),
+        ("HTTP/1.0 200 OK\r\n\r\n".to_owned(), r#"{"data":[{"id":"m","max_model_len":8}]}"#.to_owned()),
+        ("HTTP/1.1 503 Service Unavailable\r\nContent-Length: 2\r\n\r\n".to_owned(), "{}".to_owned()),
+        ("HTTP/1.0 200 OK\r\n\r\n".to_owned(), big),
+        (format!("HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port}/health\r\nContent-Length: 0\r\n\r\n"), String::new()),
+        ("HTTP/1.0 200 OK\r\n\r\n".to_owned(), "not json".to_owned()),
+    ];
+    let paths = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = paths.clone();
+    let server = thread::spawn(move || {
+        for (head, body) in replies {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            seen.lock().unwrap().push(line.split_whitespace().nth(1).unwrap_or("").to_owned());
+            while { let mut h = String::new(); reader.read_line(&mut h).unwrap() > 2 } {}
+            let _ = stream.write_all(head.as_bytes()).and_then(|_| stream.write_all(body.as_bytes()));
+        }
+    });
+    assert_eq!(get(port, "status").unwrap()["weights"]["released"], 1);
+    assert_eq!(get(port, "v1/models").unwrap()["data"][0]["max_model_len"], 8, "a body read to the end without a length");
+    assert_eq!(get(port, "ready").unwrap_err().to_string(), "engine ready unavailable", "503 fails");
+    assert_eq!(get(port, "status").unwrap_err().to_string(), "engine status unavailable", "over 1 MiB fails");
+    assert!(get(port, "health").is_err(), "a redirect is not followed");
+    assert!(get(port, "health").is_err(), "not JSON");
+    server.join().unwrap();
+    assert_eq!(*paths.lock().unwrap(), ["/status", "/v1/models", "/ready", "/status", "/health", "/health"], "one request each, none followed");
+    assert_eq!(get(port, "health").unwrap_err().to_string(), "engine health unavailable", "nothing listening");
 }

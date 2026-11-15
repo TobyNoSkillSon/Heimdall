@@ -1,10 +1,8 @@
     use super::*;
     #[test]
-    fn default_is_dry_and_native_pending() {
+    fn default_is_dry() {
         let s = Settings::default();
         assert!(s.dry_run);
-        assert!(s.archive_choice_pending);
-        assert_eq!(s.archive_format, settings::ArchiveFormat::NativeLossless);
         assert!(!s.setup_requested);
     }
     #[test]

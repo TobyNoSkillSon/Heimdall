@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use unicode_normalization::UnicodeNormalization;
 /// Calibrated on retained complete takes and ASR-confirmed damaged variants.
-/// See docs/drama3-integration.md for the measured separation and false retry.
+/// See docs/personal/drama3-integration.md for the measured separation and false retry.
 pub const MAX_WORD_ERROR_RATE: f64 = 0.05;
 fn number(word: &str) -> Option<u32> {
     let value = match word {
@@ -35,7 +35,51 @@ fn number(word: &str) -> Option<u32> {
         "seventy" | "siedemdziesiąt" => 70,
         "eighty" | "osiemdziesiąt" => 80,
         "ninety" | "dziewięćdziesiąt" => 90,
-        _ => return word.parse().ok(),
+        _ => return polish_number(word).or_else(|| word.parse().ok()),
+    };
+    Some(value)
+}
+/// Stems of the Polish ordinals 1st to 90th ("piąt-y", "dwudziest-ej"), the value each stands for.
+const POLISH_ORDINALS: [(&str, u32); 27] = [
+    ("pierwsz", 1), ("drug", 2), ("trzec", 3), ("czwart", 4), ("piąt", 5), ("szóst", 6), ("siódm", 7), ("ósm", 8),
+    ("dziewiąt", 9), ("dziesiąt", 10), ("jedenast", 11), ("dwunast", 12), ("trzynast", 13), ("czternast", 14),
+    ("piętnast", 15), ("szesnast", 16), ("siedemnast", 17), ("osiemnast", 18), ("dziewiętnast", 19), ("dwudziest", 20),
+    ("trzydziest", 30), ("czterdziest", 40), ("pięćdziesiąt", 50), ("sześćdziesiąt", 60), ("siedemdziesiąt", 70),
+    ("osiemdziesiąt", 80), ("dziewięćdziesiąt", 90),
+];
+/// Night 10–11 Nov voice-drop sweep, rows 7 and 8: a Polish number in any case, which the recognizer writes in digits
+/// ("w pięciu do dziesięciu zdaniach" heard "w 5 do 10 zdaniach", "od sto dwudziestej sekundy" heard "od 120
+/// sekundy"; 10 Nov 09:52 and 09:54: both sentences went to the lighter voice). Cardinals in their other cases
+/// ("pięciu", "dwóch", "trzema", "dwudziestu", "pięćdziesięciu") and ordinals in every gender and case ("piąty",
+/// "dwudziestej", "trzeciego"), each as its value. A compound ("sto dwudziestej", "dwudziestego pierwszego") is
+/// joined by `spelled` as any other.
+fn polish_number(word: &str) -> Option<u32> {
+    let value = match word {
+        "jednego" | "jednej" | "jednemu" | "jednym" | "jedną" => 1,
+        "dwóch" | "dwu" | "dwom" | "dwóm" | "dwoma" | "dwiema" | "dwaj" | "dwoje" | "dwojga" => 2,
+        "trzech" | "trzem" | "trzema" | "trzej" | "troje" | "trojga" => 3,
+        "czterech" | "czterem" | "czterema" | "czterej" | "czworo" | "czworga" => 4,
+        "pięciu" | "pięcioma" => 5,
+        "sześciu" | "sześcioma" => 6,
+        "siedmiu" | "siedmioma" => 7,
+        "ośmiu" | "ośmioma" => 8,
+        "dziewięciu" | "dziewięcioma" => 9,
+        "dziesięciu" | "dziesięcioma" => 10,
+        "pięćdziesięciu" | "pięćdziesięcioma" => 50,
+        "sześćdziesięciu" | "sześćdziesięcioma" => 60,
+        "siedemdziesięciu" | "siedemdziesięcioma" => 70,
+        "osiemdziesięciu" | "osiemdziesięcioma" => 80,
+        "dziewięćdziesięciu" | "dziewięćdziesięcioma" => 90,
+        _ => {
+            // An ordinal's ending, hard or soft stem ("piąt-ego", "trzec-iego", "drug-iej"); and the "-naście" and
+            // "-dzieści" cardinals' other cases, which share the ordinal's stem ("piętnast-u", "dwudziest-oma").
+            const ENDINGS: [&str; 20] = ["y", "i", "a", "ia", "e", "ie", "ego", "iego", "emu", "iemu", "ym", "im", "ej", "iej", "ą", "ią", "ych", "ich", "ymi", "imi"];
+            return POLISH_ORDINALS.iter().find_map(|&(stem, n)| {
+                let ending = word.strip_prefix(stem)?;
+                let cardinal = (11..=40).contains(&n) && stem.ends_with("st") && matches!(ending, "u" | "oma");
+                (ENDINGS.contains(&ending) || cardinal).then_some(n)
+            });
+        }
     };
     Some(value)
 }
@@ -51,7 +95,23 @@ fn hundreds(word: &str) -> Option<u64> {
         "siedemset" => 700,
         "osiemset" => 800,
         "dziewięćset" => 900,
-        _ => return None,
+        // Their other cases ("od stu", "pięciuset"), and the ordinals ("setny", "dwusetnej").
+        "stu" => 100,
+        "dwustu" => 200,
+        "trzystu" => 300,
+        "czterystu" => 400,
+        "pięciuset" => 500,
+        "sześciuset" => 600,
+        "siedmiuset" => 700,
+        "ośmiuset" => 800,
+        "dziewięciuset" => 900,
+        _ => {
+            const STEMS: [(&str, u64); 9] = [("setn", 100), ("dwusetn", 200), ("trzechsetn", 300), ("czterechsetn", 400), ("pięćsetn", 500), ("sześćsetn", 600), ("siedemsetn", 700), ("osiemsetn", 800), ("dziewięćsetn", 900)];
+            return STEMS.iter().find_map(|&(stem, n)| {
+                let ending = word.strip_prefix(stem)?;
+                matches!(ending, "y" | "a" | "e" | "ego" | "emu" | "ym" | "ej" | "ą" | "ych" | "ymi").then_some(n)
+            });
+        }
     })
 }
 fn digits(word: &str) -> bool {
@@ -87,6 +147,13 @@ fn spelled(tokens: &[&str]) -> Option<(u64, usize)> {
         if let Some(h) = tokens.get(at).and_then(|w| hundreds(w)) {
             value = Some(h);
             used = 1;
+        } else if let Some((n, k)) = below_hundred(at).filter(|&(n, k)| (11..100).contains(&n) && n % 10 != 0 && tokens.get(at + k) == Some(&"hundred")) {
+            // Night 11–12 Nov sweep: hundreds counted past ten, "fifteen hundred" (1500) and "twenty five hundred"
+            // (2500), as the recognizer writes them in digits (11 Nov 10:14: "the best fifteen hundred" heard "1,500"
+            // on all three takes sent the sentence to the lighter voice). A round tens word ("twenty hundred") is not
+            // said this way.
+            value = Some(n * 100);
+            used = k + 1;
         } else if tokens.get(at + 1) == Some(&"hundred") {
             let leading = if tokens[at] == "a" { Some((1, 1)) } else { below_hundred(at).filter(|(n, used)| *used == 1 && (1..10).contains(n)) };
             if let Some((n, _)) = leading {
@@ -168,11 +235,30 @@ fn unit(word: &str, after_number: bool) -> Option<&'static str> {
         "celsjusza" => "celsius",
         "fahrenheita" => "fahrenheit",
         "%" | "percent" | "procent" => "percent",
-        "gigabyte" | "gigabytes" => "gigabyte",
-        "terabyte" | "terabytes" => "terabyte",
-        "megabyte" | "megabytes" => "megabyte",
-        "kilobyte" | "kilobytes" => "kilobyte",
+        // The binary units are said "gigabytes" (`drama3::spell_symbols`; night 10–11 Nov sweep: "GiB" heard
+        // "gigabytes" rejected 15 takes and sent five sentences to the lighter voice on 10 Nov 19:02–19:10).
+        "gigabyte" | "gigabytes" | "gibibyte" | "gibibytes" => "gigabyte",
+        "terabyte" | "terabytes" | "tebibyte" | "tebibytes" => "terabyte",
+        "megabyte" | "megabytes" | "mebibyte" | "mebibytes" => "megabyte",
+        "kilobyte" | "kilobytes" | "kibibyte" | "kibibytes" => "kilobyte",
+        "gib" if after_number => "gigabyte",
+        "tib" if after_number => "terabyte",
+        "mib" if after_number => "megabyte",
+        "kib" if after_number => "kilobyte",
         "millisecond" | "milliseconds" => "millisecond",
+        // Night 11–12 Nov sweep: lengths and weights the recognizer abbreviates ("about 4 kilometres" heard "4 km", 11
+        // Nov 10:39 and 10:48, four takes).
+        "kilometre" | "kilometres" | "kilometer" | "kilometers" | "kilometr" | "kilometry" | "kilometrów" | "kilometra" => "kilometre",
+        "centimetre" | "centimetres" | "centimeter" | "centimeters" | "centymetr" | "centymetry" | "centymetrów" => "centimetre",
+        "millimetre" | "millimetres" | "millimeter" | "millimeters" | "milimetr" | "milimetry" | "milimetrów" => "millimetre",
+        "kilogram" | "kilograms" | "kilogramy" | "kilogramów" => "kilogram",
+        // Night 12–13 Nov sweep: "98 metres above sea level" and "a few hundred metres" heard "meters" (12 Nov 10:26 and
+        // 11:24, four takes, one sentence to the lighter voice). `regional` needs a stem of three letters.
+        "metre" | "metres" | "meter" | "meters" | "metr" | "metry" | "metrów" | "metra" => "metre",
+        "km" if after_number => "kilometre",
+        "cm" if after_number => "centimetre",
+        "mm" if after_number => "millimetre",
+        "kg" if after_number => "kilogram",
         "million" | "millions" | "milion" | "miliony" | "milionów" | "miliona" => "million",
         "billion" | "billions" | "miliard" | "miliardy" | "miliardów" | "miliarda" => "billion",
         "złoty" | "złote" | "złotych" | "złotego" | "złotówek" | "pln" => "złoty",
@@ -202,6 +288,11 @@ fn domain(after: &[char]) -> bool {
     let name: String = after.iter().take_while(|c| c.is_alphanumeric()).collect();
     TOP.contains(&name.as_str())
 }
+/// Two letters or more, then digits or letters, after a dot inside a token: a name's part ("T3.codes", "file.rs").
+fn named_after_dot(after: &[char]) -> bool {
+    let name: Vec<char> = after.iter().copied().take_while(|c| c.is_alphanumeric()).collect();
+    name.len() >= 2 && name[..2].iter().all(|c| c.is_alphabetic()) && after.get(name.len()) != Some(&'.')
+}
 /// The words of `text` as they are spoken: lower case, punctuation dropped, numbers as digits ("twenty one" and
 /// "21", "six hundred" and "600", "1,000" and "1000"), a currency symbol after its amount ("$20" is "20 dollar") and
 /// units in one spelling (`unit`).
@@ -230,6 +321,10 @@ pub fn words(text: &str) -> Vec<String> {
             // The dot of a web address ("X.com") is said "dot", which the recognizer writes either way (25 Oct: "X.com"
             // heard "X dot com", rejected for the added "dot").
             '.' if k > 0 && chars[k - 1].is_alphanumeric() && domain(&chars[k + 1..]) => text.push_str(" dot "),
+            // So is a dot inside any written name, two letters or more after it (voice-drop sweep 14 Nov 15:22: "T3.codes"
+            // heard "T3 dot codes", rejected twice for the added "dot"). One letter after it is an abbreviation ("a.m.",
+            // "e.g.", "U.S."), said without the dot.
+            '.' if k > 0 && chars[k - 1].is_alphanumeric() && named_after_dot(&chars[k + 1..]) => text.push_str(" dot "),
             // A dot that starts a word is the spoken "dot" of an address (".ai"), which the recognizer writes bare.
             '.' if chars.get(k + 1).is_some_and(|c| c.is_alphabetic()) && (k == 0 || chars[k - 1].is_whitespace()) => {
                 text.push_str(" dot ")
@@ -382,8 +477,11 @@ pub fn words(text: &str) -> Vec<String> {
         }
         k += 1;
     }
+    // An ordinal after the "to" counts as its number: "twenty to thirty second" is "20 to 32nd" here, and the recognizer
+    // writes "20 to 30 seconds" (`seconds_or_ordinal`; 13 Nov 13:34).
+    let numeric = |w: &str| digits(w) || ["st", "nd", "rd", "th"].iter().any(|s| w.strip_suffix(s).is_some_and(|n| !n.is_empty() && digits(n)));
     for k in 1..result.len().saturating_sub(1) {
-        if result[k] == "to" && digits(&result[k - 1]) && digits(&result[k + 1]) {
+        if result[k] == "to" && digits(&result[k - 1]) && numeric(&result[k + 1]) {
             result[k] = RANGE.to_owned();
         }
     }
@@ -406,7 +504,36 @@ pub fn words(text: &str) -> Vec<String> {
         }
         k += 1;
     }
+    month_days(&mut result);
     result
+}
+fn month(word: &str) -> bool {
+    matches!(word, "january" | "february" | "march" | "april" | "may" | "june" | "july" | "august" | "september"
+        | "october" | "november" | "december")
+}
+/// A day of the month is said as an ordinal or not, however it is written ("1 December" said "the first of December",
+/// "November 1st" heard "November 1"; 8 Nov 06:00 and 9 Nov 13:05: every take rejected and the sentence went to the
+/// lighter voice). Next to a month name, a day's ordinal ending and an "of" before the month drop on both sides. The
+/// day itself is still compared as a number.
+fn month_days(result: &mut Vec<String>) {
+    let day = |w: &str| -> Option<String> {
+        let n = ["st", "nd", "rd", "th"].iter().find_map(|e| w.strip_suffix(e)).unwrap_or(w);
+        (digits(n) && n.parse::<u32>().is_ok_and(|d| (1..=31).contains(&d))).then(|| n.to_owned())
+    };
+    let mut k = 0;
+    while k < result.len() {
+        if let Some(n) = day(&result[k]) {
+            let of_month = result.get(k + 1).is_some_and(|w| w == "of") && result.get(k + 2).is_some_and(|w| month(w));
+            let next_to_month = result.get(k + 1).is_some_and(|w| month(w)) || (k > 0 && month(&result[k - 1]));
+            if of_month || next_to_month {
+                result[k] = n;
+                if of_month {
+                    result.remove(k + 1);
+                }
+            }
+        }
+        k += 1;
+    }
 }
 /// The fraction of a mixed number ("three and three quarters").
 fn fraction(word: &str) -> bool {
@@ -500,6 +627,11 @@ fn protected(word: &str) -> bool {
             | "degrees"
             | "celsius"
             | "fahrenheit"
+            | "kilometre"
+            | "metre"
+            | "centimetre"
+            | "millimetre"
+            | "kilogram"
     ) || word.ends_with("n't")
         || word.chars().any(char::is_numeric)
 }
@@ -620,6 +752,9 @@ fn sound(word: &str) -> Option<String> {
             (b'g', Some(b'h')) if k > 0 => (b"", 2),
             (b'w', Some(b'h')) => (b"w", 2),
             (b'w', Some(b'r')) | (b'k', Some(b'n')) if k == 0 => (b"", 1),
+            // A leading "x" before a consonant is the letter's name: "XLlama" is said "ex-llama" as "ExLlama" is
+            // (night 10–11 Nov sweep, row 13: "ExLlamaV3" heard "XLama V3" on all three takes).
+            (b'x', Some(c)) if k == 0 && !vowel(c) => (b"eks", 1),
             (b'c', Some(b'k')) => (b"k", 2),
             (b'q', Some(b'u')) => (b"kw", 2),
             (b'q', _) => (b"k", 1),
@@ -752,7 +887,7 @@ fn foreign_alike(expected: &str, actual: &str) -> bool {
     row[y.len()] <= 1
 }
 /// `parts` (two to `MAX_PARTS` words) heard as the single word `whole`, or the reverse: a compound written as one word
-/// or several ("pull down"/"pulldown", "13 51"/"1351", "AllForOne"/"all for one", "DFlash2"/"D Flash 2"). Number words
+/// or several ("pull down"/"pulldown", "13 51"/"1351", "OneForAll"/"one for all", "DFlash2"/"D Flash 2"). Number words
 /// were turned into digits by `words`, so a digit part is also tried spelled out ("every one" is "every 1" here).
 /// Without a number or negation, the joined spelling may also sound alike ("a Vercel" heard as "Aversel").
 fn joined(parts: &[String], whole: &str) -> bool {
@@ -765,20 +900,112 @@ fn joined(parts: &[String], whole: &str) -> bool {
             None => rest.is_empty(),
             // A letter "o" said as zero ("GPT-4o" heard "GPT-4.0", 26 Oct, three takes).
             // "too" said after a number is heard as its digit ("aimed at 8.5 too" heard "8.52", 3 Nov 03:51, three takes).
-            Some((first, more)) => [first.as_str(), spelled(first), if first == "0" { "o" } else { first.as_str() }, if first == "too" { "2" } else { first.as_str() }]
-                .iter()
-                .any(|form| rest.strip_prefix(*form).is_some_and(|tail| concatenates(more, tail))),
+            // Night 12–13 Nov: "GPT 4o's" heard "GPT-4.0's" (12 Nov 09:23, all three takes): the zero keeps its "'s".
+            // A magnitude after a number is written as its letter: "VL 32B" heard "VL32B" (09:31, all three takes).
+            Some((first, more)) => {
+                // (`decade` writes the heard "0's" as "0s".)
+                let zero = match first.as_str() { "0" => Some("o"), "0's" | "0s" => Some("o's"), _ => None };
+                let letter = match first.as_str() { "billion" => "b", "million" => "m", _ => first.as_str() };
+                // Night 13–14 Nov sweep: an ordinal `words` wrote in digits is also its word, so "Second hand" ("2nd
+                // hand") heard "Secondhand" is the compound (13 Nov 10:09, all three takes, lighter voice).
+                let ordinal = ordinal_word(first).unwrap_or(first.as_str());
+                [first.as_str(), spelled(first), zero.unwrap_or(first.as_str()), if first == "too" { "2" } else { first.as_str() }, letter, ordinal]
+                    .iter()
+                    .any(|form| rest.strip_prefix(*form).is_some_and(|tail| concatenates(more, tail)))
+            }
         }
     }
     if !(2..=MAX_PARTS).contains(&parts.len()) {
         return false;
     }
+    if seconds_or_ordinal(parts, whole) {
+        return true;
+    }
     if contraction(whole).is_some_and(|(stem, clitic)| parts[0] == stem && clitic_words(clitic).contains(&parts[1].as_str())) {
+        return true;
+    }
+    // A first word said as a letter's name and written as the letter, joined to the rest: "queue time" heard "QTime"
+    // (night 10–11 Nov sweep, row 11: all three takes, and the sentence went to the lighter voice).
+    if letter_name(&parts[0]).is_some_and(|letter| whole.strip_prefix(letter).is_some_and(|rest| !rest.is_empty() && concatenates(&parts[1..], rest))) {
         return true;
     }
     concatenates(parts, whole)
         || (!protected(whole) && !parts.iter().any(|p| protected(p)) && sounds_alike(&parts.concat(), whole))
         || compound_alike(&parts.concat(), whole)
+}
+/// The ordinal word of a token `words` wrote in digits ("2nd" is "second"), for the ordinals `ordinal` reads.
+fn ordinal_word(token: &str) -> Option<&'static str> {
+    const ORDINALS: [&str; 27] = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth",
+        "tenth", "eleventh", "twelfth", "thirteenth", "fourteenth", "fifteenth", "sixteenth", "seventeenth",
+        "eighteenth", "nineteenth", "twentieth", "thirtieth", "fortieth", "fiftieth", "sixtieth", "seventieth",
+        "eightieth", "ninetieth"];
+    ORDINALS.iter().copied().find(|w| ordinal(w).is_some_and(|(n, suffix)| token == format!("{n}{suffix}")))
+}
+/// "thirty second" is a duration as well as an ordinal: `words` writes the said "a thirty second clip" as "32nd", and
+/// the recognizer as "30 seconds" (13 Nov 13:34: "a twenty to thirty second screen clip", all three takes, lighter
+/// voice). A tens number with "second" or "seconds" is the ordinal two past it; the same speech, but for an "s".
+fn seconds_or_ordinal(parts: &[String], whole: &str) -> bool {
+    let [tens, second] = parts else { return false };
+    let Some(n) = whole.strip_suffix("nd").and_then(|n| n.parse::<u32>().ok()) else { return false };
+    matches!(second.as_str(), "second" | "seconds")
+        && tens.parse::<u32>().is_ok_and(|t| digits(tens) && (20..100).contains(&t) && t % 10 == 0 && n == t + 2)
+}
+/// The letter a word is the spoken name of, for the letters whose names are not everyday words ("queue" is "q", "ex"
+/// is "x"). "are", "you", "see", "why", "oh" and "be" are left out: those words are said for themselves.
+fn letter_name(word: &str) -> Option<&'static str> {
+    Some(match word {
+        "queue" | "cue" => "q",
+        "ex" => "x",
+        "jay" => "j",
+        "kay" => "k",
+        "gee" => "g",
+        "tee" => "t",
+        "pee" => "p",
+        "vee" => "v",
+        "zed" | "zee" => "z",
+        "dee" => "d",
+        "el" => "l",
+        "em" => "m",
+        "es" => "s",
+        "ef" => "f",
+        "aitch" => "h",
+        "bee" => "b",
+        _ => return None,
+    })
+}
+/// A letter written alone heard as its spoken name, every letter whose name is a word of its own ("c" heard "see",
+/// voice-drop sweep 14 Nov 15:18: two takes rejected before the third was kept). One way only: a written "see" is the
+/// word, and `letter_name` keeps it out.
+fn lone_letter_said(letter: &str, heard: &str) -> bool {
+    let names: &[&str] = match letter {
+        "a" => &["ay"],
+        "b" => &["be", "bee"],
+        "c" => &["see", "sea", "cee"],
+        "d" => &["dee"],
+        "e" => &["ee"],
+        "f" => &["ef", "eff"],
+        "g" => &["gee"],
+        "h" => &["aitch", "haitch"],
+        "i" => &["eye", "aye"],
+        "j" => &["jay"],
+        "k" => &["kay"],
+        "l" => &["el", "ell"],
+        "m" => &["em"],
+        "n" => &["en"],
+        "o" => &["oh", "owe"],
+        "p" => &["pee", "pea"],
+        "q" => &["queue", "cue"],
+        "r" => &["are", "ar"],
+        "s" => &["es", "ess"],
+        "t" => &["tee", "tea"],
+        "u" => &["you"],
+        "v" => &["vee"],
+        "x" => &["ex"],
+        "y" => &["why"],
+        "z" => &["zed", "zee"],
+        _ => return false,
+    };
+    names.contains(&heard)
 }
 /// A name of letters and digits heard in another spelling of its letters, the digits exactly the same: "DINOv3" heard
 /// "Dyno V3" (2 Nov, five sentences, three of them sent to the lighter voice). The letter runs sound alike (a "y" as
@@ -819,10 +1046,31 @@ fn fused(parts: &[String], whole: &str, names: &HashSet<String>, heard: bool) ->
     parts.len() == 2 && !parts.iter().any(|p| protected(p) || contrast(p) || p.chars().count() < 3)
         && if heard { misheard(whole, &parts.concat(), names) } else { misheard(&parts.concat(), whole, names) }
 }
-/// The most words one compound may be heard as ("all for one").
+/// A name written as one word of several ("TobyNoSkillSon", a handle) heard as its parts, one of them spelled by sound
+/// ("the user No Skilson", "the user or no Skillsun", "the user no skills and"; 9 Nov 11:58 to 13:22: four sentences went to the
+/// lighter voice). Only a mixed-case or capitalised name of the expected text (`proper_nouns`), of eight letters or more,
+/// heard as two to `MAX_PARTS` plain words whose joined sound is at most one sound from the name's: the parts may hold
+/// "no" or "and", which belong to the name, never a digit.
+fn name_split(parts: &[String], whole: &str, names: &HashSet<String>) -> bool {
+    if !(2..=MAX_PARTS).contains(&parts.len()) || !names.contains(whole) || whole.chars().count() < 8
+        || !parts.iter().all(|p| p.chars().all(|c| c.is_ascii_lowercase() || c == '\'')) {
+        return false;
+    }
+    let plain = |w: &str| w.chars().filter(char::is_ascii_lowercase).collect::<String>();
+    let joined = plain(&parts.concat());
+    // The name's first part is heard whole: a split never starts inside the name.
+    if joined.chars().take(3).ne(plain(whole).chars().take(3)) {
+        return false;
+    }
+    match (sound(&joined), sound(&plain(whole))) {
+        (Some(x), Some(y)) => edit_distance(&x, &y) <= 1,
+        _ => false,
+    }
+}
+/// The most words one compound may be heard as ("one for all").
 const MAX_PARTS: usize = 4;
 /// Words the recognizer writes for one another: homophones, and a word said in full that it writes short.
-const SAME_SPEECH: [(&str, &str); 25] = [
+const SAME_SPEECH: [(&str, &str); 28] = [
     // Too short to sound out: "a full model add" heard "model ad" (2 Nov 02:49, all three takes).
     ("add", "ad"),
     ("i", "eye"),
@@ -857,9 +1105,23 @@ const SAME_SPEECH: [(&str, &str); 25] = [
     ("wait", "weight"),
     ("heard", "herd"),
     ("cause", "cores"),
+    // Night 12–13 Nov sweep, each rejected on every take or twice before a take was kept: "Three to know." heard "3 to
+    // no" (12 Nov 07:05, all three takes; the sentence went to the lighter voice), "from the Mac" heard "Mach" (11:24,
+    // all three takes, with "metres"), "Is it MoE?" said "Moe" and heard "Mo" (09:31, all three takes), "where the
+    // argument had a hole" heard "whole" (17:49, two takes). One sound each: the recognizer cannot tell them apart.
+    // "know" heard "no" is `negation_heard`: one way only.
+    ("mac", "mach"),
+    ("moe", "mo"),
+    ("hole", "whole"),
 ];
 fn listed(expected: &str, actual: &str) -> bool {
     SAME_SPEECH.iter().any(|&(x, y)| (expected == x && actual == y) || (expected == y && actual == x))
+        || negation_heard(expected, actual)
+}
+/// "know" heard "no" ("Three to know." heard "3 to no", 12 Nov 07:05: all three takes, and the sentence went to the
+/// lighter voice). One way only: "no" heard "know" may be a dropped negation and stays a fault.
+fn negation_heard(expected: &str, actual: &str) -> bool {
+    expected == "know" && actual == "no"
 }
 /// The stem and clitic of a contraction: "it'll" is "it" and "ll". Negations ("isn't") are `protected`, not here.
 fn contraction(word: &str) -> Option<(&str, &str)> {
@@ -913,6 +1175,118 @@ fn regional(expected: &str, actual: &str) -> bool {
     }
     let plain = |w: &str| w.chars().count() >= 5 && w.chars().all(char::is_alphabetic) && !protected(w);
     expected != actual && plain(expected) && plain(actual) && american(expected) == american(actual)
+}
+/// Night 8 Nov log sweep, finding 5: one word written with and without its accents ("café" heard "cafe",
+/// "patisserie" heard "pâtisserie"). The English recognizer writes plain letters, so on 6–7 Nov "café" alone rejected
+/// 36 correct Jarvis takes: it is under five letters, so neither `near` nor `foreign_alike` (`rough`) compared it,
+/// and `sound` takes plain letters only. Folded: marks dropped (NFKD) and "ł" as "l", nothing else changed.
+fn accent_fold(word: &str) -> String {
+    word.nfkd().filter(|c| !unicode_normalization::char::is_combining_mark(*c)).map(|c| match c {
+        'ł' => 'l',
+        'đ' => 'd',
+        'ø' => 'o',
+        c => c,
+    })
+    .collect()
+}
+fn accent_alike(expected: &str, actual: &str) -> bool {
+    expected != actual && (!expected.is_ascii() || !actual.is_ascii()) && accent_fold(expected) == accent_fold(actual)
+}
+/// Night 11–12 Nov sweep: a Polish street or place name in an English reply, heard by the English recognizer in one
+/// of its own spellings. On 11 Nov "Hoża" was heard "Hoja", "Hosa", "Hosha", "Hoxha" and "Hosher", "Zacisze"
+/// "Zachisha", "Zatsusha" and "Zakisha", "Jeżyce" "Ježica" and "Ježice", "Starołęka" "Staroweka": 20 takes rejected,
+/// each a 2-4 s retry, and one sentence went to the lighter voice. `foreign_alike` needs five sounds and Polish
+/// letters, so short names ("Hoża") and names in plain letters ("Zacisze") were never compared.
+///
+/// Compared by `polish_sounds`, which hears as an English listener does: every hiss and hush ("s", "z", "sz", "ż",
+/// "rz", "c", "cz", "ch" in English) is one sound, "ł", "w" and "v" one, nasal vowels plain. Only for a name of the
+/// text (capitalised, `proper_nouns`) that looks Polish (Polish letters, or "sz", "cz", "rz"), never a protected word;
+/// the sounds must match exactly under five sounds and within one from five.
+fn polish_name_alike(expected: &str, actual: &str, names: &HashSet<String>) -> bool {
+    let named = names.contains(expected) || names.contains(&format!("^{expected}"));
+    // Night 13–14 Nov sweep: a Polish "j" after a vowel and before a consonant or the end marks a name too ("Pracuj"
+    // heard "Pratsu", 13 Nov 13:12, all three takes rejected).
+    let chars: Vec<char> = expected.chars().collect();
+    let vowel_j = (1..chars.len()).any(|k| chars[k] == 'j' && "aeiouy".contains(chars[k - 1])
+        && chars.get(k + 1).is_none_or(|c| !"aeiouy".contains(*c)));
+    let polish = expected.chars().any(|c| "ąćęłńóśźż".contains(c)) || ["sz", "cz", "rz"].iter().any(|d| expected.contains(d)) || vowel_j;
+    if !named || !polish || expected == actual || protected(actual) || actual.chars().count() < 3
+        || !actual.chars().all(char::is_alphabetic) {
+        return false;
+    }
+    let x = polish_sounds(expected, true, 'y');
+    // An English "j" is a hush ("Hoża" heard "Hoja"); in a Slavic spelling it is the Polish "j" ("Jeżyce" heard
+    // "Ježica"): both readings are tried.
+    [polish_sounds(actual, false, 'S'), polish_sounds(actual, false, 'y')].iter().any(|y| {
+        let (short, long) = (x.chars().count().min(y.chars().count()), x.chars().count().max(y.chars().count()));
+        short >= 4 && edit_distance(&x, y) <= usize::from(long >= 5)
+    })
+}
+/// A word's sounds as an English listener hears a Polish name (`polish_name_alike`): "S" for every sibilant or
+/// affricate, "v" for "ł"/"w"/"v", "a" for each vowel group, other accents dropped. `polish` reads the word as Polish
+/// ("ch" is "h", "c" is "ts", "j" is "y"); otherwise as an English spelling ("ch" and "c" before e/i/y hiss, an "r"
+/// after a final vowel is silent, "j" is `j`).
+fn polish_sounds(word: &str, polish: bool, j: char) -> String {
+    let s: Vec<char> = accent_hush(word).chars().filter(|c| *c != '\'').collect();
+    let vowel = |c: char| "aeiouyąęó".contains(c);
+    let mut out: Vec<char> = Vec::new();
+    let mut k = 0;
+    while k < s.len() {
+        let (c, next) = (s[k], s.get(k + 1).copied());
+        let (code, used): (&str, usize) = match (c, next) {
+            ('s', Some('z')) if polish && s.get(k + 2) == Some(&'c') && s.get(k + 3) == Some(&'z') => ("S", 4),
+            ('c', Some('h')) if polish => ("h", 2),
+            ('t', Some('c')) if s.get(k + 2) == Some(&'h') => ("S", 3),
+            ('s' | 'c' | 'z', Some('h' | 'z')) | ('t', Some('s' | 'z')) => ("S", 2),
+            ('r', Some('z')) if polish => ("S", 2),
+            ('d', Some('z' | 'ż' | 'ź')) => ("dS", 2),
+            ('c', Some('e' | 'i' | 'y')) if !polish => ("S", 1),
+            ('c', _) if !polish => ("k", 1),
+            ('s' | 'z' | 'c' | 'ś' | 'ź' | 'ż' | 'ć' | 'Š' | 'Ž' | 'Č', _) => ("S", 1),
+            // An Albanian "xh" is the English "j" ("Hoża" heard "Hoxha").
+            ('x', Some('h')) => ("S", 2),
+            ('x', _) => ("kS", 1),
+            ('j', _) if polish => ("y", 1),
+            ('j', _) => (if j == 'S' { "S" } else { "y" }, 1),
+            ('ł' | 'w' | 'v', _) => ("v", 1),
+            ('ń', _) => ("n", 1),
+            ('q', _) => ("k", 1),
+            ('y', _) if !polish && k == 0 => ("y", 1),
+            (c, _) if vowel(c) => ("a", 1),
+            (c, _) => {
+                let plain: String = c.to_string().nfkd().filter(char::is_ascii_alphanumeric).collect();
+                k += 1;
+                for c in plain.chars() {
+                    if out.last() != Some(&c) {
+                        out.push(c);
+                    }
+                }
+                continue;
+            }
+        };
+        for c in code.chars() {
+            if out.last() != Some(&c) {
+                out.push(c);
+            }
+        }
+        k += used;
+    }
+    // A final "r" after a vowel is not said in Jarvis's British speech ("Hoża" heard "Hosher").
+    if !polish && out.len() >= 3 && out.last() == Some(&'r') && out[out.len() - 2] == 'a' {
+        out.pop();
+    }
+    out.into_iter().collect()
+}
+/// The Slavic hushing letters of other languages' spellings ("š", "ž", "č", as the recognizer may write a Polish name),
+/// kept apart from the accents `polish_sounds` drops; every other letter unchanged.
+fn accent_hush(word: &str) -> String {
+    word.chars().map(|c| match c {
+        'š' => 'Š',
+        'ž' => 'Ž',
+        'č' => 'Č',
+        c => c,
+    })
+    .collect()
 }
 /// A plural written with its singular stem: "copy" heard "copies".
 fn inflection(expected: &str, actual: &str) -> bool {
@@ -1006,9 +1380,49 @@ fn spelling_alike(expected: &str, actual: &str, names: &HashSet<String>) -> Opti
         Some("regional")
     } else if name_alike(expected, actual, names) {
         Some("name")
+    } else if accent_alike(expected, actual) {
+        Some("accent")
+    } else if polish_name_alike(expected, actual, names) {
+        Some("polish name")
+    } else if leet_alike(expected, actual) {
+        Some("letters")
+    } else if hum(expected).is_some() && hum(expected) == hum(actual) {
+        Some("interjection")
+    } else if letter_name(expected) == Some(actual) || letter_name(actual) == Some(expected) || lone_letter_said(expected, actual) {
+        // "queue" heard "Q"; "c" heard "see".
+        Some("letter")
     } else {
         None
     }
+}
+/// A hum written with any number of letters: "hm", "hmm" and "hmmm" are one sound, as are "mm" and "mmm" (night 12–13
+/// Nov sweep: "mm-hm" heard "mm-hmm" rejected six takes and "saying mm" heard "mmm" one, 12 Nov 06:56 to 14:17, each a
+/// 2-4 s retry). "m" alone is an abbreviation (`m`), never a hum.
+fn hum(word: &str) -> Option<&'static str> {
+    let rest = word.trim_start_matches('h');
+    let hs = word.len() - rest.len();
+    if hs > 1 || rest.len() < 1 + usize::from(hs == 0) || !rest.chars().all(|c| c == 'm') {
+        return None;
+    }
+    Some(if hs == 1 { "hmm" } else { "mm" })
+}
+/// A name with a digit standing for a letter ("Solv3R" said "solver"): the expected word has one digit between letters
+/// (at least three before it, one or two after), and the heard word is its letters with the digit read as the letter it
+/// looks like, or sounds alike (8 Nov 05:45 and 09:30: four sentences of "Solv3R" went to the lighter voice, two of
+/// them heard "solver's" and "Solva"). A digit after the letters ("DINOv3") or before a unit-like tail ("CoLa3D") is
+/// no such name.
+fn leet_alike(expected: &str, actual: &str) -> bool {
+    let (stem, tail) = match expected.strip_suffix("'s") { Some(stem) => (stem, "'s"), None => (expected, "") };
+    let chars: Vec<char> = stem.chars().collect();
+    let Some(at) = chars.iter().position(char::is_ascii_digit) else { return false };
+    let after = &chars[at + 1..];
+    if at < 3 || !chars[..at].iter().all(char::is_ascii_lowercase) || !(1..=2).contains(&after.len())
+        || !after.iter().all(char::is_ascii_lowercase) || matches!(after, ['d'] | ['k'] | ['g'] | ['x'] | ['b'] | ['m']) {
+        return false;
+    }
+    let letter = match chars[at] { '0' => 'o', '1' => 'i', '3' => 'e', '4' => 'a', '5' => 's', '7' => 't', _ => return false };
+    let decoded: String = chars[..at].iter().chain([letter].iter()).chain(after).collect::<String>() + tail;
+    decoded == actual || sounds_alike(&decoded, actual)
 }
 pub fn check(expected: &str, transcript: &str) -> Value {
     let a = words(expected);
@@ -1021,7 +1435,7 @@ pub fn check(expected: &str, transcript: &str) -> Value {
     // 03:23 and 23 Oct 01:25: all three takes rejected as repeated).
     let spoken = |w: &[String]| (0..w.len()).filter(|&k| !unit_after_number(w, k) && w[k] != RANGE).map(|k| w[k].clone()).collect::<Vec<_>>();
     // Edit distance in words, where the recognizer's other spellings of what was said cost nothing: a compound
-    // written as one word or up to four ("pull-down"/"pulldown", "13 51"/"1351", "AllForOne"/"all for one"), a Roman
+    // written as one word or up to four ("pull-down"/"pulldown", "13 51"/"1351", "OneForAll"/"one for all"), a Roman
     // numeral, an inflected ending (`near`) and a word that sounds the same (`sounds_alike`: "cache"/"cash"). Measured
     // 18–19 Oct: each of these rejected all three Jarvis takes of a correctly spoken sentence and switched the user's
     // reply to the lighter voice.
@@ -1048,7 +1462,8 @@ pub fn check(expected: &str, transcript: &str) -> Value {
                 if i >= k && (joined(&a[i - k..i], &b[j - 1]) || fused(&a[i - k..i], &b[j - 1], &names, false)) {
                     cost = cost.min(costs[i - k][j - 1]);
                 }
-                if j >= k && (joined(&b[j - k..j], &a[i - 1]) || fused(&b[j - k..j], &a[i - 1], &names, true)) {
+                if j >= k && (joined(&b[j - k..j], &a[i - 1]) || fused(&b[j - k..j], &a[i - 1], &names, true)
+                    || name_split(&b[j - k..j], &a[i - 1], &names)) {
                     cost = cost.min(costs[i - 1][j - k]);
                 }
                 for m in 2..=MAX_PARTS {
@@ -1118,10 +1533,12 @@ pub fn check(expected: &str, transcript: &str) -> Value {
             i -= k;
             j -= 1;
             true
-        } else if let Some(k) = (2..=MAX_PARTS).find(|&k| i > 0 && j >= k && (joined(&b[j - k..j], &a[i - 1]) || fused(&b[j - k..j], &a[i - 1], &names, true)) && here == costs[i - 1][j - k]) {
+        } else if let Some(k) = (2..=MAX_PARTS).find(|&k| i > 0 && j >= k && (joined(&b[j - k..j], &a[i - 1]) || fused(&b[j - k..j], &a[i - 1], &names, true)
+            || name_split(&b[j - k..j], &a[i - 1], &names)) && here == costs[i - 1][j - k]) {
             let exact = joined(&b[j - k..j], &a[i - 1]);
             misheard_words += usize::from(!exact);
-            spellings.push(json!({"kind":if exact { "split" } else { "fused" },"expected":a[i-1],"actual":b[j-k..j].join(" ")}));
+            let kind = if exact { "split" } else if fused(&b[j - k..j], &a[i - 1], &names, true) { "fused" } else { "name_split" };
+            spellings.push(json!({"kind":kind,"expected":a[i-1],"actual":b[j-k..j].join(" ")}));
             for position in &mut positions[j - k..j] {
                 *position = Some(i - 1);
             }
@@ -1237,6 +1654,9 @@ fn misheard_limit(words: usize) -> usize {
 /// only with the same sound (a name: the same rough sound), a longer one at most one sound apart, two from seven, three
 /// from nine. Never a negation, number, unit, ordinal, noise or `contrast` word: those change what was said.
 fn misheard(expected: &str, actual: &str, names: &HashSet<String>) -> bool {
+    if function_alike(expected, actual) {
+        return true;
+    }
     let plain = |w: &str| w.chars().count() >= 2 && w.chars().all(|c| c.is_alphabetic() || c == '\'') && !protected(w) && !contrast(w) && !noise(w);
     if !plain(expected) || !plain(actual) || expected == actual {
         return false;
@@ -1275,6 +1695,12 @@ fn misheard(expected: &str, actual: &str, names: &HashSet<String>) -> bool {
     let longest = x.chars().count().max(y.chars().count());
     let apart = edit_distance(&x, &y);
     starts && (apart <= 1 || (apart <= 2 && longest >= 7) || (apart <= 3 && longest >= 9))
+}
+/// Short function words the recognizer hears for one another in Jarvis's British speech: "an" and "and" (voice-drop
+/// sweep 14 Nov, 13:51 and 19:08: "an app" heard "and app"), "or" heard "all" (19:08, no "r": "aw"). Like any word heard
+/// as another spelling of its sound they count toward `misheard_limit`, never free; "and" heard "in" stays a fault.
+fn function_alike(expected: &str, actual: &str) -> bool {
+    matches!((expected, actual), ("an", "and") | ("and", "an") | ("or", "all"))
 }
 /// The one word a rejected take got wrong, when that was its only fault: a single substitution of an unprotected
 /// plain word, the final word right, nothing cut or repeated. `(expected, heard)`.
@@ -1342,8 +1768,8 @@ fn keep_limit(words: usize) -> usize {
 /// broken one. A kept take is complete (its final word heard, or heard as another whole word of about its length),
 /// repeats nothing, and only has words heard as other words: at most `keep_limit` of them, none of them a negation,
 /// number, unit, ordinal or `contrast` word. A dropped or added word is never kept: skipping words is how the voice
-/// fails, and the check exists to catch it (review 24 Oct). `_earlier` is the sentence's earlier rejected takes.
-pub fn keepable(evidence: &Value, _earlier: &[Value]) -> Option<usize> {
+/// fails, and the check exists to catch it (review 24 Oct).
+pub fn keepable(evidence: &Value) -> Option<usize> {
     let edits = evidence["edits"].as_array()?;
     let words = evidence["expected_words"].as_u64()? as usize;
     let complete = evidence["last_word"] == true || evidence["last_misheard"] == true;
@@ -1673,10 +2099,10 @@ mod tests {
              "The top bar shows the max GPU and memory load plus tokens used today."),
             ("It also has to confirm or refute your bet on DFlash2 and keep the reply short.",
              "It also has to confirm or refute your bet on D Flash 2 and keep the reply short."),
-            ("The one thing I held back is deleting AllForOne since that can't be undone.",
-             "The one thing I held back is deleting all for one, since that can't be undone."),
-            ("It will delete AllForOne's weights build files and caches and archive the code notes and results.",
-             "It will delete all for one's weights build files and caches and archive the code notes and results."),
+            ("The one thing I held back is deleting OneForAll since that can't be undone.",
+             "The one thing I held back is deleting one for all, since that can't be undone."),
+            ("It will delete OneForAll's weights build files and caches and archive the code notes and results.",
+             "It will delete one for all's weights build files and caches and archive the code notes and results."),
             ("The ones that look good are built like Linear a Vercel dashboard or Apple's widget grid.",
              "The ones that look good are built like Linear Aversel dashboard or Apple's widget grid."),
             ("The ones that look good are built like Linear a Vercel dashboard or Apple's widget grid.",
@@ -1713,7 +2139,7 @@ mod tests {
             ("I will not ever delete the archive for you.", "I will never delete the archive for you."),
             ("It will test the last 1000 characters to see which length wakes me.", "It will test the last 1,001 characters to see which length wakes me."),
             // A compound with a part missing is not the compound.
-            ("The one thing I held back is deleting AllForOne today.", "The one thing I held back is deleting all for today."),
+            ("The one thing I held back is deleting OneForAll today.", "The one thing I held back is deleting all for today."),
         ] {
             let r = check(expected, heard);
             assert_eq!(r["accepted"], false, "{expected} / {heard}: {r}");
@@ -1962,6 +2388,41 @@ mod night_log_tests {
         let kinds: Vec<&str> = r["spellings"].as_array().unwrap().iter().map(|s| s["kind"].as_str().unwrap()).collect();
         assert!(kinds.contains(&"split") && kinds.contains(&"name"), "{r}");
     }
+    /// Night 8 Nov log sweep, finding 5: accent-only pairs from `heimdall.log` 6–7 Nov ("café→cafe" 36 rejections,
+    /// "patisserie→pâtisserie" 1), each a correct take rejected.
+    #[test]
+    fn the_7_nov_accent_only_spellings_pass() {
+        for (expected, heard) in [
+            (
+                "The physical side is much slower, cooking, care, repairs, cleaning, and hospitality like the café, because AI still needs robots to touch the real world.",
+                "The physical side is much slower, cooking, care, repairs, cleaning, and hospitality like the cafe, because AI still needs robots to touch the real world.",
+            ),
+            (
+                "A good site for a café, mechanic or clinic in a few days for 2,000 to 5,000 is a sale the owner understands without any AI explanation.",
+                "A good site for a cafe mechanic or clinic in a few days for 2,000 to 5,000 is a sale the owner understands without any AI explanation.",
+            ),
+            ("The cafés in the park open at eight.", "The cafes in the park open at eight."),
+            ("It runs a patisserie and an event catering arm.", "It runs a pâtisserie and an event catering arm."),
+            ("She took the train to Łódź on Friday.", "She took the train to Lodz on Friday."),
+        ] {
+            let r = verdict(expected, heard);
+            assert_eq!(r["accepted"], true, "{expected} / {heard}: {r}");
+            let kinds: Vec<&str> = r["spellings"].as_array().unwrap().iter().map(|s| s["kind"].as_str().unwrap()).collect();
+            assert!(kinds.contains(&"accent"), "{r}");
+        }
+        assert!(!accent_alike("cafe", "cafe") && !accent_alike("cafe", "safe"));
+    }
+    #[test]
+    fn accents_never_hide_a_changed_word() {
+        for (expected, heard) in [
+            ("Meet me at the café at noon.", "Meet me at the cave at noon."),
+            ("Meet me at the café at noon.", "Meet me at the cafe at moon."),
+            ("The résumé is ready.", "The resume is not ready."),
+            ("She took the train to Łódź on Friday.", "She took the train to Lots on Friday."),
+        ] {
+            assert_eq!(verdict(expected, heard)["accepted"], false, "{expected} / {heard}");
+        }
+    }
     /// 23–24 Oct night (`heimdall.log`): each was heard alike on every take and switched the sentence to the lighter
     /// voice.
     #[test]
@@ -2077,7 +2538,7 @@ mod night_log_tests {
         ] {
             let v = spoken_check(written, heard);
             assert_eq!(v["accepted"], false, "{written} / {heard}: {v}");
-            assert_eq!(keepable(&v, &[]), None, "{written} / {heard}: kept {v}");
+            assert_eq!(keepable(&v), None, "{written} / {heard}: kept {v}");
         }
         // Another word, not another spelling (`keepable` may still keep one such word after the last retry).
         assert_eq!(spoken_check("A blind judgement came first.", "A blind judge came first.")["accepted"], false);
@@ -2091,7 +2552,7 @@ mod night_log_tests {
     }
     #[test]
     fn a_take_misheard_but_complete_is_kept_after_the_last_retry() {
-        let keep = |expected: &str, heard: &str| keepable(&check(expected, heard), &[]);
+        let keep = |expected: &str, heard: &str| keepable(&check(expected, heard));
         // 23 Oct: a name, a Polish phrase, a name heard another way.
         assert_eq!(keep("The Baltic Slavs also had a dedicated war god Jarovit.", "The Baltic Slavs also had a dedicated war god Yarovit."), Some(1));
         assert!(keep("He's also very Polish the four faced Zbruch idol in Kraków is popularly called Światowid.",
@@ -2110,7 +2571,7 @@ mod night_log_tests {
     }
     #[test]
     fn a_meaning_word_a_dropped_word_or_a_cut_end_is_never_kept() {
-        let keep = |expected: &str, heard: &str| keepable(&check(expected, heard), &[check(expected, heard)]);
+        let keep = |expected: &str, heard: &str| keepable(&check(expected, heard));
         // A changed number, negation or opposite, even heard alike on every take (review 24 Oct: the voice misreads a
         // number the same way each time).
         assert_eq!(keep("It costs fifteen dollars today.", "It costs fifty dollars today."), None);
@@ -2123,7 +2584,7 @@ mod night_log_tests {
         assert_eq!(keep("Pick one and press done.", "Pick one and press the."), None);
         assert_eq!(keep("The war god was called Jarovit.", "The war god was called Ja."), None);
         // A verifier error carries no edits and is never kept.
-        assert_eq!(keepable(&json!({"accepted":false,"reason":"live recognizer unavailable"}), &[]), None);
+        assert_eq!(keepable(&json!({"accepted":false,"reason":"live recognizer unavailable"})), None);
     }
 }
 #[cfg(test)]
@@ -2398,7 +2859,377 @@ mod night_1104_tests {
     #[test]
     fn a_contrast_word_heard_as_a_plain_word_may_be_kept_after_the_retries() {
         let r = check("The page and Angel's copy in Downloads get updated when it finishes.", "The page and Angel's copy and downloads get updated when it finishes.");
-        assert_eq!(keepable(&r, &[]), Some(1));
-        assert_eq!(keepable(&check("Put it in the folder please.", "Put it on the folder please."), &[]), None);
+        assert_eq!(keepable(&r), Some(1));
+        assert_eq!(keepable(&check("Put it in the folder please.", "Put it on the folder please.")), None);
+    }
+}
+
+/// The 8-9 Nov voice-drop sweep (night 1110, Assistant/Research/night-pass-2026-11-10/voice-drops.md): takes the word
+/// check rejected on every attempt, so the sentence went to the lighter voice, though Jarvis said it.
+#[cfg(test)]
+mod sweep_1110_tests {
+    use super::*;
+
+    #[test]
+    fn a_day_of_the_month_is_the_same_said_as_an_ordinal() {
+        // 8 Nov 06:00 and 9 Nov 13:05, all three takes each.
+        assert_eq!(check("It closes on 1 December.", "It closes on 1st December.")["accepted"], true);
+        assert_eq!(check("On November 1st usage meters jumped overnight.", "On November 1, usage meters jumped overnight.")["accepted"], true);
+        assert_eq!(check("It closes on 1 December.", "It closes on the first of December.")["accepted"], true);
+        // Still a number: another day fails, and an ordinal away from a month stays an ordinal.
+        assert_eq!(check("It closes on 1 December.", "It closes on 2nd December.")["accepted"], false);
+        assert_eq!(check("It came 1st in the test run.", "It came 1 in the test run.")["accepted"], false);
+    }
+
+    #[test]
+    fn a_handle_heard_as_its_parts_is_the_name() {
+        // 9 Nov 12:14 (three takes), 13:02 (three), 13:22 (two of three), 11:58 (three).
+        for (expected, heard) in [
+            ("MayaNoSkillSon is the light elf building in the open.", "Maya No Skilson is the light elf building in the open."),
+            ("MayaNoSkillSon is the light elf building in the open.", "Maya No Skillzen is the light elf building in the open."),
+            ("MayaNoSkillSon is the light elf building in the open.", "Maya no skillzon is the light elf building in the open."),
+            ("The card asks whether to upload the white one to MayaNoSkillSon and the black one to SkillfulMaya.",
+                "The card asks whether to upload the white one to Maya No Skilson and the black one to Skillful Maya."),
+            ("MayaNoSkillSon has the cleaned up white astronauts still with the blue check, and SkillfulMaya has the black twin.",
+                "Maya no skills and has the cleaned up white astronauts still with the blue check, and skillful Maya has the black twin."),
+            ("All without Maya or NoSkillSon in them.", "All without Maya or no Skillsun in them."),
+        ] {
+            assert_eq!(check(expected, heard)["accepted"], true, "{expected} / {heard}: {}", check(expected, heard));
+        }
+        // Not a name in the text: plain words heard as other words still fail, and a name is no licence to drop words.
+        assert_eq!(check("Maya is not skilled at this.", "Maya is no skilled at this.")["accepted"], false);
+        assert_eq!(check("MayaNoSkillSon is the light elf building in the open.", "Maya is the light elf building in the open.")["accepted"], false);
+        assert_eq!(check("MayaNoSkillSon is the light elf building in the open.", "Maya No Killer is the light elf building in the open.")["accepted"], false);
+    }
+
+    #[test]
+    fn a_digit_standing_for_a_letter_is_said_as_the_letter() {
+        // 8 Nov 05:45: "Solv3R" said "solver", heard "solver's" and "Solva".
+        assert_eq!(check("One catch, Solv3R's weights are non-commercial only.", "One catch, solver's weights are non-commercial only.")["accepted"], true);
+        assert_eq!(check("Solv3R and CoLa3D are the two worth adding to Arsenal.", "Solva and Cola 3D are the two worth adding to Arsenal.")["accepted"], true);
+        // Said as a digit, it is not the name; nor is a letters-and-digits name with a unit-like tail.
+        assert_eq!(check("The solver is Solv3R.", "The solver is solve 3.")["accepted"], false);
+        assert!(!leet_alike("cola3d", "colaed"));
+        assert!(!leet_alike("dinov3", "dinove"));
+        assert!(!leet_alike("solv3r", "solve"));
+        assert!(!leet_alike("solv3r", "sulver"));
+    }
+    /// Night 10–11 Nov voice-drop sweep, rows 12 and 14–17: every take of a "GiB" sentence heard "gigabytes" (or "GB")
+    /// and five sentences went to the lighter voice. The logged sentences and transcripts, 10 Nov 19:01–19:10.
+    #[test]
+    fn binary_units_are_heard_as_gigabytes() {
+        for (expected, heard) in [
+            ("It's the closest to BF16 of everything that fits with a measured divergence of 0.0084 and it leaves about 13 GiB after a 250000 token cache.",
+             "It's the closest to BF16 of everything that fits, with a measured divergence of 0.0084, and it leaves about 13 gigabytes after a 250,000 token cache."),
+            ("It's the closest to BF16 of everything that fits with a measured divergence of 0.0084 and it leaves about 13 GiB after a 250000 token cache.",
+             "It's the closest to BF16 of everything, that fits with a measured divergence of 0.0084, and it leaves about 13GB after a 250,000 token cache."),
+            ("The 2 bit to 4 bit files fit with 13 to 65 GiB to spare.", "The 2-bit to 4-bit files fit with 13 to 65 gigabytes to spare."),
+            ("With 250000 tokens cached about 13 GiB is left.", "With 250,000 tokens cached, about 13 gigabytes is left."),
+            ("The step down if you want more room is Unsloth's IQ4 XS with about 30 GiB left.", "The step down, if you want more room, is Unsloth's IQ4XS with about 30 gigabytes left."),
+            ("The step down if you want more room is Unsloth's IQ4 XS with about 30 GiB left.", "The step down if you want more room is Unsloth's IQ4XS with about 30GB left."),
+            ("Splash keeps its cache at 8 bit which costs about 13 kilobytes per token for this model or roughly 3 GiB per 250000 tokens.",
+             "Splash keeps its cash at 8-bit, which costs about 13 kilobytes per token for this model, or roughly 3 GB per 250,000 tokens."),
+            ("It needs 512MiB and 2 TiB.", "It needs 512 megabytes and 2 terabytes."),
+        ] {
+            let v = check(expected, heard);
+            assert_eq!(v["accepted"], true, "{expected} / {heard}: {v}");
+            // As the voices now say it (`drama3::spell_symbols`).
+            let said = crate::drama3::normalize(expected);
+            assert!(!said.contains("GiB"), "{said}");
+            let v = check(&said, heard);
+            assert_eq!(v["accepted"], true, "{said} / {heard}: {v}");
+        }
+        // A wrong amount or unit is still a fault: row 15's first takes said 25,000 for 250,000.
+        for (expected, heard) in [
+            ("With 250000 tokens cached about 13 GiB is left.", "With 25,000 tokens cached, about 13 gigabytes is left."),
+            ("With 250000 tokens cached about 13 GiB is left.", "With 250,000 tokens cached, about 13 megabytes is left."),
+            ("With 250000 tokens cached about 13 GiB is left.", "With 250,000 tokens cached, about 13 is left."),
+            ("With 250000 tokens cached about 13 GiB is left.", "With 250,000 tokens cached, about 31 gigabytes is left."),
+        ] {
+            assert_eq!(check(expected, heard)["accepted"], false, "{heard}");
+        }
+        // "gib" is a unit only after a number.
+        assert_eq!(words("a gib of 3 GiB"), ["a", "gib", "of", "3", "gigabyte"]);
+    }
+    /// Night 10–11 Nov sweep, rows 7 and 8 (10 Nov 09:52 and 09:54): Polish numbers in other cases, written in digits by
+    /// the recognizer, sent two sentences to the lighter voice.
+    #[test]
+    fn polish_numbers_in_every_case_are_their_value() {
+        let v = check(
+            "Pierwsze pytanie opisz w pięciu do dziesięciu zdaniach osiągnięcie z którego jesteś najbardziej dumny.",
+            "Pierwsze pytanie opisz w 5 do 10 zdaniach osiągnięcie, z którego jesteś najbardziej dumny.",
+        );
+        assert_eq!(v["accepted"], true, "{v}");
+        let expected = "To co dyktowałeś przepadło od sto dwudziestej sekundy więc powtórz proszę tę część na razie w krótszych kawałkach.";
+        let v = check(expected, "To co dyktowałeś przepadło od 120 sekundy, więc powtórz proszę tę część na razie w krótszych kawałkach.");
+        assert_eq!(v["accepted"], true, "{v}");
+        // The logged takes now fail only on their real faults ("co" heard "czy", "to" dropped), never on the number.
+        let v = check(expected, "Czy kodyktowałeś przepadło od 120 sekundy, więc powtórz proszę tę część na razie w krótszych kawałkach.");
+        assert_eq!(v["accepted"], false);
+        assert!(!v["edits"].to_string().contains("120") && !v["edits"].to_string().contains("dwudziest"), "{v}");
+        // Cardinals and ordinals in their cases, alone and in compounds.
+        for (said, value) in [
+            ("pięciu", "5"), ("pięcioma", "5"), ("dwóch", "2"), ("dwiema", "2"), ("trzema", "3"), ("czterech", "4"),
+            ("ośmiu", "8"), ("jedenastu", "11"), ("piętnastoma", "15"), ("dwudziestu", "20"), ("trzydziestu", "30"),
+            ("pięćdziesięciu", "50"), ("dziewięćdziesięciu", "90"), ("jednej", "1"),
+            ("piąty", "5"), ("piątej", "5"), ("trzeciej", "3"), ("trzecią", "3"), ("drugiego", "2"), ("drugim", "2"),
+            ("ósmej", "8"), ("dziesiątym", "10"), ("dwunastej", "12"), ("dwudziestej", "20"), ("czterdziestym", "40"),
+            ("sześćdziesiątej", "60"),
+            ("sto dwudziestej", "120"), ("dwudziestego pierwszego", "21"), ("trzydziestej piątej", "35"), ("od stu", "od 100"),
+            ("pięciuset", "500"), ("dwustu pięćdziesięciu", "250"), ("setnej", "100"), ("dwusetny", "200"),
+            ("dwudziestu pięciu tysięcy", "25000"),
+        ] {
+            assert_eq!(words(said).join(" "), value, "{said}");
+        }
+        // Words that only look like a number stay words: the weekdays, "dozens".
+        for word in ["piątek", "czwartek", "dziesiątki", "drugstore", "stuff", "setting"] {
+            assert_eq!(words(word), [word], "{word}");
+        }
+        // A wrong number is still a fault.
+        for heard in ["Opisz w 6 do 10 zdaniach.", "Opisz w 5 do 12 zdaniach.", "Opisz w 5 zdaniach."] {
+            assert_eq!(check("Opisz w pięciu do dziesięciu zdaniach.", heard)["accepted"], false, "{heard}");
+        }
+        assert_eq!(check("Od sto dwudziestej sekundy.", "Od 20 sekundy.")["accepted"], false);
+        assert_eq!(check("Od sto dwudziestej sekundy.", "Od 100 20 sekundy.")["accepted"], false);
+    }
+    /// Night 10–11 Nov sweep, rows 11 and 13: a term heard merged or split. "Queue time" heard "QTime" (10 Nov 17:00)
+    /// and "ExLlamaV3" heard "XLama V3" (19:02), each on all three takes.
+    #[test]
+    fn a_term_heard_merged_or_split_with_its_letters_is_said() {
+        for (expected, heard) in [
+            ("Queue time belongs to the provider so another host could fix it.", "QTime belongs to the provider so another host could fix it."),
+            ("Queue time belongs to the provider so another host could fix it.", "QTime belongs to the provider, so another host could fix it."),
+            ("ExLlamaV3 is CUDA only and the one Mac app that reads EXL3 doesn't list this model's architecture.",
+             "XLama V3 is CUDA only, and the one Mac app that reads ExL3 doesn't list this model's architecture."),
+            ("A caution from memory which the worker will verify. ExLlama has been built around NVIDIA cards, so Mac support may be missing.",
+             "A caution from memory which the worker will verify. XLlama has been built around NVIDIA cards, so Mac support may be missing."),
+            // The reverse direction, and the letter on its own.
+            ("The QTime value is low.", "The queue time value is low."),
+            ("The queue is full.", "The Q is full."),
+        ] {
+            let v = check(expected, heard);
+            assert_eq!(v["accepted"], true, "{expected} / {heard}: {v}");
+        }
+        // Real faults around them still fail: a dropped word, a changed number, another word, letters that differ.
+        for (expected, heard) in [
+            ("Queue time belongs to the provider.", "Time belongs to the provider."),
+            ("Queue time belongs to the provider.", "Q belongs to the provider."),
+            ("Queue time belongs to the provider.", "QTimer belongs to the provider."),
+            ("Queue time belongs to the provider.", "Cutie belongs to the provider."),
+            ("Next time belongs to the provider.", "XTime belongs to the provider."),
+            ("ExLlamaV3 is CUDA only.", "XLama V4 is CUDA only."),
+            ("ExLlamaV3 is CUDA only.", "Llama V3 is CUDA only."),
+            ("ExLlamaV3 is CUDA only.", "XLama is CUDA only."),
+            ("ExLlamaV3 is CUDA only.", "XLarma V3 is CUDA only."),
+            ("We are done here today.", "Wer done here today."),
+            ("You see the problem now.", "UC the problem now."),
+        ] {
+            let v = check(expected, heard);
+            assert_eq!(v["accepted"], false, "{expected} / {heard}: {v}");
+        }
+    }
+    /// Night 11–12 Nov sweep (11 Nov): Polish street and place names in English replies, heard in the recognizer's
+    /// spellings, rejected 20 takes; one sentence went to the lighter voice at 11:32 (`polish_name_alike`).
+    #[test]
+    fn polish_names_heard_in_english_spellings_are_the_name() {
+        for (expected, heard) in [
+            ("One thing to confirm I heard the address as Hoża six.", "One thing to confirm I heard the address as Hoja 6."),
+            ("The worker checks your CV files for the real one and falls back to Hoża six if it finds nothing.",
+             "The worker checks your CV files for the real one and falls back to Hosher 6 if it finds nothing."),
+            ("The reranker scores each ad against a specific profile so yesterday's scores for AI automation roles are useless for a clean easy job near Hoża.",
+             "The re-ranker scores each ad against a specific profile, so yesterday's scores for AI automation roles are useless for a clean, easy job near HOSA."),
+            ("The reranker scores each ad against a specific profile so yesterday's scores for AI automation roles are useless for a clean easy job near Hoża.",
+             "The re-ranker scores each ad against a specific profile, so yesterday's scores for AI automation roles are useless for a clean, easy job near Hosha."),
+            ("The ad I found is in Starołęka which is across the city from Hoża not two kilometres away.",
+             "The ad I found is in Staroweka, which is across the city from Hoxha, not two kilometers away."),
+            ("The ad I found is in Starołęka which is across the city from Hoża not two kilometres away.",
+             "The ad I found is in Staroweka, which is across the city from Hoja, not two kilometers away."),
+            ("The one on your list is a different ad in Jeżyce and it doesn't name the company at all.",
+             "The one on your list is a different ad in Ježica, and it doesn't name the company at all."),
+            ("The last one I mentioned was the street view check. A worker is confirming that the view faces the right building at Zacisze eight.",
+             "The last one I mentioned was the street view check. A worker is confirming that the view faces the right building at Zakisha 8."),
+            ("Zacisze eight and Makropol's website and register entry give the same address.",
+             "Zachisha 8 and Makropol's website and register entry give the same address."),
+            ("Zacisze eight and Makropol's website and register entry give the same address.",
+             "Zatsusha eight and Makropol's website and register entry give the same address."),
+            // "Kilometres" heard "km" (10:39, 10:48).
+            ("The office is listed only as Stare Miasto about four kilometres from Hoża so a tram ride.",
+             "The office is listed only as Stare Miasto, about 4 km from Hoja, so a tram ride."),
+            ("The office is at Poznańska 62 in Jeżyce about two and a half kilometres from Hoża.",
+             "The office is at Poznań ska 62 in Ježice, about 2.5 km from Hoża."),
+            // "Fifteen hundred" heard "1,500" (10:14, all three takes; the sentence went to the lighter voice).
+            ("It rescored the best fifteen hundred or so candidates for the new profile and those scores are saved too so repeating this same search will be quick.",
+             "It re-scored the best 1,500 or so candidates for the new profile, and those scores are saved too, so repeating this same search will be quick."),
+        ] {
+            let v = check(expected, heard);
+            assert_eq!(v["accepted"], true, "{expected} / {heard}: {v}");
+        }
+        for (said, value) in [("fifteen hundred and five", "1505"), ("twenty five hundred", "2500"), ("nine hundred", "900"), ("fifteen hundred", "1500")] {
+            assert_eq!(words(said).join(" "), value, "{said}");
+        }
+        // A round tens word before "hundred" stays apart.
+        assert_eq!(words("twenty hundred").join(" "), "20 100");
+        // Still faults: the house number read in Polish, another place, a different word, a wrong distance or count.
+        for (expected, heard) in [
+            ("Zacisze eight and Makropol's website give the same address.", "Zachisha Osh and Makropol's website give the same address."),
+            ("Zacisze eight and Makropol's website give the same address.", "Zachisha Ocean and Makropol's website give the same address."),
+            ("It is near Hoża today.", "It is near Hotel today."),
+            ("It is near Hoża today.", "It is near Warsaw today."),
+            ("It is near Hoża today.", "It is near Hall today."),
+            ("It is in Jeżyce today.", "It is in Mokotów today."),
+            ("It is in Zacisze today.", "It is in Sadie today."),
+            ("It is near Hoża not far.", "It is near Hoja no far."),
+            ("About four kilometres from Hoża.", "About 4 miles from Hoja."),
+            ("About four kilometres from Hoża.", "About 40 km from Hoja."),
+            ("About four kilometres from Hoża.", "About 4 from Hoja."),
+            ("The best fifteen hundred candidates.", "The best 1,000 candidates."),
+            ("The best fifteen hundred candidates.", "The best 150 candidates."),
+            ("The best fifteen hundred candidates.", "The best 15,000 candidates."),
+            // A plain English name or word is never compared this way.
+            ("The house is ready.", "The hosa is ready."),
+        ] {
+            let v = check(expected, heard);
+            assert_eq!(v["accepted"], false, "{expected} / {heard}: {v}");
+        }
+    }
+
+    /// Night 12–13 Nov sweep (12 Nov 01:07 to 18:51): the logged sentences and takes the check rejected although they
+    /// said the text. Five of the seven sentences sent to the lighter voice, and seven retries of "hm" and "mm".
+    #[test]
+    fn sweep_1113_homophones_hums_metres_and_model_names_pass() {
+        for (expected, heard) in [
+            // 07:05, all three takes: "know" heard "no".
+            ("Three to know.", "3 to no"),
+            ("Three to know.", "Three to no."),
+            // 09:23, all three takes: "4o's" heard "4.0's".
+            ("By its makers' own numbers it scores close to GPT 4o's voice mode on a spoken test.",
+             "By its maker's own numbers, it scores close to GPT-4.0's voice mode on a spoken test."),
+            // 09:31, all three takes: "MoE" said "Moe", heard "Mo".
+            ("Is it MoE?", "Is it Mo?"),
+            // 09:31, all three takes: "VL 32B" heard "VL32B".
+            ("The brain is the language model from Qwen3 VL 32B an ordinary dense model 64 layers.",
+             "The brain is the language model from Qwen 3 VL32B, an ordinary dense model, 64 layers."),
+            // 11:24, all three takes (cut before the battery, whose "percent" Jarvis added): "Mac" heard "Mach",
+            // "metres" heard "meters".
+            ("I just read it myself from the Mac 2885 steps today 2.2 kilometres two floors up and two down standing still right now 98 metres above sea level.",
+             "I just read it myself from the Mach 2885 steps, today 2.2 kilometers, two floors up and two down, standing still right now, 98 meters above sea level."),
+            // 10:26: "metres" heard "meters".
+            ("Once you grant always iOS itself restarts the app whenever you move a few hundred metres even if it was fully closed.",
+             "Once you grant always iOS itself restarts the app whenever you move a few hundred meters, even if it was fully closed."),
+            // 09:23, 09:45 and four more: "mm-hm" heard "mm-hmm"; 14:17: "mm" heard "mmm".
+            ("At every pause it decides in a single token whether you finished are still talking are just saying mm-hm or are thinking.",
+             "At every pause it decides in a single token whether you finished, are still talking, are just saying, mm-hmm, or are thinking."),
+            ("It should be my reflexes knowing when you've finished saying mm or one moment holding the floor.",
+             "It should be my reflexes knowing when you've finished saying, mmm, or one moment, holding the floor."),
+            // 17:49, two takes: "hole" heard "whole".
+            ("Afterwards I give you three things what was factually wrong where the argument had a hole and the one part that was strongest.",
+             "Afterwards I give you three things what was factually wrong, where the argument had a whole and the one part that was strongest."),
+        ] {
+            let v = check(expected, heard);
+            assert_eq!(v["accepted"], true, "{expected} / {heard}: {v}");
+        }
+        for (word, hum_of) in [("hm", Some("hmm")), ("hmmm", Some("hmm")), ("mm", Some("mm")), ("mmm", Some("mm")), ("m", None), ("h", None), ("hhm", None), ("him", None)] {
+            assert_eq!(hum(word), hum_of, "{word}");
+        }
+        // Still faults: another number, model or unit, a dropped negation, a different word.
+        for (expected, heard) in [
+            ("It scores close to GPT 4o's voice mode.", "It scores close to GPT-4.1's voice mode."),
+            ("It scores close to GPT 4o's voice mode.", "It scores close to GPT-4's voice mode."),
+            ("The model is Qwen3 VL 32B today.", "The model is Qwen 3 VL32M today."),
+            ("The model is Qwen3 VL 32B today.", "The model is Qwen 3 VL30B today."),
+            ("It is 98 metres above sea level.", "It is 98 kilometers above sea level."),
+            ("It is 98 metres above sea level.", "It is 98 feet above sea level."),
+            ("It is 98 metres above sea level.", "It is 98 above sea level."),
+            ("The answer is no today.", "The answer is now today."),
+            ("I do not know today.", "I do know today."),
+            ("There is no reason to wait.", "There is know reason to wait."),
+            ("It runs on the Mac today.", "It runs on the max today."),
+            ("Is it MoE here?", "Is it more here?"),
+        ] {
+            let v = check(expected, heard);
+            assert_eq!(v["accepted"], false, "{expected} / {heard}: {v}");
+        }
+    }
+
+    /// Night 13–14 Nov sweep (12 Nov 22:56 to 13 Nov 17:46): the two sentences sent to the lighter voice, both check
+    /// faults, and the Polish site name rejected on all three takes.
+    #[test]
+    fn sweep_1114_secondhand_thirty_second_and_pracuj_pass() {
+        for (expected, heard) in [
+            // 10:09, all three takes: "Second hand" ("2nd hand") heard "Secondhand".
+            ("Second hand flats and rentals live on the portals and they own those listings.",
+             "Secondhand flats and rentals live on the portals, and they own those listings."),
+            // 13:34, all three takes: "thirty second" ("32nd") heard "30 seconds".
+            ("That points back to video in its smallest form a twenty to thirty second screen clip of Heimdall doing real work linked from the top line of the CV.",
+             "That points back to video in its smallest form, a 20 to 30 seconds screenclip of Heimdall doing real work, linked from the top line of the CV."),
+            ("Record a thirty second clip.", "Record a 30-second clip."),
+            ("It was the twenty second of May.", "It was the 22nd of May."),
+            // 13:12, take 1: "Pracuj" heard "Pratsu".
+            ("For BCF I need your yes, an hourly rate, and which stored Pracuj CV can go.",
+             "For BCF I need your yes, an hourly rate, and which stored Pratsu CV can go."),
+        ] {
+            let v = check(expected, heard);
+            assert_eq!(v["accepted"], true, "{expected} / {heard}: {v}");
+        }
+        assert_eq!(ordinal_word("2nd"), Some("second"));
+        assert_eq!(ordinal_word("20th"), Some("twentieth"));
+        assert_eq!(ordinal_word("22nd"), None);
+        // Still faults: another number of seconds, another ordinal, a different compound, another name.
+        for (expected, heard) in [
+            ("Record a thirty second clip.", "Record a 40 seconds clip."),
+            ("Record a thirty second clip.", "Record a 30 minutes clip."),
+            ("Record a thirty second clip.", "Record a 33rd clip."),
+            ("It was the twenty second of May.", "It was the 23rd of May."),
+            ("It was the twenty second of May.", "It was the 30 seconds of May."),
+            ("Second hand flats live on the portals.", "Third hand flats live on the portals."),
+            ("Second hand flats live on the portals.", "Firsthand flats live on the portals."),
+            ("Which stored Pracuj CV can go today?", "Which stored Indeed CV can go today?"),
+            ("Which stored Pracuj CV can go today?", "Which stored CV can go today?"),
+        ] {
+            let v = check(expected, heard);
+            assert_eq!(v["accepted"], false, "{expected} / {heard}: {v}");
+        }
+    }
+    /// Voice-drop sweep 14 Nov: false rejections that each left the user 8-17 s of silence mid-reply ("an" heard "and" at
+    /// 13:51 and 19:08, "or" heard "all" at 19:08, "c" heard "see" at 15:18, "T3.codes" heard "T3 dot codes" at 15:22).
+    #[test]
+    fn sweep_1115_function_words_letter_names_and_a_dotted_name_pass() {
+        let spoken = |written: &str, heard: &str| check(&crate::drama3::normalize(written), heard);
+        for (written, heard) in [
+            ("When macOS says an app will damage your computer and should go in the bin, that's nearly always one of three things, a revoked certificate or a quarantine flag.",
+             "When macOS says and app will damage your computer and should go in the bin, that's nearly always one of three things, a revoked certificate all a quarantine flag."),
+            ("After that come four new posts, each with an hour of audio.", "After that come four new posts, each with and hour of audio."),
+            ("Vella and Arsenal both open.", "Vella an Arsenal both open."),
+            ("C the bold type and pixel art.", "See the bold type and pixel art."),
+            ("Press key c to copy it.", "Press key see to copy it."),
+            ("Pick option r now.", "Pick option are now."),
+            ("Then y is the last column.", "Then why is the last column."),
+            ("It names the qualities that give T3.codes its feel.", "It names the qualities that give T3 dot codes its feel."),
+            ("It names the qualities that give T3.codes its feel.", "It names the qualities that give T3.codes its feel."),
+            ("Open the file main.rs first.", "Open the file main dot rs first."),
+            // Abbreviations keep no dot.
+            ("We meet at 9 a.m. tomorrow.", "We meet at 9 a.m. tomorrow."),
+            ("Fruit, e.g. apples, is fine.", "Fruit, e.g. apples, is fine."),
+        ] {
+            let v = spoken(written, heard);
+            assert_eq!(v["accepted"], true, "{written} / {heard}: {v}");
+        }
+        // Still faults: real mishearings (16:15 "and" heard "in", 19:40 "auth" heard "R3"), a function word heard as
+        // another, a letter heard as another letter's name, a dotted name with its part changed, and no free pass for
+        // a short sentence with two function-word slips.
+        for (written, heard) in [
+            ("One is public and general, what any user's Heimdall is and can do.", "One is public in general, what any user's Heimdall is and can do."),
+            ("The benchmark and the auth refactor all open.", "The benchmark and the R3 factor all open."),
+            ("The benchmark and the auth refactor all open.", "The benchmark and the R3 refactor all open."),
+            ("Take the train or the bus.", "Take the train in the bus."),
+            ("Take the train or the bus.", "Take the train of the bus."),
+            ("Press key c to copy it.", "Press key bee to copy it."),
+            ("Press key c to copy it.", "Press key sea to cut it."),
+            ("It gives T3.codes its feel.", "It gives T3 dot com its feel."),
+            ("An app or a tool.", "And app all a tool."),
+        ] {
+            let v = spoken(written, heard);
+            assert_eq!(v["accepted"], false, "{written} / {heard}: {v}");
+        }
     }
 }

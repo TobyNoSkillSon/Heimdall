@@ -74,6 +74,47 @@ fn main() -> Result<()> {
             let q:timeline::Search=serde_json::from_str(&args[2])?;
             println!("{}",serde_json::to_string(&timeline::search(&db,&q)?)?);
         }
+        Some("vector-search-lab") => {
+            // Lab: many vector searches in one process (the copy loads once), each line {"qid","search":{..}} ->
+            // {"qid","ids","similarity","stats"}; `--scan` also runs the old linear scan for parity. Read-only; set
+            // HEIMDALL_VECTOR_CACHE=off (or a lab folder) so nothing is written beside a live archive.
+            // `--rerank MODELS N`: each line also carries "query" (its text); the first N worded hits of a search fetching
+            // rerank::fetch_for(N) rows are reranked as the app does, output in "reranked".
+            ensure!(args.len()>=3,"vector-search-lab ARCHIVE_ROOT QUERIES_JSONL [--scan] [--rerank MODELS N]");
+            let db=rusqlite::Connection::open_with_flags(Path::new(&args[1]).join(store::INDEX),rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let scan=args.iter().any(|a|a=="--scan");
+            let rerank=args.iter().position(|a|a=="--rerank").map(|i|-> Result<_> {
+                Ok((heimdall_archive::rerank::service(Path::new(args.get(i+1).context("models folder")?)),args.get(i+2).context("count")?.parse::<usize>()?))
+            }).transpose()?;
+            for line in std::fs::read_to_string(&args[2])?.lines().filter(|l|!l.trim().is_empty()) {
+                let item:serde_json::Value=serde_json::from_str(line)?;
+                let mut q:timeline::Search=serde_json::from_value(item["search"].clone())?;
+                if let Some((_,n))=&rerank {q.limit=heimdall_archive::rerank::fetch_for(*n,q.limit);}
+                let started=std::time::Instant::now();
+                let (rows,stats)=timeline::search_with_stats(&db,&q)?;
+                let wall=started.elapsed().as_secs_f64();
+                let mut out=serde_json::json!({"qid":item["qid"],"ids":rows.iter().map(|c|&c.id).collect::<Vec<_>>(),
+                    "similarity":rows.iter().map(|c|c.similarity).collect::<Vec<_>>(),"wall_s":wall,"stats":stats});
+                if let Some((service,n))=&rerank {
+                    let text=item["query"].as_str().context("query text")?;
+                    let scored=heimdall_archive::rerank::plan(&rows,*n);
+                    let documents:Vec<String>=scored.iter().map(|&i|heimdall_archive::rerank::document(&rows[i])).collect();
+                    let s=service.score(text,&documents,&mut ||true)?;
+                    let reranked=heimdall_archive::rerank::apply(rows,&scored,&s.scores);
+                    out["reranked"]=serde_json::json!(reranked.iter().map(|c|&c.id).collect::<Vec<_>>());
+                    out["rerank"]=serde_json::json!({"worded":scored.len(),"seconds":s.seconds,"load_seconds":s.load_seconds,"peak_bytes":s.peak_bytes});
+                }
+                if scan {
+                    let v:timeline::VectorSearch=serde_json::from_value(q.vector.clone().context("vector required")?)?;
+                    let started=std::time::Instant::now();
+                    let old=timeline::search_scan(&db,&q,Some(&v))?;
+                    out["scan_wall_s"]=serde_json::json!(started.elapsed().as_secs_f64());
+                    out["scan_ids"]=serde_json::json!(old.iter().map(|c|&c.id).collect::<Vec<_>>());
+                    out["scan_similarity"]=serde_json::json!(old.iter().map(|c|c.similarity).collect::<Vec<_>>());
+                }
+                println!("{out}");
+            }
+        }
         Some("migrate") => {
             ensure!(args.len() >= 2, "migrate ARCHIVE_ROOT [--keep] [--crash-after STAGE]");
             let keep = args.iter().any(|a| a == "--keep");
@@ -102,6 +143,33 @@ fn main() -> Result<()> {
         Some("compact") => {
             ensure!(args.len() >= 2, "compact ARCHIVE_ROOT");
             println!("{:?}", compact::compact_once(Path::new(&args[1]), heimdall_archive::wall_ns())?);
+        }
+        // Video tiering alone, pass after pass, for at most SECONDS, only while the Mac is idle on AC power (the app's
+        // own gate): a catch-up run and the lab's throughput measurement. One JSON line per pass.
+        #[cfg(target_os = "macos")]
+        Some("tier") => {
+            ensure!(args.len() >= 3, "tier ARCHIVE_ROOT SECONDS");
+            let (root, limit) = (Path::new(&args[1]), std::time::Duration::from_secs(args[2].parse()?));
+            let start = std::time::Instant::now();
+            let hot = || store::pack_path(root, store::HOT).ok().and_then(|p| std::fs::metadata(p).ok()).map_or(0, |m| m.len());
+            let (hot_before, mut tiered, mut retired) = (hot(), 0, 0);
+            while start.elapsed() < limit {
+                let pass = std::time::Instant::now();
+                let mut more = || start.elapsed() < limit && heimdall_archive::video::native::maintenance_allowed();
+                let t = heimdall_archive::video::tier_while(root, heimdall_archive::wall_ns(), heimdall_archive::video::PASS_EPOCHS, &mut more)?;
+                (tiered, retired) = (tiered + t.tiered, retired + t.retired);
+                println!("{}", serde_json::json!({"tiered":t.tiered,"retired":t.retired,"errors":t.errors,"seconds":pass.elapsed().as_secs_f64(),"hot_bytes":hot()}));
+                if t.tiered == 0 && t.retired == 0 {
+                    break;
+                }
+            }
+            println!("{}", serde_json::json!({"tiered":tiered,"retired":retired,"seconds":start.elapsed().as_secs_f64(),"hot_bytes_before":hot_before,"hot_bytes_after":hot()}));
+        }
+        // Lab: the cold audio a wall-clock window would take under the policy before 13 Nov (every source as the
+        // non-voice policy: 16 kHz mono) and after it, encoded in memory from hot audio; nothing is written.
+        Some("audio-cost") => {
+            ensure!(args.len() >= 4, "audio-cost ARCHIVE_ROOT FROM_WALL_NS TO_WALL_NS");
+            audio_cost(Path::new(&args[1]), args[2].parse()?, args[3].parse()?)?;
         }
         Some("bench") => {
             ensure!(args.len() >= 3, "bench LAB_ARCHIVE_ROOT GROUPS");
@@ -176,7 +244,7 @@ fn main() -> Result<()> {
                 serde_json::json!({"seconds":mono.len() as f64/16000.,"hot_bytes":hot,"cold_bytes":bytes.len(),"bitrate":args[2]})
             );
         }
-        _ => anyhow::bail!("usage: heimdall-archive migrate|compact|compact-file|pack-file|bench|codec ..."),
+        _ => anyhow::bail!("usage: heimdall-archive migrate|compact|tier|compact-file|pack-file|bench|codec ..."),
     }
     Ok(())
 }
@@ -296,5 +364,62 @@ let db=store::open(root)?;
  let source_seconds:f64=db.query_row("SELECT coalesce(sum(end_ns-start_ns),0)/1e9 FROM timeline_chunks WHERE kind='other_audio'",[],|r|r.get(0))?;
  println!("{{\"audio_span_samples\":{samples},\"audio_span_cpu_s\":{audio_cpu},\"sound_source_seconds\":{source_seconds}}}");
  println!("{{\"finals\":{count},\"baseline_cpu_s\":{baseline},\"indexed_cpu_s\":{indexed},\"marginal_cpu_s\":{}}}",indexed-baseline);
+    Ok(())
+}
+
+/// `audio-cost`: groups hot blocks as compaction does (one segment and source, at most 10 s, split at a discontinuity or
+/// the speech/non-speech boundary) and sums each policy's cold bytes per source kind and class.
+fn audio_cost(root: &Path, from: i64, to: i64) -> Result<()> {
+    let db = store::read_index(root)?;
+    let _reader = compact::reader_lock(root)?;
+    let mut rows: Vec<(i64, i64, String, u64, usize, u32, u16, bool)> = db
+        .prepare("SELECT b.id,b.segment,b.source_id,b.host_ns,b.frames,b.rate,b.channels,b.discontinuity FROM blocks b WHERE b.codec='f32-zstd' AND b.wall_ns>=?1 AND b.wall_ns<?2")?
+        .query_map([from, to], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? as u64, r.get::<_, i64>(4)? as usize, r.get(5)?, r.get(6)?, r.get(7)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    rows.sort_by(|a, b| (a.1, &a.2, a.3).cmp(&(b.1, &b.2, b.3)));
+    let mut totals = std::collections::BTreeMap::<(String, bool), [f64; 5]>::new();
+    let mut cache = audio::ObjectCache::default();
+    let started = std::time::Instant::now();
+    let mut i = 0;
+    while i < rows.len() {
+        let (_, segment, source, start, _, rate, channels, _) = rows[i].clone();
+        let session: i64 = db.query_row("SELECT session FROM segments WHERE id=?1", [segment], |r| r.get(0))?;
+        let metadata: String = db.query_row("SELECT metadata_json FROM sources WHERE segment=?1 AND id=?2", rusqlite::params![segment, source], |r| r.get(0)).unwrap_or_default();
+        let kind = heimdall_archive::clip::describe_source(&source, &metadata).0;
+        let kind = if kind == "audio" && source.starts_with("mic") { "mic".to_owned() } else { kind };
+        let voice = matches!(kind.as_str(), "mic" | "call" | "heimdall");
+        let ranges = heimdall_archive::records::non_speech_ranges_in(&db, session, &source, start, start + compact::GROUP_NS)?;
+        let is_low = |a: u64, b: u64| ranges.iter().any(|(x, y)| *x <= a && *y >= b);
+        let span = |r: &(i64, i64, String, u64, usize, u32, u16, bool)| (r.3, r.3 + r.4 as u64 * 1_000_000_000 / r.5 as u64);
+        let low = { let (a, b) = span(&rows[i]); is_low(a, b) };
+        let (mut pcm, mut frames, mut expected) = (vec![], 0usize, start);
+        while i < rows.len() {
+            let r = &rows[i];
+            let (a, b) = span(r);
+            if frames > 0 && (r.1 != segment || r.2 != source || r.5 != rate || r.6 != channels || r.7 || a.abs_diff(expected) > 1_000_000_000 / rate as u64 || (frames + r.4) as u64 * 1_000_000_000 > rate as u64 * compact::GROUP_NS || is_low(a, b) != low) {
+                break;
+            }
+            pcm.extend(audio::read_block_cached(&db, r.0, &mut cache)?.samples);
+            frames += r.4;
+            expected = b;
+            i += 1;
+        }
+        let mono = audio::mono_16k(&pcm, rate, channels)?;
+        if mono.is_empty() || !mono.iter().all(|x| x.is_finite()) {
+            continue;
+        }
+        let old = compact::encode_cold(&pcm, rate, channels, &mono, false, low)?;
+        let new = compact::encode_cold(&pcm, rate, channels, &mono, true, low)?;
+        let t = totals.entry((kind, low)).or_default();
+        t[0] += frames as f64 / rate as f64;
+        t[1] += old.bytes.len() as f64;
+        t[2] += new.bytes.len() as f64;
+        t[3] += if voice { new.bytes.len() } else { old.bytes.len() } as f64;
+        t[4] += (channels == 2 && compact::cold_channels(&pcm, channels) == 1) as u8 as f64 * frames as f64 / rate as f64;
+    }
+    for ((kind, low), t) in &totals {
+        println!("{}", serde_json::json!({"kind":kind,"class":if *low {"non-speech"} else {"speech"},"seconds":t[0],"old_bytes":t[1],"native_bytes":t[2],"shipped_bytes":t[3],"identical_stereo_seconds":t[4]}));
+    }
+    println!("{}", serde_json::json!({"cpu_seconds":started.elapsed().as_secs_f64()}));
     Ok(())
 }

@@ -5,9 +5,6 @@
 
 use super::Pipeline;
 
-/// The request the card asks for, after the wake name.
-pub(crate) const REQUEST: &str = "show me what you can do";
-
 /// Whether `text` is the phrase: the request, in any case and punctuation, with or without a wake name before it (the
 /// ASR hears "Heimdall" as "Hindor" or "Hindol", and a custom name may come out any way). Close variants of the request
 /// count ("could", "us", "what can you do").

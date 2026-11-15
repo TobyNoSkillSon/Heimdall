@@ -81,11 +81,11 @@ fn vims_address_wakes_only_while_owner_listens_to_him() {
     guest_line(&mut a, &call, 1, "Vim", VIM_ADDRESS, 80 * S);
     let all: Vec<_> = decisions(&a).iter().map(outcome).collect();
     assert_eq!(all, [
-        ("held_not_owner".into(), None),
+        ("held_not_user".into(), None),
         ("send".into(), Some("guest".into())),
         ("send".into(), Some("name".into())),
-        ("held_not_owner".into(), None),
-        ("held_not_owner".into(), None),
+        ("held_not_user".into(), None),
+        ("held_not_user".into(), None),
     ], "{all:#?}");
     // The agent's copy is marked only while he is listened to; d1's conversation keeps the label it learned on.
     let speakers: Vec<_> = routed(&a).iter().map(|r| r["observation"]["speaker"].as_str().unwrap().to_owned()).collect();
@@ -122,7 +122,7 @@ fn a_guests_listen_to_me_never_grants_listening() {
     turn(&mut a, &mic, 300 * S, "Heimdall, listen to angel sister.", Detect::Final, 0, Some(0.), 3 * S, |_| {});
     assert!(a.tools.speech_policy.listen_change(Some("angel sister"), capture::host_now_ns()).is_ok(), "his own words in this run");
     assert!(a.tools.speech_policy.listen_change(Some("Vim"), capture::host_now_ns()).is_err(), "only the guest he named");
-    assert_eq!(a.set_listening("ANGEL SISTER", true, "agent").unwrap(), "Now acting on angel sister's requests: their lines show as \"angel sister (listened to)\", and when they address you by name they wake you. It stays on until User turns it off.");
+    assert_eq!(a.set_listening("ANGEL SISTER", true, "agent").unwrap(), "Now acting on angel sister's requests: their lines show as \"angel sister (listened to)\", and when they address you by name they wake you. It stays on until the user turns it off.");
     assert!(a.set_listening("User", false, "agent").is_err() && a.set_listening("Heimdall", true, "agent").is_err());
     assert!(a.set_listening("Dave", true, "agent").unwrap_err().to_string().contains("no named voice"));
 }
@@ -139,7 +139,7 @@ fn heimdalls_own_voice_never_counts_as_a_guest() {
     a.tools.speech_policy.sentence_started(said, 10 * S, true);
     a.tools.speech_policy.voice_stopped(13 * S);
     guest_line(&mut a, &call, 1, "Vim", said, 10 * S + 200_000_000);
-    assert_eq!(outcome(decisions(&a).last().unwrap()).0, "held_not_owner");
+    assert_eq!(outcome(decisions(&a).last().unwrap()).0, "held_not_user");
     let held: Vec<_> = a.index.evidence.records().unwrap().into_iter().filter(|r| r.kind == "guest_wake_held").collect();
     assert_eq!(held.len(), 1);
     assert_eq!(held[0].payload["reason"], "heimdalls_echo");
@@ -201,7 +201,7 @@ fn during_dictation_only_a_listened_guest_can_wake() {
     named(&mut a);
     let call = discord(&a);
     let epoch = 1_800_000_000.0;
-    let mut vella = |a: &mut Pipeline, state: &str, reason: &str, at: u64| {
+    let vella = |a: &mut Pipeline, state: &str, reason: &str, at: u64| {
         let info = serde_json::json!({"v":1,"state":state,"reason":reason,"session":"S1","pid":4321,"mode":"dictation",
             "shortcut":"{}","shortcutLabel":"⌃⌘N · Toggle","sent":epoch + at as f64 / 1e9});
         a.hooks.vella_now = Some(at);
@@ -216,9 +216,95 @@ fn during_dictation_only_a_listened_guest_can_wake() {
     assert!(a.vella.on(), "still dictating");
     vella(&mut a, "off", "stop", 40 * S);
     let all: Vec<_> = decisions(&a).iter().map(outcome).collect();
-    assert_eq!(all, [("held_not_owner".into(), None), ("send".into(), Some("guest".into()))], "{all:#?}");
+    assert_eq!(all, [("held_not_user".into(), None), ("send".into(), Some("guest".into()))], "{all:#?}");
     // Both lines reach the agent as context; only the listened guest's carries the request.
     let routed = routed(&a);
     assert!(routed[0].get("listened_guest").is_none());
     assert_eq!(routed[1]["listened_guest"], "Vim");
+}
+
+/// ("Build it so only you and the listened-to guest can interrupt me"): the verdict listening mode's
+/// cut-off reads (bridge/call_interrupt.rs) follows the speaker tracker's live updates through the real pipeline: the
+/// open call voice is the listened guest's when his named track is in it, someone else's when another named track is,
+/// noise when the tracker heard it with no track, and possibly the guest's when its track has no name yet. Nothing is
+/// judged while nobody is listened to.
+#[test]
+fn listening_mode_judges_the_open_call_voice_by_the_trackers_tracks() {
+    use crate::bridge::call_interrupt::{CallVoiceWho, NOISE, UNLABELLED};
+    use crate::speakers_runtime::{Event, Update};
+    let (_t, mut a, _mic) = rig(false);
+    named(&mut a);
+    let call = discord(&a);
+    a.audio.insert(call.clone(), AudioRing { start: 0, samples: vec![0.01; 16_000].into() });
+    let seg = |speaker, start_time, end_time| speakers::diar::SpeakerSegment { start_time, end_time, speaker };
+    let open = |a: &mut Pipeline, at: u64| {
+        a.listen(ListenEvent::SpeechStart { source: call.clone(), host_time_ns: at }).unwrap();
+        at
+    };
+    let close = |a: &mut Pipeline, at: u64| a.listen(ListenEvent::SpeechEnd { source: call.clone(), host_time_ns: at }).unwrap();
+    // Not listening: the policy is off and nothing is judged.
+    let at = open(&mut a, 5 * S);
+    assert!(!a.tools.speech_policy.listening_guests());
+    assert_eq!(a.tools.speech_policy.voice_who(&call, at), CallVoiceWho::Pending);
+    close(&mut a, 6 * S);
+    a.action(ui::UiAction::ListenToSpeaker { id: "Vim".into(), on: true }).unwrap();
+    assert!(a.tools.speech_policy.listening_guests(), "listening to Vim");
+    let generation = a.discord[&call].actor_generation;
+    let update = |a: &mut Pipeline, update| a.speaker_ready(Event { source: call.clone(), generation, update }).unwrap();
+    update(&mut a, Update::Started { origin: 0 });
+    let track = |speaker| TrackId { source: call.clone(), session: 0, speaker };
+    let mut segments = vec![];
+    let heard = |a: &mut Pipeline, until_s: f64, segments: &Vec<speakers::diar::SpeakerSegment>, events| {
+        update(a, Update::Stable { origin: 0, until: (until_s * 1e9) as u64, segments: segments.clone(), finalized: false });
+        update(a, Update::Snapshot { origin: 0, segments: segments.clone(), events });
+    };
+    // Vim talks: his named track in the voice.
+    let at = open(&mut a, 10 * S);
+    assert_eq!(a.tools.speech_policy.voice_who(&call, at), CallVoiceWho::Pending, "nothing diarized yet");
+    segments.push(seg(1, 10.0, 10.3));
+    heard(&mut a, 10.3, &segments, vec![SpeakerEvent::LabelChanged { track: track(1), name: "Vim".into() }]);
+    assert_eq!(a.tools.speech_policy.voice_who(&call, at), CallVoiceWho::MayInterrupt("Vim".into()));
+    close(&mut a, 11 * S);
+    assert_eq!(a.tools.speech_policy.voice_who(&call, at), CallVoiceWho::Pending, "a closed voice keeps no verdict");
+    // angel sister talks: pending until the tracker has heard enough, then someone else.
+    let at = open(&mut a, 20 * S);
+    segments.push(seg(2, 20.0, 20.4));
+    heard(&mut a, 20.4, &segments, vec![SpeakerEvent::LabelChanged { track: track(2), name: "angel sister".into() }]);
+    assert_eq!(a.tools.speech_policy.voice_who(&call, at), CallVoiceWho::Pending);
+    *segments.last_mut().unwrap() = seg(2, 20.0, 20.8);
+    heard(&mut a, 20.8, &segments, vec![]);
+    assert_eq!(a.tools.speech_policy.voice_who(&call, at), CallVoiceWho::Bystander("angel sister".into()));
+    // Vim joins her in the same open voice: his.
+    segments.push(seg(1, 21.0, 21.5));
+    heard(&mut a, 21.5, &segments, vec![]);
+    assert_eq!(a.tools.speech_policy.voice_who(&call, at), CallVoiceWho::MayInterrupt("Vim".into()));
+    close(&mut a, 22 * S);
+    // Noise: heard, no track.
+    let at = open(&mut a, 30 * S);
+    heard(&mut a, 30.7, &segments, vec![]);
+    assert_eq!(a.tools.speech_policy.voice_who(&call, at), CallVoiceWho::Bystander(NOISE.into()));
+    close(&mut a, 31 * S);
+    // A new voice the tracker has not named yet.
+    let at = open(&mut a, 40 * S);
+    segments.push(seg(3, 40.0, 40.3));
+    heard(&mut a, 40.3, &segments, vec![]);
+    assert_eq!(a.tools.speech_policy.voice_who(&call, at), CallVoiceWho::MayInterrupt(UNLABELLED.into()));
+    close(&mut a, 41 * S);
+    // Coded voices: one from an earlier call is someone else; one first heard in this call, or one near Vim (Vim on
+    // another microphone is coded, never widened into his set), may be him.
+    let coded = |a: &mut Pipeline, speaker: i32, at_s: u64, new: bool, near: Option<&str>, segments: &mut Vec<speakers::diar::SpeakerSegment>| {
+        let at = open(a, at_s * S);
+        segments.push(seg(speaker, at_s as f64, at_s as f64 + 0.7));
+        let near = near.map(|n| speakers::naming::NearVoice { name: n.into(), cosine: 0.4 });
+        heard(a, at_s as f64 + 0.7, segments, vec![SpeakerEvent::VoiceCoded { track: track(speaker), code: format!("Speaker Fri 13 Nov 11h #{speaker}"), new, near }]);
+        let who = a.tools.speech_policy.voice_who(&call, at);
+        close(a, (at_s + 1) * S);
+        who
+    };
+    assert_eq!(coded(&mut a, 4, 50, false, None, &mut segments), CallVoiceWho::Bystander("Speaker Fri 13 Nov 11h #4".into()));
+    assert_eq!(coded(&mut a, 5, 60, true, None, &mut segments), CallVoiceWho::MayInterrupt(UNLABELLED.into()));
+    assert_eq!(coded(&mut a, 6, 70, false, Some("Vim"), &mut segments), CallVoiceWho::MayInterrupt(UNLABELLED.into()));
+    assert_eq!(coded(&mut a, 7, 80, false, Some("angel sister"), &mut segments), CallVoiceWho::Bystander("Speaker Fri 13 Nov 11h #7".into()));
+    a.action(ui::UiAction::ListenToSpeaker { id: "Vim".into(), on: false }).unwrap();
+    assert!(!a.tools.speech_policy.listening_guests(), "back to User's 5 Nov rule");
 }

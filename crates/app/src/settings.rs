@@ -5,14 +5,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ArchiveFormat {
-    #[default]
-    NativeLossless,
-    Flac24,
-    Flac16kMono,
-}
 /// Recording resolution per display.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -118,24 +110,18 @@ pub struct Settings {
     /// Missing (false) in files written before it, so those migrate once.
     #[serde(default)]
     pub anthropic_models_added: bool,
-    /// Anthropic ▸ Monthly Credits: the API credit the spend estimate counts against, in US dollars ($100 with Max
-    /// 5x, $200 with Max 20x; $100 until the user says which plan).
-    pub anthropic_credit_usd: u32,
-    /// The day of the month the credit renews (1-28). The user's plan date is not known yet; the calendar month until then.
-    pub anthropic_credit_day: u8,
     /// Durable stop epoch; preserves notice cancellation across relaunch.
     pub delivery_generation: u64,
-    pub archive_format: ArchiveFormat,
-    pub archive_choice_pending: bool,
     /// The name friends see for this Mac after pairing (Friends). Blank means the macOS account's full name.
     pub friends_name: String,
-    /// Zero keeps sessions until the user sets a retention period. Disk guard still applies.
-    pub retention_days: u32,
     pub free_space_floor_bytes: u64,
     pub speak_replies: bool,
     /// Voice speed in percent of natural (Speaking ▸ Speed, 80 to 160). Both voices are time-stretched on the way
     /// to the speaker without pitch change (`speak::stretch`).
     pub voice_speed_percent: u16,
+    /// Hidden: memory search reranks this many of the best worded hits with Qwen3-Reranker-0.6B (docs/chunk-index.md,
+    /// "Reranking"); 0 turns reranking off. At most `heimdall_archive::rerank::MAX_CANDIDATES`.
+    pub memory_rerank: usize,
     /// Hidden: how long the user has been quiet (since his last voiced audio) before the short spoken acknowledgement
     /// ("On it.") plays and the island's send arrow and thinking dots show, in milliseconds (
     /// 2.5 s; 2 s, the animation too; 0 by default; `pipeline::ack`). Never
@@ -177,10 +163,6 @@ pub struct Settings {
     /// an update's, a crash) reopens Setup there (`setup_wizard::first_launch`). Cleared by Setup's Done.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup_step: Option<String>,
-    /// Ignored. Per-stream switches from before App Audio, keyed by PID and generation, so they never
-    /// matched a relaunched app. Still read so older files load; never written again.
-    #[serde(skip_serializing)]
-    pub disabled_sources: Vec<String>,
     /// App Audio ▸ apps to record. None by default: no app's process is tapped. Written only when
     /// non-empty, so a default file stays readable by builds without this field.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -220,8 +202,6 @@ pub struct Settings {
     /// Drama 3 residency: speaking (default) or always. Both unload under pressure.
     pub drama3_residency: String,
     pub tts_backend: String,
-    /// Baseline, ReDimNet shaders, Nemotron shaders, or both (lab-qualified choices only).
-    pub speakers_backend: String,
     // ---- speech-policy (night pass 3) ----
     /// Speaking ▸ Wake Sound: a soft tick when a spoken request goes to the agent (bridge/speech_policy.rs). On by
     /// default; a file without it (older builds) loads it on.
@@ -243,6 +223,13 @@ pub struct Settings {
     #[serde(default, skip_serializing_if = "is_false")]
     pub islands_hidden: bool,
     // ---- end floating islands host ----
+    // ---- islands display (night 1107, bug note 2026-11-07T02-02-35) ----
+    /// Islands Display: missing or null, the notch island and the floating islands follow the pointer (the default);
+    /// a display's name as macOS gives it ("MSI MAG 271QPX") keeps them on that display while it is connected
+    /// (`ui::islands_display`; the helper's `display.json`, `islands/display.rs`). Written only when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub islands_display: Option<String>,
+    // ---- end islands display ----
     // ---- speech voice (night 1022 menu) ----
     /// Speaking ▸ Local or API and the voice. Missing in files before it: Local, Drama 3 (the user's voice stays).
     pub speech_voice: crate::speech_voice::VoiceChoice,
@@ -275,6 +262,14 @@ pub struct Settings {
     /// appears in screen shares and streams. Off by default (unshared); written only when true.
     #[serde(skip_serializing_if = "is_false")]
     pub islands_on_streams: bool,
+    /// Control Apps: the agent's `computer` tool acts in other apps through Accessibility (crates/computer, bug note
+    /// 2026-10-22T19-16-01). Off by default; written only when true.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub computer_control: bool,
+    /// The `computer` tool's pointer-click fallback (a click posted to the app; the pointer stays). Off until the user
+    /// decides; no menu row, only this file. Written only when true.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub computer_clicks: bool,
     /// Agent ▸ Model ▸ Claude Code subscription (docs/claude-relay.md): Heimdall's main agent is a Claude
     /// thread in T3 Code on the user's Anthropic subscription instead of Pi's model. Pi stays the record (context only, no
     /// turns); `agent_model` is kept for when this is off. Off by default; written only when true.
@@ -284,7 +279,7 @@ pub struct Settings {
     /// Written only when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_relay_model: Option<String>,
-    /// The T3 provider instance (account) the relay runs on, e.g. `claudeAgent_claude_code_2`; `None`: automatic, the
+    /// The T3 provider instance (account) the relay runs on, e.g. `claudeAgent_2`; `None`: automatic, the
     /// eligible account whose quota resets soonest (`agent::routing`). Written only when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_relay_account: Option<String>,
@@ -325,9 +320,16 @@ pub struct Settings {
     #[serde(skip_serializing_if = "ui::identity::Identity::is_default", deserialize_with = "lenient_identity")]
     pub identity: ui::identity::Identity,
     /// Hidden, personal edition: the bug inbox in a code checkout, where the night round works
-    /// (`heimdall_night::bug_notes::default_inbox`). Unset: `bugs/inbox` in the data folder. Written only when set.
+    /// (`heimdall_night::bug_notes::default_inbox`). Unset: `bugs/notes` in the data folder. Written only when set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bug_inbox: Option<PathBuf>,
+    // ---- task account failover (bug note 2026-11-06T12-26-36) ----
+    /// Hidden: true stops Heimdall moving a task that failed on a Claude usage limit to another Claude account with
+    /// quota (`t3::failover`; "Why can't you just resume them on the second account?"). Off by
+    /// default, so the failover is on; written only when true.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub task_failover_off: bool,
+    // ---- end task account failover ----
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -335,25 +337,20 @@ impl Default for Settings {
             dry_run: true,
             engine_on: false,
             agent_model: agent::provider::AgentModel::default(),
-            // The public edition starts blank: no pre-added models and no monthly credit (the personal defaults are
-            // the owner's plan).
+            // The public edition starts blank: no pre-added models (the personal defaults are the owner's plan).
             api_models: if crate::edition::PUBLIC { vec![] } else { default_api_models() },
             anthropic_models_added: true,
-            anthropic_credit_usd: if crate::edition::PUBLIC { 0 } else { 100 },
-            anthropic_credit_day: 1,
             // No model picked yet: the Engine section's first pick sets it.
             engine_model: String::new(),
             engine_thinking: Default::default(),
             engine_quant: Default::default(),
             delivery_generation: 0,
-            archive_format: ArchiveFormat::NativeLossless,
-            archive_choice_pending: true,
             friends_name: String::new(),
-            retention_days: 0,
             free_space_floor_bytes: 10 * 1024 * 1024 * 1024,
             speak_replies: true,
             // A little quicker than natural ("we really want the quick speech").
             voice_speed_percent: DEFAULT_VOICE_SPEED_PERCENT,
+            memory_rerank: heimdall_archive::rerank::DEFAULT_CANDIDATES,
             ack_delay_ms: DEFAULT_ACK_DELAY_MS,
             agent_speed: "standard".into(),
             launch_at_login: false,
@@ -365,7 +362,6 @@ impl Default for Settings {
             harness_autonomy: None,
             arsenal_mcp: None,
             setup_step: None,
-            disabled_sources: vec![],
             recorded_apps: vec![],
             system_audio_confirmed: false,
             microphone: None,
@@ -381,7 +377,6 @@ impl Default for Settings {
             screen_recording_migrated: true,
             drama3_residency: "speaking".into(),
             tts_backend: "auto".into(),
-            speakers_backend: "default".into(),
             // ---- speech-policy (night pass 3) ----
             wake_sound: true,
             // Ships off: on after the user's morning live test (lab/aec/REPORT.md checks 1-6), by `"echo_cancel_off": false`.
@@ -390,6 +385,7 @@ impl Default for Settings {
             // ---- floating islands host (night 1022) ----
             floating_islands_off: false,
             islands_hidden: false,
+            islands_display: None,
             // ---- end floating islands host ----
             // ---- speech voice (night 1022 menu) ----
             speech_voice: Default::default(),
@@ -401,6 +397,8 @@ impl Default for Settings {
             background_off: vec![],
             // ---- end speech voice ----
             islands_on_streams: false,
+            computer_control: false,
+            computer_clicks: false,
             agent_relay: false,
             agent_relay_model: None,
             agent_relay_account: None,
@@ -414,6 +412,7 @@ impl Default for Settings {
             relay_skip: false,
             identity: Default::default(),
             bug_inbox: None,
+            task_failover_off: false, // task account failover (bug note 2026-11-06T12-26-36)
         }
     }
 }
@@ -451,6 +450,16 @@ fn migrate_islands_model(value: &mut serde_json::Value) -> bool {
     map.entry("background_model").or_insert(old);
     true
 }
+// ---- islands display (night 1107, bug note 2026-11-07T02-02-35) ----
+impl Settings {
+    /// The display the islands are locked to: `islands_display` unless it is empty or a word for following
+    /// ("follow" written into the file by hand means Follow Cursor, as the settings tool reads it).
+    pub fn islands_display_lock(&self) -> Option<String> {
+        self.islands_display.as_deref().map(str::trim).filter(|v| !ui::islands_display::is_follow(v)).map(str::to_string)
+    }
+}
+// ---- end islands display ----
+
 impl Settings {
     pub fn load(path: &Path) -> Result<Self> {
         Ok(Self::read(path)?.0)
@@ -629,7 +638,6 @@ impl Settings {
     }
     pub fn validate(&self) -> Result<()> {
         let s = self;
-        ensure!((1..=28).contains(&s.anthropic_credit_day), "invalid credit renewal day");
         ensure!(s.engine_model.trim() == s.engine_model && s.engine_model.len() <= 256, "invalid engine model");
         ensure!(s.engine_quant.iter().all(|(id, q)| !id.is_empty() && id.len() <= 256 && !q.is_empty() && q.len() <= 64), "invalid engine precision");
         ensure!(s.engine_thinking.values().chain(s.api_models.iter().filter_map(|m| m.thinking.as_ref()))
@@ -643,11 +651,11 @@ impl Settings {
             "invalid voice speed"
         );
         ensure!(s.ack_delay_ms <= MAX_ACK_DELAY_MS, "invalid acknowledgement delay");
+        ensure!(s.memory_rerank <= heimdall_archive::rerank::MAX_CANDIDATES, "invalid memory rerank count");
         ensure!(matches!(s.agent_speed.as_str(), "standard" | "fast"), "invalid agent speed");
         ensure!(matches!(s.tts_backend.as_str(), "auto" | "metal" | "cpu"), "invalid speech backend");
         s.speech_voice.validate()?; // speech voice (night 1022 menu)
         s.identity.validate().map_err(|e| anyhow::anyhow!("invalid identity: {e}"))?;
-        ensure!(matches!(s.speakers_backend.as_str(), "default" | "redimnet" | "nemotron" | "all"), "invalid speakers backend");
         ensure!(
             s.free_space_floor_bytes >= 1024 * 1024 * 1024,
             "free-space floor must be at least 1 GiB"
@@ -657,13 +665,6 @@ impl Settings {
             "invalid screen recording settings"
         );
         Ok(())
-    }
-    /// These fields are compatibility inputs, superseded by the user's permanent tiered archive rule.
-    pub fn normalize_archive(&mut self) {
-        self.archive_format = ArchiveFormat::NativeLossless;
-        self.archive_choice_pending = false;
-        self.retention_days = 0;
-        self.disabled_sources.clear();
     }
     pub fn save(&self, path: &Path) -> Result<()> {
         private_dir(path.parent().context("settings parent")?)?;
@@ -1028,7 +1029,6 @@ mod control_tests {
         let s=Settings::load(&path).unwrap();
         let keys: Vec<(String,String)>=s.api_models.iter().map(|m|(m.provider.clone(),m.id.clone())).collect();
         assert_eq!(keys.iter().map(|(p,i)|format!("{p}/{i}")).collect::<Vec<_>>(),["opencode-go/claude-haiku-5-5","anthropic/claude-opus-5-5","anthropic/claude-sonnet-5-5","anthropic/claude-haiku-5-5"]);
-        assert_eq!((s.anthropic_credit_usd,s.anthropic_credit_day),(100,1));
         // The selection is untouched until a key is connected; removing a Claude model sticks.
         assert_eq!(s.agent_model.api(),Some(("opencode-go","claude-haiku-5-5")));
         let mut s=s;s.api_models.retain(|m|m.id!="claude-sonnet-5-5");s.save(&path).unwrap();
@@ -1050,12 +1050,12 @@ mod control_tests {
     #[test]
     fn atomic_replacement_with_preserved_time_and_length_is_still_observed() {
         let dir=tempfile::tempdir().unwrap();let path=dir.path().join("settings.json");
-        fs::write(&path,r#"{"retention_days":5}"#).unwrap();
+        fs::write(&path,r#"{"memory_rerank":5}"#).unwrap();
         let time=fs::metadata(&path).unwrap().modified().unwrap();let mut watch=SettingsWatch::default();
-        assert_eq!(watch.read_changed(&path).unwrap().unwrap().retention_days,5);
-        let candidate=dir.path().join("candidate.json");fs::write(&candidate,r#"{"retention_days":6}"#).unwrap();
+        assert_eq!(watch.read_changed(&path).unwrap().unwrap().memory_rerank,5);
+        let candidate=dir.path().join("candidate.json");fs::write(&candidate,r#"{"memory_rerank":6}"#).unwrap();
         fs::File::options().write(true).open(&candidate).unwrap().set_times(fs::FileTimes::new().set_modified(time)).unwrap();
-        fs::rename(candidate,&path).unwrap();assert_eq!(watch.read_changed(&path).unwrap().unwrap().retention_days,6);
+        fs::rename(candidate,&path).unwrap();assert_eq!(watch.read_changed(&path).unwrap().unwrap().memory_rerank,6);
     }
     #[test]
     fn pause_and_screen_choices_persist_and_defaults_stay_absent() {
@@ -1215,6 +1215,20 @@ mod app_audio_tests {
     }
 
     #[test]
+    fn old_files_with_the_retired_archive_and_credit_keys_load_and_drop_them_on_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"dry_run":false,"archive_format":"flac16k_mono","archive_choice_pending":true,"retention_days":7,"anthropic_credit_usd":200,"anthropic_credit_day":14}"#).unwrap();
+        let old = Settings::load(&path).unwrap();
+        assert!(!old.dry_run, "the other keys still apply");
+        old.save(&path).unwrap();
+        let written: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        for key in ["archive_format", "archive_choice_pending", "retention_days", "anthropic_credit_usd", "anthropic_credit_day"] {
+            assert!(written.get(key).is_none(), "{key} is never written again");
+        }
+    }
+
+    #[test]
     fn default_records_nothing_and_old_files_with_disabled_sources_load_but_are_never_rewritten() {
         let json = serde_json::to_value(Settings::default()).unwrap();
         assert!(json.get("recorded_apps").is_none() && json.get("system_audio_confirmed").is_none());
@@ -1354,6 +1368,24 @@ mod menu_redesign_settings {
         back.save(&path)?;
         let raw = fs::read_to_string(&path)?;
         assert!(!raw.contains("\"voice\""), "{raw}");
+        Ok(())
+    }
+    /// `speakers_backend` (the 11 Oct shader candidates, gone 14 Nov) did nothing at the end; a file that still has it,
+    /// with any value, loads and validates, and the next save drops it.
+    #[test]
+    fn a_file_with_the_retired_speakers_backend_loads_and_saves_without_it() -> Result<()> {
+        let t = tempfile::tempdir()?;
+        let path = t.path().join("settings.json");
+        for value in ["redimnet", "something else"] {
+            let mut old: serde_json::Value = serde_json::to_value(Settings { screen_off: true, ..Default::default() })?;
+            old["speakers_backend"] = value.into();
+            fs::write(&path, serde_json::to_vec_pretty(&old)?)?;
+            let back = Settings::load_and_migrate(&path)?;
+            back.validate()?;
+            assert!(back.screen_off, "the rest of the file still applies");
+            back.save(&path)?;
+            assert!(!fs::read_to_string(&path)?.contains("speakers_backend"));
+        }
         Ok(())
     }
 }
@@ -1505,9 +1537,9 @@ mod background_tasks_tests {
         let mut s = Settings::default();
         s.save(&path).unwrap();
         assert!(!std::fs::read_to_string(&path).unwrap().contains("background_efforts"), "none set: nothing written");
-        s.background_model = BackgroundModel { provider: "t3:claudeAgent_claude_code_2".into(), id: "claude-haiku-5-5".into() };
+        s.background_model = BackgroundModel { provider: "t3:claudeAgent_2".into(), id: "claude-haiku-5-5".into() };
         s.background_efforts = vec![
-            BackgroundEffort { provider: "t3:claudeAgent_claude_code_2".into(), id: "claude-haiku-5-5".into(), level: "low".into() },
+            BackgroundEffort { provider: "t3:claudeAgent_2".into(), id: "claude-haiku-5-5".into(), level: "low".into() },
             BackgroundEffort { provider: "anthropic".into(), id: "claude-sonnet-5-5".into(), level: "max".into() },
         ];
         s.save(&path).unwrap();
@@ -1552,8 +1584,8 @@ mod background_tasks_tests {
         assert_eq!(old.background_model.id, "gpt-6-luna", "his saved model stays the shared one");
         if !crate::edition::PUBLIC {
             assert_eq!(old.task_models, [
-                TaskModel { task: "islands".into(), provider: "t3:claudeAgent_claude_code_2".into(), id: "claude-haiku-5-5".into() },
-                TaskModel { task: "goals".into(), provider: "t3:claudeAgent_claude_code_2".into(), id: "claude-haiku-5-5".into() },
+                TaskModel { task: "islands".into(), provider: "t3:claudeAgent_2".into(), id: "claude-haiku-5-5".into() },
+                TaskModel { task: "goals".into(), provider: "t3:claudeAgent_2".into(), id: "claude-haiku-5-5".into() },
             ]);
         } else {
             assert!(old.task_models.is_empty());
@@ -1578,9 +1610,9 @@ mod background_tasks_tests {
         if crate::edition::PUBLIC { return }
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
-        std::fs::write(&path, r#"{"engine_on":false,"engine_added":false,"relay_added":false,"background_model":{"provider":"openai","id":"gpt-6-luna"},"task_models":[{"task":"islands","provider":"t3:claudeAgent_claude_code_2","id":"claude-haiku-5-5"}]}"#).unwrap();
+        std::fs::write(&path, r#"{"engine_on":false,"engine_added":false,"relay_added":false,"background_model":{"provider":"openai","id":"gpt-6-luna"},"task_models":[{"task":"islands","provider":"t3:claudeAgent_2","id":"claude-haiku-5-5"}]}"#).unwrap();
         let mut s = Settings::load_and_migrate(&path).unwrap();
-        assert!(s.task_models.iter().any(|m| m.task == "goals" && m.id == "claude-haiku-5-5" && m.provider == "t3:claudeAgent_claude_code_2"));
+        assert!(s.task_models.iter().any(|m| m.task == "goals" && m.id == "claude-haiku-5-5" && m.provider == "t3:claudeAgent_2"));
         assert_eq!(s.background_model.id, "gpt-6-luna", "the shared model is untouched");
         s.task_models.retain(|m| m.task != "goals");
         s.save(&path).unwrap();

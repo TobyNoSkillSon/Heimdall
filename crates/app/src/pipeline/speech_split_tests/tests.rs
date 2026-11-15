@@ -181,7 +181,6 @@
             NamingFlow::new(EnrollmentStore::uncalibrated()),
             p.speaker_cpu.clone(),
             p.speaker_tx.clone(),
-            p.settings.speakers_backend.clone(),
         )
         .unwrap();
         p.discord.insert(
@@ -198,6 +197,7 @@
                 closed: false,
                 segments: vec![],
                 unlabelled: vec![],
+                heard_until: 0,
             },
         );
         let words = timed(&[
@@ -656,6 +656,10 @@
             false,
         )
         .unwrap();
+        // Separation waits for the call to end (bug note 2026-11-08T11-30-09).
+        assert_eq!(p.speech_split.reservations.len(), 1);
+        p.correction_end("call", 0);
+        p.correction_tick().unwrap();
         assert_eq!(p.speech_split.reservations.len(), 2);
         assert!(pop());
         p.stable_speech(
@@ -671,6 +675,9 @@
             false,
         )
         .unwrap();
+        assert_eq!(p.speech_split.pending.len(), 1);
+        p.correction_end("call", 0);
+        p.correction_tick().unwrap();
         assert_eq!(p.speech_split.pending.len(), 1);
         assert!(
             !pop(),
@@ -697,6 +704,84 @@
         p.correction_tick().unwrap();
         assert_eq!(p.speech_split.pending.len(), 1);
         assert!(!pop());
+    }
+    /// Bug note 2026-11-08T11-30-09: the speech-split helper ran at 127% CPU during the user's Discord call (8 Nov
+    /// 11:29) and his call audio glitched. While a call is live nothing new separates and no separated track goes to
+    /// side ASR; both resume on the tick after the call ends, and a new call pauses them again.
+    #[test]
+    fn speech_split_yields_to_a_live_call_and_resumes_after_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut p = Pipeline::new(
+            temp.path().join("data"),
+            temp.path().join("models"),
+            Settings::default(),
+            None,
+            true,
+        )
+        .unwrap();
+        let (runtime, pop) = crate::speech_split::Runtime::held_queue();
+        assert!(pop());
+        p.speech_split.runtime = Some(runtime);
+        let worker = Arc::new(listen::ListenWorker::spawn(Default::default(), empty_engine).unwrap());
+        worker.wait_ready().unwrap();
+        p.live_worker = Some(worker.clone());
+        // A separated job from before the call, waiting for side ASR.
+        p.speech_split.decoded.insert(
+            "earlier".into(),
+            Decoding {
+                input: Input {
+                    region: heimdall_night::dataset::Region {
+                        session: "s".into(),
+                        source: "call".into(),
+                        start_ns: 0,
+                        end_ns: S,
+                        speakers: 2,
+                        utterance_ids: vec![],
+                        audio: vec![],
+                    },
+                    start_ns: 0,
+                    samples: vec![],
+                    enrollments: EnrollmentStore::uncalibrated(),
+                },
+                output: Output {
+                    tracks: (0..2)
+                        .map(|_| heimdall_night::correction::Track { samples: vec![0.; 3200], identity: serde_json::Value::Null })
+                        .collect(),
+                    cpu_seconds: 0.,
+                    separation_seconds: 0.,
+                    total_seconds: 0.,
+                },
+                words: [None, None],
+                admitted: Instant::now(),
+            },
+        );
+        // The call starts talking over itself: the overlap is noted, nothing runs.
+        p.stable_speech("call", 0, 4_000_000_000, vec![seg(1, 1., 2.), seg(2, 1., 2.)], false).unwrap();
+        assert!(p.correction_yields_to_call());
+        for _ in 0..3 {
+            p.correction_tick().unwrap();
+        }
+        assert_eq!(p.speech_split.pending.len(), 1);
+        assert!(p.speech_split.submitted.is_empty());
+        assert_eq!(p.speech_split.outstanding, 0);
+        assert!(p.speech_split.inflight.is_empty(), "side ASR waits for the call too");
+        assert!(pop(), "the idle helper is unloaded during the call, not held");
+        // The call goes quiet: both resume on the next tick.
+        p.correction_end("call", 0);
+        assert!(!p.correction_yields_to_call());
+        p.correction_tick().unwrap();
+        assert!(p.speech_split.pending.is_empty());
+        assert_eq!(p.speech_split.submitted.len(), 1);
+        assert_eq!(p.speech_split.outstanding, 1);
+        assert_eq!(p.speech_split.inflight.len(), 2);
+        assert!(pop(), "the job went to the helper");
+        // A new call pauses what is still pending; the running job is left to finish.
+        p.stable_speech("call", 9_000_000_000, 13_000_000_000, vec![seg(1, 1., 2.), seg(2, 1., 2.)], false).unwrap();
+        p.correction_tick().unwrap();
+        assert_eq!(p.speech_split.pending.len(), 1);
+        assert_eq!(p.speech_split.submitted.len(), 1);
+        assert!(!pop(), "nothing new starts and a running job keeps its helper");
+        worker.request_shutdown();
     }
     #[test]
     fn diagnostic_gate_is_per_owned_edit_and_identity_never_certifies_text() {

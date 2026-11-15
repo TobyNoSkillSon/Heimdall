@@ -51,7 +51,7 @@
         }
     }
     /// Review 27 Oct: a restart's retired run forwards its last events even when the live loop's channel is full
-    /// at the moment its capture stops (CaptureRun::start can hold the loop): the old source's removal still arrives.
+    /// at the moment its capture stops (a capture start could hold the loop): the old source's removal still arrives.
     #[test]
     fn a_retired_run_forwards_its_removal_through_a_full_channel() {
         let (input, rx) = unbounded();

@@ -530,6 +530,9 @@ pub(super) fn report_resolutions<H: agent::harness::Harness>(b: &mut agent::Brid
         *cue = RetryCue::None;
         if let Some(u) = ui { u.send(ui::UiUpdate::Health(ui::HealthCue::Clear { key: RETRY_KEY.into() })); }
     }
+    // night1113 phone-mic follow-up (build 12 review): a phone turn whose queued delivery failed, was cancelled or was
+    // folded into another follows it at once, instead of holding the Mac silent for `PHONE_TURN_LIMIT`.
+    crate::remote::follow_phone_delivery(|id| b.delivery_fate(id).ok());
 }
 
 

@@ -15,16 +15,34 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / 'crates/archive/embedding/native'
 OUT = ROOT / 'models/embeddinggemma2/native'
-# Agents on the user's Mac build with two jobs at low priority (HEIMDALL_BUILD_JOBS=2).
-JOBS = os.environ.get('HEIMDALL_BUILD_JOBS', '4')
+# The kernels' Metal target: the app's stated minimum (Package.swift's .macOS(.v14), Info.plist 14.4). Without it the
+# compiler targets the build Mac's macOS, and a library built on macOS 27 (Metal 4.1) fails to load on macOS 14-26
+# (release-1114 VM finding, 14 Nov: "Unable to load kernel rbitsc").
+METAL_MIN = '14.4'
+# Two jobs by default; HEIMDALL_JOBS (or HEIMDALL_BUILD_JOBS) sets more.
+JOBS = os.environ.get('HEIMDALL_BUILD_JOBS') or os.environ.get('HEIMDALL_JOBS', '2')
+
+
+# The selected Xcode's Swift (`xcrun`, as for `metal` below), never the Command Line Tools': their Swift can be older
+# than the Xcode SDK and refuses it ("this SDK is not supported by the compiler"; VM build from source, 14 Nov).
+SWIFT = ['xcrun', 'swift']
 
 
 def run(args, **kwargs):
     subprocess.run([str(a) for a in args], check=True, timeout=kwargs.pop('timeout', 180), **kwargs)
 
 
+# The package builds from a copy in a fixed folder outside the home (as v0.1.0-alpha.1's worker was built): SwiftPM bakes
+# its resource bundles' build path into the binary, and the copy's path names no user (scripts/check_public_bundle.py).
+STAGE = Path('/private/tmp/heimdall-embed-build/native')
+
+
 def build():
-    run(['/Library/Developer/CommandLineTools/usr/bin/swift', 'package', '--package-path', PACKAGE, 'resolve'], timeout=180)
+    global PACKAGE
+    STAGE.mkdir(parents=True, exist_ok=True)
+    run(['rsync', '-a', '--delete', '--exclude', '.build', f'{PACKAGE}/', f'{STAGE}/'])
+    PACKAGE = STAGE
+    run([*SWIFT, 'package', '--package-path', PACKAGE, 'resolve'], timeout=180)
     tokenizer = PACKAGE / '.build/checkouts/swift-transformers/Sources/Tokenizers/BPETokenizer.swift'
     data = tokenizer.read_text()
     if '// Heimdall: ranked neighbor heap' in data:
@@ -61,15 +79,21 @@ def build():
             return text.replacingOccurrences(of: toReplace, with: replacement)''')
         normalizer.chmod(normalizer.stat().st_mode | 0o200)
         normalizer.write_text(data)
-    run(['/Library/Developer/CommandLineTools/usr/bin/swift', 'build', '--package-path', PACKAGE,
-         '--build-system', 'native', '-c', 'release', '--jobs', JOBS], timeout=600)
+    # Build paths remapped (as v0.1.0-alpha.1's worker had them, /build/heimdall/native/...), so the shipped worker names
+    # no home folder (scripts/check_public_bundle.py).
+    remap = []
+    for source, target in [(PACKAGE.parent, '/build/heimdall'), (Path.home(), '/build')]:
+        remap += ['-Xcc', f'-ffile-prefix-map={source}={target}', '-Xcxx', f'-ffile-prefix-map={source}={target}',
+                  '-Xswiftc', '-file-prefix-map', '-Xswiftc', f'{source}={target}']
+    run([*SWIFT, 'build', '--package-path', PACKAGE,
+         '--build-system', 'native', '-c', 'release', '--jobs', JOBS, *remap], timeout=600)
     shaders = PACKAGE / '.build/checkouts/mlx-swift/Source/Cmlx/mlx-generated/metal'
     scratch = ROOT / 'target/embeddinggemma2/native-metal'
     scratch.mkdir(parents=True, exist_ok=True)
     # Like upstream's no-fast-math MLX build; this is shader compilation, not a GPU run.
     def compile(source):
         output = scratch / (source.stem + '.air')
-        run(['xcrun', '-sdk', 'macosx', 'metal', '-std=metal3.1', '-fno-fast-math',
+        run(['xcrun', '-sdk', 'macosx', 'metal', '-std=metal3.1', '-fno-fast-math', f'-mmacosx-version-min={METAL_MIN}',
              '-I', shaders, '-c', source, '-o', output])
         return output
     with ThreadPoolExecutor(max_workers=int(JOBS)) as pool:
@@ -87,7 +111,7 @@ def build():
         shutil.copytree(bundle, OUT / bundle.name, dirs_exist_ok=True)
     packages = json.loads((PACKAGE / 'Package.resolved').read_text())
     (OUT / 'source.json').write_text(json.dumps({'packages': packages,
-        'precision': 'bfloat16', 'metal_flags': ['-std=metal3.1', '-fno-fast-math'],
+        'precision': 'bfloat16', 'metal_flags': ['-std=metal3.1', '-fno-fast-math', f'-mmacosx-version-min={METAL_MIN}'],
         'tokenizer_patch_sha256': hashlib.sha256((PACKAGE / 'BPEHeap.swift.inc').read_bytes()).hexdigest(),
         'tokenizer_executed_source_sha256': hashlib.sha256(tokenizer.read_bytes() + normalizer.read_bytes()).hexdigest()}, indent=2) + '\n')
     rows = []

@@ -1,7 +1,7 @@
-//! The Floating Islands file protocol, Rust side (night 1022). The Swift helper in `islands/` reads and writes the
+//! The Floating Islands file protocol, Heimdall's side (night 1022). The helper (`crates/islands`) reads and writes the
 //! same files: one JSON object per island in `<root>/islands/<id>.json`, the user's clicks in `<root>/responses/`,
 //! what is on screen in `<root>/state.json`. Every read-modify-write holds the same `flock` on
-//! `islands/.write.lock` as the Swift side, and writes go through a hidden temp file plus rename.
+//! `islands/.write.lock` as the helper, and writes go through a hidden temp file plus rename.
 //! Contract: `docs/archive/briefs/night-1022-islands.md`.
 
 use anyhow::{Context, Result};
@@ -40,7 +40,7 @@ impl Root {
         Ok(())
     }
 
-    /// Run `body` holding the folder's write lock (the Swift side's `IslandFile.locked`).
+    /// Run `body` holding the folder's write lock (the helper's `IslandFile::locked`).
     pub fn locked<T>(&self, body: impl FnOnce() -> Result<T>) -> Result<T> {
         self.ensure()?;
         let lock = fs::OpenOptions::new().create(true).read(true).write(true).open(self.islands().join(".write.lock"))?;
@@ -122,12 +122,41 @@ impl Root {
     pub fn screen_state(&self) -> Map<String, Value> { read_object(&self.state()).unwrap_or_default() }
 }
 
-/// The Swift side's `Paths.safeID`: letters, digits, `-`, `_`, `.`; anything else becomes `-`.
+/// The user's name in notices, tool results and Settled labels: Personalise's name, "the user" while none is chosen
+/// (`remote_presence::user_name`'s rule; read here so the Goals lab, which includes this file, builds too; cleanup 14
+/// Nov, ISL-5).
+pub fn user() -> String {
+    #[cfg(test)]
+    if let Some(n) = TEST_USER.with(|u| u.borrow().clone()) { return named(&n) }
+    named(&agent::identity::current().user)
+}
+fn named(user: &str) -> String {
+    let user = user.trim();
+    if user.is_empty() || user == agent::identity::PUBLIC_USER { "the user".into() } else { user.to_owned() }
+}
+/// `user` to start a sentence ("The user").
+pub fn user_cap() -> String {
+    let u = user();
+    let mut c = u.chars();
+    c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+}
+#[cfg(test)]
+thread_local! { static TEST_USER: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) } }
+/// Runs `f` with the user's name set to `name` on this thread (as Personalise would set it; "" for none).
+#[cfg(test)]
+pub fn with_user<T>(name: &str, f: impl FnOnce() -> T) -> T {
+    TEST_USER.with(|u| *u.borrow_mut() = Some(name.to_owned()));
+    let out = f();
+    TEST_USER.with(|u| *u.borrow_mut() = None);
+    out
+}
+
+/// The helper's `Paths::safe_id`: letters, digits, `-`, `_`, `.`; anything else becomes `-`.
 pub fn safe_id(id: &str) -> String {
     id.chars().map(|c| if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '-' }).collect()
 }
 
-/// Top-level merge; `null` in `over` removes the key (the Swift side's `IslandFile.merge`).
+/// Top-level merge; `null` in `over` removes the key (the helper's `IslandFile::merge`).
 pub fn merge(base: &mut Map<String, Value>, over: &Map<String, Value>) {
     for (k, v) in over {
         if v.is_null() { base.remove(k); } else { base.insert(k.clone(), v.clone()); }
@@ -144,12 +173,16 @@ pub fn read_object(path: &Path) -> Option<Map<String, Value>> {
 static WRITES: AtomicU64 = AtomicU64::new(0);
 
 /// Write through a hidden temp file and rename, so the helper's watcher never sees a half-written island.
-pub fn write_atomic(path: &Path, value: &Value) -> Result<()> {
+pub fn write_atomic(path: &Path, value: &Value) -> Result<()> { write_bytes_atomic(path, &serde_json::to_vec_pretty(value)?) }
+
+/// `write_atomic` for any file in the folder (a kept document): its folder made, a hidden temp file named by this
+/// process and a counter, then a rename.
+pub fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let dir = path.parent().context("island path has no folder")?;
-    fs::create_dir_all(dir)?;
+    fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     let name = path.file_name().and_then(|n| n.to_str()).context("island path has no name")?;
     let tmp = dir.join(format!(".{name}.{}.{}.tmp", std::process::id(), WRITES.fetch_add(1, Ordering::Relaxed)));
-    fs::write(&tmp, serde_json::to_vec_pretty(value)?)?;
+    fs::write(&tmp, bytes)?;
     fs::rename(&tmp, path).inspect_err(|_| { let _ = fs::remove_file(&tmp); })?;
     Ok(())
 }

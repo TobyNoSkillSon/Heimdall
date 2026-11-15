@@ -8,6 +8,7 @@
 //! Safety: Heimdall may act on any thread. Destructive operations (deleting a project or a scheduled task,
 //! changing environment settings, and interrupting, restarting, archiving or editing the queue of a thread
 //! Heimdall did not start) need the user's answer to an exact `ask` question first, used once.
+//! Archiving alone may cover a named set of his threads on one card (`archive_batch`).
 use super::client::bounded_text;
 use super::workers::Workers;
 use agent::delivery::DeliveryPermit;
@@ -193,7 +194,7 @@ pub fn detail(catalog: &Value, name: &str) -> Result<String> {
     if inside_only(t) {
         out.push_str("\nUnavailable through t3_call: Heimdall is an outside client with no calling thread. Use Heimdall's own delegate_task, task_status and task_cancel.");
     } else if !marker(t).is_empty() {
-        out.push_str(&format!("\nConfirmation rule:{}. Confirmation is User's click on Yes.", marker(t)));
+        out.push_str(&format!("\nConfirmation rule:{}. Confirmation is {}'s click on Yes.", marker(t), agent::identity::user()));
     }
     if t["inputSchema"]["properties"].get("clientRequestId").is_some() {
         out.push_str("\nclientRequestId is filled in for you.");
@@ -237,7 +238,9 @@ pub fn check(schema: &Value, v: &Value, path: &str) -> Result<()> {
         Value::Object(map) => {
             if let Some(required) = s.get("required").and_then(Value::as_array) {
                 for key in required.iter().filter_map(Value::as_str) {
-                    ensure!(map.contains_key(key), "{path}.{key}: required");
+                    // Lane S: a missing field with fixed values names them (4 Nov: t3_pending_request without action).
+                    let values = s.get("properties").and_then(|p| p.get(key)).and_then(|p| p.get("enum")).cloned();
+                    ensure!(map.contains_key(key), "{path}.{key}: required{}", values.map(|v| format!("; one of {v}")).unwrap_or_default());
                 }
             }
             let properties = s.get("properties").and_then(Value::as_object);
@@ -331,7 +334,7 @@ pub fn render(envelope: &Value) -> String {
         .flatten()
         .map(|c| match c["type"].as_str() {
             Some("text") => agent::plain::text(c["text"].as_str().unwrap_or("")),
-            Some("image") => format!("[image {} omitted; User can see it in T3]", c["mimeType"].as_str().unwrap_or("")),
+            Some("image") => format!("[image {} omitted; {} can see it in T3]", c["mimeType"].as_str().unwrap_or(""), agent::identity::user()),
             Some(other) => format!("[{other} content omitted]"),
             None => String::new(),
         })
@@ -422,16 +425,16 @@ impl Workers {
     }
     fn verify_confirmation(&self, id: &str, question: &str) -> Result<()> {
         let consumed: bool = self.db.lock().unwrap().query_row("SELECT EXISTS(SELECT 1 FROM consumed_confirms WHERE id=?)", [id], |r| r.get(0))?;
-        ensure!(!consumed, "CONFIRM_USED: each confirmation approves one call; ask again");
+        ensure!(!consumed, "CONFIRM_USED: that click already approved an earlier call, and each approves one call; ask again with this call's question");
         // Only the user's click counts: a spoken answer reaches this as the agent's own words (ask_close), which must
         // never approve a destructive call.
         let (asked, answer) = match self.actions.ask_click(id)? {
             Some(clicked) => clicked,
-            None if self.actions.ask_answer(id)?.is_some() => bail!("CONFIRM_NEEDS_CLICK: a spoken answer cannot approve this; ask again and wait for User's click on Yes"),
-            None => bail!("CONFIRM_PENDING: User has not answered that question yet; wait for his click"),
+            None if self.actions.ask_answer(id)?.is_some() => bail!("CONFIRM_NEEDS_CLICK: a spoken answer cannot approve this; ask again and wait for {}'s click on Yes", agent::identity::user()),
+            None => bail!("CONFIRM_PENDING: {} has not answered that question yet; wait for their click", agent::identity::user_start()),
         };
         ensure!(asked.trim() == question, "CONFIRM_MISMATCH: ask exactly {question:?} for this call");
-        ensure!(approves(&answer), "CONFIRM_DECLINED: User answered {answer:?}; do not do it");
+        ensure!(approves(&answer), "CONFIRM_DECLINED: {} answered {answer:?}; do not do it", agent::identity::user_start());
         Ok(())
     }
     pub(super) async fn t3_call(&self, a: Value, op: &str, permit: &DeliveryPermit) -> Result<String> {
@@ -447,6 +450,10 @@ impl Workers {
             !inside_only(&tool),
             "OUTSIDE_CALLER: {name} acts as a calling T3 thread and Heimdall has none. Use Heimdall's own delegate_task, task_status or task_cancel tool instead"
         );
+        // Bug note 2026-11-13T18-04-30: several threads archived on one card.
+        if a.get("threads").is_some() {
+            return self.archive_batch(&a, &tool, op, permit).await;
+        }
         let properties = &tool["inputSchema"]["properties"];
         // The durable action identity makes a replayed send or interrupt idempotent in T3 too.
         if properties.get("clientRequestId").is_some() && args.get("clientRequestId").is_none() {
@@ -462,7 +469,12 @@ impl Workers {
         check(&tool["inputSchema"], &args, "args").map_err(|e| anyhow::anyhow!("INVALID_ARGUMENT: {e}"))?;
         if direct(&tool, &args) && guarded(&tool, &args).is_none() {
             let envelope = permit.run(self.client.call_raw(&name, args.clone(), deadline)).await?;
-            let text = crate::threads::compact(&name, &args, &envelope["structuredContent"]).unwrap_or_else(|| render(&envelope));
+            let mut text = crate::threads::compact(&name, &args, &envelope["structuredContent"]).unwrap_or_else(|| render(&envelope));
+            if operation(&name, &args) == "t3_pending_request_list" {
+                if let Some(thread) = args["threadId"].as_str() {
+                    text.push_str(&self.unlisted_approval(thread, &envelope["structuredContent"]).await);
+                }
+            }
             ensure!(
                 text.len() <= RESULT_BYTES,
                 "OUTPUT_TOO_LARGE: {name} returned {} KB; ask for less (limit, maxCharsPerItem) or page with its cursor",
@@ -480,8 +492,9 @@ impl Workers {
                 None => {
                     // Only a click approves it, so the user's voice does not close this card (night-ask, 20 Oct).
                     self.actions.require_click(&question);
+                    let user = agent::identity::user();
                     bail!(
-                        "CONFIRM_REQUIRED: call ask with question {question:?} and options [\"Yes\",\"No\"]. When User clicks Yes, repeat this call with confirm set to that ask's request_id. A spoken yes does not count"
+                        "CONFIRM_REQUIRED: call ask with question {question:?} and options [\"Yes\",\"No\"]. When {user} clicks Yes, repeat this call with confirm set to that ask's request_id. A spoken yes does not count"
                     )
                 }
                 Some(id) => {
@@ -510,7 +523,24 @@ impl Workers {
             _ => None,
         };
         permit.check()?;
-        let envelope = match self.client.call_raw(&name, args.clone(), deadline).await {
+        let sent = match self.client.call_raw(&name, args.clone(), deadline).await {
+            Err(e) if name == "t3_thread_send" => self.land(&args, e, deadline, permit).await,
+            Err(e) if name == "t3_thread_organize" && already_so(&args, &e.to_string()) => {
+                // ---- Lane S (night 10–11 Nov), t3_call archive failures: T3 refuses to unarchive a thread that is not
+                // archived (3 and 4 Nov, twice). The thread is already as asked: a plain answer, not a failure. ----
+                let text = format!("Thread {} is already {}d; nothing to do.", args["threadId"].as_str().unwrap_or("?"), args["action"].as_str().unwrap_or(""));
+                // Its record follows as if the call had gone through (an archive ends following a task).
+                self.effects(&operation(&name, &args), &args, &Value::Null)?;
+                // Review 1111 S5: the user's click approved this call; it is spent here as on any other path.
+                if let Some(id) = &confirm {
+                    self.db.lock().unwrap().execute("INSERT OR IGNORE INTO consumed_confirms VALUES(?)", [id])?;
+                }
+                self.finish(op, &Value::String(text.clone()))?;
+                return Ok(text);
+            }
+            other => other,
+        };
+        let envelope = match sent {
             Ok(v) => v,
             Err(e) => {
                 // A definite rejection applied nothing; only a lost response leaves the call uncertain.
@@ -540,10 +570,85 @@ impl Workers {
         if let Some(id) = confirm {
             self.db.lock().unwrap().execute("INSERT OR IGNORE INTO consumed_confirms VALUES(?)", [id])?;
         }
-        let text = crate::threads::compact(&name, &args, &result).unwrap_or_else(|| render(&envelope)) + &note;
+        let mut text = crate::threads::compact(&name, &args, &result).unwrap_or_else(|| render(&envelope));
+        // Lane S (proposal 10): the reply promise once per session; afterwards the send's answer ends at its state.
+        if name == "t3_thread_send" && text.contains(crate::threads::REPLY_PROMISE) && !self.once("reply-promise") {
+            text = text.replacen(crate::threads::REPLY_PROMISE, ".", 1);
+        }
+        let text = text + &note;
         self.finish(op, &Value::String(text.clone()))?;
         self.changed.notify_one();
         Ok(text)
+    }
+    // ---- Lane S (night 10–11 Nov): a send always lands. Bug note 2026-11-10T09-03-14. ----
+    // T3 refuses a steer into a thread with no running turn ("has no running turn that can be steered": idle, or its
+    // run just finished) and any send into an archived thread. Steers failed 20 times in two weeks, each retried by the
+    // relay with `auto`; three of them said "unarchiving it failed too … not archived", because the archived matcher
+    // took the steer refusal for an archive. Now a steer with no turn to steer starts one (what `auto` does), and an
+    // archived Heimdall thread is unarchived and gets the message as a new turn. The user's archived threads keep T3's
+    // refusal.
+    async fn land(&self, args: &Value, refused: anyhow::Error, deadline: Duration, permit: &DeliveryPermit) -> Result<Value> {
+        let text = refused.to_string();
+        if archived_refusal(&text) {
+            return self.resend_archived(args, refused, deadline, permit).await;
+        }
+        if idle_refusal(&text) {
+            // Review 1111 S4: only Heimdall's own threads get the steer as a new turn; a thread of the user's keeps T3's
+            // refusal, saying how to start a turn there on purpose.
+            if !args["threadId"].as_str().map(|t| self.heimdall_s(t)).transpose()?.unwrap_or(false) {
+                return Err(anyhow::anyhow!("{text} Nothing was sent: this is a thread of {user}'s with no running turn to steer. Starting a turn in their own thread needs their say-so: ask {user} first, then send with mode auto.", user = agent::identity::user()));
+            }
+            permit.check()?;
+            return self.client.call_raw("t3_thread_send", as_new_turn(args, "started"), deadline).await;
+        }
+        Err(refused)
+    }
+    // ---- end lane S ----
+    // ---- Night 8 Nov log sweep, finding 1: a message for an archived Heimdall worker still reaches it. ----
+    // The relay archives a finished task with task_cancel, and the user's words or island click for it often follow
+    // seconds later ("Try int8 once", 8 Nov 02:08:50); T3 refuses a send into an archived thread
+    // (`thread_not_sendable`). For Heimdall's own threads the send unarchives the thread and goes out once more, so
+    // the click lands in the thread that holds its context; the user's threads keep T3's refusal.
+    async fn resend_archived(&self, args: &Value, refused: anyhow::Error, deadline: Duration, permit: &DeliveryPermit) -> Result<Value> {
+        let Some(thread) = args["threadId"].as_str() else { return Err(refused) };
+        if !self.heimdall_s(thread)? {
+            return Err(refused);
+        }
+        permit.check()?;
+        // Lane S: a thread unarchived meanwhile (by the user, or a send racing this one) is fine; the message still goes.
+        match self.client.call("t3_thread_organize", json!({"threadId":thread,"action":"unarchive"})).await {
+            Err(e) if !e.to_string().contains("is not archived") => return Err(refused.context(format!("unarchiving it failed too: {e:#}"))),
+            _ => {}
+        }
+        eprintln!("t3: {thread} was archived; unarchived it to deliver a message");
+        // Its archive no longer stands: the run this message starts is followed and wakes as any task's does.
+        self.db.lock().unwrap().execute("DELETE FROM quiet WHERE thread=?", [thread])?;
+        // T3 applied nothing the first time; a fresh retry key keeps its own dedupe from answering the refusal. An
+        // archived thread has no turn to steer, so a steer goes as a new turn (lane S).
+        permit.check()?;
+        self.client.call_raw("t3_thread_send", as_new_turn(args, "unarchived"), deadline).await
+    }
+    // ---- end finding 1 ----
+    /// Bug note 2026-11-06T11-57-54: T3's `t3_pending_request` list names questions only ("approvals are not listed"),
+    /// so the relay never saw a thread wait on an approval. The thread's live approval wait (`crate::waits_on_approval`,
+    /// the hook's answered cards left out) as one more line; nothing when there is none or the read fails.
+    async fn unlisted_approval(&self, thread: &str, listed: &Value) -> String {
+        let questions = listed["requestIds"].as_array().map_or(0, Vec::len) as u64;
+        let Ok(r) = self.client.call("t3_thread_read", json!({"threadId":thread,"limit":1,"maxCharsPerItem":1,"runLimit":1})).await else { return String::new() };
+        let t = &r["thread"];
+        let counted = crate::threads::live_requests(t).saturating_sub(questions);
+        let counted = if counted == 0 && questions == 0 && t["status"] == "waiting" { 1 } else { counted };
+        if counted == 0 {
+            return String::new();
+        }
+        match crate::waits_on_approval(&self.client, thread, t, counted).await {
+            Ok(Some(a)) => {
+                let asks = a.text.map(|t| format!(": {t}")).unwrap_or_default();
+                let open = t["link"].as_str().map(|l| l.trim_matches(['<', '>'])).filter(|l| !l.is_empty()).map(|l| format!(" Open it: {l}")).unwrap_or_default();
+                format!("\nApproval waiting (T3 lists no approvals; only {} can give it, in T3){asks}.{open}", agent::identity::user())
+            }
+            _ => String::new(),
+        }
     }
     /// Ownership and quiet periods that follow from a successful call.
     /// Returns a note for the call's answer: the job island a launched or forked thread got.
@@ -621,4 +726,242 @@ impl Workers {
             .optional()?
             .is_some_and(|until| until as u64 > crate::now_ms()))
     }
+}
+
+// ---- Batch archive on one card (bug note 2026-11-13T18-04-30) ----
+// The user asked to clean up his T3 threads and clicked "Archive them too" on one card covering 46 of his finished
+// threads; the guard then wanted one exact card per thread. Archiving keeps a thread's history and is undone by
+// unarchive, so archive alone (never a delete, interrupt or any other guarded action) may cover a named set on one
+// card: `t3_call {tool: t3_thread_organize, args: {action: archive}, threads: [ids]}`. Heimdall's own threads in the
+// set archive at once; his are covered by one question naming their count, when they were last active and a tag of
+// their exact ids. His click on Yes approves archiving exactly that set, once, within 30 minutes of the question.
+/// The most threads one batch archives.
+pub const BATCH_MAX: usize = 100;
+/// How long a batch question stays good for its click.
+const BATCH_LIFETIME_MS: u64 = 30 * 60 * 1000;
+/// One of the user's threads in a batch: id, title, last active (`updatedAt`).
+pub struct BatchThread {
+    pub id: String,
+    pub title: String,
+    pub updated: Option<String>,
+}
+/// The tag of an exact set of thread ids shown on the card: six hex digits of the SHA-256 of the sorted ids, so any
+/// other set (one thread more or less) almost always asks a different question. The binding itself is the full hash
+/// (`batch_key`), the card's titles and the order of question and card.
+pub fn batch_tag(ids: &[String]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut sorted: Vec<&str> = ids.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    let digest = Sha256::digest(sorted.join("\n").as_bytes());
+    digest.iter().take(3).map(|b| format!("{b:02X}")).collect()
+}
+/// The key a batch question is kept under: the full SHA-256 of the sorted ids.
+fn batch_key(ids: &[String]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut sorted: Vec<&str> = ids.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    Sha256::digest(sorted.join("\n").as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+/// "12 Oct" from an ISO time.
+fn day_month(iso: &str) -> Option<(String, String)> {
+    let date = iso.get(..10)?;
+    let month: usize = date.get(5..7)?.parse().ok()?;
+    let day: u32 = date.get(8..10)?.parse().ok()?;
+    let name = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"].get(month.checked_sub(1)?)?;
+    Some((date.to_owned(), format!("{day} {name}")))
+}
+/// The batch card's exact question and the Yes option's description (the first titles): count, when they were last
+/// active, and the set's tag.
+pub fn batch_question(threads: &[BatchThread]) -> (String, String) {
+    let ids: Vec<String> = threads.iter().map(|t| t.id.clone()).collect();
+    let mut days: Vec<(String, String)> = threads.iter().filter_map(|t| t.updated.as_deref().and_then(day_month)).collect();
+    days.sort();
+    let active = match (days.first(), days.last()) {
+        (Some(a), Some(b)) if a.0 == b.0 => format!(", last active {}", a.1),
+        (Some(a), Some(b)) => format!(", last active {} to {}", a.1, b.1),
+        _ => String::new(),
+    };
+    let what = if threads.len() == 1 { "this T3 thread of yours".to_owned() } else { format!("these {} T3 threads of yours", threads.len()) };
+    let question = format!("Archive {what}{active} (set {})?", batch_tag(&ids));
+    // The first titles that fit the option's description, then how many more.
+    let titles: Vec<String> = threads.iter().map(|t| bounded_text(&t.title.replace(['\'', '"', '\n'], " "), 30)).collect();
+    let more = |shown: usize| if shown < titles.len() { format!(" and {} more", titles.len() - shown) } else { String::new() };
+    let mut shown = 1;
+    while shown < titles.len() && titles[..=shown].join(", ").chars().count() + more(shown + 1).chars().count() <= agent::mcp_contract::DESCRIPTION_CHARS {
+        shown += 1;
+    }
+    let description = format!("{}{}", titles[..shown].join(", "), more(shown));
+    (question, bounded_text(&description, agent::mcp_contract::DESCRIPTION_CHARS))
+}
+
+impl Workers {
+    /// `t3_call` with `threads`: archive every listed thread, Heimdall's own at once and the user's on one click.
+    async fn archive_batch(&self, a: &Value, tool: &Value, op: &str, permit: &DeliveryPermit) -> Result<String> {
+        let name = tool["name"].as_str().unwrap_or("");
+        let args = a.get("args").cloned().unwrap_or_else(|| json!({}));
+        ensure!(
+            name == "t3_thread_organize" && args["action"] == "archive",
+            "INVALID_ARGUMENT: threads covers archiving only (t3_thread_organize with action archive); every other call, deleting included, names one threadId and gets its own question"
+        );
+        ensure!(args.get("threadId").is_none(), "INVALID_ARGUMENT: pass the threads to archive in threads, not args.threadId");
+        let ids: Vec<String> = a["threads"]
+            .as_array()
+            .context("INVALID_ARGUMENT: threads: a list of thread ids")?
+            .iter()
+            .map(|v| v.as_str().map(str::to_owned).context("INVALID_ARGUMENT: threads: each is a thread id"))
+            .collect::<Result<_>>()?;
+        ensure!((1..=BATCH_MAX).contains(&ids.len()), "INVALID_ARGUMENT: threads: 1 to {BATCH_MAX} thread ids; split a larger clean-up");
+        ensure!(ids.iter().enumerate().all(|(i, id)| !ids[..i].contains(id)), "INVALID_ARGUMENT: threads: name each thread once");
+        let properties = &tool["inputSchema"]["properties"];
+        let call_args = |id: &str| {
+            let mut c = args.clone();
+            c["threadId"] = json!(id);
+            if properties.get("clientRequestId").is_some() {
+                c["clientRequestId"] = json!(format!("{op}:{id}"));
+            }
+            c
+        };
+        for id in &ids {
+            check(&tool["inputSchema"], &call_args(id), "args").map_err(|e| anyhow::anyhow!("INVALID_ARGUMENT: {e}"))?;
+        }
+        let body = json!({"tool":name,"args":args,"threads":ids});
+        if let Some(done) = self.prepare(op, "t3_call", &body, permit)? {
+            return Ok(done.as_str().map(agent::plain::text).unwrap_or_else(|| agent::plain::render(&done)));
+        }
+        // Whose each thread is, as the one-thread rule judges it (`confirmation`).
+        let mut his = vec![];
+        for id in &ids {
+            if self.heimdall_s(id)? {
+                continue;
+            }
+            let shell = self
+                .client
+                .call("t3_thread_read", json!({"threadId":id,"limit":1,"maxCharsPerItem":1,"runLimit":1}))
+                .await
+                .with_context(|| format!("T3_TOOL_FAILED: reading thread {id} for the card failed; check the id or leave it out of threads"))?;
+            let t = &shell["thread"];
+            if relay_shell(t) {
+                continue;
+            }
+            his.push(BatchThread { id: id.clone(), title: t["title"].as_str().unwrap_or(id).to_owned(), updated: t["updatedAt"].as_str().map(str::to_owned) });
+        }
+        let mut confirm = None;
+        if !his.is_empty() {
+            let his_ids: Vec<String> = his.iter().map(|t| t.id.clone()).collect();
+            let key = batch_key(&his_ids);
+            let set = serde_json::to_string(&{ let mut s = his_ids.clone(); s.sort(); s })?;
+            match a["confirm"].as_str() {
+                None => {
+                    let (question, description) = batch_question(&his);
+                    // One live set per question (review: a set chosen to share another's short tag and days would
+                    // otherwise take over its click); its own key is the full hash of the exact set. The question and
+                    // titles are kept with it: a thread active again before the click keeps its card.
+                    {
+                        let db = self.db.lock().unwrap();
+                        db.execute("DELETE FROM batch_confirms WHERE question=? AND key!=?", params![question, key])?;
+                        db.execute("INSERT OR REPLACE INTO batch_confirms(key,ids,question,description,created_ms) VALUES(?,?,?,?,?)", params![key, set, question, description, crate::now_ms() as i64])?;
+                    }
+                    self.actions.require_click(&question);
+                    let user = agent::identity::user();
+                    bail!(
+                        "CONFIRM_REQUIRED: call ask with questions [{{question: {question:?}, options: [{{label: \"Yes\", description: {description:?}}}, \"No\"]}}], exactly so. When {user} clicks Yes, repeat this call with the same threads and confirm set to that ask's request_id. Their click archives exactly these {} threads of theirs, once. A spoken yes does not count",
+                        his.len()
+                    )
+                }
+                Some(id) => {
+                    let row: Option<(String, String, String, i64)> = self
+                        .db
+                        .lock()
+                        .unwrap()
+                        .query_row("SELECT ids,question,description,created_ms FROM batch_confirms WHERE key=?", [&key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                        .optional()?;
+                    let Some((_, question, description, created)) = row.filter(|r| r.0 == set) else {
+                        let consumed: bool = self.db.lock().unwrap().query_row("SELECT EXISTS(SELECT 1 FROM consumed_confirms WHERE id=?)", [id], |r| r.get(0))?;
+                        ensure!(!consumed, "CONFIRM_USED: that click already approved an earlier call, and each approves one call; call again without confirm and ask again");
+                        bail!("CONFIRM_MISMATCH: that card was not asked for these threads; call again without confirm and ask its question")
+                    };
+                    self.verify_confirmation(id, &question)?;
+                    // The card he clicked: asked after this question was issued (an older click never revives with a
+                    // later question of the same words), and showing these threads' titles under Yes.
+                    let (card, asked_ms) = self.actions.ask_card(id)?.context("CONFIRM_MISMATCH: that card's contents are not on record; ask again")?;
+                    ensure!(asked_ms >= created as u64, "CONFIRM_MISMATCH: that card was asked before this question; ask again with it");
+                    let yes = card.iter().flat_map(|q| &q.options).find(|o| approves(&o.label));
+                    ensure!(
+                        card.len() == 1 && yes.and_then(|o| o.description.as_deref()) == Some(description.as_str()),
+                        "CONFIRM_MISMATCH: the card must show Yes with the description {description:?}; ask again exactly as CONFIRM_REQUIRED said"
+                    );
+                    ensure!(crate::now_ms().saturating_sub(created as u64) <= BATCH_LIFETIME_MS, "CONFIRM_EXPIRED: that question is more than 30 minutes old; call again without confirm and ask again");
+                    confirm = Some((id.to_owned(), key));
+                }
+            }
+        }
+        permit.with(|| {
+            self.db.lock().unwrap().execute("UPDATE operations SET state='calling' WHERE id=?", [op])?;
+            Ok(())
+        })?;
+        // His click approves this one batch: spent before the first archive, so a second call racing this one finds it
+        // used (review), and the question's set goes with it.
+        if let Some((id, key)) = &confirm {
+            let db = self.db.lock().unwrap();
+            ensure!(db.execute("INSERT OR IGNORE INTO consumed_confirms VALUES(?)", [id])? == 1, "CONFIRM_USED: that click already approved an earlier call, and each approves one call; call again without confirm and ask again");
+            db.execute("DELETE FROM batch_confirms WHERE key=?", [key])?;
+        }
+        let (mut archived, mut failed) = (0usize, vec![]);
+        for id in &ids {
+            permit.check()?;
+            let c = call_args(id);
+            match self.client.call_raw(name, c.clone(), Duration::from_secs(30)).await {
+                Ok(_) => archived += 1,
+                Err(e) if already_so(&c, &e.to_string()) => archived += 1,
+                Err(e) => {
+                    failed.push(format!("{id}: {e}"));
+                    continue;
+                }
+            }
+            self.effects("t3_thread_organize", &c, &Value::Null)?;
+        }
+        let mut text = format!("Archived {archived} of {} threads.", ids.len());
+        if !failed.is_empty() {
+            text.push_str(&format!(" Not archived: {}", failed.join("; ")));
+        }
+        self.finish(op, &Value::String(text.clone()))?;
+        self.changed.notify_one();
+        Ok(text)
+    }
+}
+// ---- end batch archive ----
+
+/// Night 8 Nov log sweep, finding 1: T3's refusal of a message into an archived thread (0.1.x: `thread_not_sendable`,
+/// "is archived and cannot receive messages"; older: "is archived; unarchive it first").
+/// Lane S: only the archive refusal itself. `thread_not_sendable` alone also covers a steer with no running turn (bug
+/// note 2026-11-10T09-03-14), which unarchiving cannot help.
+pub fn archived_refusal(error: &str) -> bool {
+    error.starts_with("T3_TOOL_FAILED") && error.contains(" is archived")
+}
+/// Lane S: T3's refusal of a steer into a thread with no running turn (T3 0.1.x: `thread_not_sendable`, "Thread … has
+/// no running turn that can be steered.").
+pub fn idle_refusal(error: &str) -> bool {
+    error.starts_with("T3_TOOL_FAILED") && error.contains("no running turn")
+}
+/// Lane S: the same send as a new turn (`auto`: T3 starts a turn on an idle thread, steers a running one), under a
+/// fresh retry key so T3's dedupe does not answer with the first refusal.
+fn as_new_turn(args: &Value, why: &str) -> Value {
+    let mut again = args.clone();
+    if again["mode"] == "steer" {
+        again["mode"] = json!("auto");
+    }
+    if let Some(key) = args["clientRequestId"].as_str() {
+        again["clientRequestId"] = json!(format!("{key}-{why}"));
+    }
+    again
+}
+/// Lane S, t3_call archive failures: T3's refusal to unarchive a thread that is not archived, or to archive one that
+/// already is: the thread is already as asked.
+fn already_so(args: &Value, error: &str) -> bool {
+    error.starts_with("T3_TOOL_FAILED")
+        && match args["action"].as_str() {
+            Some("unarchive") => error.contains("is not archived"),
+            Some("archive") => error.contains("already archived"),
+            _ => false,
+        }
 }

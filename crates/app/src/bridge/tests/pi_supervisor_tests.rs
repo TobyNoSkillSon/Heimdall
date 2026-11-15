@@ -254,7 +254,7 @@
         let reload=rows.iter().position(|e|e.kind=="agent_reload").unwrap(); assert!(tool<settled&&settled<reload);
         // E4.1: the reload's reason is the line before the restart message; nothing continues by itself.
         let note=contexts(&session)?.into_iter().rfind(|c|c.contains("fake Pi integration")).context("no reload context")?;
-        assert!(note.contains("Reloaded: ")&&!note.contains("reload-")&&note.contains("you have just been restarted")&&note.ends_with("Don't do anything unless User talks to you."),"{note}");
+        assert!(note.contains("Reloaded: ")&&!note.contains("reload-")&&note.contains("you have just been restarted")&&note.ends_with("Don't do anything unless the user talks to you."),"{note}");
         let actions=tools.mcp_actions.actions.as_ref().unwrap();
         let db=rusqlite::Connection::open(data.join("agent/mcp-actions.sqlite"))?;
         let (id,state):(String,String)=db.query_row("SELECT id,state FROM receipts WHERE operation='stable-fake-reload-call'",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
@@ -347,17 +347,17 @@
         let id=actions.ask("question-click",&asked("Publish the prepared change?",&yes_no),&p)?;
         let retained=actions.ask("another-question",&asked("Retain this separate question?",&yes_no),&p)?;
         runtime.notice_action(ui::agent_notice::AgentNoticeAction::Answer{request_id:id.clone(),answers:vec![ui::agent_notice::QuestionAnswer{question_id:"q1".into(),labels:vec!["No".into()],other:None}], by_hand: vec![]})?;
-        wait_for(&session,|r|r.iter().any(|e|e.kind=="agent_send"&&e.payload.to_string().contains("User clicked No.")))?;
-        assert_eq!(actions.state(&id)?,"answered"); assert_eq!(delivery_count(&data,"User clicked No.")?,1);
+        wait_for(&session,|r|r.iter().any(|e|e.kind=="agent_send"&&e.payload.to_string().contains("The user clicked No.")))?;
+        assert_eq!(actions.state(&id)?,"answered"); assert_eq!(delivery_count(&data,"The user clicked No.")?,1);
         // A second answer to a committed card is no error and no second delivery (R16).
         tools.answer_question(&id,&one_answer("Yes"),&[])?;
-        assert_eq!(delivery_count(&data,"User clicked Yes.")?,0);
+        assert_eq!(delivery_count(&data,"The user clicked Yes.")?,0);
         assert!(tools.pending_questions.lock().unwrap().contains_key(&retained));
         let stale=actions.ask("stale-click",&asked("Old question",&yes_no),&p)?;
         tools.agent_enabled.store(false,Ordering::Release); tools.agent_enabled.store(true,Ordering::Release);
         assert!(tools.answer_question(&stale,&one_answer("Yes"),&[]).is_err()); runtime.barrier()?;
         assert!(tools.pending_questions.lock().unwrap().is_empty());
-        assert_eq!(actions.state(&stale)?,"cancelled"); assert_eq!(delivery_count(&data,"User clicked Yes.")?,0); drop(runtime); Ok(())
+        assert_eq!(actions.state(&stale)?,"cancelled"); assert_eq!(delivery_count(&data,"The user clicked Yes.")?,0); drop(runtime); Ok(())
     }
     /// Night review 20 Oct (6), through the real supervisor: a reply still waiting out the user's pause when his words
     /// reach the agent is dropped unheard, and the wake says it never reached him (night pass 1022 wording).
@@ -521,7 +521,7 @@
         let sent=|words:&str|->Result<String>{wait_for(&session,|r|r.iter().any(|e|e.kind=="agent_send"&&e.payload.to_string().contains(words)))?;
             Ok(heimdall_archive::Journal::open_read_only(&session)?.records()?.into_iter().rev().find(|e|e.kind=="agent_send"&&e.payload.to_string().contains(words)).unwrap().payload.to_string())};
         // An aside (not for Heimdall) delivered with a wake: the card stays up, no closed line.
-        let card=actions.ask("q-aside",&asked("Delete AllForOne's heavy files and archive the rest?",&yes_no),&p)?;
+        let card=actions.ask("q-aside",&asked("Delete Atlas's heavy files and archive the rest?",&yes_no),&p)?;
         let now=capture::host_now_ns();
         say_as("Alex, are you coming tonight",now,now+1,false)?;
         let wake=sent("are you coming tonight")?;
@@ -998,7 +998,7 @@
         // once; its speech-split child is not repeated.
         assert_eq!(first[0].matches("already heard part").count(),1,"a split of spooled speech is not repeated: {}",first[0]);
         assert!(first[0].contains(" Discord · Erin] and the tests too"),"a split of unheard speech is part of it: {}",first[0]);
-        assert!(first[0].contains("nothing here is a request")&&first[0].ends_with("Don't do anything unless User talks to you."));
+        assert!(first[0].contains("nothing here is a request")&&first[0].ends_with("Don't do anything unless the user talks to you."));
         let records=heimdall_archive::Journal::open_read_only(&session)?.records()?;
         assert!(!records.iter().any(|r|r.kind=="agent_transport_reply"&&r.payload["wire"]["type"]=="mock_pi"),"the catch-up started a turn");
         // Heard while on: it reaches the live spool (and the next wake), so it is never a catch-up.
@@ -1100,7 +1100,7 @@
         assert_eq!(all.len(),1);
         assert!(all[0].contains(" Discord · Dave] said after it")&&!all[0].contains("before the conversation's last message"),"{}",all[0]);
         assert!(all[0].starts_with(&format!("Heimdall catch-up: what was said since {} ",agent::clock::local_hms(ended))),"{}",all[0]);
-        assert!(all[0].ends_with("Don't do anything unless User talks to you."));
+        assert!(all[0].ends_with("Don't do anything unless the user talks to you."));
         drop(runtime);Ok(())
     }
     /// A catch-up that cannot be added is tried again on the next verified start, then dropped.
@@ -1179,7 +1179,7 @@
         // The reload's reason reaches the conversation only in the context of a start that took it (E4.1, E4.6).
         let notes=|session:&Path|->Result<Vec<String>>{Ok(contexts(session)?.into_iter().filter(|c|c.contains("Reloaded: ")).collect())};
         std::fs::write(data.join("die-on-start"),"")?;
-        runtime.send(Command::Reload{reason:"User reloaded the agent from the Agent window".into(),abort:false,permit:None})?;
+        runtime.send(Command::Reload{reason:"The user reloaded the agent from the Agent window".into(),abort:false,permit:None})?;
         wait_for(&session,|r|r.iter().any(|e|e.kind=="agent_reload"))?;
         std::thread::sleep(std::time::Duration::from_millis(500));
         assert!(notes(&session)?.is_empty(),"a failed replacement wrote a note");
@@ -1188,10 +1188,10 @@
         wait_until("automatic restart",||Ok(!data.join("agent/pending-reload.json").exists()))?;runtime.barrier()?;
         let written=notes(&session)?;
         assert_eq!(written.len(),1,"{written:?}");
-        assert!(written[0].contains("Reloaded: User reloaded the agent")&&written[0].ends_with("Don't do anything unless User talks to you."),"{}",written[0]);
+        assert!(written[0].contains("Reloaded: The user reloaded the agent")&&written[0].ends_with("Don't do anything unless the user talks to you."),"{}",written[0]);
         drop(runtime);
         // A pending reload from an earlier run: cleared at startup, no note.
-        std::fs::write(data.join("agent/pending-reload.json"),serde_json::to_vec(&json!({"wait_for_settlement":true,"reason":"User reloaded the agent from the Agent window at 05:16","generation":0,"receipts":[]}))?)?;
+        std::fs::write(data.join("agent/pending-reload.json"),serde_json::to_vec(&json!({"wait_for_settlement":true,"reason":"The user reloaded the agent from the Agent window at 05:16","generation":0,"receipts":[]}))?)?;
         let session=data.join("archive/session-relaunch");
         let relaunched=mock_runtime(dir.path(),&data,&session,false)?;
         assert!(!data.join("agent/pending-reload.json").exists());
@@ -1240,7 +1240,7 @@
     fn reload_prompt_explicitly_excludes_new_heimdall_binary_code() {
         let prompt=include_str!("../../../../agent/prompt/heimdall.md");let section=prompt.split("## Your own setup\n\n").nth(1).unwrap().split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(section.contains("call `reload_me` with the reason"),"{section}");
-        assert!(section.contains("`reload_me` does not change Heimdall itself."),"{section}");
+        assert!(section.contains("`reload_me` does not change Heimdall itself: changes to the app come with an update."),"{section}");
     }
 
     /// Review of night pass 3 (finding 1): the user's name-wake restarts a turn that has not acted (night pass H2). The
@@ -1309,14 +1309,14 @@ fn a_two_question_card_commits_once_with_each_answer_keyed_by_its_question()->Re
     ];
     tools.answer_question(&card,&answers,&[])?;
     assert_eq!(actions.state(&card)?,"answered");
-    wait_for(&session,|r|r.iter().any(|e|e.kind=="agent_send"&&e.payload.to_string().contains("User answered")))?;
-    assert_eq!(delivery_count(&data,"User answered q1")?,1);
-    assert_eq!(delivery_count(&data,"User answered q2")?,1);
+    wait_for(&session,|r|r.iter().any(|e|e.kind=="agent_send"&&e.payload.to_string().contains("The user answered")))?;
+    assert_eq!(delivery_count(&data,"The user answered q1")?,1);
+    assert_eq!(delivery_count(&data,"The user answered q2")?,1);
     assert_eq!(delivery_count(&data,"Soft; Other:")?,1,"the second answer keeps its words of his own");
     // Committed once: a second Send finds the card answered and changes nothing (R16: no "Question unavailable").
     tools.answer_question(&card,&answers,&[])?;
     assert_eq!(actions.state(&card)?,"answered");
-    assert_eq!(delivery_count(&data,"User answered q1")?,1);
+    assert_eq!(delivery_count(&data,"The user answered q1")?,1);
     Ok(())
 }
 
@@ -1385,14 +1385,14 @@ fn spoken_choices_fill_a_card_one_question_at_a_time_and_talk_leaves_it_open()->
     // "both" on the two-option multi-select: the card completes and is committed with both answers.
     say_for_heimdall(&tools,&runtime,2,"both")?;
     wait_state(actions,&card,"answered")?;
-    wait_for(&session,|r|r.iter().any(|e|e.kind=="agent_send"&&e.payload.to_string().contains("User answered")))?;
+    wait_for(&session,|r|r.iter().any(|e|e.kind=="agent_send"&&e.payload.to_string().contains("The user answered")))?;
     assert_eq!(delivery_count(&data,"Soft, Loud")?,1);
     // A single-question card: "Yes" is its option, so it completes with the legacy line, as a click would.
     let yes_no=["Yes".to_string(),"No".to_string()];
     let yes=actions.ask("q-yes",&asked("Push it too?",&yes_no),&p)?;
     say_for_heimdall(&tools,&runtime,3,"Yes")?;
     wait_state(actions,&yes,"answered")?;
-    wait_for(&session,|r|r.iter().any(|e|e.kind=="agent_send"&&e.payload.to_string().contains("User clicked Yes. Question: Push it too?")))?;
+    wait_for(&session,|r|r.iter().any(|e|e.kind=="agent_send"&&e.payload.to_string().contains("The user clicked Yes. Question: Push it too?")))?;
     // A letter past the last option is talk, not an answer: the card stays open until a click or ask_close.
     let late=actions.ask("q-late",&asked("Push it too?",&yes_no),&p)?;
     say_for_heimdall(&tools,&runtime,4,"D")?;
@@ -1638,3 +1638,22 @@ fn a_history_no_model_can_summarise_is_cut_to_the_newest_turns_with_one_notice()
     assert_eq!(agent_notices(&tools),["Agent history too long for every model: its oldest part was cut"]);
     drop(runtime);Ok(())
 }
+
+    /// F6 (10 Nov): a voice wake through the real supervisor and Pi joins its turn's end to its latency record (the
+    /// live lines' missing turns were relay mode's, latency.rs).
+    #[test]
+    fn a_voice_wakes_latency_record_gets_its_pi_turns_end() -> Result<()> {
+        let (_d,_data,session,tools,runtime)=setup()?;
+        let (start,text)=(capture::host_now_ns(),"what is on my calendar");
+        crate::latency::admitted("voice-lat","mic:1",start,false);
+        crate::latency::decided("voice-lat",Some("name"));
+        runtime.send(Command::Observe(Observation{id:"voice-lat".into(),timestamp_ms:agent::now_ms(),source:"Mic".into(),speaker:"User".into(),language:"en".into(),text:text.into()}))?;
+        let through={let mut c=tools.send_context.lock().unwrap();c.observe_at("User",text,start+1,json!({"id":"voice-lat","start_ns":start}))};
+        runtime.wake_pending_through_with_permit(vec![],false,through,Some("voice-lat".into()),agent::Speaker::Owner,tools.agent_enabled.permit()?)?;runtime.barrier()?;
+        wait_for(&session,|r|r.iter().any(|e|e.kind=="agent_reply"&&e.payload.to_string().contains("\"complete\"")))?;
+        runtime.barrier()?;
+        let r=crate::latency::live_current().expect("the delivered request is the current one");
+        assert_eq!(r.id,"voice-lat");
+        assert!(r.mark(crate::latency::Stage::Deliver).is_some()&&r.mark(crate::latency::Stage::Done).is_some(),"the Pi turn's end joins its request: {r:?}");
+        drop(runtime);Ok(())
+    }

@@ -137,6 +137,8 @@ where
     let hits = v["hits"].as_array().cloned().unwrap_or_default();
     let detail = v["search_mode"] == "detail";
     let mut lines: Vec<String> = vec![];
+    // Why these hits are not what was asked for (a meaning search paused for memory answered by words).
+    if let Some(n) = v["notice"].as_str().filter(|n| !n.is_empty()) { lines.push(n.to_owned()); }
     if hits.is_empty() {
         lines.push("No hits.".into());
     }
@@ -263,6 +265,8 @@ mod tests {
         let detail = json!({"search_mode":"detail","hits":[{"h":"h3","id":"x","start":"2026-10-19T10:00:00Z","label":"Mic · User","text":"rest","text_offset_bytes":3000}],"next_cursor":null});
         assert_eq!(timeline(&detail, &cet()), "19 Oct 12:00 · Mic · User · [h3]\n…rest");
         assert_eq!(timeline(&json!({"search_mode":"literal","hits":[],"next_cursor":null}), &cet()), "No hits.");
+        let paused = json!({"search_mode":"literal_fallback","notice":"Meaning search is paused.","hits":[],"next_cursor":null});
+        assert_eq!(timeline(&paused, &cet()), "Meaning search is paused.\nNo hits.", "the notice comes first");
         let pending = json!({"search_mode":"semantic","hits":[{"h":"h1","start":"2026-10-19T10:00:00Z","label":"Mic · User","text":"just said","pending_embedding":true}],"next_cursor":null});
         assert_eq!(timeline(&pending, &cet()), "19 Oct 12:00 · Mic · User · recent, literal match (not yet searchable by meaning) · [h1] just said");
     }

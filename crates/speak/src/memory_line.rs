@@ -2,7 +2,8 @@
 //!
 //! "whenever the model needs more RAM or is just not enough, then you should switch to a Phonon
 //! model for speaking... you should absolutely by yourself decide to switch to a much lighter speaking model... so
-//! that we can lift like 20 GB from RAM." His standing rule keeps the whole Mac under 95 GB in use.
+//! that we can lift like 20 GB from RAM." His standing rule kept the whole Mac under 95 GB
+//! in use; 6 Nov 13:13 he raised Jarvis's line to 105 GB ("why is the limit 95? ... like 105").
 //!
 //! The policy (`Policy::decide`) is pure: a sample of memory in use, the memory jobs have declared they are about to
 //! take, and the native pressure level go in; whether Jarvis stays, gives way, stays away or comes back comes out.
@@ -15,15 +16,18 @@
 //!   from `RETURN_HOLD` for each hold that follows a return within `CALM`, up to `HOLD_MAX` (review 4 Nov: assuming
 //!   24 GiB for a ~29 GB Jarvis, he flip-flopped with Phonon S about once a minute).
 //!
-//! Jobs declare a need with a JSON file in `<Heimdall data>/memory-needs/` (`Needs`, docs/drama3-integration.md).
+//! Jobs declare a need with a JSON file in `<Heimdall data>/memory-needs/` (`Needs`, docs/personal/drama3-integration.md). A
+//! need with `"yield": true` asks Heimdall to make room whatever the line says (Arsenal's RAM yield,
+//! docs/personal/arsenal-yield.md).
 use anyhow::{bail, Result};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const GIB: u64 = 1 << 30;
-/// The user's line: the whole Mac stays under 95 GB in use (Activity Monitor's "Memory Used", which counts GiB).
-pub const LINE: u64 = 95 * GIB;
+/// The user's line: Jarvis gives way before the whole Mac passes 105 GB in use (Activity Monitor's "Memory Used", which
+/// counts GiB)., raising it from 95: "Let's make a limit like 100 something, like 105."
+pub const LINE: u64 = 105 * GIB;
 /// What Jarvis takes when he loads: about 22 GB measured resident (bug note 2026-11-03T22-38-44, the 4 Nov 02:18 lag
 /// sample) plus the 2 GB word-check decoder, rounded up. The sidecar's own admission still books its 29 GB against
 /// free memory (`crates/drama-engine/src/memory.rs` `RESIDENT`).
@@ -34,8 +38,15 @@ pub const JARVIS_MAX: u64 = 36 * GIB;
 /// A give-way's release is measured over this long after he stops being resident (the worker is reaped in seconds).
 pub const FREED_WINDOW: Duration = Duration::from_secs(15);
 /// The sidecar's own admission (`crates/drama-engine/src/memory.rs` `refusal`): free + inactive must be at least
-/// `RESIDENT` (27 GB + 2 GB word check) plus `MARGIN` (2 GiB), or it exits 73. A return it would refuse is no return.
-pub const ADMISSION: u64 = 27_000_000_000 + 2_000_000_000 + 2 * GIB;
+/// `RESIDENT` (27 GB + 2 GB word check) plus `MARGIN` (2 GiB), or it exits 73.
+pub const SIDECAR_ADMISSION: u64 = 27_000_000_000 + 2_000_000_000 + 2 * GIB;
+/// The engine's own floor, checked after the sidecar's admission (`heimdall-drama3-engine` and `engine.py`: "Need 55 GB
+/// available before loading Drama 3", exit 73).
+pub const ENGINE_FLOOR: u64 = 55_000_000_000;
+/// What a load needs free + inactive: the stricter of the two. A return either would refuse is no return: a refused
+/// return counts as a new hold right after a return and doubles the next one (9 Nov voice-drop sweep: the line let
+/// him back at 31 GB available while the engine refused below 55 GB).
+pub const ADMISSION: u64 = if ENGINE_FLOOR > SIDECAR_ADMISSION { ENGINE_FLOOR } else { SIDECAR_ADMISSION };
 /// Room left under the line after Jarvis is back, so the next small allocation does not unload him again.
 pub const RETURN_MARGIN: u64 = 4 * GIB;
 /// Memory must stay back this long before Jarvis reloads, the first time.
@@ -54,6 +65,13 @@ pub const CRITICAL: i64 = 4;
 /// A need file without `until` lasts this long from its last write; no need file lasts longer than `NEED_MAX`.
 pub const NEED_DEFAULT: Duration = Duration::from_secs(2 * 3600);
 pub const NEED_MAX: Duration = Duration::from_secs(12 * 3600);
+// --- arsenal-yield review fix 4 (night 1110) ---
+/// An ask (`"yield": true`) is a lease: it counts at most this long after its last write, whatever its `until`, so an
+/// Arsenal that stops renewing it (it hung, or the model it loaded sits idle) holds Jarvis out no longer than this.
+/// Arsenal writes 60 s and renews every 20 s while its Load waits or loads and while a run of the model runs.
+pub const YIELD_LEASE_MAX: Duration = Duration::from_secs(90);
+/// A writer's recorded start time matches the live process's within this (the two clocks round differently).
+pub const START_SLACK: f64 = 1.0;
 
 /// One reading of the Mac.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -67,6 +85,10 @@ pub struct Sample {
     pub pressure: i64,
     /// Free + inactive, as the sidecar's admission counts it; None when not read (fakes).
     pub available: Option<u64>,
+    // --- arsenal-yield (night 1110): jobs that asked Heimdall to yield its memory ---
+    /// Who asked Heimdall to make room (need files with `"yield": true`, docs/personal/arsenal-yield.md): Jarvis gives way
+    /// whatever the line says, and returns only once no such need is live.
+    pub yield_for: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -81,13 +103,22 @@ pub enum Action {
     Return,
 }
 
-/// GB as Activity Monitor shows them (GiB), the unit of the 95 GB line, in every reason and log line.
+/// GB as Activity Monitor shows them (GiB), the unit of the memory line, in every reason and log line.
 pub fn gb(bytes: u64) -> String {
     format!("{:.1}", bytes as f64 / GIB as f64)
 }
 
+/// `LINE` in whole GB (GiB), as every reason and log line names it.
+pub fn line_gb() -> u64 {
+    LINE / GIB
+}
+
 /// Why `sample` says Jarvis must go, if it does.
 pub fn over_line(sample: &Sample) -> Option<String> {
+    // arsenal-yield: a job that asked for room (Arsenal's own admission refused its load) is answered at once.
+    if !sample.yield_for.is_empty() {
+        return Some(format!("{} asked for room. Jarvis unloaded to free memory; Phonon S speaks.", sample.yield_for.join(", ")));
+    }
     if sample.pressure & (WARN | CRITICAL) != 0 {
         let level = if sample.pressure & CRITICAL != 0 { "critical" } else { "warning" };
         return Some(format!("System memory pressure ({level}). Jarvis unloaded to free memory; Phonon S speaks."));
@@ -99,8 +130,8 @@ pub fn over_line(sample: &Sample) -> Option<String> {
         } else {
             String::new()
         };
-        return Some(format!("Memory would pass 95 GB ({} GB in use{need}). Jarvis unloaded to free memory; Phonon S speaks.",
-            gb(sample.used)));
+        return Some(format!("Memory would pass {} GB ({} GB in use{need}). Jarvis unloaded to free memory; Phonon S speaks.",
+            line_gb(), gb(sample.used)));
     }
     None
 }
@@ -108,7 +139,7 @@ pub fn over_line(sample: &Sample) -> Option<String> {
 /// Why loading Jarvis (`jarvis` bytes) now would itself pass the line, if it would.
 pub fn no_room(sample: &Sample, jarvis: u64) -> Option<String> {
     let after = sample.used.saturating_add(sample.need).saturating_add(jarvis);
-    (after > LINE).then(|| format!("Not enough room under 95 GB for Jarvis ({} GB in use{}). Phonon S speaks.", gb(sample.used),
+    (after > LINE).then(|| format!("Not enough room under {} GB for Jarvis ({} GB in use{}). Phonon S speaks.", line_gb(), gb(sample.used),
         if sample.need > 0 { format!(" plus {} GB needed", gb(sample.need)) } else { String::new() }))
 }
 
@@ -116,6 +147,7 @@ pub fn no_room(sample: &Sample, jarvis: u64) -> Option<String> {
 /// pressure.
 pub fn back(sample: &Sample, jarvis: u64) -> bool {
     sample.pressure & (WARN | CRITICAL) == 0
+        && sample.yield_for.is_empty()
         && sample.used.saturating_add(sample.need).saturating_add(jarvis).saturating_add(RETURN_MARGIN) <= LINE
         && sample.available.is_none_or(|free| free >= ADMISSION)
 }
@@ -136,6 +168,11 @@ pub struct Policy {
     unloaded: Option<(u64, Instant)>,
     /// The most memory a give-way freed in this run of holds (reset with the strikes).
     freed: u64,
+    /// When the current hold began, and the most memory jobs declared during it (bug note 2026-11-08T02-03-44).
+    held_at: Option<Instant>,
+    held_need: u64,
+    /// The last return: how long he was held out, and whether a job had released its need by then.
+    last_return: Option<(Duration, bool)>,
 }
 
 impl Policy {
@@ -143,9 +180,13 @@ impl Policy {
     /// has been spoken; None while a line is being spoken.
     pub fn decide(&mut self, sample: &Sample, resident: bool, quiet_for: Option<Duration>, now: Instant) -> Action {
         self.measure(sample, resident, now);
+        if self.held.is_some() {
+            self.held_need = self.held_need.max(sample.need);
+        }
         if resident {
             if let Some(reason) = over_line(sample) {
                 self.hold(reason.clone(), now);
+                self.held_need = self.held_need.max(sample.need);
                 return Action::GiveWay(reason);
             }
             // Resident while held: the give-way is still waiting for his line to end.
@@ -158,7 +199,10 @@ impl Policy {
             // Not loaded and not held: he loads as usual, unless loading him would itself pass the line (or pressure
             // is up), which would only unload him again.
             match over_line(sample).or_else(|| no_room(sample, self.jarvis_bytes())) {
-                Some(reason) => self.hold(reason, now),
+                Some(reason) => {
+                    self.hold(reason, now);
+                    self.held_need = sample.need;
+                }
                 None => return Action::Stay,
             }
         }
@@ -167,8 +211,15 @@ impl Policy {
             return Action::Hold;
         }
         let since = *self.back_since.get_or_insert(now);
+        // A released need (file deleted, or `until` in the past) is seen at the next reading, but the hold is still
+        // waited out: a job that releases one need often loads the next at once (8 Nov 01:39, BF16 released for an
+        // int8 load), and a reload in between would only unload him again.
+        let released = self.released(sample);
         if now.duration_since(since) >= self.hold_for() && quiet_for.is_some_and(|q| q >= QUIET) {
+            self.last_return = Some((self.held_at.map_or(Duration::ZERO, |at| now.duration_since(at)), released));
             self.held = None;
+            self.held_at = None;
+            self.held_need = 0;
             self.back_since = None;
             self.returned_at = Some(now);
             return Action::Return;
@@ -180,6 +231,8 @@ impl Policy {
     pub fn hold(&mut self, reason: String, now: Instant) {
         if self.held.is_none() {
             self.back_since = None;
+            self.held_at = Some(now);
+            self.held_need = 0;
             if self.returned_at.is_some_and(|at| now.duration_since(at) < CALM) {
                 self.strikes = self.strikes.saturating_add(1);
             } else {
@@ -191,6 +244,18 @@ impl Policy {
     }
     pub fn held(&self) -> Option<&str> {
         self.held.as_deref()
+    }
+    /// How long the current hold has lasted.
+    pub fn held_for(&self, now: Instant) -> Option<Duration> {
+        self.held_at.map(|at| now.duration_since(at))
+    }
+    /// A job declared memory during this hold and has since released some of it.
+    pub fn released(&self, sample: &Sample) -> bool {
+        self.held.is_some() && self.held_need > 0 && sample.need < self.held_need
+    }
+    /// The last return: how long he was held out, and whether a job had released its need by then.
+    pub fn last_return(&self) -> Option<(Duration, bool)> {
+        self.last_return
     }
     /// How long memory must stay back before he returns from this hold.
     pub fn hold_for(&self) -> Duration {
@@ -287,7 +352,9 @@ pub const NEEDS_DIR: &str = "memory-needs";
 
 /// One declaration: `<name>.json` with `{"gb": 40, "why": "Arsenal locomotive restore", "until": <unix seconds>}`
 /// (`bytes` instead of `gb` also works). It counts until `until`, or `NEED_DEFAULT` after its last write, and never
-/// longer than `NEED_MAX` after it; delete the file when the job ends. Malformed files are ignored.
+/// longer than `NEED_MAX` after it; delete the file when the job ends (the approval hook lets a job delete exactly
+/// these files, `deny::memory_need` in emergency-cli), or write `until` in the past, which counts as released at the
+/// next reading; Jarvis returns once memory has stayed back for the hold (`Policy::hold_for`). Malformed files are ignored.
 pub struct Needs {
     pub dir: PathBuf,
 }
@@ -298,6 +365,15 @@ impl Needs {
     }
     /// The live needs: (bytes, why).
     pub fn live(&self, now: SystemTime) -> Vec<(u64, String)> {
+        Self::split(self.scan(now)).0
+    }
+    // --- arsenal-yield (night 1110) ---
+    /// The live needs that ask Heimdall to yield (`"yield": true`): their `why (file)`, sorted.
+    pub fn asking(&self, now: SystemTime) -> Vec<String> {
+        Self::split(self.scan(now)).1
+    }
+    /// One walk of the folder, each file read and parsed once: every live need as (bytes, `why (file)`, asks to yield).
+    fn scan(&self, now: SystemTime) -> Vec<(u64, String, bool)> {
         let Ok(entries) = std::fs::read_dir(&self.dir) else { return Vec::new() };
         let mut out = Vec::new();
         for entry in entries.flatten() {
@@ -307,30 +383,96 @@ impl Needs {
             }
             let Ok(written) = entry.metadata().and_then(|m| m.modified()) else { continue };
             let Ok(text) = std::fs::read_to_string(&path) else { continue };
-            if let Some(need) = parse_need(&text, written, now) {
-                let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("a job").to_owned();
-                out.push((need.0, need.1.unwrap_or(name)));
+            let Ok(value) = serde_json::from_str::<Value>(&text) else { continue };
+            if let Some((bytes, why)) = need_of(&value, written, now, &writer_alive) {
+                // The file's name always, so a log line says which file to release (bug note 2026-11-08T02-03-45).
+                let file = path.file_name().and_then(|s| s.to_str()).unwrap_or("a job").to_owned();
+                out.push((bytes, why.map_or(file.clone(), |why| format!("{why} ({file})")), value["yield"].as_bool() == Some(true)));
             }
         }
-        out.sort_by(|a, b| a.1.cmp(&b.1));
         out
     }
+    /// A scan as the live needs sorted by why, and the asks to yield sorted.
+    fn split(all: Vec<(u64, String, bool)>) -> (Vec<(u64, String)>, Vec<String>) {
+        let mut asking: Vec<String> = all.iter().filter(|n| n.2).map(|n| n.1.clone()).collect();
+        asking.sort();
+        let mut live: Vec<(u64, String)> = all.into_iter().map(|(bytes, why, _)| (bytes, why)).collect();
+        live.sort_by(|a, b| a.1.cmp(&b.1));
+        (live, asking)
+    }
+}
+
+/// arsenal-yield: a live need file that asks Heimdall to yield (`"yield": true`): `Some(why)`; anything else None.
+pub fn parse_yield(text: &str, written: SystemTime, now: SystemTime) -> Option<Option<String>> {
+    parse_yield_with(text, written, now, &writer_alive)
+}
+/// `parse_yield` with the writer's liveness check given (tests).
+pub fn parse_yield_with(text: &str, written: SystemTime, now: SystemTime, alive: &dyn Fn(u32, Option<f64>) -> bool) -> Option<Option<String>> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    if value["yield"].as_bool() != Some(true) {
+        return None;
+    }
+    need_of(&value, written, now, alive).map(|(_, why)| why)
+}
+
+/// arsenal-yield review fix 4: a need file that names its writer (`pid`, and `pid_start`, the writer's start in unix
+/// seconds) counts only while that very process lives: a crashed or force-quit Arsenal's ask is gone at the next
+/// reading, and a pid reused by another process (its start differs) does not keep it. Files without `pid` are not
+/// checked (Vella, Arsenal's commands, older writers).
+pub fn writer_alive(pid: u32, start: Option<f64>) -> bool {
+    if !crate::compute_flag::pid_alive(pid) {
+        return false;
+    }
+    match (start, process_start(pid)) {
+        (Some(want), Some(have)) => (want - have).abs() <= START_SLACK,
+        // No start recorded, or not readable for this pid (another user's process): the pid alone decides.
+        _ => true,
+    }
+}
+
+/// When process `pid` started, in unix seconds (`proc_pidinfo` PROC_PIDTBSDINFO); None when it cannot be read.
+#[cfg(target_os = "macos")]
+pub fn process_start(pid: u32) -> Option<f64> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+    let got = unsafe { libc::proc_pidinfo(pid as i32, libc::PROC_PIDTBSDINFO, 0, &mut info as *mut _ as *mut libc::c_void, size) };
+    (got == size).then(|| info.pbi_start_tvsec as f64 + info.pbi_start_tvusec as f64 / 1e6)
+}
+#[cfg(not(target_os = "macos"))]
+pub fn process_start(_pid: u32) -> Option<f64> {
+    None
 }
 
 /// One need file's (bytes, why) while it is live at `now`.
 pub fn parse_need(text: &str, written: SystemTime, now: SystemTime) -> Option<(u64, Option<String>)> {
-    let value: Value = serde_json::from_str(text).ok()?;
+    parse_need_with(text, written, now, &writer_alive)
+}
+/// `parse_need` with the writer's liveness check given (tests).
+pub fn parse_need_with(text: &str, written: SystemTime, now: SystemTime, alive: &dyn Fn(u32, Option<f64>) -> bool) -> Option<(u64, Option<String>)> {
+    need_of(&serde_json::from_str(text).ok()?, written, now, alive)
+}
+/// A parsed need file's live need: (bytes, why).
+fn need_of(value: &Value, written: SystemTime, now: SystemTime, alive: &dyn Fn(u32, Option<f64>) -> bool) -> Option<(u64, Option<String>)> {
     let bytes = match (value["bytes"].as_u64(), value["gb"].as_f64()) {
         (Some(bytes), _) => bytes,
-        // GB as Activity Monitor and the 95 GB line count them (GiB).
+        // GB as Activity Monitor and the memory line count them (GiB).
         (None, Some(gb)) if gb.is_finite() && gb > 0. => (gb * GIB as f64) as u64,
         _ => return None,
     };
     let secs = |t: SystemTime| t.duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.);
-    let cap = secs(written) + NEED_MAX.as_secs_f64();
+    let mut cap = secs(written) + NEED_MAX.as_secs_f64();
+    // arsenal-yield review fix 4: an ask is a lease the writer renews.
+    if value["yield"].as_bool() == Some(true) {
+        cap = cap.min(secs(written) + YIELD_LEASE_MAX.as_secs_f64());
+    }
     let until = value["until"].as_f64().unwrap_or(secs(written) + NEED_DEFAULT.as_secs_f64()).min(cap);
     if bytes == 0 || secs(now) >= until {
         return None;
+    }
+    if let Some(pid) = value["pid"].as_u64() {
+        if pid > u32::MAX as u64 || !alive(pid as u32, value["pid_start"].as_f64()) {
+            return None;
+        }
     }
     let why = value["why"].as_str().map(|s| s.chars().take(80).collect());
     Some((bytes, why))
@@ -412,7 +554,8 @@ pub struct Native {
 
 impl Source for Native {
     fn sample(&mut self) -> Result<Sample> {
-        let needs = self.needs.live(SystemTime::now());
+        let now = SystemTime::now();
+        let (needs, yield_for) = Needs::split(self.needs.scan(now));
         let (used, available) = vm_bytes()?;
         Ok(Sample {
             used,
@@ -420,6 +563,7 @@ impl Source for Native {
             why: needs.into_iter().map(|(_, w)| w).collect(),
             pressure: pressure()?,
             available: Some(available),
+            yield_for,
         })
     }
 }

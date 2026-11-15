@@ -1,11 +1,14 @@
 #!/bin/zsh
-# Install watchdog for a night-pass restart of Heimdall (docs/nightly-build.md, night 1022 handshake).
+# Install watchdog for a night-pass restart of Heimdall (docs/personal/nightly-build.md, night 1022 handshake).
 # Start it detached BEFORE swapping the bundle:
 #   nohup scripts/install_watchdog.sh >/tmp/heimdall-watchdog.log 2>&1 &!
 # It lives at most 40 minutes. After the installer touches $MARK (the new build was launched), it waits for
 # $OK (written by the restarted Heimdall's agent). No $OK within 25 minutes of the restart, or Heimdall not running
 # for three checks in a row after a 90 s grace, and it quits the new build, restores dist/rollback/previous,
 # relaunches it and writes $ROLLED with the reason.
+# Only marks written after the watchdog started count: a $MARK or $OK older than its start is a leftover from an
+# earlier install and is ignored (logged once at arming), so it can neither trigger a rollback nor end the watch early
+# (incident 12 Nov 15:47: last night's /tmp/heimdall-night-restarted rolled a healthy Heimdall back at once).
 set -u
 H=${HEIMDALL_REPO:-$(cd "$(dirname "$0")/.." && pwd)}
 APP=${HEIMDALL_APP:-$HOME/Applications/Heimdall.app}
@@ -26,6 +29,12 @@ log() { print -r -- "$(date '+%H:%M:%S') watchdog: $*"; }
 start=$(date +%s)
 echo $$ > ${WATCHDOG_PIDFILE:-/tmp/heimdall-watchdog.pid}
 log "started (pid $$), lifetime ${LIFETIME}s, handshake ${HANDSHAKE}s"
+
+# A mark counts only if it was written at or after this watchdog's start.
+fresh() { [[ -f "$1" ]] && (( $(stat -f %m "$1") >= start )); }
+for f in "$MARK" "$OK"; do
+  [[ -f "$f" ]] && ! fresh "$f" && log "ignoring stale mark $f (written $(date -r $(stat -f %m "$f") '+%F %T'), before this watchdog started)"
+done
 
 # The main app only: a running Heimdall also has `Heimdall --heimdall-guardian-root …` children that outlive it.
 running() {
@@ -80,8 +89,8 @@ restarted=0; down=0
 while true; do
   now=$(date +%s)
   (( now - start > LIFETIME )) && { log "lifetime reached; exiting"; exit 0; }
-  [[ -f "$OK" ]] && { log "handshake file present; exiting OK"; exit 0; }
-  if (( restarted == 0 )) && [[ -f "$MARK" ]]; then restarted=$(stat -f %m "$MARK"); log "restart seen at $restarted"; fi
+  fresh "$OK" && { log "handshake file present; exiting OK"; exit 0; }
+  if (( restarted == 0 )) && fresh "$MARK"; then restarted=$(stat -f %m "$MARK"); log "restart seen at $restarted"; fi
   if (( restarted > 0 )); then
     (( now - restarted > HANDSHAKE )) && rollback "no handshake within $((HANDSHAKE / 60)) minutes of the restart"
     if (( now - restarted > GRACE )); then

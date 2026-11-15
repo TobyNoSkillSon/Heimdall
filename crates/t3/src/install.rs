@@ -22,8 +22,6 @@ pub const TEAM_ID: &str = "ARK85ZXQ4Z";
 /// The newest stable release's macOS update feed.
 pub const FEED: &str = "https://github.com/pingdotgg/t3code/releases/latest/download/latest-mac.yml";
 const RELEASES: &str = "https://github.com/pingdotgg/t3code/releases/download";
-/// Where a person downloads T3 Code by hand.
-pub const DOWNLOAD_PAGE: &str = "https://github.com/pingdotgg/t3code/releases/latest";
 /// The first version with Orchestrator V2 (its nightlies; stable from 0.1.0).
 pub const MIN_V2: (u64, u64, u64) = (0, 0, 46);
 /// The code requirement an installed download must satisfy: T3 Tools' Developer ID, T3 Code's identifier.

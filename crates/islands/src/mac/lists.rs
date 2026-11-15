@@ -762,7 +762,7 @@ fn proposal_block(it: &PlanItem, p: &crate::model::Proposal, root: &CALayer, y: 
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::model::due::Cal;
 
@@ -789,8 +789,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_title_cut_at_two_lines_is_as_tall_as_the_lines_it_draws() {
+    /// Run by `mac::tests::appkit_renders`, in one process with the other AppKit renders (TST-11).
+    pub(crate) fn a_title_cut_at_two_lines_is_as_tall_as_the_lines_it_draws() {
         // Bug (30 Oct): a two-line title's layer was shorter than what it drew, slicing the second line in half.
         let f = body_strong();
         let one = text_block("Ag", &f, &ink(), 250.0, 2.0).bounds().size.height;

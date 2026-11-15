@@ -11,7 +11,7 @@ fn island() -> Island {
 
 fn history() -> Event {
     Event::Chat(vec![
-        ChatEntry { at_ms: 1, kind: ChatKind::Owner("what's on my calendar".into()) },
+        ChatEntry { at_ms: 1, kind: ChatKind::User("what's on my calendar".into()) },
         ChatEntry { at_ms: 2, kind: ChatKind::Heimdall { text: "Two meetings, the first at ten.".into(), heard: Heard::Whole } },
     ])
 }
@@ -205,9 +205,9 @@ fn a_voice_turn_never_closes_the_conversation() {
     }
     open(&mut i, 9.5, "while Heimdall speaks");
     i.apply(Event::Chat(vec![
-        ChatEntry { at_ms: 1, kind: ChatKind::Owner("what's on my calendar".into()) },
+        ChatEntry { at_ms: 1, kind: ChatKind::User("what's on my calendar".into()) },
         ChatEntry { at_ms: 2, kind: ChatKind::Heimdall { text: "Two meetings, the first at ten.".into(), heard: Heard::Whole } },
-        ChatEntry { at_ms: 3, kind: ChatKind::Owner("and tomorrow".into()) },
+        ChatEntry { at_ms: 3, kind: ChatKind::User("and tomorrow".into()) },
     ]), 9.6);
     i.apply(Event::Speaking(false), 10.0);
     i.apply(Event::SpokenText(None), 10.0);

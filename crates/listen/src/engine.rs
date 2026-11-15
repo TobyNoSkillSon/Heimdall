@@ -62,7 +62,6 @@ pub enum ListenEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PartialPolicy {
     Responsive,
-    Slow { interval_samples: usize },
     FinalOnly,
 }
 #[derive(Debug, Clone)]
@@ -81,6 +80,42 @@ pub struct ListenConfig {
     /// Silero probability at which a block counts as speech for word onsets (`onset::VoicedHistory`). Every decode's
     /// word starts move forward to speech; 0.5 is the value measured in lab/screen-phrase-bench.
     pub onset_threshold: f32,
+    /// The user's microphones (sources starting with `mic`, the final-only convention of `policy`, and the phone's
+    /// `phone:` microphone): the Smart Turn
+    /// checks of one pause, as (silence samples, threshold), ascending. Each asks once the pause reaches its length
+    /// and ends the turn when the probability exceeds its threshold; the first also reports `SpeechEnd`.
+    /// `maximum_silence_samples` stays the ceiling. Empty: these sources use the one check below like every other.
+    pub mic_turn_checks: Vec<(usize, f32)>,
+}
+/// The user's tuned turn model (`models/smart-turn/owner-turn.onnx`) on his microphones: when Smart Turn is asked during a
+/// pause, and the bar it must clear, as (silence ms, threshold); the last bar is the policy's own `threshold` (.5).
+/// Before 11 Nov one check at `minimum_silence_ms` (1500) was the only one, a fixed 1.5 s wait before every turn could
+/// end. The steps come from the model's validation sweep (`lab/eval/data/tune/turn-training.json`, 382 recordings,
+/// pauses under 1 s the hard "not done" examples): at 300 ms over .95 ended no short pause and 9% of finished turns; at
+/// 1 s over .95 ends 33% (the sweep has no hard examples of 1–1.5 s pauses, and at 600 ms .9 still ended 48 of 382
+/// mid-sentence pauses, so the bar stays at the one that ended none); 1.5 s over .5 is the old check. A pause that clears no bar ends at the ceiling (`long_silence_ms`, 2.5 s), as before.
+pub const TUNED_TURN_CHECKS: [(u64, f32); 2] = [(300, 0.95), (1000, 0.95)];
+impl ListenConfig {
+    /// The user's turn policy (`owner-policy.json`): every source keeps its one check at `minimum_silence_ms` over
+    /// `threshold`, ceiling `long_silence_ms`; his microphones are asked earlier too (`TUNED_TURN_CHECKS`).
+    pub fn apply_tuned_policy(&mut self, p: &serde_json::Value) -> Result<()> {
+        let ms = |key: &str| p[key].as_u64().map(|v| v as usize * 16).ok_or_else(|| anyhow::anyhow!("missing {key}"));
+        self.pause_samples = ms("minimum_silence_ms")?;
+        self.maximum_silence_samples = ms("long_silence_ms").unwrap_or(40000);
+        self.complete_threshold = p["threshold"].as_f64().ok_or_else(|| anyhow::anyhow!("missing turn threshold"))? as f32;
+        self.mic_turn_checks = TUNED_TURN_CHECKS.iter().map(|&(ms, bar)| (ms as usize * 16, bar)).filter(|&(n, _)| n < self.pause_samples).collect();
+        self.mic_turn_checks.push((self.pause_samples, self.complete_threshold));
+        Ok(())
+    }
+    /// The `n`th Smart Turn check of one pause on `source`, if there is one.
+    fn turn_check(&self, source: &str, n: usize) -> Option<(usize, f32)> {
+        // His phone's microphone (`phone:<kind>:<generation>`, the app's live phone mic) is his voice too.
+        if (source.starts_with("mic") || source.starts_with("phone:")) && !self.mic_turn_checks.is_empty() {
+            self.mic_turn_checks.get(n).copied()
+        } else {
+            (n == 0).then_some((self.pause_samples, self.complete_threshold))
+        }
+    }
 }
 impl Default for ListenConfig {
     fn default() -> Self {
@@ -97,26 +132,16 @@ impl Default for ListenConfig {
             maximum_sources: 32,
             maximum_chunk_samples: 16000,
             onset_threshold: 0.5,
+            mic_turn_checks: vec![],
         }
     }
 }
 pub trait SpeechDetector {
     fn probability(&mut self, audio: &[f32; 512], state: &mut VadState) -> Result<f32>;
-    fn probabilities(&mut self, audio: &[[f32; 512]], states: &mut [VadState]) -> Result<Vec<f32>> {
-        ensure!(audio.len() == states.len(), "VAD batch schema");
-        audio
-            .iter()
-            .zip(states)
-            .map(|(a, s)| self.probability(a, s))
-            .collect()
-    }
 }
 impl SpeechDetector for Silero {
     fn probability(&mut self, a: &[f32; 512], s: &mut VadState) -> Result<f32> {
         self.probability(a, s)
-    }
-    fn probabilities(&mut self, audio: &[[f32; 512]], states: &mut [VadState]) -> Result<Vec<f32>> {
-        Silero::probabilities(self, audio, states)
     }
 }
 pub trait TurnDetector {
@@ -130,9 +155,6 @@ impl TurnDetector for SmartTurn {
 impl<V: SpeechDetector + ?Sized> SpeechDetector for &mut V {
     fn probability(&mut self, a: &[f32; 512], s: &mut VadState) -> Result<f32> {
         (**self).probability(a, s)
-    }
-    fn probabilities(&mut self, audio: &[[f32; 512]], states: &mut [VadState]) -> Result<Vec<f32>> {
-        (**self).probabilities(audio, states)
     }
 }
 impl<T: TurnDetector + ?Sized> TurnDetector for &mut T {
@@ -159,13 +181,17 @@ struct Source {
     since_partial: usize,
     partial_count: usize,
     decode_revision: u64,
-    candidate_checked: bool,
+    /// Smart Turn checks already made in this pause (`ListenConfig::turn_check`).
+    checks_done: usize,
     probability: f32,
     words: Vec<Word>,
     agreement: Vec<usize>,
     stable: usize,
     /// Every VAD block of this source and generation, for word onsets.
     voiced: VoicedHistory,
+    /// A window roll sent words of this utterance as a `TranscriptSegment`: its final must be emitted even with no
+    /// words left, or the consumer keeps those words open until the next utterance (bug note 2026-11-14T11-58-47).
+    segmented: bool,
 }
 impl Source {
     fn new(generation: u64, ns: u64) -> Self {
@@ -188,12 +214,13 @@ impl Source {
             since_partial: 0,
             partial_count: 0,
             decode_revision: 0,
-            candidate_checked: false,
+            checks_done: 0,
             probability: 0.0,
             words: vec![],
             agreement: vec![],
             stable: 0,
             voiced: VoicedHistory::default(),
+            segmented: false,
         }
     }
 }
@@ -208,33 +235,36 @@ pub struct ListenEngine<R, V = Silero, T = SmartTurn> {
     batch_partial_sources: std::collections::HashSet<String>,
     deferred_partials: Vec<(String, Option<bool>)>,
 }
+/// The turn model under `models` and the listening config that goes with it: the user's tuned model and its policy
+/// (`smart-turn/owner-policy.json`) when the policy is there, else the stock CPU model and the defaults.
+pub fn turn_model(models: &Path) -> Result<(std::path::PathBuf, ListenConfig)> {
+    let mut config = ListenConfig::default();
+    let policy = models.join("smart-turn/owner-policy.json");
+    if !policy.exists() {
+        return Ok((models.join("smart-turn/smart-turn-v3.2-cpu.onnx"), config));
+    }
+    let p: serde_json::Value = serde_json::from_slice(&std::fs::read(policy)?)?;
+    config.apply_tuned_policy(&p)?;
+    Ok((models.join("smart-turn/owner-turn.onnx"), config))
+}
 impl<R: Recognizer> ListenEngine<R> {
     pub fn load(models: &Path, asr: R) -> Result<Self> {
         Self::load_with_turn_backend(models, asr, None)
     }
     pub fn load_with_turn_backend(models: &Path, asr: R, backend: Option<&str>) -> Result<Self> {
-        let mut config = ListenConfig::default();
-        let policy = models.join("smart-turn/owner-policy.json");
-        let turn_path = if policy.exists() {
-            let p: serde_json::Value = serde_json::from_slice(&std::fs::read(policy)?)?;
-            config.pause_samples = (p["minimum_silence_ms"]
-                .as_u64()
-                .ok_or_else(|| anyhow::anyhow!("missing minimum silence"))?
-                as usize)
-                * 16;
-            config.maximum_silence_samples = 40000;
-            config.complete_threshold = p["threshold"]
-                .as_f64()
-                .ok_or_else(|| anyhow::anyhow!("missing turn threshold"))?
-                as f32;
-            models.join("smart-turn/owner-turn.onnx")
-        } else {
-            models.join("smart-turn/smart-turn-v3.2-cpu.onnx")
-        };
+        let (turn_path, config) = turn_model(models)?;
         Self::new(
             asr,
             Silero::load(&models.join("silero/silero_vad.onnx"))?,
-            match backend { Some(b) => SmartTurn::load_backend(&turn_path, b)?, None => SmartTurn::load(&turn_path)? },
+            match backend {
+                // A model without its Metal data (the stock CPU model, a fresh install) listens on CPU.
+                Some("metal") => SmartTurn::load_backend(&turn_path, "metal").or_else(|e| {
+                    eprintln!("Smart Turn: {e:#}; using CPU");
+                    SmartTurn::load_backend(&turn_path, "cpu")
+                })?,
+                Some(b) => SmartTurn::load_backend(&turn_path, b)?,
+                None => SmartTurn::load(&turn_path)?,
+            },
             config,
         )
     }
@@ -260,8 +290,14 @@ impl<R: Recognizer, V: SpeechDetector, T: TurnDetector> ListenEngine<R, V, T> {
             (0.0..=1.0).contains(&config.vad_start)
                 && (0.0..=1.0).contains(&config.vad_continue)
                 && (0.0..=1.0).contains(&config.complete_threshold)
-                && (0.0..=1.0).contains(&config.onset_threshold),
+                && (0.0..=1.0).contains(&config.onset_threshold)
+                && config.mic_turn_checks.iter().all(|(_, t)| (0.0..=1.0).contains(t)),
             "Invalid threshold"
+        );
+        ensure!(
+            config.mic_turn_checks.iter().try_fold(0, |at, &(n, _)| (n > at).then_some(n)).is_some()
+                && config.mic_turn_checks.last().is_none_or(|&(n, _)| n <= config.maximum_silence_samples),
+            "Invalid turn checks"
         );
         ensure!(
             config.pause_samples > 0
@@ -272,8 +308,7 @@ impl<R: Recognizer, V: SpeechDetector, T: TurnDetector> ListenEngine<R, V, T> {
                 && config.maximum_sources > 0
                 && config.maximum_chunk_samples > 0
                 && config.source_policies.len() <= config.maximum_sources
-                && config.source_policies.iter().all(|(id, p)| id.len() <= 256
-                    && !matches!(p,PartialPolicy::Slow{interval_samples} if *interval_samples<512)),
+                && config.source_policies.keys().all(|id| id.len() <= 256),
             "Invalid endpoint/cadence"
         );
         Ok(Self {
@@ -306,10 +341,6 @@ impl<R: Recognizer, V: SpeechDetector, T: TurnDetector> ListenEngine<R, V, T> {
     pub fn set_source_policy(&mut self, source: &str, policy: PartialPolicy) -> Result<()> {
         ensure!(source.len() <= 256, "Source ID exceeds 256 bytes");
         ensure!(
-            !matches!(policy, PartialPolicy::Slow { interval_samples } if interval_samples < 512),
-            "Invalid slow cadence"
-        );
-        ensure!(
             self.config.source_policies.contains_key(source)
                 || self.config.source_policies.len() < self.config.maximum_sources,
             "Source policy limit"
@@ -327,17 +358,38 @@ impl<R: Recognizer, V: SpeechDetector, T: TurnDetector> ListenEngine<R, V, T> {
     /// Synchronous offline/core inference. Live capture uses ListenWorker's
     /// bounded nonblocking push; never call this on an audio callback.
     pub fn push(&mut self, chunk: AudioChunk<'_>) -> Result<Vec<ListenEvent>> {
-        self.push_predicted(chunk, None)
+        ensure!(chunk.source.len() <= 256, "Source ID exceeds 256 bytes");
+        ensure!(
+            chunk.samples.len() <= self.config.maximum_chunk_samples,
+            "Audio chunk exceeds configured bound"
+        );
+        ensure!(
+            self.sources.contains_key(chunk.source)
+                || self.sources.len() < self.config.maximum_sources,
+            "Source limit"
+        );
+        ensure!(
+            chunk.samples.iter().all(|v| v.is_finite()),
+            "Non-finite audio samples"
+        );
+        let mut s = self
+            .sources
+            .remove(chunk.source)
+            .unwrap_or_else(|| Source::new(chunk.generation, chunk.host_time_ns));
+        let result = self.push_source(&chunk, &mut s);
+        // Inference may already have consumed samples/state. Never silently
+        // concatenate the next arrival with that partially processed utterance.
+        s.faulted |= result.is_err();
+        self.sources.insert(chunk.source.into(), s);
+        result
     }
-    /// Batch already-available, independent VAD frames. Never waits for another stream.
-    /// Discontinuities and chunks containing multiple frames retain the ordinary path.
+    /// Independent arrivals of several streams, each pushed in order. Single-frame, unique-source arrivals can
+    /// share ready partial/final decodes; seams and multi-frame intake keep their immediate path.
     pub fn push_batch(&mut self, chunks: &[AudioChunk<'_>]) -> Vec<Result<Vec<ListenEvent>>> {
         let mut ids = HashMap::new();
         for c in chunks {
             *ids.entry(c.source).or_insert(0) += 1;
         }
-        let mut blocks = vec![];
-        let mut states = vec![];
         let mut indices = vec![];
         for (i, c) in chunks.iter().enumerate() {
             if ids[c.source] != 1
@@ -360,64 +412,21 @@ impl<R: Recognizer, V: SpeechDetector, T: TurnDetector> ListenEngine<R, V, T> {
             if !(512..1024).contains(&count) {
                 continue;
             }
-            let block: Vec<f32> = source
-                .into_iter()
-                .flat_map(|s| s.pending.iter().copied())
-                .chain(c.samples.iter().copied())
-                .take(512)
-                .collect();
-            blocks.push(block.try_into().unwrap());
-            states.push(source.map_or_else(VadState::default, |s| s.vad.clone()));
             indices.push(i);
         }
-        let mut predicted: Vec<Option<(f32, VadState)>> = vec![None; chunks.len()];
-        // Single-frame, unique-source arrivals can share ready partial/final
-        // decodes. Seams and multi-frame intake retain their immediate path.
         self.batch_partial_sources = indices
             .iter()
             .map(|i| chunks[*i].source.to_string())
             .collect();
-        let mut failures = HashMap::new();
-        if blocks.len() > 1 {
-            match self.vad.probabilities(&blocks, &mut states) {
-                Ok(p)
-                    if p.len() == indices.len()
-                        && p.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v)) =>
-                {
-                    for ((i, p), state) in indices.into_iter().zip(p).zip(states) {
-                        predicted[i] = Some((p, state));
-                    }
-                }
-                result => {
-                    let message = match result {
-                        Err(e) => e.to_string(),
-                        _ => "Invalid batched VAD probability".into(),
-                    };
-                    for i in indices {
-                        failures.insert(i, message.clone());
-                    }
-                }
-            }
-        }
         let mut results: Vec<_> = chunks
             .iter()
-            .enumerate()
-            .map(|(i, c)| {
-                if let Some(error) = failures.remove(&i) {
-                    if let Some(s) = self.sources.get_mut(c.source) {
-                        s.faulted = true;
-                    }
-                    return Err(anyhow::anyhow!(error));
-                }
-                self.push_predicted(
-                    AudioChunk {
-                        source: c.source,
-                        generation: c.generation,
-                        host_time_ns: c.host_time_ns,
-                        samples: c.samples,
-                    },
-                    predicted[i].take(),
-                )
+            .map(|c| {
+                self.push(AudioChunk {
+                    source: c.source,
+                    generation: c.generation,
+                    host_time_ns: c.host_time_ns,
+                    samples: c.samples,
+                })
             })
             .collect();
         self.batch_partial_sources.clear();
@@ -458,41 +467,10 @@ impl<R: Recognizer, V: SpeechDetector, T: TurnDetector> ListenEngine<R, V, T> {
         }
         results
     }
-    fn push_predicted(
-        &mut self,
-        chunk: AudioChunk<'_>,
-        predicted: Option<(f32, VadState)>,
-    ) -> Result<Vec<ListenEvent>> {
-        ensure!(chunk.source.len() <= 256, "Source ID exceeds 256 bytes");
-        ensure!(
-            chunk.samples.len() <= self.config.maximum_chunk_samples,
-            "Audio chunk exceeds configured bound"
-        );
-        ensure!(
-            self.sources.contains_key(chunk.source)
-                || self.sources.len() < self.config.maximum_sources,
-            "Source limit"
-        );
-        ensure!(
-            chunk.samples.iter().all(|v| v.is_finite()),
-            "Non-finite audio samples"
-        );
-        let mut s = self
-            .sources
-            .remove(chunk.source)
-            .unwrap_or_else(|| Source::new(chunk.generation, chunk.host_time_ns));
-        let result = self.push_source(&chunk, &mut s, predicted);
-        // Inference may already have consumed samples/state. Never silently
-        // concatenate the next arrival with that partially processed utterance.
-        s.faulted |= result.is_err();
-        self.sources.insert(chunk.source.into(), s);
-        result
-    }
     fn push_source(
         &mut self,
         chunk: &AudioChunk<'_>,
         s: &mut Source,
-        mut predicted: Option<(f32, VadState)>,
     ) -> Result<Vec<ListenEvent>> {
         let mut events = vec![];
         if s.faulted {
@@ -522,16 +500,13 @@ impl<R: Recognizer, V: SpeechDetector, T: TurnDetector> ListenEngine<R, V, T> {
             let block: [f32; 512] = block.try_into().unwrap();
             let ns = s.pending_ns;
             s.pending_ns += 32_000_000;
-            let p = if let Some((p, state)) = predicted.take() {
-                s.vad = state;
-                p
-            } else {
-                self.vad.probability(&block, &mut s.vad)?
-            };
+            let p = self.vad.probability(&block, &mut s.vad)?;
             self.evidence(chunk.source, ns, serde_json::json!({"model":"silero","input":{"source":chunk.source,"start_ns":ns,"end_ns":ns+32_000_000,"rate":16000,"samples":512,"context_samples":64,"state":"previous source/generation Silero state; zero on reset"},"generation":s.generation,"probability":p,"utterance_start_ns":s.active.then_some(s.start_ns)}))?;
             s.voiced.push(ns, p >= self.config.onset_threshold);
+            // Within the policy's pause (1.5 s), speech going on again needs only the continue level, as when this
+            // pause was reported at 1.5 s: an early `SpeechEnd` must not make his soft words count as silence.
             let speech = p
-                >= if s.voicing {
+                >= if s.voicing || (s.active && s.silence < self.config.pause_samples) {
                     self.config.vad_continue
                 } else {
                     self.config.vad_start
@@ -573,21 +548,26 @@ impl<R: Recognizer, V: SpeechDetector, T: TurnDetector> ListenEngine<R, V, T> {
                 if speech {
                     s.last_voice_ns = ns + 32_000_000;
                     s.silence = 0;
-                    s.candidate_checked = false;
+                    s.checks_done = 0;
                 } else {
                     s.silence += 512;
                 }
-                if s.silence >= self.config.pause_samples && !s.candidate_checked {
-                    s.voicing = false;
-                    s.candidate_checked = true;
-                    events.push(ListenEvent::SpeechEnd {
-                        source: chunk.source.into(),
-                        host_time_ns: s.last_voice_ns,
-                    });
+                // The candidate pause, then each later check of the same pause: Smart Turn decides, the ceiling
+                // below only catches a pause it never calls finished.
+                let due = self.config.turn_check(chunk.source, s.checks_done);
+                if let Some((_, bar)) = due.filter(|&(at, _)| s.silence >= at) {
+                    if s.checks_done == 0 {
+                        s.voicing = false;
+                        events.push(ListenEvent::SpeechEnd {
+                            source: chunk.source.into(),
+                            host_time_ns: s.last_voice_ns,
+                        });
+                    }
+                    s.checks_done += 1;
                     crate::timing::endpoint(chunk.source, s.last_voice_ns);
                     s.probability = self.turn_probability(chunk.source, s)?;
                     crate::timing::turn(chunk.source);
-                    if s.probability > self.config.complete_threshold {
+                    if s.probability > bar {
                         self.finish(chunk.source, s, false, &mut events)?;
                     }
                 }
@@ -596,7 +576,6 @@ impl<R: Recognizer, V: SpeechDetector, T: TurnDetector> ListenEngine<R, V, T> {
                 }
                 let interval = match self.policy(chunk.source) {
                     PartialPolicy::FinalOnly => usize::MAX,
-                    PartialPolicy::Slow { interval_samples } => interval_samples,
                     PartialPolicy::Responsive if s.partial_count == 0 => self
                         .config
                         .first_partial_samples
@@ -709,6 +688,7 @@ impl<R: Recognizer, V: SpeechDetector, T: TurnDetector> ListenEngine<R, V, T> {
                         words: transcript.words,
                     });
                     s.agreement.drain(..count);
+                    s.segmented = true;
                     s.stable = s.stable.saturating_sub(count);
                     s.start_ns = s.words.first().map_or(s.window_ns, |w| w.start_ns);
                 }
@@ -771,7 +751,10 @@ impl<R: Recognizer, V: SpeechDetector, T: TurnDetector> ListenEngine<R, V, T> {
             .max()
             .unwrap_or(s.last_voice_ns)
             .max(s.last_voice_ns);
-        if !transcript.words.is_empty() {
+        // Bug note 2026-11-14T11-58-47 (11:56:55): a 15-s window roll sent every word of the turn as a segment, the
+        // final then had none, and no final was emitted: the consumer kept his plea open for 103 s, until he spoke
+        // again (20 of his finals since 10 Nov). A rolled utterance always ends with a final, empty or not.
+        if !transcript.words.is_empty() || s.segmented {
             crate::timing::decoded(source, end_ns);
             events.push(ListenEvent::FinalUtterance {
                 source: source.into(),
@@ -793,8 +776,9 @@ impl<R: Recognizer, V: SpeechDetector, T: TurnDetector> ListenEngine<R, V, T> {
             s.pre.clear();
         }
         s.silence = 0;
-        s.candidate_checked = false;
+        s.checks_done = 0;
         s.stable = 0;
+        s.segmented = false;
         s.agreement.clear();
     }
     /// End-of-file/source: include the exact pending remainder, no per-callback
@@ -946,6 +930,49 @@ mod tests {
         for (kind, text) in [("partial", "Take"), ("segment", "Take"), ("segment", "again"), ("partial", "late"), ("final", "late")] {
             assert!(kinds.contains(&(kind, text.to_string())), "{kind} {text}: {kinds:?}");
         }
+    }
+    /// Bug note 2026-11-14T11-58-47: his 11:56:55–11:57:07 plea, then 85 s of silence with the turn model unsure. The
+    /// 15-s window roll sent all its words as a segment; the final had no words left and was never emitted, so the
+    /// utterance stayed open until he spoke again. Now the turn still ends with a final (empty), at the silence ceiling.
+    #[test]
+    fn a_turn_whose_words_all_went_out_in_a_window_roll_still_ends_with_a_final() {
+        const MS: u64 = 1_000_000;
+        const BLOCK: u64 = 32 * MS;
+        let voiced = |ns: u64| (1_000 * MS..7_000 * MS).contains(&ns);
+        let words = vec![("Did", 1_100 * MS, 1_500 * MS), ("you", 1_600 * MS, 2_000 * MS), ("hear", 2_100 * MS, 2_600 * MS),
+            ("what", 3_000 * MS, 3_500 * MS), ("I", 3_600 * MS, 3_800 * MS), ("said?", 4_000 * MS, 6_900 * MS)];
+        let mut e = ListenEngine::new(
+            EarlyAsr(words),
+            FakeVad,
+            FakeTurn(0.1), // never sure the turn is over: only the silence ceiling ends it
+            ListenConfig {
+                source_policies: HashMap::from([("mic".into(), PartialPolicy::Responsive)]),
+                pause_samples: 9600,
+                maximum_silence_samples: 16000 * 14,
+                partial_interval_samples: 16000,
+                ..ListenConfig::default()
+            },
+        )
+        .unwrap();
+        let (mut segment, mut finals) = (vec![], vec![]);
+        for i in 0..(30_000 * MS / BLOCK) {
+            let ns = i * BLOCK;
+            let block = [if voiced(ns) { 1.0 } else { 0.0 }; 512];
+            for event in e.push(AudioChunk { source: "mic", generation: 1, host_time_ns: ns, samples: &block }).unwrap() {
+                match event {
+                    ListenEvent::TranscriptSegment { words, .. } => segment.extend(words.into_iter().map(|w| w.text)),
+                    ListenEvent::FinalUtterance { words, end_ns, forced, .. } => finals.push((words.len(), end_ns, forced, ns)),
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(segment, ["Did", "you", "hear", "what", "I", "said?"], "the roll sent every word");
+        assert_eq!(finals.len(), 1, "{finals:?}");
+        let (n, end_ns, forced, at) = finals[0];
+        assert_eq!(n, 0, "no word twice: the consumer joins the segment as the prefix");
+        assert!(forced);
+        assert!((6_900 * MS..7_100 * MS).contains(&end_ns), "ends at the last voice: {end_ns}");
+        assert!(at < 7_000 * MS + 14_500 * MS, "at the silence ceiling, not at the next utterance: {at}");
     }
     #[test]
     fn every_decode_keeps_raw_words_confidence_clock_revision_and_final_flag() {
@@ -1245,6 +1272,184 @@ mod tests {
             assert_eq!(e.sources[source].pending.len(), 128);
         }
     }
+    /// The user's turn timing on audio timelines (11 Nov, "we need to get rid of the delay"): Smart Turn, not a fixed
+    /// 1.5 s silence, closes his turn; a mid-sentence pause does not; resumed speech stays one turn.
+    mod turn_timing {
+        use super::*;
+        use std::{cell::RefCell, rc::Rc};
+        /// Smart Turn as a function of the pause so far (ms of trailing silence in its audio); every call is logged.
+        #[derive(Clone)]
+        struct Script(Rc<RefCell<(fn(u64) -> f32, Vec<u64>)>>);
+        impl TurnDetector for Script {
+            fn probability(&mut self, audio: &[f32]) -> Result<f32> {
+                let quiet = audio.iter().rev().take_while(|v| **v < 0.5).count() as u64 / 16;
+                let mut s = self.0.borrow_mut();
+                s.1.push(quiet);
+                Ok((s.0)(quiet))
+            }
+        }
+        const POLICY: &str = r#"{"threshold": 0.5, "minimum_silence_ms": 1500, "long_silence_ms": 2500}"#;
+        fn owner() -> ListenConfig {
+            let mut c = ListenConfig::default();
+            c.apply_tuned_policy(&serde_json::from_str(POLICY).unwrap()).unwrap();
+            c
+        }
+        /// Before 11 Nov: one check after 1.5 s of silence, the same ceiling, on every source.
+        fn before() -> ListenConfig {
+            ListenConfig { pause_samples: 24000, maximum_silence_samples: 40000, complete_threshold: 0.5, ..ListenConfig::default() }
+        }
+        const BLOCK_NS: u64 = 32_000_000;
+        /// What happened on one timeline.
+        struct Heard {
+            /// Each final: ms from the end of the last voiced block to the block that emitted it, and forced.
+            finals: Vec<(u64, bool)>,
+            events: Vec<ListenEvent>,
+            /// The pause (ms) at each Smart Turn call.
+            asked: Vec<u64>,
+        }
+        /// Plays `(speech?, ms, Smart Turn meanwhile)` on `source` in 32 ms blocks (lengths round up to whole blocks).
+        fn play(config: ListenConfig, source: &str, timeline: &[(bool, u64, fn(u64) -> f32)]) -> Heard {
+            let turn = Script(Rc::new(RefCell::new((|_| 0.0, vec![]))));
+            let mut e = ListenEngine::new(FakeAsr { calls: 0 }, FakeVad, turn.clone(), config).unwrap();
+            let (mut t, mut last_voice_end, mut finals, mut events) = (0u64, 0u64, vec![], vec![]);
+            for &(speech, ms, p) in timeline {
+                turn.0.borrow_mut().0 = p;
+                for _ in 0..(ms * 1_000_000).div_ceil(BLOCK_NS) {
+                    let block = [if speech { 1.0 } else { 0.0 }; 512];
+                    let out = e.push(AudioChunk { source, generation: 1, host_time_ns: t, samples: &block }).unwrap();
+                    t += BLOCK_NS;
+                    if speech {
+                        last_voice_end = t;
+                    }
+                    for ev in &out {
+                        if let ListenEvent::FinalUtterance { forced, .. } = ev {
+                            finals.push(((t - last_voice_end) / 1_000_000, *forced));
+                        }
+                    }
+                    events.extend(out);
+                }
+            }
+            let asked = turn.0.borrow().1.clone();
+            Heard { finals, events, asked }
+        }
+        fn talk(_: u64) -> f32 {
+            0.0
+        }
+        fn sure(_: u64) -> f32 {
+            0.97
+        }
+        /// Finished, but Smart Turn only grows sure as the pause lengthens.
+        fn slowly_sure(quiet: u64) -> f32 {
+            if quiet < 900 { 0.6 } else { 0.96 }
+        }
+        /// Mid-sentence: Smart Turn leans "done" more the longer he pauses (the sweep's 600 ms row: .9 ended 48 of
+        /// 382 such pauses), yet stays under the .95 bar of his checks at 300 ms and 1 s.
+        fn leaning(quiet: u64) -> f32 {
+            if quiet < 900 { 0.9 } else { 0.94 }
+        }
+        /// Mid-sentence, a dangling word: Smart Turn stays under the 1.5 s bar.
+        fn unfinished(_: u64) -> f32 {
+            0.3
+        }
+        #[test]
+        fn a_finished_sentence_reaches_the_final_without_the_fixed_wait() {
+            let said: [(bool, u64, fn(u64) -> f32); 2] = [(true, 2000, talk), (false, 3000, sure)];
+            let old = play(before(), "mic:BuiltInMicrophoneDevice:1", &said).finals;
+            assert!(old.len() == 1 && old[0].0 >= 1500, "before: the 1.5 s wait ({old:?})");
+            let new = play(owner(), "mic:BuiltInMicrophoneDevice:1", &said).finals;
+            assert!(new.len() == 1 && !new[0].1 && new[0].0 <= 350, "a sure finish ends at the 300 ms check ({new:?})");
+            let new = play(owner(), "mic:BuiltInMicrophoneDevice:1", &[(true, 2000, talk), (false, 3000, slowly_sure)]).finals;
+            assert!(new.len() == 1 && !new[0].1 && (1000..1100).contains(&new[0].0), "sure from 1 s: ends there ({new:?})");
+            // His phone's live microphone is his voice: the same early checks.
+            let phone = play(owner(), "phone:airpods:3", &said).finals;
+            assert!(phone.len() == 1 && !phone[0].1 && phone[0].0 <= 350, "the phone waits like an app ({phone:?})");
+        }
+        #[test]
+        fn mid_sentence_pauses_of_half_one_and_two_seconds_stay_one_turn() {
+            for (pause, p) in [(500, leaning as fn(u64) -> f32), (1000, leaning), (1400, leaning), (500, unfinished), (1000, unfinished), (2000, unfinished)] {
+                let h = play(owner(), "mic:BuiltInMicrophoneDevice:1", &[(true, 1500, talk), (false, pause, p), (true, 1500, talk), (false, 3000, sure)]);
+                assert_eq!(h.finals.len(), 1, "a {pause} ms pause split the turn: {:?}", h.finals);
+                assert!(!h.finals[0].1 && h.finals[0].0 <= 350, "{pause} ms: {:?}", h.finals);
+                // Asked in the pause at each check its length reaches, then once at the end.
+                let in_pause: Vec<u64> = h.asked[..h.asked.len() - 1].iter().map(|q| q / 100).collect();
+                let due: Vec<u64> = [3, 10, 15].into_iter().filter(|at| at * 100 <= pause).collect();
+                assert_eq!(in_pause, due, "{pause} ms: asked at {:?}", h.asked);
+                let starts = h.events.iter().filter(|e| matches!(e, ListenEvent::SpeechStart { .. })).count();
+                assert_eq!(starts, 2, "the resumed speech is the same utterance's voice again");
+            }
+        }
+        #[test]
+        fn resumed_speech_starts_the_checks_over_and_nothing_is_emitted_twice() {
+            let h = play(
+                owner(),
+                "mic:BuiltInMicrophoneDevice:1",
+                &[(true, 1000, talk), (false, 400, leaning), (true, 800, talk), (false, 1200, leaning), (true, 800, talk), (false, 3000, sure)],
+            );
+            assert_eq!(h.finals.len(), 1, "{:?}", h.finals);
+            // Each pause is asked from its own start: 300 ms; 300 ms and 1 s; then the end at 300 ms.
+            assert_eq!(h.asked.iter().map(|q| q / 100).collect::<Vec<_>>(), [3, 3, 10, 3], "{:?}", h.asked);
+            let final_start = h.events.iter().find_map(|e| match e { ListenEvent::FinalUtterance { start_ns, .. } => Some(*start_ns), _ => None });
+            let first_start = h.events.iter().find_map(|e| match e { ListenEvent::SpeechStart { host_time_ns, .. } => Some(*host_time_ns), _ => None });
+            assert_eq!(final_start, first_start, "the final covers the turn from its first word");
+            let early = h.events.iter().filter(|e| matches!(e, ListenEvent::PartialTranscript { .. } | ListenEvent::TranscriptSegment { .. })).count();
+            assert_eq!(early, 0, "a pause decodes nothing early on the final-only microphone");
+        }
+        /// Silero as the block's level: .37 is soft speech, over the continue level (.35), under the start level (.4).
+        struct LevelVad;
+        impl SpeechDetector for LevelVad {
+            fn probability(&mut self, a: &[f32; 512], _: &mut VadState) -> Result<f32> {
+                Ok(a.iter().copied().fold(0.0, f32::max))
+            }
+        }
+        #[test]
+        fn soft_words_after_an_early_speech_end_still_count_as_speech() {
+            // He talks, pauses 400 ms (the 300 ms check reports SpeechEnd), then goes on softly for 1.5 s. Before 11
+            // Nov that pause was never reported, so the continue level held; it must still hold, or the soft words
+            // count as silence and the 1.5 s check or the ceiling ends his turn while he talks.
+            let mut e = ListenEngine::new(FakeAsr { calls: 0 }, LevelVad, FakeTurn(0.3), owner()).unwrap();
+            let (mut t, mut finals, mut starts) = (0u64, vec![], 0);
+            for (level, ms) in [(1.0, 1000), (0.0, 400), (0.37, 1500)] {
+                for _ in 0..(ms * 1_000_000u64).div_ceil(BLOCK_NS) {
+                    let out = e.push(AudioChunk { source: "mic:BuiltInMicrophoneDevice:1", generation: 1, host_time_ns: t, samples: &[level; 512] }).unwrap();
+                    t += BLOCK_NS;
+                    starts += out.iter().filter(|e| matches!(e, ListenEvent::SpeechStart { .. })).count();
+                    finals.extend(out.into_iter().filter(|e| matches!(e, ListenEvent::FinalUtterance { .. })));
+                }
+            }
+            assert!(finals.is_empty(), "ended while he spoke softly: {finals:?}");
+            assert_eq!(starts, 2, "the soft words are his voice again after the early speech end");
+        }
+        #[test]
+        fn a_pause_smart_turn_never_calls_finished_ends_at_the_ceiling() {
+            let h = play(owner(), "mic:BuiltInMicrophoneDevice:1", &[(true, 2000, talk), (false, 3500, unfinished)]);
+            assert!(h.finals.len() == 1 && h.finals[0].1 && (2500..2600).contains(&h.finals[0].0), "{:?}", h.finals);
+            assert_eq!(h.asked.iter().map(|q| q / 100).collect::<Vec<_>>(), [3, 10, 15], "then the ceiling");
+        }
+        #[test]
+        fn other_voices_keep_the_single_late_check() {
+            // App audio and call guests are not his voice: the tuned model's early bars are not theirs.
+            for source in ["process:1234", "process:5678:discord"] {
+                let h = play(owner(), source, &[(true, 2000, talk), (false, 3000, sure)]);
+                assert!(h.finals.len() == 1 && h.finals[0].0 >= 1500, "{source}: {:?}", h.finals);
+                assert_eq!(h.asked.len(), 1, "{source}");
+            }
+        }
+        #[test]
+        fn the_policy_steps_are_ordered_and_bounded() {
+            let c = owner();
+            assert_eq!((c.pause_samples, c.complete_threshold, c.maximum_silence_samples), (24000, 0.5, 40000));
+            assert_eq!(c.mic_turn_checks, vec![(4800, 0.95), (16000, 0.95), (24000, 0.5)]);
+            // A policy whose own check comes earlier drops the steps after it.
+            let mut short = ListenConfig::default();
+            short.apply_tuned_policy(&serde_json::json!({"threshold": 0.6, "minimum_silence_ms": 800, "long_silence_ms": 2500})).unwrap();
+            assert_eq!(short.mic_turn_checks, vec![(4800, 0.95), (12800, 0.6)]);
+            assert!(ListenEngine::new(FakeAsr { calls: 0 }, FakeVad, FakeTurn(0.1), short).is_ok());
+            let bad = ListenConfig { mic_turn_checks: vec![(9000, 0.5), (4800, 0.5)], ..ListenConfig::default() };
+            assert!(ListenEngine::new(FakeAsr { calls: 0 }, FakeVad, FakeTurn(0.1), bad).is_err(), "out of order");
+            let bad = ListenConfig { mic_turn_checks: vec![(30000, 0.5)], ..ListenConfig::default() };
+            assert!(ListenEngine::new(FakeAsr { calls: 0 }, FakeVad, FakeTurn(0.1), bad).is_err(), "past the ceiling");
+        }
+    }
     #[test]
     fn endpoint_fallback_and_source_restart() {
         let mut e = engine(0.1);
@@ -1517,27 +1722,9 @@ mod efficiency_tests {
             }
             assert!(!partial);
         }
-        e.set_source_policy(
-            "process:browser",
-            PartialPolicy::Slow {
-                interval_samples: 16000,
-            },
-        )
-        .unwrap();
-        assert_eq!(
-            e.policy("process:browser"),
-            PartialPolicy::Slow {
-                interval_samples: 16000
-            }
-        );
-        assert!(e
-            .set_source_policy(
-                "x",
-                PartialPolicy::Slow {
-                    interval_samples: 0
-                }
-            )
-            .is_err());
+        e.set_source_policy("process:browser", PartialPolicy::Responsive).unwrap();
+        assert_eq!(e.policy("process:browser"), PartialPolicy::Responsive);
+        assert!(e.set_source_policy(&"x".repeat(257), PartialPolicy::Responsive).is_err());
     }
     #[test]
     fn model_swaps_preserve_every_active_source_and_final_only_decodes() {

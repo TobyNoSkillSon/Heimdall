@@ -10,6 +10,8 @@
 //! the runner (JSON on stdin, `{"text", "usage", "ms"}` on stdout; `lab/goals/mock-runner.py` answers no ops);
 //! writes `<dir>/turns.jsonl` and `<dir>/final.json`. stream: the rendered lines with their times. prompt: the system
 //! prompt's size and token estimate.
+// No tests of its own: the included files' tests need the whole app and run in its test build.
+#![cfg(not(test))]
 #![allow(dead_code)]
 
 // Included as they are; `#[path]` inside an inline module would look under src/bin/, so each file is a top-level

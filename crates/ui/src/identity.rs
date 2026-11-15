@@ -20,17 +20,27 @@ pub const DEFAULT_USER: &str = "User";
 /// neutral, never the owner's name (VM finding P-11, 28 Oct). Only a label: no claim that a decider trained on
 /// "the user" generalises to other names, which stays a separate release gate.
 pub const PUBLIC_USER: &str = "User";
-/// The heading of the user's own typed messages in the Agent windows: the personal build's stored label, the public one's You
-/// (VM run 5 Nov 05:43: never the owner's name in a stranger's app).
-pub const USER_HEADING: &str = if cfg!(feature = "public") { "You" } else { DEFAULT_USER };
-/// The user in a sentence the app writes about them (a reload's reason): the stored label, or the public edition's "The user".
-pub const USER_SUBJECT: &str = if cfg!(feature = "public") { "The user" } else { DEFAULT_USER };
-/// A speaker's name as the windows show it: the user's own label (`DEFAULT_USER` in every edition's store) is the public
-/// edition's chosen name, or You (VM run 5 Nov 05:43); everyone else as named.
-pub fn shown_speaker(speaker: &str) -> String {
-    if !cfg!(feature = "public") || speaker != DEFAULT_USER { return speaker.to_string(); }
+/// The heading of the user's own typed messages in the public edition's Agent windows (VM run 5 Nov 05:43: never the
+/// owner's name in a stranger's app).
+pub const USER_HEADING: &str = "You";
+/// The heading of the user's own typed messages in the Agent windows: the name Personalise sets (settings `user_name`)
+/// in the personal edition, You in the public one or while no name is set (14 Nov: never a hard-coded name).
+pub fn user_heading() -> String {
     let user = current().user_name;
-    if user == PUBLIC_USER || user == DEFAULT_USER || user.is_empty() { USER_HEADING.into() } else { user }
+    if cfg!(feature = "public") || user.trim().is_empty() || user == PUBLIC_USER { USER_HEADING.into() } else { user }
+}
+/// The user in a sentence the app writes about them (a reload's reason): the configured name, or "The user".
+pub fn user_subject() -> String {
+    let user = current().user_name;
+    if cfg!(feature = "public") || user.trim().is_empty() || user == PUBLIC_USER { "The user".into() } else { user }
+}
+/// A speaker's name as the windows show it: the user's own label (`the user` in every edition's store) is the public
+/// edition's chosen name, or You (VM run 5 Nov 05:43); everyone else as named.
+/// The personal edition shows the configured name too (14 Nov), so the user's own profile still reads `the user`.
+pub fn shown_speaker(speaker: &str) -> String {
+    if speaker != DEFAULT_USER { return speaker.to_string(); }
+    let user = current().user_name;
+    if user == PUBLIC_USER || user.trim().is_empty() || (cfg!(feature = "public") && user == DEFAULT_USER) { USER_HEADING.into() } else { user }
 }
 
 /// The wake instruction's heading, as the app stores it and as the public edition sends it (agent `identity`).
@@ -301,7 +311,7 @@ mod tests {
         let d = Identity::default();
         assert_eq!((d.name.as_str(), d.user_name.as_str()), ("Heimdall", "User"));
         assert!(d.is_default() && d.default_names() && d.validate().is_ok());
-        assert_eq!(d.named("User's Mac. User: hi."), "User's Mac. User: hi.");
+        assert_eq!(d.named("the user's Mac. User: hi."), "the user's Mac. User: hi.");
         assert_eq!(serde_json::from_str::<Identity>("{}").unwrap().user_name, "User");
         let saved: Identity = serde_json::from_str(r#"{"name":"Ivy","user_name":"Evelyn"}"#).unwrap();
         assert_eq!((saved.name.as_str(), saved.user_name.as_str()), ("Ivy", "Evelyn"));
@@ -363,11 +373,12 @@ mod tests {
 
     /// VM run 5 Nov 05:43: the public windows never show the owner's name for the user's own lines.
     #[test]
+    #[cfg_attr(not(feature = "public"), ignore = "the personal branch needs a stored user name other than the public `User`; this tree stores the public label")]
     fn the_users_own_label_shows_as_the_editions_user() {
         assert_eq!(shown_speaker("Dave"), "Dave");
         if cfg!(feature = "public") {
-            assert_ne!(shown_speaker(DEFAULT_USER), DEFAULT_USER);
-            assert_eq!((USER_HEADING, USER_SUBJECT), ("You", "The user"));
+            assert_ne!(shown_speaker("User"), "User");
+            assert_eq!((user_heading().as_str(), user_subject().as_str()), ("You", "The user"));
         } else {
             assert_eq!(shown_speaker(DEFAULT_USER), DEFAULT_USER);
         }

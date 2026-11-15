@@ -1,12 +1,6 @@
 use anyhow::{ensure, Result};
 use sha2::{Digest, Sha256};
 use std::{io::Read, path::Path};
-#[derive(serde::Deserialize)]
-pub(crate) struct Asset {
-    pub path: String,
-    pub bytes: u64,
-    pub sha256: String,
-}
 pub fn verify(path: &Path, bytes: u64, expected: &str) -> Result<()> {
     let mut file = std::fs::File::open(path)?;
     ensure!(

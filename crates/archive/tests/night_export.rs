@@ -41,11 +41,8 @@ fn joined_export_keeps_every_event_once_with_session_keys() {
     let t = tempfile::tempdir().unwrap();
     let archive = t.path().join("archive");
     let s = session(&archive, "session-original");
-    let snapshot = t.path().join("isolated-snapshot");
-    export::snapshot_archive(&archive, &snapshot).unwrap();
-    assert!(snapshot.join("NIGHT_SNAPSHOT").is_file());
     let output = t.path().join("dataset");
-    assert_eq!(export::export(&snapshot, &output).unwrap(), 1);
+    assert_eq!(export::export(&archive, &output).unwrap(), 1);
     let row: Value = serde_json::from_str(fs::read_to_string(output.join("manifest.jsonl")).unwrap().trim()).unwrap();
     assert_eq!(row["schema"], 2);
     assert_eq!(row["session"], "session-original");
@@ -58,17 +55,6 @@ fn joined_export_keeps_every_event_once_with_session_keys() {
     }
     // Originals and archived failed/escape decision remain unchanged.
     assert_eq!(Journal::open_read_only(&s).unwrap().records().unwrap().len(), 8);
-}
-#[test]
-fn snapshot_refuses_missing_store_and_existing_destination() {
-    let t = tempfile::tempdir().unwrap();
-    assert!(export::snapshot_archive(&t.path().join("no-archive"), &t.path().join("no-snapshot")).is_err());
-    let archive = t.path().join("archive");
-    session(&archive, "session-live");
-    fs::create_dir(t.path().join("taken")).unwrap();
-    assert!(export::snapshot_archive(&archive, &t.path().join("taken")).is_err());
-    assert!(export::snapshot_archive(&archive, &archive.join("inside")).is_err());
-    assert!(!archive.join("inside").exists());
 }
 #[test]
 fn night_audio_is_content_addressed_and_original_transcript_is_preserved() {
@@ -95,29 +81,6 @@ fn night_audio_is_content_addressed_and_original_transcript_is_preserved() {
     assert!(output.join(audio).exists());
     let db = store::open(&archive).unwrap();
     assert_eq!(db.query_row("SELECT text FROM utterances", params![], |r| r.get::<_, String>(0)).unwrap(), "hello");
-}
-#[test]
-fn live_snapshot_includes_committed_wal_and_stays_unchanged_after_new_evidence() {
-    let t = tempfile::tempdir().unwrap();
-    let archive = t.path().join("archive");
-    let source = session(&archive, "session-live");
-    let db = store::open(&archive).unwrap();
-    db.execute("UPDATE utterances SET text='updated in WAL'", []).unwrap();
-    let journal = Journal::open(&source).unwrap();
-    journal
-        .append(&Record { kind: "before_snapshot".into(), source: "call".into(), utterance_ids: vec!["u1".into()], host_ns: 200, wall_ns: 200, payload: json!({"retained":true}) })
-        .unwrap();
-    let snapshot = t.path().join("snapshot");
-    export::snapshot_archive(&archive, &snapshot).unwrap();
-    journal
-        .append(&Record { kind: "after_snapshot".into(), source: "call".into(), utterance_ids: vec!["u1".into()], host_ns: 201, wall_ns: 201, payload: json!({"retained":true}) })
-        .unwrap();
-    let rows = Journal::open_read_only(&store::session_path(&snapshot, "session-live")).unwrap().records().unwrap();
-    assert!(rows.iter().any(|r| r.kind == "before_snapshot"));
-    assert!(!rows.iter().any(|r| r.kind == "after_snapshot"));
-    let copy = store::open(&snapshot).unwrap();
-    assert_eq!(copy.query_row("SELECT text FROM utterances", [], |r| r.get::<_, String>(0)).unwrap(), "updated in WAL");
-    assert_eq!(Journal::open_read_only(&source).unwrap().records().unwrap().len(), 10);
 }
 #[test]
 fn explicit_utterance_link_prevents_neighboring_command_training_label() {

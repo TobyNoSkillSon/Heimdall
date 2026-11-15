@@ -1,42 +1,57 @@
-# pipeline — the conductor
+# pipeline: the conductor
 
-`Pipeline` is the live state machine from captured audio to agent turns. One struct (`mod.rs`), one `impl Pipeline`
-block per concern:
+`Pipeline` is the live state machine from captured audio to agent turns: one struct (`mod.rs`) and one
+`impl Pipeline` block per concern. Behaviour lives in the topic pages linked below; this is the map.
+
+## Entry points
+
+- Built and driven by `crates/app/src/live_loop.rs` and `crates/app/src/replay_modes.rs`: `Pipeline::new`,
+  `capture_event`, `worker_event`, `action`, `apply_settings`, `finish`.
+- Talks to the agent through `bridge::AgentRuntime` and to the UI through `ui::Ui`.
+- Journal writes (`self.index.note`, `event`) never block the loop: they go to the archive's background writer
+  ([archive.md](../../../../docs/archive.md)).
+
+## Files
 
 | File | Owns |
 |---|---|
-| `mod.rs` | types, the `Pipeline` struct, construction, `ui()`, `finish()` |
-| `sources.rs` | running/paused, sources arriving and leaving, microphones, the listen worker's lifecycle and events, Discord relabelling, gaps; a device back within 5 s under a new generation journals `source_readded` (`device_key` strips only the generation of a `kind:name:generation` id, so `screen:1` and `screen:2` stay two devices; docs/capture.md) |
+| `mod.rs` | types, the `Pipeline` struct, construction, `ui()`, `finish()`; test modules declared at its foot |
+| `sources.rs` | running and paused, sources arriving and leaving, microphones, the listen worker's lifecycle and events, Discord relabelling, gaps, `source_readded` ([capture.md](../../../../docs/capture.md)) |
 | `utterances.rs` | listen events into utterances, admission before commands, finals handed to the agent, waiting calls |
 | `commands.rs` | spoken commands: proposals from partials, window decodes and finals, the decider's verdict, execution, island cues |
-| `speaker_tracks.rs` | transcript lines, speaker tracks and identities |
-| `voice_names.rs` | quiet speaker naming: the voice namer's minute check in calls, its "Is this John?" card, the renames every naming path shares |
-| `transcript_naming.rs` | naming a "Speaker N" by double-click in the transcript window |
-| `listen_to.rs` | listening to guests: each named voice's listen flag (`speakers.json`), the agent's `listen_to`; a listened guest's own line counts like the user's |
-| `mic_voice.rs` | who speaks on the user's microphone: each utterance embedded whole and judged against their voice print and Heimdall's voices; Heimdall's voice archived only, another voice "Unknown" and never a wake (`mic_voice` evidence) |
-| `settings_apply.rs` | applying and saving settings, the local engine, the menu's values; Seeing off swaps in `screen::ScreenBuffer::idle()`, a placeholder with no store (docs/screen.md) |
-| `actions.rs` | `ui::UiAction` handling; refreshed provider figures are saved and handed to the agent's supervisor like a thinking change (`Command::Thinking`), so the next start uses them without interrupting a turn (docs/models.md) |
-| `menu_problem.rs` | the menu's orange line: only problems the user can act on |
-| `send_worker.rs` | the decider worker (d1 send/wait/not-for-Heimdall) and its foreground bounds |
-| `ack.rs` | the instant acknowledgement: an ack clip as the wake goes, or after `Settings::ack_delay_ms` of quiet (0 by default); the island's send arrow and thinking dots held to the same moment (`hold_island`, `UiUpdate::IslandHold`); the wake's `[Heimdall already said: …]` or `[Heimdall is saying: …]` line; talk-over stop. The line passes `voicebank::ack_gate` (only when their words ask for what it claims), and no ack plays when replies come right behind it |
-| `barge_in.rs` | the user talking over Heimdall: their voice, matched by speaker ID every half second, stops it; its echo and other voices never do (no transcript, no decider) |
-| `output_route.rs` | headphones or speakers, read from Core Audio each time a barge-in arms |
-| `echo_guard.rs` | Heimdall's own voice through speakers: mic words aligned, fuzzily, with the sentences playing then are its echo, archived only (`echo_guard` evidence); the user's words over it stay their. Backup to Apple's echo cancellation (`bridge/echo_cancel.rs`) |
-| `heimdall_voice.rs` | Heimdall's own voices: each voice that can speak enrolled silently from lines it renders (never played), kept in `speakers.json`; the user's voice learned from their wakes (`user-voice.json`); the speaker encoder in its own helper; the barge-in's voice check and the whole-utterance verdict (`mic_verdict`) |
-| `drops.rs` | drops onto the notch: held while the user's utterance is open or starts within `GRACE` (3 s), then joined to that turn (their words, the drop's lines, its images, one wake); otherwise alone as their typed message (`crates/app/src/drops.rs` writes the lines) |
-| `vella.rs` | dictating to Vella (docs/vella.md): Vella's notifications into `crate::vella::Link` (intervals on the host clock, its keybind, the 45 s timeout on the settings tick), the island's Vella token, and the dictated final: an utterance on the user's microphone that dictation covers by half is archived (`dictated_to_vella`), observed and added to the conversation as `[dictated to Vella] …`, and never sent early, a spoken command, decided, a wake, a barge-in or an ack talk-over stop. Triggers are judged per word (a word is dictated when its middle lies inside a dictation): in any line, only words outside dictation can name Heimdall, say "send it", follow up, stop or be a command, and words said after they stop still wake; d1 and the agent read dictated runs as `[dictated to Vella: …]` |
+| `send_worker.rs` | the decider worker (send, wait, not for Heimdall) and its foreground bounds ([decision-chain.md](../../../../docs/decision-chain.md)) |
+| `decider.rs`, `decider_swap.rs` | the Decider section's state and the decider hot-swap (precision or version), ordered with every decision |
+| `hotkeys.rs` | the live decider label keys: ⌃⌘\ forces a wake, ⌃⌘' asks for a suggestion; both kept as labels |
 | `heard_twice.rs` | one utterance heard on two microphones reaches the decider and the agent once |
-| `suggest.rs` | the in-conversation suggester's window, card and pick (`crate::suggester`; docs/suggester.md) |
-| `speech_split.rs` | speech correction and per-word attribution (CPU helper; `speech_split/replay.rs`) |
-| `resilience.rs` | each part's health, freeze checks, the lower recovery rungs, the agent pre-flight (docs/resilience.md) |
+| `speaker_tracks.rs` | transcript lines, speaker tracks and identities ([speakers.md](../../../../docs/speakers.md)) |
+| `voice_names.rs` | quiet speaker naming: the voice namer's check in calls, its "Is this John?" card, the shared rename path |
+| `transcript_naming.rs` | naming a "Speaker N" by double-click in the transcript window |
+| `listen_to.rs` | listening to call guests: each named voice's listen flag in `speakers.json`, the agent's `listen_to` |
+| `mic_voice.rs` | who speaks on the user's microphone: each utterance judged against the user's voice print and Heimdall's voices (`mic_voice` evidence) |
+| `heimdall_voice.rs` | Heimdall's own voices enrolled silently, the user's voice learned from wakes, the speaker encoder helper, the barge-in voice check |
+| `barge_in.rs` | the user talking over Heimdall stops it, matched by speaker ID every half second |
+| `output_route.rs` | headphones or speakers, read from Core Audio each time a barge-in arms |
+| `echo_guard.rs` | Heimdall's own voice heard through the speakers is archived only (`echo_guard` evidence); a backup to `bridge/echo_cancel.rs` |
+| `playback.rs` | sound from the Mac's own output heard back on the microphone is not the user |
+| `ack.rs` | the instant acknowledgement, `Settings::ack_delay_ms`, and the island's send arrow held to the same moment (`hold_island`) |
+| `drops.rs` | drops onto the notch: joined to the user's open turn within `GRACE` (3 s), else sent alone |
+| `vella.rs` | dictation to Vella: dictated lines never wake ([vella.md](../../../../docs/vella.md)) |
+| `suggest.rs` | the in-conversation suggester's window, card and pick ([suggester.md](../../../../docs/suggester.md)) |
+| `speech_split.rs`, `speech_split/` | speech correction and per-word attribution (CPU helper; `speech_split/replay.rs`) |
+| `settings_apply.rs` | applying and saving settings, starting the local engine, the menu's values ([settings.md](../../../../docs/settings.md)) |
+| `engine_models.rs` | the menu's Engine section: precisions, downloads, deletes, which one loads ([inference-engine.md](../../../../docs/inference-engine.md)) |
+| `actions.rs` | `ui::UiAction` handling |
+| `menu_problem.rs` | the menu's orange line: only problems the user can act on |
+| `resilience.rs` | each part's health, freeze checks, the lower recovery rungs, the agent pre-flight ([resilience.md](../../../../docs/resilience.md)) |
+| `catch_up.rs` | the island's "catching up" while the archive's write lock holds writes back |
+| `model_downloads.rs` | first-run model downloads; listening starts when they land ([models.md](../../../../docs/models.md)) |
+| `setup_ready.rs`, `setup_phrase.rs` | Setup's Getting ready rows (`<data>/setup/status.json`) and its last spoken step ([setup.md](../../../../docs/setup.md)) |
 
-**Interface:** constructed and driven by `live_loop.rs` / `replay_modes.rs` (`Pipeline::new`, `capture_event`,
-`worker_event`, `action`, `apply_settings`, `finish`). Talks to the agent through `bridge::AgentRuntime` and to the
-UI through `ui::Ui`. Journal writes (`self.index.note`, `event`) never block the loop: notes go straight to the
-archive's background writer (docs/archive.md).
+## Tests
 
-**Testing:** `cargo nextest run -p app -E 'test(/^pipeline::/)'`. This is the slowest domain. The plumbing tests need
-`scripts/check.sh`'s RAM-disk TMPDIR (the archive commits with F_FULLFSYNC); on the SSD some exceed nextest's 120 s
-limit. Unit tests live in `tests/unit/` by topic, helpers in `tests/unit/mod.rs`; scenario files sit in `tests/`
-(`plumbing_tests.rs`, `resilience_tests.rs`, `start_latency_tests.rs` and per-feature files), each declared at the
-foot of `mod.rs`; `send_worker_tests/` and `speech_split_tests/` hold those modules' tests.
+- `cargo nextest run -p app -E 'test(/^pipeline::/)'`, or `cargo test -p app pipeline::`. This is the slowest domain.
+- The plumbing tests need `scripts/check.sh`'s RAM-disk `TMPDIR` (the archive commits with `F_FULLFSYNC`); on the SSD
+  some exceed nextest's 120 s limit.
+- Unit tests live in `tests/unit/` by topic, helpers in `tests/unit/mod.rs`. Scenario files sit in `tests/`
+  (`plumbing_tests.rs`, `resilience_tests.rs`, `start_latency_tests.rs` and per-feature files), each declared at the
+  foot of `mod.rs`. `send_worker_tests/` and `speech_split_tests/` hold those modules' tests.

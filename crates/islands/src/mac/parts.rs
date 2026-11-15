@@ -1,6 +1,6 @@
 //! The nine parts (Ideas/generative-ui.md §3): bars, line, stat, list, image, slider, toggle, button, text; the status,
 //! steps, items, key values and open button an island shows; and the plan lists. Each renders into a layer of a given
-//! width and registers its click targets (Swift `Parts.swift`).
+//! width and registers its click targets.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -38,6 +38,9 @@ pub enum Control {
     GoalToggle { key: String },
     /// Yes on a list's front proposal: one click, an `approval` response (`docs/one-system.md`).
     Yes { list: String, id: String },
+    /// No on a list's front proposal, beside its Yes: an `approval` response with action "no", which declines it
+    /// (recorded, never proposed again; bug note 2026-11-10T17-07-37).
+    No { list: String, id: String },
     /// A choice on Scheduled's guarantee line: a `waiting` response for the waiting item `id`.
     Waiting { id: String, action: String, label: String },
     /// A Settled row's proof chip: shows the proof under the row; a file proof also opens.
@@ -55,7 +58,7 @@ impl Control {
             (Button { id: x, .. }, Button { id: y, .. }) | (ListRow { id: x, .. }, ListRow { id: y, .. }) | (Toggle { id: x, .. }, Toggle { id: y, .. }) => x == y,
             (Tick { key: x, .. }, Tick { key: y, .. }) | (Disclose { key: x }, Disclose { key: y }) | (GoalToggle { key: x }, GoalToggle { key: y }) => x == y,
             (Approve { key: x, action: a }, Approve { key: y, action: b }) | (Waiting { id: x, action: a, .. }, Waiting { id: y, action: b, .. }) => x == y && a == b,
-            (Yes { list: a, id: x }, Yes { list: b, id: y }) => a == b && x == y,
+            (Yes { list: a, id: x }, Yes { list: b, id: y }) | (No { list: a, id: x }, No { list: b, id: y }) => a == b && x == y,
             (Proof { key: x, .. }, Proof { key: y, .. }) => x == y,
             (Details, Details) => true,
             _ => false,
@@ -1158,7 +1161,7 @@ pub fn capitalized(s: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// 4 Nov: a job island with a graphic folds its stage band behind the bottom row; without one, the band is the body.
@@ -1277,8 +1280,8 @@ mod tests {
         assert_eq!(capitalized("not-now"), "Not-Now");
     }
 
-    #[test]
-    fn a_closed_rows_detail_line_is_one_line_cut_with_an_ellipsis_at_the_row_width() {
+    /// Run by `mac::tests::appkit_renders`, in one process with the other AppKit renders (TST-11).
+    pub(crate) fn a_closed_rows_detail_line_is_one_line_cut_with_an_ellipsis_at_the_row_width() {
         let short = text_layer("Converting weights", &note_font(), &ink2(), 120.0, 1, Align::Left, false, 2.0);
         assert_eq!(text_of(&short).as_deref(), Some("Converting weights"));
         let long = "The first line of a detail that runs well past the width of a closed row, so it has to be cut short";

@@ -171,6 +171,11 @@ impl Process {
         }
         // The runtime's own words name the owner only in the personal edition (VM finding P-04, 28 Oct).
         command.env("HEIMDALL_EDITION", if cfg!(feature = "public") { "public" } else { "personal" });
+        // The user as Personalise names them (`identity::user`) and the label of their own lines as the agent reads it
+        // (`identity::sent_label`), for the runtime's own words (14 Nov: never a hard-coded name).
+        let names = crate::identity::current();
+        command.env("HEIMDALL_USER_NAME", crate::identity::user_of(&names));
+        command.env("HEIMDALL_USER_LABEL", crate::identity::sent_label(&names));
         for (key, value) in env {
             command.env(key, value);
         }
@@ -566,8 +571,6 @@ pub fn cold_cache_break_even(limits: crate::provider::Limits) -> u64 {
 
 /// The extension command that appends context without a turn (runtime/heimdall.ts).
 pub const CONTEXT_COMMAND: &str = "heimdall_context";
-/// The extension command that records the reload outcome note, once the replacement start is verified.
-pub const RELOAD_NOTE_COMMAND: &str = "heimdall_reload_note";
 /// The extension commands of the compaction fallback (runtime/compaction-fallback.mjs; bug note 2026-10-28T19-41-00):
 /// what the last compaction would summarise, written to a file, and the next compaction's result from Heimdall.
 pub const COMPACTION_SOURCE_COMMAND: &str = "heimdall_compaction_source";
@@ -714,12 +717,20 @@ impl PiConfig {
             let exe = std::env::current_exe()?;
             // The procedures the minimal prompt leaves out (docs/skills.md): each bundled skill is copied in once; a
             // reload rereads the folder, so an edited skill is live after `reload_me`. A failed copy never stops Pi.
-            let skills = crate::skills::folder(&self.agent_dir);
+            let [own, skills] = crate::skills::folders(&self.agent_dir);
             if let Err(e) = crate::skills::seed_and_upgrade(&crate::skills::bundled(&exe), &skills) {
                 eprintln!("Bundled skills not copied: {e:#}");
             }
-            args.extend(["--skill".into(), skills.to_string_lossy().into_owned()]);
+            // The user's own skills first: Pi keeps the first skill of a name (`crate::skills::folders`).
+            for folder in [own, skills] {
+                args.extend(["--skill".into(), folder.to_string_lossy().into_owned()]);
+            }
+            // The general prompt, then this install's private layer from the data folder (`crate::environment`).
             let text = fill_prompt(&prompt_text(prompt, &exe)?, &exe, self.tool_log.as_deref(), self.session.parent());
+            let text = match self.session.parent() {
+                Some(data) => format!("{}\n\n{}\n", text.trim_end(), private_layer(&exe, self.tool_log.as_deref(), data)),
+                None => text,
+            };
             // A file rather than argv carries the prompt (no process-list disclosure).
             let target = self.agent_dir.join("APPEND_SYSTEM.md");
             crate::runtime::atomic_write(&target, text.as_bytes())?;
@@ -784,33 +795,51 @@ fn prompt_text(path: &std::path::Path, exe: &std::path::Path) -> Result<String> 
 }
 /// Every runtime fill Heimdall's prompt gets, for Pi's launch and the relay (`relay_prompt::text`): the configured names
 /// (Personalise; unchanged for Heimdall and the user), the tool log, the connectors guide, the emergency protocol, the docs
-/// folder, and the taste ledger's path and commands for the profile in `data` (`crate::taste`).
+/// folder, the memory folder, and the taste ledger's path and commands for the profile in `data` (`crate::taste`).
 pub fn fill_prompt(text: &str, exe: &std::path::Path, tool_log: Option<&std::path::Path>, data: Option<&std::path::Path>) -> String {
-    let text = crate::identity::fill(text, &crate::identity::current());
-    let text = with_tool_log(&text, tool_log);
+    fill_paths(&crate::identity::fill(text, &crate::identity::current()), exe, tool_log, data)
+}
+/// This install's private layer for the profile in `data` (`crate::environment::layer`: the block rewritten now, the
+/// user's own notes and rules as they wrote them), with the same path names filled as the general prompt, so a rule
+/// there can name `HEIMDALL_DOCS_DIR` or the taste commands, and `{user}` as the configured name. It goes under the
+/// general prompt, for Pi and the relay alike.
+pub fn private_layer(exe: &std::path::Path, tool_log: Option<&std::path::Path>, data: &std::path::Path) -> String {
+    let layer = crate::identity::tokens(&crate::environment::layer(data), &crate::identity::current());
+    fill_paths(&layer, exe, tool_log, Some(data))
+}
+/// The path fills of `fill_prompt`, without the names.
+pub fn fill_paths(text: &str, exe: &std::path::Path, tool_log: Option<&std::path::Path>, data: Option<&std::path::Path>) -> String {
+    let text = with_tool_log(text, tool_log);
     let text = with_connectors_doc(&text, &connectors_doc(exe));
     let text = text.replace(EMERGENCY_PLACEHOLDER, &emergency_doc(exe).display().to_string());
     let text = text.replace(DOCS_PLACEHOLDER, &docs_dir(exe).display().to_string());
+    let memory = data.map(|d| memory_dir(d).display().to_string()).unwrap_or_else(|| "the agent/memory folder in Heimdall's data folder".into());
+    let text = text.replace(MEMORY_PLACEHOLDER, &memory);
+    let private = data.map(|d| crate::environment::dir(d).display().to_string()).unwrap_or_else(|| "the agent/private folder in Heimdall's data folder".into());
+    let text = text.replace(PRIVATE_PLACEHOLDER, &private);
     match data {
         Some(data) => crate::taste::fill_prompt(&text, data, exe),
         None => text,
     }
 }
-/// The edition's system prompt (docs/editions.md): the user's own, or the public one without his name, paths or projects.
-#[cfg(not(feature = "public"))]
+/// Heimdall's general system prompt (docs/skills.md, "Two layers"): one text for every user and both editions, with
+/// nothing of any one person's in it. What a user's install has and what they asked for is the private layer, read from
+/// their data folder at launch and put under it (`crate::environment::under`).
 const PROMPT_FILE: &str = "prompt/heimdall.md";
-#[cfg(not(feature = "public"))]
 pub const PROMPT: &str = include_str!("../prompt/heimdall.md");
-#[cfg(feature = "public")]
-const PROMPT_FILE: &str = "prompt/public/heimdall.md";
-#[cfg(feature = "public")]
-pub const PROMPT: &str = include_str!("../prompt/public/heimdall.md");
-/// The default system prompt for T3 tasks (docs/skills.md): the rules every brief carries, put at the top of each
-/// `delegate_task` brief by the T3 layer (`t3::Workers::set_brief_preamble`), so Heimdall writes only the task.
-#[cfg(not(feature = "public"))]
+/// The general prompt for T3 tasks (docs/skills.md): the rules every brief carries, put at the top of each
+/// `delegate_task` brief by the T3 layer (`t3::Workers::set_brief_preamble`), so Heimdall writes only the task. The
+/// user's own rules for tasks go under it (`task_preamble`).
 pub const WORKER_PROMPT: &str = include_str!("../prompt/worker.md");
-#[cfg(feature = "public")]
-pub const WORKER_PROMPT: &str = include_str!("../prompt/public/worker.md");
+/// The heading the user's own task rules sit under in a brief's preamble.
+pub const TASK_RULES_HEADING: &str = "This user's own rules for every task:";
+/// The preamble of every `delegate_task` brief for the profile in `data`: the general task prompt with the names
+/// filled, then the user's own task rules from `<data>/agent/private/task-rules.md` when there are any, as written.
+pub fn task_preamble(data: &std::path::Path, names: &crate::identity::Names) -> String {
+    let general = crate::identity::template(WORKER_PROMPT, names);
+    let own = crate::environment::task_rules(data);
+    if own.is_empty() { general } else { format!("{}\n\n{TASK_RULES_HEADING}\n\n{own}\n", general.trim_end()) }
+}
 /// Pi's working folder: the home folder the user picked (docs/home.md), both editions; the user's own home folder if
 /// it is missing, since a missing folder would stop Pi from starting at all.
 fn working_dir() -> PathBuf {
@@ -860,6 +889,17 @@ pub fn docs_dir(exe: &std::path::Path) -> PathBuf {
         }
     }
 }
+/// The prompt's name for the agent's quick-access memory folder ("some kind of folder in your own
+/// files where you can just put things so you can quickly access them"; "you can just do an ls on the folder"). Plain
+/// Markdown notes and a `MEMORY.md` index the agent reads and writes with its file tools; no tool of its own.
+pub const MEMORY_PLACEHOLDER: &str = "HEIMDALL_MEMORY_DIR";
+/// The memory folder of the profile whose data directory is `data`, beside the agent's skills.
+pub fn memory_dir(data: &std::path::Path) -> PathBuf {
+    data.join("agent").join("memory")
+}
+/// The prompt's name for the user's private folder (`crate::environment::dir`): the file "This install" is read from,
+/// where the agent writes a standing rule, and the user's own skills.
+pub const PRIVATE_PLACEHOLDER: &str = "HEIMDALL_PRIVATE_DIR";
 /// The prompt with the connectors guide's real path in place of `CONNECTORS_PLACEHOLDER`.
 fn with_connectors_doc(prompt: &str, doc: &std::path::Path) -> String {
     prompt.replace(CONNECTORS_PLACEHOLDER, &doc.display().to_string())
@@ -879,21 +919,29 @@ pub struct LoopPolicy {
     pub notice: String,
 }
 /// Night pass 20→21 Oct (P3): how Heimdall's compactions summarize. Pi appends it to its own summary prompt as
-/// "Additional focus"; the text is `prompt/compaction.md`.
-#[cfg(not(feature = "public"))]
+/// "Additional focus"; the text is `prompt/compaction.md`, the same in every edition.
 pub const COMPACTION_INSTRUCTIONS: &str = include_str!("../prompt/compaction.md");
-#[cfg(feature = "public")]
-pub const COMPACTION_INSTRUCTIONS: &str = include_str!("../prompt/public/compaction.md");
 /// Pi's `compact` command for every compaction Heimdall starts (maintenance, catch-up, supervisor).
 pub fn compact_command(id: &str) -> Value {
-    json!({"type":"compact","id":id,"customInstructions":crate::identity::names_only(COMPACTION_INSTRUCTIONS.trim(), &crate::identity::current())})
+    json!({"type":"compact","id":id,"customInstructions":crate::identity::template(COMPACTION_INSTRUCTIONS.trim(), &crate::identity::current())})
 }
 /// What Pi receives for one delivery: the delivery marker, then the local date and time at sending (night pass 20→21
 /// Oct, P1: on 20 Oct the agent believed it was 19 Oct and wrote that into bug notes and briefs), then the text. The
 /// date line sits in the user message, never the system prompt, so the cached prefix stays the same all day; a resend
 /// is stamped again when it goes out.
 pub fn marked_prompt(id: &str, text: &str, now_ms: u64) -> String {
-    format!("[Heimdall delivery: {id}]\n{}\n{text}", crate::clock::now_line(now_ms))
+    format!("[Heimdall delivery: {id}]\n{}\n{text}", crate::clock::now_line_with(now_ms, turn_context(now_ms).as_deref()))
+}
+/// What the app adds to every delivery's `[Now: …]` line (where the user is and where the reply goes; `app::presence`).
+/// Unset (tests, the public edition, a lab run without a bridge): the line is the date and time alone.
+type TurnContext = Box<dyn Fn(u64) -> Option<String> + Send + Sync>;
+static TURN_CONTEXT: std::sync::OnceLock<TurnContext> = std::sync::OnceLock::new();
+/// Installs the turn context once, at app start; a second call is ignored.
+pub fn set_turn_context(f: impl Fn(u64) -> Option<String> + Send + Sync + 'static) {
+    let _ = TURN_CONTEXT.set(Box::new(f));
+}
+fn turn_context(now_ms: u64) -> Option<String> {
+    TURN_CONTEXT.get().and_then(|f| f(now_ms))
 }
 pub fn loop_policy() -> &'static LoopPolicy {
     static POLICY: std::sync::LazyLock<LoopPolicy> = std::sync::LazyLock::new(||
@@ -1306,7 +1354,7 @@ impl Pi {
         }
         self.loop_abort = None;
         self.stop_after_compaction = false;
-        self.abort_with_reason("Stopped by User").await
+        self.abort_with_reason(&crate::emergency::stopped_by()).await
     }
     async fn abort_with_reason(&mut self, reason: &str) -> Result<()> {
         self.stop_reason = Some(reason.into());
@@ -1362,10 +1410,6 @@ impl Pi {
     /// slash command would reach the model as an ordinary request.
     pub async fn append_context(&mut self, text: &str) -> Result<()> {
         self.extension_note(CONTEXT_COMMAND, text).await
-    }
-    /// Records the reload outcome in the conversation (shown in the Agent window), without a turn.
-    pub async fn note_reload(&mut self, text: &str) -> Result<()> {
-        self.extension_note(RELOAD_NOTE_COMMAND, text).await
     }
     async fn extension_note(&mut self, command: &str, text: &str) -> Result<()> {
         anyhow::ensure!(!self.active(), "notes wait for settlement");
@@ -2396,10 +2440,9 @@ mod prompt_source_tests {
     #[test]
     fn the_prompt_names_the_real_tool_log() {
         let prompt = super::PROMPT;
-        // Editions (docs/editions.md): each build carries its own prompt, compaction text and Pi working folder.
-        let public = cfg!(feature = "public");
-        assert_eq!(prompt, if public { include_str!("../prompt/public/heimdall.md") } else { include_str!("../prompt/heimdall.md") });
-        assert_eq!(super::COMPACTION_INSTRUCTIONS, if public { include_str!("../prompt/public/compaction.md") } else { include_str!("../prompt/compaction.md") });
+        // One general prompt and compaction text for every edition (docs/skills.md, "Two layers").
+        assert_eq!(prompt, include_str!("../prompt/heimdall.md"));
+        assert_eq!(super::COMPACTION_INSTRUCTIONS, include_str!("../prompt/compaction.md"));
         let home = heimdall_home::home_dir();
         assert_eq!(super::working_dir(), if home.is_dir() { home } else { std::path::PathBuf::from(std::env::var_os("HOME").unwrap()) });
         let data = std::path::Path::new("/Users/x/Library/Application Support/Heimdall");
@@ -2418,7 +2461,7 @@ mod prompt_source_tests {
     #[test]
     fn the_prompt_names_this_builds_emergency_protocol() {
         assert!(!super::PROMPT.contains("/Projects/Heimdall/docs/"), "a fixed checkout docs path");
-        if !cfg!(feature = "public") { assert!(super::PROMPT.contains(super::EMERGENCY_PLACEHOLDER)); }
+        assert!(super::PROMPT.contains(super::EMERGENCY_PLACEHOLDER));
         let app = std::path::Path::new("/Applications/Heimdall.app/Contents/MacOS/heimdall");
         assert_eq!(super::emergency_doc(app), std::path::Path::new("/Applications/Heimdall.app/Contents/Resources/emergency.md"));
         assert!(super::emergency_doc(std::path::Path::new("/tmp/target/debug/heimdall")).is_file(), "the checkout's copy in development");
@@ -2427,9 +2470,7 @@ mod prompt_source_tests {
     /// holds the index, and the checkout's `docs/` otherwise.
     #[test]
     fn the_prompt_names_this_builds_docs() {
-        // The personal prompt is not in the public source export (there it is a copy of the public one).
-        let personal_prompt = super::PROMPT != include_str!("../prompt/public/heimdall.md");
-        if !cfg!(feature = "public") && personal_prompt { assert!(super::PROMPT.contains(&format!("`{}`", super::DOCS_PLACEHOLDER))); }
+        assert!(super::PROMPT.contains(&format!("`{}`", super::DOCS_PLACEHOLDER)));
         let d = tempfile::tempdir().unwrap();
         let exe = d.path().join("Heimdall.app/Contents/MacOS/Heimdall");
         let checkout = super::docs_dir(&exe);

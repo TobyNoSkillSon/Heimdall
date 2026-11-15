@@ -39,6 +39,19 @@ enum AuthStep {
     Retry,
     Report(String),
 }
+/// What a task's turn that failed on a usage limit means (`Workers::failover_step`, bug note 2026-11-06T12-26-36).
+enum FailStep {
+    None,
+    Move,
+    Report(String),
+}
+/// The accounts' quota for the failover (`Workers::set_accounts`): `true` when the caller may wait for a fresh reading.
+/// `Err(ACCOUNTS_OFF)`: the user turned the failover off; any other `Err`: no reading, said in the notice.
+pub type AccountsHook = Arc<dyn Fn(bool) -> std::result::Result<Vec<agent::accounts::AccountQuota>, String> + Send + Sync>;
+/// The accounts hook's answer when the failover is turned off.
+pub const ACCOUNTS_OFF: &str = "off";
+/// Outbox id prefix of the failover's quiet notice: context for the agent, never a wake (`agent::notice`).
+pub const FAILOVER_NOTICE: &str = "t3-failover:";
 /// What a finished run leaves for its notice.
 #[derive(Default)]
 pub(super) struct Final {
@@ -49,6 +62,43 @@ pub(super) struct Final {
     /// This run's own last reply, without the earlier turns `reply` carries.
     own: Option<String>,
 }
+// --- Steers from Heimdall (bug note 2026-11-08T06-13-58) ---
+/// What every message Heimdall sends a thread (`t3_thread_send`: a steer, a follow-up, `GO INSTALL`) starts with: one
+/// mark for its own tasks, one for the user's other threads. Tasks ignored unmarked steers as injected text (8 Nov
+/// 06:13); the task rules (`prompt/worker.md`, "Messages from Heimdall") say this mark is their orchestrator speaking.
+/// Both name the user as Personalise sets it (`agent::identity::user`: the configured name, "the user" while none is
+/// chosen; 14 Nov: never a hard-coded name). The deny list's GO INSTALL check reads only the `[From Heimdall` prefix.
+pub fn steer_mark() -> String {
+    format!("[From Heimdall, the orchestrator that started this task, speaking for {}]", agent::identity::user())
+}
+pub fn message_mark() -> String {
+    format!("[From Heimdall, {}'s voice assistant]", agent::identity::user())
+}
+/// The length of a mark of `from_heimdall` at the start of `start`, whichever name it was written with.
+fn mark_len(start: &str) -> Option<usize> {
+    start.strip_prefix("[From Heimdall, ")?;
+    let end = start.find(']')? + 1;
+    let mark = &start[..end];
+    (mark.contains("orchestrator that started this task, speaking for ") || mark.ends_with("'s voice assistant]")).then_some(end)
+}
+/// `message` with its mark in front (`STEER_MARK` into a task, else `MESSAGE_MARK`), once: a replayed or rejoined send
+/// keeps one mark. An empty message stays empty.
+/// Lane S (proposal 10): said after the first job island note of a session.
+pub const ISLAND_HINT: &str = " Add details with islands_put on that id.";
+/// Lane S: the line a self-closed task's final notice carries (`close_finished`).
+pub const CLOSED: &str = "It closes itself now (archived once nothing of it runs), so no task_cancel; a message to it reopens it.";
+pub fn from_heimdall(message: &str, task: bool) -> String {
+    let start = message.trim_start();
+    if start.is_empty() || mark_len(start).is_some() { return message.to_owned(); }
+    format!("{} {message}", if task { steer_mark() } else { message_mark() })
+}
+/// `message` without the mark `from_heimdall` put in front.
+pub fn unmarked(message: &str) -> &str {
+    let start = message.trim_start();
+    mark_len(start).map(|n| &start[n..]).map_or(message, |rest| rest.strip_prefix(' ').unwrap_or(rest))
+}
+// --- end steers from Heimdall ---
+
 #[derive(Clone)]
 pub struct Worker {
     pub thread: String,
@@ -81,13 +131,27 @@ pub struct Workers {
     /// `t3_call`), before the call returns: the app gives each one a bound job island (night 1023). What it returns
     /// is added to `delegate_task`'s answer.
     task_hook: Mutex<Option<TaskHook>>,
+    /// Bug note 2026-11-13T12-27-46: called with the thread once a task's final notice reached Heimdall (`on_result_delivered`).
+    result_hook: Mutex<Option<ResultHook>>,
     /// The default system prompt for tasks (docs/skills.md, `agent::harness::WORKER_PROMPT`): put above every
     /// `delegate_task` brief, so the rules every brief carries never depend on Heimdall writing them.
     brief_preamble: Mutex<Option<String>>,
+    /// Review 1111: rules put under the preamble for a task whose folder is outside the Vault (no Vault CLAUDE.md there).
+    outside_vault: Mutex<Option<(String, PathBuf)>>,
+    /// A task's project folder when `delegate_task` names none: Heimdall's home folder (`set_default_folder`).
+    default_folder: Mutex<Option<PathBuf>>,
     /// `AUTH_RETRY_MS`; tests shorten it (`set_auth_retry`).
     auth_retry: Mutex<u64>,
     /// `AUTH_COOLDOWN_MS`; tests shorten it (`set_auth_cooldown`).
     auth_cooldown_ms: Mutex<u64>,
+    /// Bug note 2026-11-06T12-26-36: the Claude accounts' quota for the failover (`set_accounts`); none: no failover.
+    accounts: Mutex<Option<AccountsHook>>,
+    /// Lane S (proposal 10): the result tails already said once in this process (`once`).
+    told: Mutex<std::collections::HashSet<&'static str>>,
+    /// Lane S (proposal 1): finished tasks close themselves (`closes_itself`); tests about other rules turn it off.
+    self_close: Mutex<bool>,
+    /// Crewmates (crew.rs): the crew layer, once the app attached it (`set_crew`). The crew holds these workers weakly.
+    crew: Mutex<Option<Arc<super::crew::Crew>>>,
 }
 /// An approval a followed thread waits on (`Workers::approval_wait`): its run, the card's text (the command and
 /// Claude's reason) when T3 shows the card, and the `t3-thread://` link that opens the thread in T3.
@@ -98,6 +162,8 @@ pub struct ApprovalWait {
     pub link: Option<String>,
 }
 pub type TaskHook = Arc<dyn Fn(&str, &str, &str) -> Option<String> + Send + Sync>;
+/// Called with the thread whose final notice was just delivered (`Workers::on_result_delivered`).
+pub type ResultHook = Arc<dyn Fn(&str) + Send + Sync>;
 /// Stores whose restart notice this process has sent (`Workers::announce_restart`), with the notice's outbox id (none:
 /// nothing was followed).
 static ANNOUNCED: Mutex<Vec<(std::path::PathBuf, Option<String>)>> = Mutex::new(Vec::new());
@@ -147,6 +213,9 @@ const ACTIVITY_PAGE: u64 = 50;
 const ACTIVITY_CHARS: u64 = 1500;
 /// How far into a cut command item its "running in background" line is looked for (`command_text`).
 const COMMAND_CHARS: u64 = 16_000;
+/// How long a task kept open for its delegated tasks stays unarchived after its thread last changed (bug note
+/// 2026-11-12T00-19-55): T3 queues the turn that reads a finished child's result as it writes that result.
+const KEPT_QUIET_MS: u64 = 2 * 60 * 1000;
 const BACKGROUND_MARK: &str = "Command running in background with ID: ";
 /// A Claude Monitor stops by itself after its `timeout_ms`: 5 minutes unless it names one, at most 30 (Claude Code's
 /// Monitor tool, 27 Oct). Its stop leaves a timeline item only when it starts a turn, so the deadline ends it too.
@@ -227,11 +296,21 @@ impl Workers {
         // tasks whose job island the user closed, archived by Heimdall itself once finished and reported
         // (`archive_cleared`), never by the agent remembering to.
         db.execute_batch("CREATE TABLE IF NOT EXISTS cleared(thread TEXT PRIMARY KEY,ms INTEGER NOT NULL);")?;
+        // Bug note 2026-11-13T18-04-30: the exact thread set each batch archive question was asked for (`archive_batch`).
+        db.execute_batch("CREATE TABLE IF NOT EXISTS batch_confirms(key TEXT PRIMARY KEY,ids TEXT NOT NULL,question TEXT NOT NULL,description TEXT NOT NULL,created_ms INTEGER NOT NULL);")?;
+        // Bug note 2026-11-12T00-19-55: finished tasks kept open for their delegated tasks (`closes_itself`).
+        db.execute_batch("CREATE TABLE IF NOT EXISTS kept_for_children(thread TEXT PRIMARY KEY,ms INTEGER NOT NULL);")?;
         // Bug note 2026-11-04T18-30-26: the approval each followed thread waits on now (`approval_wait`).
         db.execute_batch("CREATE TABLE IF NOT EXISTS approval_waits(thread TEXT PRIMARY KEY,run TEXT NOT NULL,call TEXT,text TEXT,link TEXT,ms INTEGER NOT NULL);")?;
         // Review 5 Nov: the runs Heimdall's own messages started (`sent_run`), so one T3 drops before it starts reads
         // cancelled (`threads::followed_run`).
         db.execute_batch("CREATE TABLE IF NOT EXISTS sent_runs(thread TEXT NOT NULL,run TEXT NOT NULL,ms INTEGER NOT NULL,PRIMARY KEY(thread,run));")?;
+        // Bug note 2026-11-06T12-26-36: tasks moved to another Claude account after a usage limit (`failover_step`;
+        // `until_ms`: when the account left resets), and the accounts Heimdall saw hit a limit, until they reset.
+        db.execute_batch(
+            "CREATE TABLE IF NOT EXISTS task_failovers(thread TEXT NOT NULL,run TEXT NOT NULL,from_instance TEXT NOT NULL,to_instance TEXT NOT NULL,model TEXT NOT NULL,limit_window TEXT NOT NULL,at_ms INTEGER NOT NULL,until_ms INTEGER NOT NULL,sent_ms INTEGER,PRIMARY KEY(thread,run));
+             CREATE TABLE IF NOT EXISTS spent_accounts(instance TEXT PRIMARY KEY,until_ms INTEGER NOT NULL);",
+        )?;
         let column = |name: &str| -> Result<bool> {
             Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('workers') WHERE name=?)", [name], |r| r.get(0))?)
         };
@@ -269,14 +348,120 @@ impl Workers {
             audit_drain_failing: std::sync::atomic::AtomicBool::new(false),
             passes: tokio::sync::watch::channel(0).0,
             task_hook: Mutex::new(None),
+            result_hook: Mutex::new(None),
             brief_preamble: Mutex::new(None),
+            outside_vault: Mutex::new(None),
+            default_folder: Mutex::new(None),
             auth_retry: Mutex::new(AUTH_RETRY_MS),
             auth_cooldown_ms: Mutex::new(AUTH_COOLDOWN_MS),
+            accounts: Mutex::new(None),
+            told: Mutex::new(Default::default()),
+            self_close: Mutex::new(true),
+            crew: Mutex::new(None),
         })
+    }
+    // ---- crewmates (crew.rs) ----
+    /// Attach the crew layer: its tools, its pass after each control-plane pass, and the rules for crew threads (never
+    /// self-closed, results recorded, sends only through the crew layer).
+    pub fn set_crew(&self, crew: Arc<super::crew::Crew>) {
+        *self.crew.lock().unwrap() = Some(crew);
+    }
+    pub fn crew(&self) -> Option<Arc<super::crew::Crew>> {
+        self.crew.lock().unwrap().clone()
+    }
+    /// The crewmate whose body `thread` is, if any.
+    fn crewmate_of(&self, thread: &str) -> Option<String> {
+        self.crew().and_then(|c| c.store.crewmate_of(thread).ok().flatten())
+    }
+    /// The user, 17:13: nothing reaches a crewmate except through Heimdall's crew layer. A call from the agent (or the
+    /// relay, the phone) that would send into, stop, archive, reconfigure or answer for a crew thread is refused here
+    /// with the crew tool to use; reads stay free.
+    fn crew_guard(&self, name: &str, a: &Value) -> Option<String> {
+        let read_only = |tool: &str, args: &Value| {
+            matches!(tool, "t3_thread_read" | "t3_thread_wait" | "t3_thread_list" | "task_status" | "t3_worktree_status" | "t3_background_wait" | "list_thread_pull_requests")
+                || matches!(args["action"].as_str(), Some("list" | "read" | "status"))
+        };
+        let threads: Vec<String> = match name {
+            "t3_thread_send" => a["threadId"].as_str().map(str::to_owned).into_iter().collect(),
+            "task_cancel" => a["taskId"].as_str().map(str::to_owned).into_iter().collect(),
+            "t3_call" if !read_only(a["tool"].as_str().unwrap_or(""), &a["args"]) => {
+                let mut ids: Vec<String> = ["threadId", "targetThreadId"].iter().filter_map(|k| a["args"][*k].as_str().map(str::to_owned)).collect();
+                ids.extend(a["threads"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(str::to_owned)));
+                ids
+            }
+            _ => vec![],
+        };
+        let (thread, crewmate) = threads.iter().find_map(|t| self.crewmate_of(t).map(|c| (t.clone(), c)))?;
+        Some(format!("CREW_THREAD: {thread} is crewmate {crewmate}'s thread; everything for it goes through the crew: crew_tell to talk to it, crew_change to re-brief, pause or move it, crew_retire to stop it"))
+    }
+    /// The open sub-agents and background commands of a followed thread (`open_children`), by label.
+    pub(crate) fn open_work(&self, thread: &str) -> Result<Vec<String>> {
+        let open = self.open_children(thread)?;
+        Ok(open.agents.into_iter().chain(open.commands).chain(open.stale).collect())
+    }
+    /// One of Heimdall's tasks: (run, status, provider, model, archived).
+    pub(crate) fn task_row(&self, thread: &str) -> Result<Option<(Option<String>, String, String, String, bool)>> {
+        Ok(self
+            .db
+            .lock()
+            .unwrap()
+            .query_row("SELECT run,status,provider,model,archived FROM workers WHERE thread=? AND kind='task'", [thread], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get::<_, i64>(4)? != 0)))
+            .optional()?)
+    }
+    /// The finished result of operation `op` (`prepare`/`finish`), if any.
+    pub(crate) fn op_result(&self, op: &str) -> Result<Option<Value>> {
+        let r: Option<Option<String>> = self.db.lock().unwrap().query_row("SELECT result FROM operations WHERE id=? AND state='complete'", [op], |r| r.get(0)).optional()?;
+        Ok(r.flatten().and_then(|s| serde_json::from_str(&s).ok()))
+    }
+    /// Re-adding (the user, 17:11): an existing T3 thread becomes one of Heimdall's tasks, followed like one it started.
+    /// `row` is the thread as `t3_thread_read` shows it.
+    pub(crate) fn adopt_thread(&self, row: &Value, path: &str, title: &str) -> Result<()> {
+        let thread = row["threadId"].as_str().context("thread id missing")?;
+        let provider = row["providerInstanceId"].as_str().unwrap_or("claudeAgent");
+        let family = if provider.starts_with("claude") { "claude".to_owned() } else if provider.starts_with("codex") { "codex".to_owned() } else { format!("instance:{provider}") };
+        let status = row["status"].as_str().unwrap_or("idle");
+        let db = self.db.lock().unwrap();
+        db.execute(
+            "INSERT INTO workers(thread,run,status,provider,family,model,project,path,title,kind,archived) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,'task',?10)
+             ON CONFLICT(thread) DO UPDATE SET kind='task',archived=excluded.archived,title=COALESCE(workers.title,excluded.title)",
+            params![thread, row["latestRunId"].as_str(), status, provider, family, row["model"].as_str().unwrap_or(""), row["projectId"].as_str().unwrap_or(""), path, title, row["archived"] == true],
+        )?;
+        db.execute("INSERT OR IGNORE INTO owned_threads VALUES(?)", [thread])?;
+        // A run that already ended before the adoption is not news.
+        if let Some(run) = row["latestRunId"].as_str().filter(|_| terminal(status)) {
+            db.execute("INSERT OR IGNORE INTO notices VALUES(?1,?2,?3,'adopted')", params![format!("terminal:{thread}:{run}:{status}"), thread, run])?;
+        }
+        drop(db);
+        self.changed.notify_one();
+        Ok(())
+    }
+    /// A crew thread gone from T3: no longer followed (a scan of a missing thread fails every pass).
+    pub(crate) fn forget(&self, thread: &str) -> Result<()> {
+        let db = self.db.lock().unwrap();
+        db.execute("UPDATE workers SET archived=1 WHERE thread=?", [thread])?;
+        db.execute("DELETE FROM held WHERE thread=?", [thread])?;
+        db.execute("DELETE FROM children WHERE thread=?", [thread])?;
+        Ok(())
+    }
+    // ---- end crewmates ----
+    /// Bug note 2026-11-06T12-26-36: the accounts' quota that a task failing on a usage limit moves by (`failover`).
+    /// Unset (tests, the lab): such a task is reported as before.
+    pub fn set_accounts(&self, hook: AccountsHook) {
+        *self.accounts.lock().unwrap() = Some(hook);
     }
     /// Sets the text put above every `delegate_task` brief (`brief_preamble`).
     pub fn set_brief_preamble(&self, text: &str) {
         *self.brief_preamble.lock().unwrap() = Some(text.trim().to_owned()).filter(|t| !t.is_empty());
+    }
+    /// Review 1111 (worker preamble): rules added under the preamble when the task's folder is outside the Vault
+    /// (`agent::harness::WORKER_OUTSIDE_VAULT`), `vault` being the Vault's root; "" sets none.
+    /// The project folder of a task started without `path`: the home folder the user picked (docs/home.md; the owner's
+    /// is `~/Vault`). Unset, `delegate_task` asks for a path.
+    pub fn set_default_folder(&self, folder: &Path) {
+        *self.default_folder.lock().unwrap() = Some(folder.to_owned());
+    }
+    pub fn set_outside_vault_rules(&self, text: &str, vault: &Path) {
+        *self.outside_vault.lock().unwrap() = Some(text.trim().to_owned()).filter(|t| !t.is_empty()).map(|t| (t, vault.to_owned()));
     }
     /// Floating islands (night 1022): changes after every control-plane pass and every followed run's wait, the
     /// moments T3 state is fresh.
@@ -285,10 +470,21 @@ impl Workers {
     }
     /// Run `hook` for every task started from now on (see `task_hook`); a later call replaces it.
     pub fn on_task_started(&self, hook: TaskHook) { *self.task_hook.lock().unwrap() = Some(hook) }
+    /// Bug note 2026-11-13T12-27-46 ("the islands, I don't think you're closing fast enough"): run `hook` with the
+    /// thread each time a run's final notice (its result) is delivered to Heimdall, so its job island can leave
+    /// shortly after; a later call replaces it.
+    pub fn on_result_delivered(&self, hook: ResultHook) { *self.result_hook.lock().unwrap() = Some(hook) }
     /// The hook for a started task; its note after a space, or nothing.
     pub(super) fn task_started(&self, thread: &str, title: &str, brief: &str) -> String {
         let hook = self.task_hook.lock().unwrap().clone();
-        hook.and_then(|h| h(thread, title, brief)).map(|n| format!(" {n}")).unwrap_or_default()
+        let note = hook.and_then(|h| h(thread, title, brief)).map(|n| format!(" {n}")).unwrap_or_default();
+        // Lane S (proposal 10): how to use the island, once per session (the hook names the island every time).
+        if !note.is_empty() && self.once("island-hint") { note + ISLAND_HINT } else { note }
+    }
+    /// Lane S (proposal 10): true the first time `what` is asked in this process. Each started task's and each send's
+    /// answer repeated the same 120-character tail (923 times in two weeks); the agent needs it once.
+    pub(super) fn once(&self, what: &'static str) -> bool {
+        self.told.lock().unwrap().insert(what)
     }
     /// `task_started` for one run of the thread, remembered (`islanded`) so the observer's pass does not run the hook
     /// again for it: a run whose island the user already dismissed stays without one.
@@ -296,7 +492,8 @@ impl Workers {
         if let Some(run) = run {
             self.db.lock().unwrap().execute("INSERT OR IGNORE INTO islanded VALUES(?,?,?)", params![thread, run, crate::now_ms() as i64])?;
         }
-        Ok(self.task_started(thread, title, brief))
+        // The island shows the words, not Heimdall's mark on them (`from_heimdall`).
+        Ok(self.task_started(thread, title, unmarked(brief)))
     }
     /// Whether the task hook already ran for this run (`run_started`).
     pub(super) fn islanded(&self, thread: &str, run: &str) -> Result<bool> {
@@ -363,7 +560,7 @@ impl Workers {
             .with_context(|| format!("TASK_NOT_OWNED: {id} is not one of your tasks; read or message other threads with t3_thread_read and t3_thread_send"))
     }
     /// Whether Heimdall started this thread (a task), for "your task" marks.
-    pub(crate) fn owns_task(&self, thread: &str) -> Result<bool> {
+    pub fn owns_task(&self, thread: &str) -> Result<bool> {
         Ok(self.db.lock().unwrap().query_row("SELECT EXISTS(SELECT 1 FROM workers WHERE thread=? AND kind='task')", [thread], |r| r.get(0))?)
     }
     /// The task's live T3 title, or the one it was started with.
@@ -436,6 +633,20 @@ impl Workers {
     async fn selection(&self, target: &Value) -> Result<(Value, String, String)> {
         let catalog = self.client.call("orchestrator_capabilities", json!({})).await?;
         let providers = catalog["providers"].as_array().context("T3 capabilities lack providers")?;
+        // No model named (the public edition's default target): the user's own T3 providers decide, pinned to the
+        // provider picked so a model two providers offer is not ambiguous.
+        let picked = match target["model"].as_str().filter(|m| !m.trim().is_empty()) {
+            Some(_) => None,
+            None => Some(catalog_default(&catalog, target["providerInstanceId"].as_str()).with_context(|| {
+                format!("MODEL_UNAVAILABLE: no target model given and T3 lists no usable model; set up a provider in T3 or pass target.model. Usable models:\n{}", crate::text::catalog(&catalog))
+            })?),
+        };
+        let mut target = target.clone();
+        if let Some((provider, model)) = &picked {
+            target["model"] = json!(model);
+            target["providerInstanceId"] = json!(provider);
+        }
+        let target = &target;
         let model_id = target["model"].as_str().context("target.model missing")?;
         let choices = || crate::text::catalog(&catalog);
         let usable = |p: &&Value| {
@@ -450,10 +661,20 @@ impl Workers {
         let provider = match candidates.as_slice() {
             [one] => *one,
             [] => anyhow::bail!("MODEL_UNAVAILABLE: {model_id} is not in T3's live catalog. Usable models:\n{}", choices()),
-            _ => anyhow::bail!(
-                "MODEL_AMBIGUOUS: {model_id} is offered by {}; set target.providerInstanceId",
-                candidates.iter().filter_map(|p| p["providerInstanceId"].as_str()).collect::<Vec<_>>().join(" and ")
-            ),
+            many => {
+                // Bug note 2026-11-08T02-03-49: several Claude accounts offer it and none was named: the one with quota
+                // (`failover::default_account`); MODEL_AMBIGUOUS only when the candidates are not all Claude accounts.
+                let ids: Vec<&str> = many.iter().filter_map(|p| p["providerInstanceId"].as_str()).collect();
+                let spent = self.spent_accounts().unwrap_or_default();
+                let reading = match self.read_accounts(false).await {
+                    Some(Ok(a)) => a,
+                    _ => vec![],
+                };
+                match crate::failover::default_account(&ids, &reading, &spent, crate::now_ms()) {
+                    Some(id) => *many.iter().find(|p| p["providerInstanceId"] == id.as_str()).unwrap(),
+                    None => anyhow::bail!("MODEL_AMBIGUOUS: {model_id} is offered by {}; set target.providerInstanceId", ids.join(" and ")),
+                }
+            }
         };
         let provider_id = provider["providerInstanceId"].as_str().context("T3 provider id missing")?.to_owned();
         ensure!(
@@ -528,6 +749,19 @@ impl Workers {
     }
     pub async fn execute(&self, name: &str, a: Value, op: &str, permit: &DeliveryPermit) -> Result<String> {
         permit.check()?;
+        // Crewmates: their own tools, and their threads reached only through them (`crew_guard`).
+        if name.starts_with("crew_") {
+            let crew = self.crew().context("CREW_UNAVAILABLE: the crew is not attached in this Heimdall")?;
+            return crew.tool(name, a, op, permit).await;
+        }
+        if let Some(refusal) = self.crew_guard(name, &a) {
+            anyhow::bail!(refusal);
+        }
+        self.execute_inner(name, a, op, permit).await
+    }
+    /// `execute` without the crew guard: the crew layer's own sends, starts and stops.
+    pub(crate) async fn execute_inner(&self, name: &str, a: Value, op: &str, permit: &DeliveryPermit) -> Result<String> {
+        permit.check()?;
         match name {
             "delegate_task" => self.delegate(a, op, permit).await,
             "task_status" => self.task_status(&a).await,
@@ -535,6 +769,10 @@ impl Workers {
             "t3_thread_list" => self.thread_list(&a).await,
             "t3_thread_read" => self.thread_read(&a).await,
             "t3_thread_send" => {
+                let mut a = a;
+                if let (Some(m), Some(t)) = (a["message"].as_str(), a["threadId"].as_str()) { a["message"] = json!(from_heimdall(m, self.owns_task(t)?)); }
+                // night1114 relay: a send while the automatic retry is pending is that retry (`auth_retry_taken`).
+                let retry = a["threadId"].as_str().map(|t| self.auth_retry_pending(t)).transpose()?.flatten();
                 if let Some(thread) = a["threadId"].as_str() {
                     if let Some(wait) = self.auth_cooldown(thread)? {
                         anyhow::bail!(wait);
@@ -545,7 +783,7 @@ impl Workers {
                         return Ok(serde_json::from_str::<Value>(&result)?["text"].as_str().unwrap_or_default().to_owned());
                     }
                     if done.is_none() && !matches!(a["mode"].as_str(), Some("steer" | "restart")) {
-                        if let Some(joined) = self.join_queued(thread, a["message"].as_str().unwrap_or(""), permit).await? {
+                        if let Some(joined) = self.join_queued(thread, unmarked(a["message"].as_str().unwrap_or("")), permit).await? {
                             self.db.lock().unwrap().execute(
                                 "INSERT OR REPLACE INTO operations VALUES(?1,'t3_thread_join',?2,'complete',?3)",
                                 params![op, a.to_string(), json!({"text": joined}).to_string()],
@@ -561,16 +799,25 @@ impl Workers {
                 if let Some(confirm) = a.get("confirm") {
                     call["confirm"] = confirm.clone();
                 }
-                self.t3_call(call, op, permit).await
+                let retry = match (retry, a["threadId"].as_str()) { (Some(reason), Some(thread)) if self.auth_retry_take(thread, op)? => Some((thread.to_owned(), reason)), _ => None };
+                let sent = self.t3_call(call, op, permit).await;
+                self.auth_retry_sent(retry, sent)
             }
             "t3_tools" => self.t3_tools(&a).await,
             "t3_call" => {
+                let mut a = a;
+                if a["tool"] == "t3_thread_send" {
+                    if let (Some(m), Some(t)) = (a["args"]["message"].as_str(), a["args"]["threadId"].as_str()) { a["args"]["message"] = json!(from_heimdall(m, self.owns_task(t)?)); }
+                }
+                let retry = match (a["tool"].as_str(), a["args"]["threadId"].as_str()) { (Some("t3_thread_send"), Some(t)) => self.auth_retry_pending(t)?.map(|r| (t.to_owned(), r)), _ => None };
                 if let (Some("t3_thread_send"), Some(thread)) = (a["tool"].as_str(), a["args"]["threadId"].as_str()) {
                     if let Some(wait) = self.auth_cooldown(thread)? {
                         anyhow::bail!(wait);
                     }
                 }
-                self.t3_call(a, op, permit).await
+                let retry = match retry { Some((thread, reason)) if self.auth_retry_take(&thread, op)? => Some((thread, reason)), _ => None };
+                let sent = self.t3_call(a, op, permit).await;
+                self.auth_retry_sent(retry, sent)
             }
             other => anyhow::bail!("unknown T3 tool {other}"),
         }
@@ -584,10 +831,13 @@ impl Workers {
             let note = self.task_started(result["task_id"].as_str().unwrap_or(""), result["title"].as_str().unwrap_or(""), a["task"].as_str().unwrap_or(""));
             return Ok(started_line(&result) + &note);
         }
-        let (selection, family, provider) = self.selection(&a["target"]).await?;
+        let target = default_target(&a["target"]);
+        let (selection, family, provider) = self.selection(&target).await?;
+        // Bug note 2026-11-06T12-26-36: never onto a Claude account whose quota is spent while another has some.
+        let (selection, family, provider, routed) = self.quota_route(&target, selection, family, provider).await;
         let path = match a["path"].as_str() {
             Some(p) => p.to_owned(),
-            None => default_path().context("path: no default project folder ($HOME/Work); pass path")?,
+            None => self.default_path().context("path: no default project folder (Heimdall's home folder); pass path")?,
         };
         let project = self.project(&path).await?;
         let marker = format!("[heimdall:{}]", uuid::Uuid::new_v4().simple());
@@ -595,7 +845,13 @@ impl Workers {
         let title = a["title"].as_str().unwrap_or("Task").to_owned();
         let (workspace, task, made) = workspace(&project, &path, a["isolation"] == "worktree", a.get("branch"), a["task"].as_str().unwrap_or(""), &title, op).await?;
         // The default task prompt on top; the working-folder line, when there is one, belongs to the task below it.
-        let task = with_preamble(self.brief_preamble.lock().unwrap().as_deref(), &task);
+        let preamble = self.brief_preamble.lock().unwrap().clone();
+        let outside = self.outside_vault.lock().unwrap().clone().filter(|(_, vault)| !in_vault(&path, vault)).map(|(rules, _)| rules);
+        let preamble = match (preamble, outside) {
+            (Some(p), Some(o)) => Some(format!("{p}\n{o}")),
+            (p, _) => p,
+        };
+        let task = with_preamble(preamble.as_deref(), &task);
         // The task's working folder: the worktree Heimdall made for it, or the folder it was given.
         let path = made.as_ref().map_or(path, |(folder, _)| folder.clone());
         let model = selection["model"].as_str().unwrap_or("").to_owned();
@@ -625,7 +881,7 @@ impl Workers {
         self.changed.notify_one();
         let note = self.run_started(thread, r["runId"].as_str(), &title, a["task"].as_str().unwrap_or(""))?;
         permit.check()?;
-        Ok(started_line(&result) + &note)
+        Ok(started_line(&result) + &routed + &note)
     }
     /// Recover a lost launch response without reissuing the non-idempotent launch.
     pub async fn reconcile_launches(&self, permit: &DeliveryPermit) -> Result<()> {
@@ -796,7 +1052,12 @@ impl Workers {
         if let Some(m) = t["model"].as_str() {
             out.push_str(&format!(" · {m}"));
         }
-        if crate::threads::asks(t) {
+        // Bug note 2026-11-06T11-57-54: the approval the last pass found, by name, since T3's listing never shows one.
+        if let Some(wait) = self.approval_wait(id)? {
+            let asks = wait.text.as_deref().map(|t| format!(": {t}")).unwrap_or_default();
+            let open = wait.link.as_deref().map(|l| format!(" (open it: {l})")).unwrap_or_default();
+            out.push_str(&format!(" · waits for {}'s approval in T3{asks}{open}", agent::identity::user()));
+        } else if crate::threads::asks(t) {
             out.push_str(" · waits on a question or approval");
         }
         out.push_str(&format!(" [task {id}]"));
@@ -890,6 +1151,10 @@ impl Workers {
             if crate::threads::ACTIVE.contains(&status.as_str()) || !reported {
                 continue;
             }
+            // A crewmate's thread stays open (crew.rs); its island may go, the thread does not.
+            if self.crewmate_of(&thread).is_some() {
+                continue;
+            }
             match self.archive_if_finished(&thread, run.as_deref()).await {
                 // Logged here for every caller: the worker pass's own archives left no line (bug note 2026-11-03T23-16-29).
                 Ok(Some(title)) => {
@@ -936,6 +1201,17 @@ impl Workers {
         if !same(&self.db.lock().unwrap())? {
             return Ok(None);
         }
+        // Bug note 2026-11-12T00-19-55: archived, it would never hear from the delegated tasks it still waits on. One
+        // kept open for them also waits `KEPT_QUIET_MS` after its thread last changed: T3 writes a finished child's
+        // result onto its parent as it queues the turn that reads it, so a child just done may not show that turn yet.
+        if !self.live_delegated(thread).await?.is_empty() {
+            return Ok(None);
+        }
+        let kept = self.db.lock().unwrap().query_row("SELECT EXISTS(SELECT 1 FROM kept_for_children WHERE thread=?)", [thread], |r| r.get::<_, bool>(0))?;
+        let changed = t["updatedAt"].as_str().and_then(at).map(|n| (n / 1_000_000) as u64);
+        if kept && changed.is_none_or(|c| crate::now_ms().saturating_sub(c) < KEPT_QUIET_MS) {
+            return Ok(None);
+        }
         if t["archived"] != true {
             self.client.call("t3_thread_organize", json!({"threadId":thread,"action":"archive"})).await?;
         }
@@ -946,6 +1222,7 @@ impl Workers {
         }
         db.execute("DELETE FROM held WHERE thread=?", [thread])?;
         db.execute("DELETE FROM cleared WHERE thread=?", [thread])?;
+        db.execute("DELETE FROM kept_for_children WHERE thread=?", [thread])?;
         Ok(Some(crate::text::title(t["title"].as_str().unwrap_or(thread))))
     }
     /// A command item cut at `ACTIVITY_CHARS` with its rest, up to `COMMAND_CHARS` more, in one read (bug note
@@ -1160,7 +1437,7 @@ impl Workers {
         let key = key.unwrap_or_else(|| format!("terminal:{}:{run}:{state}", w.thread));
         // A sign-in failure waiting for its retry: withheld, its reply rides in the task's next notice.
         let waits: Option<String> = self.db.lock().unwrap().query_row("SELECT kind FROM notices WHERE id=?", [&key], |r| r.get(0)).optional()?;
-        if waits.as_deref() == Some("auth-retry") {
+        if matches!(waits.as_deref(), Some("auth-retry" | "failover")) {
             return Ok(());
         }
         let kind = self.kind(&w.thread)?;
@@ -1186,6 +1463,19 @@ impl Workers {
                 .collect::<rusqlite::Result<_>>()?;
             let last = permit.run(self.collect_final(w, &carry, permit)).await?;
             let mut still = still.map(str::to_owned);
+            // Bug note 2026-11-06T12-26-36: a usage limit moves the task to an account with quota (`failover_moves`);
+            // not news yet, like the sign-in retry below.
+            let failover = if kind == "task" && usual { self.failover_step(&w.thread, run, state, last.own.as_deref()).await? } else { FailStep::None };
+            match failover {
+                FailStep::Move => {
+                    self.db.lock().unwrap().execute("INSERT OR IGNORE INTO notices VALUES(?1,?2,?3,'failover')", params![key, w.thread, run])?;
+                    self.db.lock().unwrap().execute("INSERT OR IGNORE INTO withheld VALUES(?,?)", params![w.thread, run])?;
+                    self.db.lock().unwrap().execute("DELETE FROM pending_finals WHERE thread=? AND run=?", params![w.thread, run])?;
+                    return Ok(());
+                }
+                FailStep::Report(line) => still = Some(still.map_or(line.clone(), |s| format!("{s} {line}"))),
+                FailStep::None => {}
+            }
             if kind == "task" && usual {
                 match self.auth_episode(&w.thread, run, state, last.own.as_deref())? {
                     AuthStep::Retry => {
@@ -1200,6 +1490,38 @@ impl Workers {
                     AuthStep::None => {}
                 }
             }
+            // Bug note 2026-11-12T00-19-55: a turn after one kept open for delegated tasks decides afresh; the cleared mark
+            // that keeping set goes (not one the user set by closing its island since).
+            if kind == "task" {
+                let db = self.db.lock().unwrap();
+                db.execute("DELETE FROM cleared WHERE thread=?1 AND ms=(SELECT ms FROM kept_for_children WHERE thread=?1)", [&w.thread])?;
+                db.execute("DELETE FROM kept_for_children WHERE thread=?", [&w.thread])?;
+            }
+            // Crewmates (crew.rs): every result goes into the crew's history; a routine one (from a schedule or a
+            // project's own tool) and a first failure Heimdall resumes by itself reach the agent only in the digest.
+            let crewmate = if kind == "task" && usual { self.crewmate_of(&w.thread) } else { None };
+            if crewmate.is_some() {
+                let reply = last.own.as_deref().or(last.reply.as_deref());
+                let quiet = self.crew().map(|c| c.on_result(&w.thread, run, state, reply, still.as_deref(), &last.carried)).unwrap_or(false);
+                if quiet {
+                    let db = self.db.lock().unwrap();
+                    db.execute("INSERT OR IGNORE INTO notices VALUES(?1,?2,?3,'crew')", params![key, w.thread, run])?;
+                    for done in last.carried.iter().chain([run]) {
+                        db.execute("DELETE FROM withheld WHERE thread=? AND run=?", params![w.thread, done])?;
+                    }
+                    db.execute("DELETE FROM pending_finals WHERE thread=? AND run=?", params![w.thread, run])?;
+                    return Ok(());
+                }
+            }
+            // Lane S (night 10–11 Nov, proposal 1): a task closes itself when its final reply is delivered. A crewmate's
+            // thread never does: it stays open between messages (the user, 16:07: "you never close him, you just steer him").
+            let close = if kind == "task" && usual && !keep && crewmate.is_none() && state == "completed" && still.is_none() && *self.self_close.lock().unwrap() { self.closes_itself(&w.thread, last.own.as_deref().or(last.reply.as_deref())).await } else { None };
+            // Bug note 2026-11-12T00-19-55: a task kept open for its delegated tasks says so instead.
+            let (closed, kept) = match close {
+                Some(Close::Closes(line)) => (Some(line), None),
+                Some(Close::Kept(line)) => (None, Some(line)),
+                None => (None, None),
+            };
             let still = still.as_deref();
             carried = last.carried.clone();
             // The reply itself, whole: Heimdall never needs a read just to see the answer.
@@ -1216,6 +1538,11 @@ impl Workers {
                     crate::text::finished_with(&w.thread, title.as_deref(), state, last.reply.as_deref(), 0, still),
                 )
             };
+            // Lane S: the self-closed task's line after its reply.
+            let (text, short) = match closed.as_deref().or(kept.as_deref()) {
+                Some(line) => (crate::text::with_line(&text, line), crate::text::with_line(&short, line)),
+                None => (text, short),
+            };
             // Written to the outbox and recorded as sent before the delivery is tried: a delivery that fails now goes
             // out from the outbox later. The turns it carries are retired once it is delivered: at once, or by
             // `retire_carried` when the outbox (or the heartbeat's resend, which carries them again) delivers it
@@ -1225,6 +1552,11 @@ impl Workers {
             let recorded = self.db.lock().unwrap().query_row("SELECT EXISTS(SELECT 1 FROM notices WHERE id=?)", [&key], |r| r.get::<_, bool>(0))?;
             if !recorded {
                 return emitted;
+            }
+            // Bug note 2026-11-13T12-27-46: the result reached Heimdall; its job island may leave after a short grace.
+            if emitted.is_ok() {
+                let hook = self.result_hook.lock().unwrap().clone();
+                if let Some(h) = hook { h(&w.thread) }
             }
             // The background commands this notice names as still running (or unchecked): Heimdall has heard of them,
             // so later turns that wait only on them are progress (`repeat`, bug note 22-19-38).
@@ -1242,6 +1574,15 @@ impl Workers {
                         db.execute("INSERT OR REPLACE INTO watch_notices VALUES(?,?,?)", params![w.thread, label, crate::now_ms() as i64])?;
                     }
                 }
+            }
+            // Lane S: delivered now, so it closes: archived at once when nothing of it runs (`archive_if_finished`, the
+            // cleared-island rule), else by a later pass once it is (`archive_cleared`). A delivery that failed leaves it
+            // open, so the outbox and the heartbeat still have a task to bring the result for.
+            if closed.is_some() && emitted.is_ok() {
+                self.close_delivered(&w.thread, run).await;
+            }
+            if kept.is_some() && emitted.is_ok() {
+                self.kept_open(&w.thread);
             }
             if emitted.is_err() {
                 let db = self.db.lock().unwrap();
@@ -1266,6 +1607,95 @@ impl Workers {
         }
         emitted
     }
+    // ---- Lane S (night 10–11 Nov, proposal 1): tasks that close themselves. ----
+    // The relay closed 254 of 363 delivered tasks with task_cancel ("Delivered."), 79 of them a step on their own.
+    // A task whose run completed with nothing of it still open (no sub-agent or background work named, no question or
+    // approval in T3) closes itself: its final notice says so, and once that notice is delivered the task is closed the
+    // way an island the user cleared is (`clear_task`, `archive_if_finished`): archived only when T3 shows no run, question
+    // or approval and none of its background work still runs, so nothing it started is cut off. A later message to it
+    // unarchives it and starts a turn (`orchestrator::resend_archived`). Returns the notice's line, or None when it stays
+    // open (something is open, or T3 could not be asked: then it stays as before, for task_cancel).
+    async fn closes_itself(&self, thread: &str, reply: Option<&str>) -> Option<Close> {
+        // Review 1111 S1: a reply that asks the user something or reports a staged build waits on him (`text::waits_on_user`).
+        if reply.is_some_and(crate::text::waits_on_user) {
+            return None;
+        }
+        if self.approval_wait(thread).ok()?.is_some() || self.background_open(thread).ok()? {
+            return None;
+        }
+        if !crate::question_ids(&self.client, thread).await.ok()?.is_empty() {
+            return None;
+        }
+        // Bug note 2026-11-12T00-19-55: tasks it started with T3's own delegate_task still run, and T3 wakes it when
+        // they finish, but never once it is archived. So it stays open, its notice says what it waits on, and once delivered
+        // it is marked cleared (`kept_open`): archived by a later pass once they are done and no turn of it runs, so a
+        // child that ends without waking it (cancelled, deleted) leaves no task open for good.
+        let live = self.live_delegated(thread).await.ok()?;
+        if !live.is_empty() {
+            return Some(Close::Kept(crate::text::waits_on_delegated(&live)));
+        }
+        Some(Close::Closes(CLOSED.into()))
+    }
+    /// Bug note 2026-11-12T00-19-55 (night 11–12 Nov): the titles of the tasks `thread` started with T3's own
+    /// `delegate_task` (child threads `thread:delegated-task:…` whose `parentThreadId` is it) that are still live
+    /// in T3. Their activity on the parent's timeline proves nothing: a lane continued by a message shows only
+    /// "completed" items there, so the child threads' own status is asked (one list of live threads of the task's
+    /// project, sub-agents included). T3 delivers a child's completion to its parent as a new turn only while the
+    /// parent is not archived (`planDelegatedCompletionDelivery` disposes it otherwise; checked in T3's server, 12
+    /// Nov): the integrator archived by its self-close at 23:04 was never woken when its lane finished at 00:01.
+    async fn live_delegated(&self, thread: &str) -> Result<Vec<String>> {
+        // Every project: delegate_task may start a child in another project than its parent's (`target.projectId`).
+        let mut rows = vec![];
+        let mut cursor = Value::Null;
+        for _ in 0..5 {
+            let mut args = json!({"allProjects":true,"statuses":crate::threads::ACTIVE,"limit":100,"includeSubagents":true});
+            if !cursor.is_null() {
+                args["cursor"] = cursor.clone();
+            }
+            let page = self.client.call("t3_thread_list", args).await?;
+            rows.extend(page["threads"].as_array().context("T3 thread list missing")?.iter().cloned());
+            cursor = page["nextCursor"].clone();
+            if cursor.is_null() {
+                break;
+            }
+        }
+        Ok(rows
+            .iter()
+            .filter(|r| r["parentThreadId"] == thread && r["archived"] != true && crate::observer::delegated_child(r))
+            .map(|r| crate::text::title(r["title"].as_str().unwrap_or("delegated task")))
+            .collect())
+    }
+    /// The delivered half of `closes_itself`: the cleared mark, then the archive if nothing of it runs now.
+    async fn close_delivered(&self, thread: &str, run: &str) {
+        if let Err(e) = self.db.lock().unwrap().execute("INSERT OR REPLACE INTO cleared VALUES(?,?)", params![thread, crate::now_ms() as i64]) {
+            eprintln!("t3: finished task {thread} not marked to close: {e:#}");
+            return;
+        }
+        match self.archive_if_finished(thread, Some(run)).await {
+            Ok(Some(title)) => {
+                eprintln!("t3: finished task '{title}' ({thread}) closed itself with its delivered result");
+                // Heimdall's own archive is not news.
+                let _ = self.quiet_for(thread, 10 * 60 * 1000);
+                self.changed.notify_one();
+            }
+            Ok(None) => eprintln!("t3: finished task {thread} closes once nothing of it runs"),
+            Err(e) => eprintln!("t3: finished task {thread} not archived yet: {e:#}"),
+        }
+    }
+    /// Bug note 2026-11-12T00-19-55: the delivered half of a task kept open for its delegated tasks: cleared, so
+    /// `archive_cleared` closes it once they are done (`archive_if_finished` waits for them and `KEPT_QUIET_MS`).
+    fn kept_open(&self, thread: &str) {
+        let db = self.db.lock().unwrap();
+        let now = crate::now_ms() as i64;
+        if let Err(e) = db.execute("INSERT OR REPLACE INTO kept_for_children VALUES(?,?)", params![thread, now]).and_then(|_| db.execute("INSERT OR REPLACE INTO cleared VALUES(?,?)", params![thread, now])) {
+            eprintln!("t3: finished task {thread} kept for its delegated tasks not marked to close: {e:#}");
+        }
+    }
+    /// Whether finished tasks close themselves (on by default; `set_self_close`).
+    pub fn set_self_close(&self, on: bool) {
+        *self.self_close.lock().unwrap() = on;
+    }
+    // ---- end lane S ----
     /// Bug note 2026-10-24T23-34-21: what a task's finished turn means for a sign-in episode. A turn failing on its
     /// provider's sign-in (`text::auth_failure`) starts one: not reported, one automatic retry after `AUTH_RETRY_MS`;
     /// more such failures before that retry are the same episode. One after the retry is reported, saying the retry
@@ -1366,19 +1796,224 @@ impl Workers {
         let now = crate::now_ms();
         let cooldown = *self.auth_cooldown_ms.lock().unwrap();
         Ok(match row {
-            // Bounded: a retry that cannot be sent (T3 refusing it) never keeps Heimdall's messages out for long
-            // (review 27 Oct); past the cooldown after it was due, a send goes through.
-            Some((failed, None, reason)) if now < (failed as u64).saturating_add(*self.auth_retry.lock().unwrap()).saturating_add(cooldown) => Some(format!(
-                "NOT_SENT: thread {thread}'s last turn failed on its sign-in ({reason}); Heimdall retries it once by itself in {} min, so this message would only stack behind the same failure. Nothing to send now.",
-                (failed as u64).saturating_add(*self.auth_retry.lock().unwrap()).saturating_sub(now).div_ceil(60_000)
-            )),
-            Some((failed, Some(retried), reason)) if failed > retried && now.saturating_sub(failed as u64) < cooldown => Some(format!(
+            // night1114 relay (bug note 2026-11-13T10-54-06): while the automatic retry is pending, a send goes through
+            // and is that retry (`auth_retry_pending`); the user's restart at 10:48 was refused twice instead.
+            Some((failed, Some(retried), reason)) if failed >= retried && now.saturating_sub(failed as u64) < cooldown => Some(format!(
                 "NOT_SENT: thread {thread} failed on its sign-in again after Heimdall's automatic retry ({reason}); a message now fails the same way. Send after {} min, once its provider is signed in again in T3.",
                 (failed as u64 + cooldown).saturating_sub(now).div_ceil(60_000)
             )),
             _ => None,
         })
     }
+    // A send is the pending sign-in retry (bug note 2026-11-13T10-54-06)
+    /// The sign-in failure whose automatic retry is still pending for `thread`, if any: a send now goes out as that retry.
+    fn auth_retry_pending(&self, thread: &str) -> Result<Option<String>> {
+        Ok(self.db.lock().unwrap().query_row("SELECT reason FROM auth_failures WHERE thread=? AND retried_ms IS NULL", [thread], |r| r.get::<_, String>(0)).optional()?)
+    }
+    /// A send is about to go out while the retry is pending: it becomes the retry, marked BEFORE it goes out so the turn
+    /// watcher reads its failure as the retry failing (review: a sign-in turn fails within the send's own round trips).
+    /// A replayed operation sent nothing new: `false`, nothing marked.
+    fn auth_retry_take(&self, thread: &str, op: &str) -> Result<bool> {
+        let db = self.db.lock().unwrap();
+        let replay = db.query_row("SELECT EXISTS(SELECT 1 FROM operations WHERE id=?)", [op], |r| r.get::<_, bool>(0))?;
+        if replay { return Ok(false); }
+        Ok(db.execute("UPDATE auth_failures SET retried_ms=? WHERE thread=? AND retried_ms IS NULL", params![crate::now_ms() as i64, thread])? > 0)
+    }
+    /// The send's result, telling the caller it was the retry; a send that failed gives the automatic retry back.
+    fn auth_retry_sent(&self, retry: Option<(String, String)>, sent: Result<String>) -> Result<String> {
+        let Some((thread, reason)) = retry else { return sent };
+        match sent {
+            Ok(text) => {
+                eprintln!("t3: {thread} retried by a send after its sign-in failure; the automatic retry is off");
+                Ok(text + &format!("\nIts last turn had failed on its sign-in ({reason}); this message is its retry, so Heimdall's automatic retry is off. If it fails the same way, its provider needs signing in again in T3."))
+            }
+            Err(e) => {
+                self.db.lock().unwrap().execute("UPDATE auth_failures SET retried_ms=NULL WHERE thread=?", [&thread])?;
+                Err(e)
+            }
+        }
+    }
+    // ---- account failover (bug note 2026-11-06T12-26-36) ----
+    /// The accounts' reading through the app's hook, on a blocking thread (a fresh reading may run the quota script).
+    async fn read_accounts(&self, wait: bool) -> Option<std::result::Result<Vec<agent::accounts::AccountQuota>, String>> {
+        let hook = self.accounts.lock().unwrap().clone()?;
+        Some(tokio::task::spawn_blocking(move || hook(wait)).await.unwrap_or_else(|e| Err(format!("the quota read stopped: {e}"))))
+    }
+    /// Accounts Heimdall saw hit a limit, with when that ends.
+    fn spent_accounts(&self) -> Result<Vec<(String, u64)>> {
+        Ok(self.db.lock().unwrap().prepare("SELECT instance,until_ms FROM spent_accounts")?.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64)))?.collect::<rusqlite::Result<_>>()?)
+    }
+    /// A task's turn that failed on a usage limit (`failover::usage_limit`, its last words' first line): the account
+    /// is recorded as spent until it resets, and the task moves (`FailStep::Move`, done by `failover_moves`) to the
+    /// account `failover::choose` names, unless the failover is off, the task already moved since that limit
+    /// (`failover::may_move`), or no account has quota left (then the notice says why it stayed).
+    async fn failover_step(&self, thread: &str, run: &str, state: &str, reply: Option<&str>) -> Result<FailStep> {
+        let first = reply.and_then(|r| r.lines().map(str::trim).find(|l| !l.is_empty()));
+        let Some(window) = first.filter(|_| state == "failed").and_then(crate::failover::usage_limit) else { return Ok(FailStep::None) };
+        // A notice tried again after the plan was made: the plan stands.
+        let planned = self.db.lock().unwrap().query_row("SELECT EXISTS(SELECT 1 FROM task_failovers WHERE thread=? AND run=?)", params![thread, run], |r| r.get::<_, bool>(0))?;
+        if planned {
+            return Ok(FailStep::Move);
+        }
+        let Some(reading) = self.read_accounts(true).await else { return Ok(FailStep::None) };
+        if reading.as_ref().err().is_some_and(|e| e == ACCOUNTS_OFF) {
+            return Ok(FailStep::None);
+        }
+        let shell = self.client.call("t3_thread_read", json!({"threadId":thread,"limit":1,"maxCharsPerItem":1,"runLimit":1})).await?;
+        let (provider, model): (String, String) = self.db.lock().unwrap().query_row("SELECT provider,model FROM workers WHERE thread=?", [thread], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let from = shell["thread"]["providerInstanceId"].as_str().filter(|s| !s.is_empty()).map_or(provider, str::to_owned);
+        let model = shell["thread"]["model"].as_str().filter(|s| !s.is_empty()).map_or(model, str::to_owned);
+        let now = crate::now_ms();
+        let accounts = reading.as_ref().map(Vec::clone).unwrap_or_default();
+        // Codex says "You've hit your usage limit" too: only a Claude thread's limit moves it (night review H2, 6 Nov).
+        if !crate::failover::is_claude(&from, &accounts) {
+            return Ok(FailStep::None);
+        }
+        let until = crate::failover::back_ms(&from, &accounts, reply.unwrap_or(""), now);
+        self.db.lock().unwrap().execute(
+            "INSERT INTO spent_accounts VALUES(?1,?2) ON CONFLICT(instance) DO UPDATE SET until_ms=MAX(until_ms,?2)",
+            params![from, until as i64],
+        )?;
+        let name = crate::failover::account_name(&from);
+        if let Err(why) = reading {
+            return Ok(FailStep::Report(format!("It stopped on {name}'s {window} limit; Heimdall could not read the other accounts' quota ({why}), so it did not move it.")));
+        }
+        // Only plans that moved or still may: a dropped plan or a give-up has `until_ms` 0 (night review H1, 6 Nov).
+        let last: Option<i64> = self.db.lock().unwrap().query_row("SELECT MAX(until_ms) FROM task_failovers WHERE thread=? AND until_ms>0", [thread], |r| r.get(0))?;
+        if !crate::failover::may_move(last.map(|u| u as u64), now) {
+            return Ok(FailStep::Report(format!(
+                "It stopped on {name}'s {window} limit after Heimdall had already moved it once since the last limit; it was not moved again (one move per limit reset)."
+            )));
+        }
+        let Some(to) = crate::failover::choose(&from, &accounts, &self.spent_accounts()?, now) else {
+            let why = if accounts.iter().any(|a| a.kind == agent::accounts::Kind::Claude && a.instance != from) { "no other Claude account has quota left" } else { "the quota reading lists no other Claude account" };
+            return Ok(FailStep::Report(format!("It stopped on {name}'s {window} limit; {why}, so Heimdall did not move it.")));
+        };
+        self.db.lock().unwrap().execute(
+            "INSERT OR IGNORE INTO task_failovers(thread,run,from_instance,to_instance,model,limit_window,at_ms,until_ms,sent_ms) VALUES(?,?,?,?,?,?,?,?,NULL)",
+            params![thread, run, from, to, model, window, now as i64, until as i64],
+        )?;
+        eprintln!("t3: {thread} run {run} failed on {from}'s {window} limit; moving it to {to}");
+        Ok(FailStep::Move)
+    }
+    /// The moves `failover_step` planned: the thread is put on the other account (`t3_thread_configure`
+    /// `modelSelection`, the relay's own call at 12:26) and resumed with `failover::resume_message`, idempotent by the
+    /// failed run. Then one quiet notice says what moved: context for the agent (no wake) and an island notice for
+    /// The user. A task that is working again by itself, or archived, needs no move. A move that cannot be made is retried
+    /// on the next pass and reported as the failure after `failover::GIVE_UP_MS`.
+    async fn failover_moves(&self, permit: &DeliveryPermit) -> Result<()> {
+        type Due = (String, String, String, String, String, String, i64);
+        let due: Vec<Due> = self
+            .db
+            .lock()
+            .unwrap()
+            .prepare("SELECT thread,run,from_instance,to_instance,model,limit_window,at_ms FROM task_failovers WHERE sent_ms IS NULL")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (thread, run, from, to, model, window, at) in due {
+            let now = crate::now_ms();
+            let current: Option<(Option<String>, String)> = self.db.lock().unwrap().query_row("SELECT run,status FROM workers WHERE thread=? AND kind='task' AND archived=0", [&thread], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+            if !current.as_ref().is_some_and(|(r, status)| r.as_deref() == Some(run.as_str()) && !crate::threads::ACTIVE.contains(&status.as_str())) {
+                // Archived, or moved and resumed by someone else meanwhile: nothing to do. No move was made, so the plan
+                // never holds back a later one (`until_ms` 0).
+                self.db.lock().unwrap().execute("UPDATE task_failovers SET sent_ms=?,until_ms=0 WHERE thread=? AND run=?", params![now as i64, thread, run])?;
+                continue;
+            }
+            let key: String = run.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).collect();
+            let message = crate::failover::resume_message(&window, &from, &to);
+            // The task's own options (its effort) go with it: a selection without them would resume at the default
+            // (night review, 6 Nov). delegate_task's result keeps the options it launched with.
+            let options: Option<Value> = self
+                .db
+                .lock()
+                .unwrap()
+                .query_row("SELECT result FROM operations WHERE kind='delegate_task' AND json_extract(result,'$.task_id')=? ORDER BY rowid DESC LIMIT 1", [&thread], |r| r.get::<_, Option<String>>(0))
+                .optional()?
+                .flatten()
+                .and_then(|r| serde_json::from_str::<Value>(&r).ok())
+                .map(|r| r["options"].clone())
+                .filter(|o| o.as_object().is_some_and(|o| !o.is_empty()));
+            let mut selection = json!({"instanceId": to, "model": model});
+            if let Some(options) = options {
+                selection["options"] = options;
+            }
+            let moved = async {
+                self.client.call("t3_thread_configure", json!({"threadId": thread, "modelSelection": selection})).await?;
+                self.client.call("t3_thread_send", json!({"threadId": thread, "message": message, "mode": "auto", "clientRequestId": format!("heimdall-failover-{key}")})).await
+            };
+            match permit.run(moved).await {
+                Ok(r) => {
+                    eprintln!("t3: {thread} moved from {from} to {to} after its {window} limit, and resumed");
+                    let next = r["runId"].as_str().map(str::to_owned);
+                    {
+                        let db = self.db.lock().unwrap();
+                        db.execute("UPDATE task_failovers SET sent_ms=? WHERE thread=? AND run=?", params![now as i64, thread, run])?;
+                        db.execute("UPDATE workers SET provider=? WHERE thread=?", params![to, thread])?;
+                        if let Some(next) = &next {
+                            db.execute("UPDATE workers SET run=?,status=? WHERE thread=? AND kind='task'", params![next, r["status"].as_str().unwrap_or("running"), thread])?;
+                            db.execute("INSERT OR IGNORE INTO sent_runs VALUES(?,?,?)", params![thread, next, now as i64])?;
+                        }
+                    }
+                    let title = crate::text::title(&self.task_title(&thread).unwrap_or_default());
+                    let (a, b) = (crate::failover::account_name(&from), crate::failover::account_name(&to));
+                    let text = format!("Task '{title}' ({thread}) stopped on {a}'s {window} limit; Heimdall moved it to {b} and resumed it there. Nothing to do.");
+                    let w = Worker { thread: thread.clone(), run: next, status: "running".into() };
+                    self.emit(&format!("{FAILOVER_NOTICE}{thread}:{run}"), &w, "failover", &text, permit).await?;
+                    let _ = self.actions.notice(&format!("{FAILOVER_NOTICE}island:{thread}:{run}"), &format!("'{title}' moved to {b} ({a} hit its {window} limit)"), "success", None, permit);
+                }
+                Err(e) if now.saturating_sub(at as u64) < crate::failover::GIVE_UP_MS => eprintln!("t3: moving {thread} to {to} did not go through ({e:#}); trying again on the next pass"),
+                Err(e) => {
+                    // Given up: no move was made (`until_ms` 0, as a dropped plan).
+                    self.db.lock().unwrap().execute("UPDATE task_failovers SET sent_ms=?,until_ms=0 WHERE thread=? AND run=?", params![now as i64, thread, run])?;
+                    let w = Worker { thread: thread.clone(), run: Some(run.clone()), status: "failed".into() };
+                    let line = format!(
+                        "It stopped on {}'s {window} limit and Heimdall's move to {} could not be made ({e:#}).",
+                        crate::failover::account_name(&from),
+                        crate::failover::account_name(&to)
+                    );
+                    self.terminal_notice_as(&w, "failed", Some(&line), false, Some(format!("terminal:{thread}:{run}:failed:failover")), permit).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+    /// A new task's Claude account (`delegate_task`): one Heimdall saw hit its limit, or the reading shows spent, gives
+    /// way to the account `failover::choose` names when that one offers the same model. Returns the selection and a
+    /// line for the answer saying so; anything that fails keeps the original choice.
+    async fn quota_route(&self, target: &Value, selection: Value, family: String, provider: String) -> (Value, String, String, String) {
+        let keep = |s: Value, f: String, p: String| (s, f, p, String::new());
+        if family != "claude" || self.accounts.lock().unwrap().is_none() {
+            return keep(selection, family, provider);
+        }
+        let now = crate::now_ms();
+        let Ok(spent) = self.spent_accounts() else { return keep(selection, family, provider) };
+        let seen = spent.iter().any(|(i, until)| *i == provider && *until > now);
+        let quick = match self.read_accounts(false).await {
+            Some(Ok(a)) => a,
+            _ => vec![],
+        };
+        let reading_spent = quick.iter().find(|a| a.instance == provider).is_some_and(|a| agent::accounts::spent_until(a, now).is_some());
+        if !seen && !reading_spent {
+            return keep(selection, family, provider);
+        }
+        let accounts = match self.read_accounts(true).await {
+            Some(Ok(a)) => a,
+            _ => quick,
+        };
+        let Some(to) = crate::failover::choose(&provider, &accounts, &spent, now) else { return keep(selection, family, provider) };
+        let mut other = target.clone();
+        other["providerInstanceId"] = json!(to);
+        // The model picked for the spent account, also when the target named none (the public edition's default).
+        other["model"] = selection["model"].clone();
+        match self.selection(&other).await {
+            Ok((s, f, p)) => {
+                let line = format!(" It runs on {}: {} has no quota left.", crate::failover::account_name(&p), crate::failover::account_name(&provider));
+                (s, f, p, line)
+            }
+            Err(_) => keep(selection, family, provider),
+        }
+    }
+    // ---- end account failover ----
     /// Bug note 2026-10-24T23-42-04 (seven of Heimdall's messages stacked on one worker): a send to a thread where
     /// Heimdall's own earlier message still waits in T3's queue joins that message (`t3_queue` edit, the same queued
     /// run, followed as before) instead of queuing another turn. Entries T3 no longer lists are forgotten.
@@ -1836,7 +2471,8 @@ impl Workers {
         // Reading the thread's requests never stands between a finished run and its notice (bug notes
         // 2026-11-02T16-05-08, 16-19-09: the listing failed on a completed task that T3 still counted a hook-answered
         // approval on, and the scan stopped before the notice). A live run's failed read is retried next pass.
-        if t["pendingRequestCount"].as_u64().unwrap_or(0) == 0 {
+        // T3's "waiting" with no count is a wait too (bug note 2026-11-06T11-57-54; `threads::asks` already reads it so).
+        if t["pendingRequestCount"].as_u64().unwrap_or(0) == 0 && !(t["status"] == "waiting" && !terminal(&state)) {
             self.db.lock().unwrap().execute("DELETE FROM approval_waits WHERE thread=?", [&w.thread])?;
         } else {
             if let Err(e) = self.pending_requests(&t, &current, &who, &state, permit).await {
@@ -2043,6 +2679,9 @@ impl Workers {
             }
         }
         let counted = t["pendingRequestCount"].as_u64().unwrap_or(0).saturating_sub(ids.len() as u64);
+        // "waiting" with no question listed and nothing counted: an approval T3 shows but does not count (bug note
+        // 2026-11-06T11-57-54).
+        let counted = if counted == 0 && ids.is_empty() && t["status"] == "waiting" { 1 } else { counted };
         let approval = if counted > 0 && !terminal(state) { crate::waits_on_approval(&self.client, thread, t, counted).await? } else { None };
         let Some(approval) = approval else {
             self.db.lock().unwrap().execute("DELETE FROM approval_waits WHERE thread=?", [thread])?;
@@ -2063,7 +2702,7 @@ impl Workers {
         };
         let open = link.map(|l| format!(" Open it: {l}")).unwrap_or_default();
         let asks = approval.text.as_deref().map(|t| format!(" It asks: {t}")).unwrap_or_default();
-        self.emit(&id, current, "approval", &format!("{who} waits for an approval in T3; only User can give it there.{asks}{open}"), permit).await?;
+        self.emit(&id, current, "approval", &format!("{who} waits for an approval in T3; only {} can give it there.{asks}{open}", agent::identity::user()), permit).await?;
         Ok(())
     }
     /// Heimdall's own message started run `run` on `thread` (a `t3_thread_send`, the sign-in retry).
@@ -2209,6 +2848,10 @@ impl Workers {
         if let Err(e) = self.auth_retries(permit).await {
             failed.get_or_insert(e);
         }
+        // Tasks that failed on a usage limit, moved to an account with quota (bug note 2026-11-06T12-26-36).
+        if let Err(e) = self.failover_moves(permit).await {
+            failed.get_or_insert(e);
+        }
         // Tasks whose job island the user closed, finished and reported by now: archived.
         if let Err(e) = permit.run(self.archive_cleared()).await {
             failed.get_or_insert(e);
@@ -2238,7 +2881,9 @@ impl Workers {
             // 2026-11-01T00-15-42, `threads::asks`).
             let rows = self.page_threads(&project, &crate::threads::ACTIVE, 100, 5, true).await?;
             let parent_of = |id: &str| rows.iter().find(|r| r["threadId"] == id).and_then(|r| r["parentThreadId"].as_str().map(str::to_owned));
-            for child in rows.iter().filter(|r| r["relationshipToParent"] == "subagent" && crate::threads::asks(r)) {
+            // A live child whose row carries no request count (T3's list rows never do) may wait on an approval while
+            // it reads "running" (bug note 2026-11-06T11-57-54): it is read below, once its followed ancestor is known.
+            for child in rows.iter().filter(|r| r["relationshipToParent"] == "subagent" && (crate::threads::asks(r) || crate::threads::count_unknown(r))) {
                 let Some(id) = child["threadId"].as_str() else { continue };
                 // The nearest followed ancestor; a sub-agent's own sub-agent reports to the same task.
                 let mut parent = child["parentThreadId"].as_str().map(str::to_owned);
@@ -2257,10 +2902,32 @@ impl Workers {
                     };
                 }
                 let Some(root) = root else { continue };
-                self.subagent_request(&root, id, child, permit).await?;
+                if crate::threads::asks(child) {
+                    self.subagent_request(&root, id, child, permit).await?;
+                } else {
+                    // One unreadable sub-agent never ends the pass for the others (night review, 6 Nov).
+                    match self.subagent_shell(id, child).await {
+                        Ok(Some(shell)) => self.subagent_request(&root, id, &shell, permit).await?,
+                        Ok(None) => {}
+                        Err(e) => eprintln!("t3: sub-agent {id} of {root} not read for approvals this pass: {e:#}"),
+                    }
+                }
             }
         }
         Ok(())
+    }
+    /// Bug note 2026-11-06T11-57-54: a live sub-agent whose list row carries no request count, read for its shell
+    /// (`pendingRequestCount`, the run it is on); `None` when it holds none. One small read per live child of a
+    /// followed task per pass; never cached, since a card arriving need not change the row T3 lists.
+    async fn subagent_shell(&self, child: &str, row: &Value) -> Result<Option<Value>> {
+        let r = self.client.call("t3_thread_read", json!({"threadId":child,"limit":1,"maxCharsPerItem":1,"runLimit":1})).await?;
+        let mut shell = r["thread"].clone();
+        if !shell.is_object() { return Ok(None) }
+        // The list row's names fill what the shell leaves out (the title the notice uses).
+        for k in ["title", "parentThreadId", "relationshipToParent", "latestRunId"] {
+            if shell.get(k).is_none_or(Value::is_null) { shell[k] = row[k].clone(); }
+        }
+        Ok(crate::threads::asks(&shell).then_some(shell))
     }
     /// One waiting sub-agent thread's questions (each once) or its approval wait, as `root`'s notice. The thread id
     /// in the line is the one an answer (`t3_pending_request` respond) needs.
@@ -2289,7 +2956,7 @@ impl Workers {
             if let Some(approval) = crate::waits_on_approval(&self.client, child, row, counted).await? {
                 let run = row["latestRunId"].as_str().unwrap_or("idle");
                 let asks = approval.text.as_deref().map(|t| format!(" It asks: {t}")).unwrap_or_default();
-                let text = format!("{who}: its sub-agent '{name}' waits for an approval in T3; only User can give it there [thread {child}].{asks}");
+                let text = format!("{who}: its sub-agent '{name}' waits for an approval in T3; only {} can give it there [thread {child}].{asks}", agent::identity::user());
                 let id = match approval.call.as_deref() {
                     Some(call) => format!("approval:{child}:{run}:{call}"),
                     None => format!("approval:{child}:{run}"),
@@ -2529,6 +3196,9 @@ impl Workers {
                         let reach=self.client.auto_connect().await;
                         let offline=self.reachability(&reach,&permit)?;
                         if self.connection()==super::observer::ConnectionState::SignInRequired || (!offline && self.client.expiry_notice()?) {self.connect_prompt(&permit)?;}
+                        // Crewmates: their inbox, schedules, resumes, sub-job wakes and lost threads (crew.rs). Before the
+                        // scans: a crew thread gone from T3 is let go here, so its failing read does not end the pass.
+                        if !offline { if let Some(crew)=self.crew() { if let Err(e)=permit.run(crew.pass(&permit)).await { eprintln!("t3: crew pass: {e:#}"); } } }
                         if let Err(e)=self.scan_all(&permit).await {
                             if e.to_string().starts_with("T3_AUTH_REQUIRED") {self.set_connection_sign_in();self.connect_prompt(&permit)?;}
                             return Err(e);
@@ -2602,6 +3272,12 @@ async fn hold_sleep(due: Option<u64>) {
         None => std::future::pending().await,
     }
 }
+/// What `Workers::closes_itself` decided for a finished task: it closes (the notice's line), or it stays open for the
+/// delegated tasks it still waits on (the line naming them; bug note 2026-11-12T00-19-55).
+enum Close {
+    Closes(String),
+    Kept(String),
+}
 /// The work a followed thread still waits on (`Workers::open_children`): sub-agent labels, background commands
 /// still within `BACKGROUND_HOLD_MS`, and background commands past it.
 struct Open {
@@ -2624,6 +3300,61 @@ struct Open {
     stale_gone: usize,
     stale_gone_recent: usize,
 }
+// ---- Lane S (night 10–11 Nov, proposal 5): delegate_task's target is optional. ----
+/// The model a task gets when its brief names none in the personal edition: 79% of 363 delegations named it, with
+/// medium effort in 66%. The public edition names no vendor: it takes the user's own T3 providers (`catalog_default`).
+#[cfg(not(feature = "public"))]
+pub const DEFAULT_TASK_MODEL: &str = "claude-opus-5-5";
+#[cfg(not(feature = "public"))]
+pub const DEFAULT_TASK_EFFORT: &str = "medium";
+/// `target` with its defaults: no model means Claude Opus 5.5 at medium effort (an effort given still wins). The
+/// account is left open, so `selection` picks the Claude account with quota left (`failover::default_account`).
+#[cfg(not(feature = "public"))]
+pub fn default_target(target: &Value) -> Value {
+    if target["model"].as_str().is_some_and(|m| !m.trim().is_empty()) {
+        return target.clone();
+    }
+    let mut t = if target.is_object() { target.clone() } else { json!({}) };
+    t["model"] = json!(DEFAULT_TASK_MODEL);
+    if t["options"]["effort"].is_null() {
+        if !t["options"].is_object() {
+            t["options"] = json!({});
+        }
+        t["options"]["effort"] = json!(DEFAULT_TASK_EFFORT);
+    }
+    t
+}
+/// The public edition: `target` as given. Without a model, `selection` takes `catalog_default` from T3's live catalog
+/// (the providers this user set up in T3), with that model's own default options.
+#[cfg(feature = "public")]
+pub fn default_target(target: &Value) -> Value {
+    if target.is_object() { target.clone() } else { json!({}) }
+}
+/// The model a task without one gets from T3's live catalog (`orchestrator_capabilities`), never a hard-coded vendor:
+/// the model T3 says the caller runs (`inheritedProviderInstanceId`/`inheritedModel`) when it is usable, else the first
+/// usable provider's (enabled, full access) model T3 marks as default (`isDefault`/`default`), else its first listed
+/// model. `provider` (target.providerInstanceId) limits it to that provider. Returns (provider, model); None when T3
+/// lists no usable model.
+pub fn catalog_default(catalog: &Value, provider: Option<&str>) -> Option<(String, String)> {
+    let usable = |p: &Value| {
+        let disabled = p["constraints"].as_array().into_iter().flatten().any(|c| c.as_str().is_some_and(|c| c.contains("disabled")));
+        let full_access = p["runtimeModes"].is_null() || p["runtimeModes"].as_array().is_some_and(|m| m.iter().any(|x| x == "full-access"));
+        !disabled && full_access && provider.is_none_or(|id| p["providerInstanceId"] == id)
+    };
+    let providers: Vec<&Value> = catalog["providers"].as_array().into_iter().flatten().filter(|p| usable(p)).collect();
+    if let (Some(id), Some(model)) = (catalog["inheritedProviderInstanceId"].as_str(), catalog["inheritedModel"].as_str()) {
+        let listed = providers.iter().any(|p| p["providerInstanceId"] == id && p["models"].as_array().is_some_and(|m| m.iter().any(|m| m["id"] == model)));
+        if listed {
+            return Some((id.to_owned(), model.to_owned()));
+        }
+    }
+    providers.iter().find_map(|p| {
+        let models = p["models"].as_array()?;
+        let model = models.iter().find(|m| m["isDefault"] == true || m["default"] == true).or_else(|| models.first())?;
+        Some((p["providerInstanceId"].as_str()?.to_owned(), model["id"].as_str()?.to_owned()))
+    })
+}
+// ---- end lane S ----
 /// `delegate_task`'s answer, from its durable result (also on replay).
 fn started_line(r: &Value) -> String {
     let id = r["task_id"].as_str().unwrap_or("?");
@@ -2642,10 +3373,16 @@ fn started_line(r: &Value) -> String {
 fn launch_kind(kind: &str) -> bool {
     matches!(kind, "delegate_task" | "t3_worker_start")
 }
-/// `$HOME/Work`, the default project folder of a task.
-fn default_path() -> Option<String> {
-    let path = std::path::Path::new(&std::env::var("HOME").ok()?).join("Vault");
-    path.is_dir().then(|| path.to_string_lossy().into_owned())
+/// Review 1111: whether `path` (a real path) is inside the Vault at `vault`, where Claude Code loads its CLAUDE.md.
+fn in_vault(path: &Path, vault: &Path) -> bool {
+    std::fs::canonicalize(vault).is_ok_and(|r| path.starts_with(&r) && r.join("CLAUDE.md").is_file())
+}
+impl Workers {
+    /// The default project folder of a task (`set_default_folder`), when it exists.
+    fn default_path(&self) -> Option<String> {
+        let path = self.default_folder.lock().unwrap().clone()?;
+        path.is_dir().then(|| path.to_string_lossy().into_owned())
+    }
 }
 /// The git checkout holding `path`: its top folder and the repository's common git folder (shared by all of a
 /// repository's worktrees), both real paths. None outside a repository or when git fails.
@@ -2666,13 +3403,23 @@ async fn checkout(path: &Path) -> Option<(std::path::PathBuf, std::path::PathBuf
     let common = std::fs::canonicalize(lines.next()?.trim()).ok()?;
     Some((top, common))
 }
-/// A brief under the default task prompt: the prompt, a rule, then Heimdall's brief.
+/// A brief under the default task prompt: the prompt, the approvals block (`AVOID_APPROVALS`), a rule, then
+/// Heimdall's brief.
 fn with_preamble(preamble: Option<&str>, task: &str) -> String {
     match preamble {
-        Some(p) => format!("{p}\n\n---\n\n{task}"),
+        Some(p) => format!("{p}\n\n{AVOID_APPROVALS}\n\n---\n\n{task}"),
         None => task.to_owned(),
     }
 }
+/// Bug note 2026-11-06T11-57-54, part 2 (fewer approvals): what Claude Code still asks about in full-access mode
+/// (bypassPermissions keeps a few checks; Heimdall's permission hook answers most, but a card it misses stops the task
+/// until the user finds it in T3). Steering, not allowing: no ask is answered automatically here.
+pub const AVOID_APPROVALS: &str = "\
+- Claude Code still stops for approval on a few commands even in full-access mode, and nobody is there to click.
+  Write commands so it never asks: delete with `rm -rf` on literal absolute paths (no variables, globs, `~`, `..`,
+  `$(...)` or relative paths in what you delete); no here-documents or `$(...)` around a delete; never write to
+  `.claude/` settings, `.git/` internals, shell profiles or other config outside your folder unless the brief asks;
+  sub-agents get `delegate_task` in full-access mode. Put the same line in every brief you give a sub-agent.";
 /// `delegate_task`'s workspace binding in `project` for `path`, the brief to send, and the worktree Heimdall made for
 /// the task (its folder and branch), if any. T3 binds a thread to its project's root, to an existing worktree of the
 /// project's own repository, or to a new worktree made from that repository; a thread has no other working folder,

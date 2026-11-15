@@ -63,10 +63,12 @@ def affected(files, by_dir, deps, reads, lab_reads):
     for f in files:
         owner = next((d for d in by_dir if f == d or f.startswith(d + "/")), None)
         if owner is None:
+            if f.startswith(("crates/ming-tts/", "crates/ming-arsenal-runner/")):
+                continue  # standalone Ming TTS for Arsenal (own workspace); no Heimdall crate or test reads it
             if f.startswith("crates/") and not f.endswith(".md"):
                 return None  # a crate outside the workspace (crates/drama-engine): its own gates, so check everything
-            if f in ("BRIEF.md", "COORD.md") or f.startswith("Assistant/"):
-                continue  # a task's brief and notes, untracked; no test reads them
+            if f in ("BRIEF.md", "COORD.md") or f.startswith(("Assistant/", ".claude/", "research/")):
+                continue  # a task's brief and notes, agents' worktrees and settings, research notes; untracked, no test reads them
             if f.startswith("lab/"):
                 # Experiments and their logs reach no test, except the lab fixtures a crate's sources name.
                 hit |= {name for name, prefixes in lab_reads.items() if any(f.startswith(x) for x in prefixes)}

@@ -288,6 +288,146 @@ fn open_chat(c: &mut Checks, dir: &Path, mtm: MainThreadMarker) {
     advance(1.0);
 }
 
+// ---- Night 1111 [input]: the composer's Edit keys (bug note 2026-11-10T16-30-03) ----
+
+/// Bug note 2026-11-10T16-30-03 ("copy paste doesn't work"): ⌘V, ⌘A, ⌘X, ⌘Z and ⇧⌘Z in the focused composer, sent as
+/// AppKit sends a key equivalent to the key window (`performKeyEquivalent:` on the click target; the window is never
+/// key offscreen, so the check calls it as `NSApplication` would). A named lab pasteboard stands in for the general one
+/// (`copy::set_check_pasteboard`): the user's clipboard is never touched.
+fn edit_keys(c: &mut Checks, mtm: MainThreadMarker) {
+    use crate::island::object::Class;
+    use objc2_app_kit::NSPasteboard;
+    let class = || with_host(|h| h.island.class()).unwrap_or(Class::Rest);
+    let control = with_host(|h| h.panels().1).expect("host");
+    crate::mac::shortcuts::run(crate::shortcuts::Shortcut::Chat, mtm);
+    advance(1.0);
+    let field = with_host(|h| h.fields.composer()).flatten();
+    c.check(class() == Class::Reply && field.as_ref().is_some_and(|f| f.currentEditor().is_some()), "⌃⌘H: the composer has the keyboard for the edit keys");
+    let board = NSPasteboard::pasteboardWithName(&super::super::util::ns("HeimdallIslandEditKeysCheck"));
+    board.clearContents();
+    // A long key-like string: one line, longer than the field, as an API key or a pasted paragraph is.
+    let long: String = format!("sk-lab-{}", "0123456789abcdef".repeat(250));
+    board.setString_forType(&super::super::util::ns(&long), unsafe { objc2_app_kit::NSPasteboardTypeString });
+    super::copy::set_check_pasteboard(Some(board.clone()));
+    let n = control.windowNumber();
+    let cmd = NSEventModifierFlags::Command;
+    let press = |code: u16, ch: &str, flags: NSEventModifierFlags| control.performKeyEquivalent(&key(code, ch, flags, n));
+    let shown = || field.as_ref().map(|f| f.stringValue().to_string()).unwrap_or_default();
+    c.check(!press(9, "v", NSEventModifierFlags::empty()), "a plain v is not an edit key (it types)");
+    c.check(press(9, "v", cmd), "⌘V is taken by the island's key panel");
+    advance(0.3);
+    c.check(shown() == long, &format!("⌘V pasted the whole {}-character string ({} shown)", long.len(), shown().len()));
+    c.check(placeholders() == 0, &format!("pasted text hides the placeholder ({})", placeholders()));
+    c.check(press(0, "a", cmd), "⌘A is taken");
+    let selected = field.as_ref().and_then(|f| f.currentEditor()).map_or(0, |e| e.selectedRange().length);
+    c.check(selected == long.len(), &format!("⌘A selects all of it ({selected})"));
+    board.clearContents();
+    c.check(press(7, "x", cmd), "⌘X is taken");
+    advance(0.3);
+    let cut = board.stringForType(unsafe { objc2_app_kit::NSPasteboardTypeString }).map(|s| s.to_string()).unwrap_or_default();
+    c.check(shown().is_empty() && cut == long, &format!("⌘X empties the field ({}) and the pasteboard holds it ({})", shown().len(), cut.len()));
+    c.check(placeholders() == 1, &format!("cut empty: the placeholder is back ({})", placeholders()));
+    c.check(press(6, "z", cmd), "⌘Z is taken");
+    advance(0.3);
+    c.check(shown() == long, &format!("⌘Z undoes the cut ({} shown)", shown().len()));
+    c.check(press(6, "Z", cmd | NSEventModifierFlags::Shift), "⇧⌘Z is taken");
+    advance(0.3);
+    c.check(shown().is_empty(), &format!("⇧⌘Z redoes it ({} shown)", shown().len()));
+    type_in(&field, "copy me", true);
+    press(0, "a", cmd);
+    board.clearContents();
+    c.check(press(8, "c", cmd), "⌘C is taken");
+    let copied = board.stringForType(unsafe { objc2_app_kit::NSPasteboardTypeString }).map(|s| s.to_string()).unwrap_or_default();
+    c.check(copied == "copy me" && shown() == "copy me", &format!("⌘C copies the selection ({copied:?}) and leaves the field ({:?})", shown()));
+    type_in(&field, "", true);
+    super::copy::set_check_pasteboard(None);
+    unsafe { let _: () = objc2::msg_send![&*board, releaseGlobally]; }
+    crate::mac::shortcuts::run(crate::shortcuts::Shortcut::Chat, mtm);
+    advance(1.0);
+}
+
+/// Night 1111 [input] (bug note 2026-11-10T16-30-03, second half): the composer's lock, through the real click path. The
+/// lock turns the composer into a secure field that keeps the keyboard; a pasted secret shows as bullets, ⌘C and ⌘X
+/// take nothing from it, and Return hands it to the app as `UiAction::Secret` alone (no typed message), clears the
+/// field and unlocks the composer, which keeps the keyboard. Renders the locked composer empty and filled, 1x and 2x.
+fn secret_field(c: &mut Checks, dir: &Path, mtm: MainThreadMarker, actions: &std::rc::Rc<std::cell::RefCell<Vec<crate::model::UiAction>>>) {
+    use crate::island::object::Class;
+    use crate::model::UiAction;
+    use objc2_app_kit::NSPasteboard;
+    let class = || with_host(|h| h.island.class()).unwrap_or(Class::Rest);
+    let control = with_host(|h| h.panels().1).expect("host");
+    crate::mac::shortcuts::run(crate::shortcuts::Shortcut::Chat, mtm);
+    advance(1.0);
+    c.check(class() == Class::Reply, "⌃⌘H: the conversation for the secret field");
+    c.check(composite(&dir.join("island-composer-lock-off-2x.png"), Some(4.0)), "the composer with its lock, unlocked, at 2x");
+    c.check(tap(&control, &Target::ComposerLock), "the lock is a target");
+    advance(1.0);
+    let secret = with_host(|h| h.fields.secret_field()).flatten();
+    let secure = secret.as_ref().is_some_and(|f| { use objc2::{ClassType, runtime::NSObjectProtocol}; f.isKindOfClass(objc2_app_kit::NSSecureTextField::class()) });
+    let placed = secret.as_ref().is_some_and(|f| unsafe { f.superview() }.is_some());
+    let editing = secret.as_ref().is_some_and(|f| f.currentEditor().is_some());
+    c.check(secure && placed && editing, &format!("locked: a secure field is placed and has the keyboard (secure {secure}, placed {placed}, editing {editing})"));
+    let plain_placed = with_host(|h| h.fields.composer()).flatten().is_some_and(|f| unsafe { f.superview() }.is_none());
+    c.check(plain_placed, "the plain composer left the view");
+    c.check(composite(&dir.join("island-composer-secret-empty.png"), None), "the locked composer, empty, rendered");
+    c.check(composite(&dir.join("island-composer-secret-empty-2x.png"), Some(4.0)), "and at 2x");
+    let board = NSPasteboard::pasteboardWithName(&super::super::util::ns("HeimdallIslandSecretCheck"));
+    board.clearContents();
+    let value = format!("sk-lab-{}", "f00dcafe".repeat(12));
+    board.setString_forType(&super::super::util::ns(&value), unsafe { objc2_app_kit::NSPasteboardTypeString });
+    super::copy::set_check_pasteboard(Some(board.clone()));
+    let n = control.windowNumber();
+    let cmd = NSEventModifierFlags::Command;
+    c.check(control.performKeyEquivalent(&key(9, "v", cmd, n)), "⌘V in the secret field");
+    advance(0.3);
+    let shown = secret.as_ref().map(|f| f.stringValue().to_string()).unwrap_or_default();
+    c.check(shown == value, &format!("the secret is pasted whole ({} of {} characters)", shown.len(), value.len()));
+    c.check(composite(&dir.join("island-composer-secret-filled.png"), None), "the locked composer, filled, rendered");
+    c.check(composite(&dir.join("island-composer-secret-filled-2x.png"), Some(4.0)), "and at 2x");
+    control.performKeyEquivalent(&key(0, "a", cmd, n));
+    board.clearContents();
+    control.performKeyEquivalent(&key(8, "c", cmd, n));
+    control.performKeyEquivalent(&key(7, "x", cmd, n));
+    advance(0.3);
+    let leaked = board.stringForType(unsafe { objc2_app_kit::NSPasteboardTypeString }).map(|s| s.to_string()).unwrap_or_default();
+    let still = secret.as_ref().map(|f| f.stringValue().to_string()).unwrap_or_default();
+    c.check(!leaked.contains("sk-lab") && still == value, &format!("⌘C and ⌘X take nothing from it (pasteboard {} characters, field {})", leaked.len(), still.len()));
+    super::copy::set_check_pasteboard(None);
+    unsafe { let _: () = objc2::msg_send![&*board, releaseGlobally]; }
+    actions.borrow_mut().clear();
+    control.sendEvent(&key(36, "\r", NSEventModifierFlags::empty(), n));
+    advance(0.2);
+    spin(0.1);
+    let got = actions.borrow().clone();
+    let kept = got.iter().filter(|a| matches!(a, UiAction::Secret(s) if s.expose() == value)).count();
+    let typed = got.iter().filter(|a| matches!(a, UiAction::AgentWindow(_) | UiAction::TypedWithDrop { .. })).count();
+    c.check(kept == 1 && typed == 0, &format!("Return: one UiAction::Secret with the value, no typed message ({kept} secret, {typed} typed)"));
+    c.check(!format!("{got:?}").contains("sk-lab"), "the actions print without the value");
+    let cleared = secret.as_ref().is_some_and(|f| f.stringValue().to_string().is_empty());
+    c.check(cleared, "the secret field is empty after Return");
+    advance(1.0);
+    let composer = with_host(|h| h.fields.composer()).flatten();
+    let back = composer.as_ref().is_some_and(|f| unsafe { f.superview() }.is_some() && f.currentEditor().is_some());
+    c.check(back, "unlocked again: the plain composer is back with the keyboard");
+    c.check(placeholders() == 1, &format!("one placeholder ({})", placeholders()));
+    // Locked, then the pull-down closes: the field's text never waits off screen, and the next one opens unlocked.
+    c.check(tap(&control, &Target::ComposerLock), "locked again");
+    advance(1.0);
+    if let Some(f) = secret.as_ref() {
+        f.setStringValue(&super::super::util::ns("left behind"));
+    }
+    crate::mac::shortcuts::run(crate::shortcuts::Shortcut::Chat, mtm);
+    advance(1.0);
+    let wiped = secret.as_ref().is_some_and(|f| f.stringValue().to_string().is_empty() && unsafe { f.superview() }.is_none());
+    c.check(class() != Class::Reply && wiped, "pulled up while locked: the secret field is off the view and empty");
+    crate::mac::shortcuts::run(crate::shortcuts::Shortcut::Chat, mtm);
+    advance(1.0);
+    let plain = with_host(|h| h.fields.composer()).flatten().is_some_and(|f| unsafe { f.superview() }.is_some());
+    c.check(plain, "opened again: the plain composer");
+    crate::mac::shortcuts::run(crate::shortcuts::Shortcut::Chat, mtm);
+    advance(1.0);
+}
+
 /// Writes the composer's 2x crop to `path` and returns the left and top of the light glyph pixels in it (text over
 /// the field's dark fill), in pixels.
 fn glyphs(path: &Path) -> Option<(i64, i64)> {
@@ -632,6 +772,8 @@ pub(crate) fn render(dir: &Path) -> Vec<String> {
     pull_down(&mut c);
     question_lip(&mut c, &actions);
     open_chat(&mut c, dir, mtm);
+    edit_keys(&mut c, mtm);
+    secret_field(&mut c, dir, mtm, &actions);
     notes_fit(&mut c);
     stills(&mut c, dir, mtm);
     idle_cost(&mut c, mtm);
@@ -656,9 +798,9 @@ pub(crate) fn render_relay_activity(dir: &Path) -> Vec<String> {
     const REPLY: &str = "Green: 412 tests passed. A worker is fixing the slow one; I'll tell you when it lands.";
     let row = |k: u64, kind: ChatKind| ChatEntry { at_ms: 1_792_780_000_000 + k * 1000, kind };
     let earlier = vec![
-        row(0, ChatKind::Owner("What did Dave push this morning?".into())),
+        row(0, ChatKind::User("What did Dave push this morning?".into())),
         row(1, ChatKind::Heimdall { text: "The audio fix for the call recorder. The old build stays as the rollback.".into(), heard: Heard::Whole }),
-        row(2, ChatKind::Owner("Is the build green?".into())),
+        row(2, ChatKind::User("Is the build green?".into())),
     ];
     let mut during = earlier.clone();
     during.push(row(3, ChatKind::Heimdall { text: "On it, checking the build.".into(), heard: Heard::Whole }));
@@ -844,7 +986,9 @@ pub(crate) fn render_composer(dir: &Path) -> Vec<String> {
     objc2_app_kit::NSApplication::sharedApplication(mtm).setActivationPolicy(objc2_app_kit::NSApplicationActivationPolicy::Prohibited);
     std::fs::create_dir_all(dir).ok();
     let mut c = Checks::new();
-    super::set_sink(Box::new(|_| {}));
+    let actions: std::rc::Rc<std::cell::RefCell<Vec<crate::model::UiAction>>> = Default::default();
+    let sink = actions.clone();
+    super::set_sink(Box::new(move |a| sink.borrow_mut().push(a)));
     super::install_offscreen(mtm);
     // Audit 27 Oct: the first focus of a text field built AppKit's field editor on the opening motion's fourth frame
     // (25-28 ms). The composer is made and its editing readied at install, without the keyboard.
@@ -862,6 +1006,8 @@ pub(crate) fn render_composer(dir: &Path) -> Vec<String> {
     super::apply(Event::Speaking(false));
     advance(2.0);
     open_chat(&mut c, dir, mtm);
+    edit_keys(&mut c, mtm);
+    secret_field(&mut c, dir, mtm, &actions);
     std::fs::write(dir.join("composer-checks.txt"), &c.report).ok();
     c.failed
 }

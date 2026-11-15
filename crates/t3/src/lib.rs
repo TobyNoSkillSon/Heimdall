@@ -1,5 +1,9 @@
 //! Outside-client T3 control. No borrowed provider credentials or T3 database access.
 pub mod client;
+/// Crewmates: permanent workers Heimdall owns, each a T3 thread it can re-attach or re-create.
+pub mod crew;
+/// Account failover for tasks that fail on a Claude usage limit (bug note 2026-11-06T12-26-36).
+pub mod failover;
 /// Finding T3 Code on this Mac and installing it (the setup wizard).
 pub mod install;
 pub mod observer;
@@ -11,12 +15,7 @@ pub use client::{Client, CredentialStore, Keychain};
 pub use workers::{ApprovalWait, Workers};
 
 
-pub(crate) fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
+pub(crate) use agent::{body_digest, now_ms};
 
 /// An approval a thread really waits on: the card's tool call id and text (the command and Claude's reason), when its
 /// card is in the thread's activity.
@@ -91,7 +90,3 @@ pub async fn answer_question(client: &Client, thread: &str, request: &str, answe
     client.call(PENDING_REQUEST, serde_json::json!({"action":"respond","threadId":thread,"requestId":request,"answers":answers})).await
 }
 
-pub(crate) fn body_digest(text: &str) -> String {
-    use sha2::Digest;
-    format!("sha256:{:x}", sha2::Sha256::digest(text.as_bytes()))
-}

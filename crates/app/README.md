@@ -1,102 +1,93 @@
-# Heimdall application
+# app: the heimdall binary
 
-**Domain: the app — shell and conductor.** `main.rs` (CLI, `main`, UI callbacks), `live_loop.rs` (capture run,
-permissions, listening/screen control), `replay_modes.rs` (offline WAV/idle/smoke modes), `pipeline/` (the conductor,
-see its README), `bridge/` (agent glue, see its README), plus settings, diagnostics, health, watchdog, providers
-(`api_providers.rs`, `inference_engine.rs`; docs/models.md), background jobs' model and
-gate (`background_model.rs`, `background_gate.rs`), archive/search glue (`archive.rs`, `index.rs`, `embeddings.rs`,
-`mcp_*.rs`) and speech-split glue. The map of all domains is `docs/architecture.md`.
-**Testing:** `cargo nextest run -p app` (pipeline is the slow part, see `pipeline/README.md`). Main-level
-test modules are in `main_tests/`. Full suite with the RAM disk: `scripts/check.sh --tests`.
+The `heimdall` menu-bar app: CLI and entry modes, the live loop, the conductor pipeline, agent glue, settings, background
+jobs, archive and search glue, setup, updates and diagnostics. It owns the capture, listen, speakers, screen, decide,
+agent, speak and UI pipeline; each of those is its own crate.
 
-`heimdall` owns the capture/listen/speakers/screen/decide/agent/speak/UI pipeline.
-First launch opens the existing four-permission setup window. Capture and screen
-services start only after its explicit setup action. Passive permission checks and
-offline modes never request permission. Local inference is prepared before live
-capture admission; TTS loads on the first reply. Discord VAD SpeechStart activates
-a bounded speaker worker (up to 81.92 seconds, 5 MiB per source at 20-ms
-packets) that owns the helper, inference, naming and quiet timer. Intake and ASR
-continue during loading and inference;
-provisional speaker labels are corrected in the UI/index once diarization catches
-up. Its 15-second quiet deadline
-finishes and reaps the helper even when capture stops. The app consumes the
-shared diarization trait through CallScopedSpeakers, preserving naming evidence
-in the parent while model allocations leave with the helper. No audio callback
-runs inference.
+Read this when: you need to find where the app wires something together, add a command-line mode, run an offline
+replay, or locate the app-side half of a feature.
+Code: `crates/app/src/`; the crate map of the whole workspace is [architecture.md](../../docs/architecture.md).
 
-Listening ▸ off (persisted as `paused`, on its own stop latch beside Agent's) stops microphone and app-audio
-capture, the listen worker's sources and d1; the agent, speech and the screen stream keep running on their own
-switches, and the agent is never told (each switch turns off only itself). The archive gets a `gap` per open source (reason "heimdall off") and a session `heimdall_off` marker, then
-`heimdall_on` when turned back on (`launched off` when it starts paused). Seeing ▸ Recording choices persist as `screen`
-(resolution, fps) and reconfigure the live recording, starting a new codec epoch (docs/screen.md).
-The Agent window is fed from dry-run sends or the live Pi transport recorder, through `agent::view`.
-The single owned Pi RPC process uses the selected model (the local engine's or an added API model, docs/models.md;
-`api_providers.rs` holds keys, catalog and menu rows), its own pinned Node/runtime/config and an explicit persistent
-session. Open Agent actions and streaming types are documented in `docs/agent-ui-handoff.md`.
-Transcript lines use device/app names; capture gaps stay in the archive and only actionable
-ones (permission revoked, device disconnected, archive stopped) show once as a plain line with the clock time.
+## Entry points
 
-Dry-run (Agent off) is the default and a persistent menu setting. It uses a logging harness,
-never starts a provider or MCP service, and settles its synthetic delivery ledger.
-TCL addressedness follows decide's advisory flag while its current export is unfit;
-d1 send probability and observed quiet control dispatch, including retained thoughts.
-Finals have labelled transcript/word/decision records in the session archive;
-listen segments and gaps are separate indexed events. Screen command occurrences
-use the utterance ID established at SpeechStart, including continued segments.
-A standalone `spójrz` waits for finalization. Captured Heimdall playback is context
-and cannot wake the agent. Mic SpeechStart interrupts the speech queue directly
-from the listen event forwarder, even while a decision is running.
+`src/main.rs` checks these first-argument modes before the normal launch, each prints and exits:
 
-The archive retains every source and model output. The first 24 hours use native
-lossless PCM; older audio and evidence compact continuously, with speech/unknown
-coverage in FLAC, non-speech in Opus, and exact zero duration markers. Retention
-keeps everything. Legacy archive-format settings cannot change this policy.
-Raw capture reserves at most 64 KiB from a fresh free-space check, consumes that
-credit per write, and expires it within one second. Near the floor it checks each
-write. Index/screenshot writes still probe directly (10 GiB initially, 1 GiB minimum).
-The existing 16 MiB safety margin and one-second native commit deadline remain;
-large concurrent external writes can still exhaust free space between probes,
-and any write error stops archival explicitly.
-Archive failures and delayed compaction surface in the menu without claiming that
-listening stopped. Source disabling discards queued inference and raw archival,
-and reenabling rejects older event timestamps.
+| Mode | What it does | Code |
+|---|---|---|
+| `setup …` | a coding agent drives Setup through the running app | `setup_cli.rs`, [setup.md](../../docs/setup.md) |
+| `--schedule-wake …` | writes one wake into the data folder's schedule | `agent::wakes`, [mcp.md](../../docs/mcp.md) |
+| `--background-probe [raw]` | one small real call on the background model | `background_probe.rs`, [background-call.md](../../docs/background-call.md) |
+| `--suggest-replay …`, `--suggest-export …` | the suggester's offline replay and label export | `suggester_replay.rs`, [suggester.md](../../docs/suggester.md) |
 
-Independent menu statuses use `UiUpdate::ComponentStatus`: ASR/turn fallback,
-decision fallback, speech fallback/failure, each speaker helper's fallback/failure,
-TCL advisory failure, archive pauses/compaction failure, and agent engine-wait,
-process-recovery or reconciliation state. A healthy component cannot clear another's
-warning; paused/setup states retain priority. Detailed failures stay in transcript
-notes or the agent line; the status header uses short messages.
+Then `args()` parses the launch flags (`heimdall --help` prints them):
 
-Offline validation uses `--replay WAV_OR_DIRECTORY`. It forces dry-run and an
-isolated data directory under the macOS temporary directory unless `--data-dir`
-is supplied, with fake mic/Discord/app sources. `--ui` optionally
-shows transcript output with fake permission status. `--realtime --streams N`
-feeds 20-ms chunks from an independent paced producer into the bounded live
-worker. Its queue holds 768 chunks per source (15.36 s at 20-ms packets; at most
-150 MiB for 32 sources at the largest allowed 1,600-sample chunk, about 30 MiB at
-the usual 320 samples; `pipeline/sources.rs`), sized for the 14.02-second
-cold-backend backlog a settings-swap replay measured on 12 Oct. Overflow remains
-an indexed gap with the raw audio kept. `--source mixed --streams 3`
-includes mic partials, Discord diarization
-and an app final-only stream. Each file is finalized before the next file; the
-measurement includes the final inference drain. This is an offline capture
-simulation, not post-permission microphone/screen/power validation.
+- `--replay WAV_OR_DIR [--source mic|discord|app|mixed] [--ui] [--realtime] [--streams 1..8] [--macmon PATH] [--data-dir DIR]`
+- `--idle-seconds 10..60 [--data-dir DIR]`: no capture, no permissions.
+- `--models DIR`: runtime model root; an installed bundle uses `Contents/Resources/models`, a checkout `models/`.
+- `--set-dry-run true|false`, `--free-space-floor-gib N`: write the setting and exit.
+- `--lab-scenario FILE --data-dir DIR`: the post-install check's UI instance on an isolated profile (`lab_run.rs`).
+- `--night-replay-smoke`, `--night-lab-worker`: night diagnostics, explicit isolated `--data-dir` required.
 
-`--macmon PATH` adds rootless macmon power brackets; process CPU is sampled every
-100 ms, including owned speaker helper CPU with libproc counters retained before
-reaping. Parent and helper CPU seconds are also reported separately. Model
-preparation is timed separately, then ten seconds of digital silence
-bracket speech. macmon watts cover the busy whole machine, not this process.
-`--idle-seconds 10..60` measures the no-capture/no-model resident core plus passive
-HAL discovery and Mach wakeups, excluding AppKit windows. Measurement receipts and
-private replay inputs stay in ignored `target/release-candidate/` directories.
-Earlier worker evidence and archives are retained under
-`lab/eval/data/release-candidate/retained-targets/` after build cleanup.
+Other binaries: `speech-split-replay` (`src/speech-split-replay.rs`), and the lab-only `goals-lab`
+(`src/bin/goals-lab.rs`, [goals.md](../../docs/goals.md)) and `heimdall-vella-*-lab` (`src/bin/`). Features: `friends`
+(default), `public` (the public edition, [editions.md](../../docs/editions.md)), `lab-timeline` (`mcp_timeline_live.rs`).
 
-`--models` selects a runtime model root; installed bundles resolve
-`Contents/Resources/models`. `scripts/bundle.sh` copies only verified runtime
-assets and active paired turn/send policy exports. It signs the speaker helper,
-nested native code and the app with the stable development
-identity. It never installs, launches, or resets permissions. The coordinator
-owns fresh review, dispatch-quality acceptance, real UI/setup and post-permission QA.
+## Where things live
+
+| Area | Files | Behaviour |
+|---|---|---|
+| Live loop | `live_loop.rs` (capture run, permissions, settings reload, Listening and Seeing switches), `replay_modes.rs` | [capture.md](../../docs/capture.md), [screen.md](../../docs/screen.md) |
+| Conductor | `pipeline/` | [src/pipeline/README.md](src/pipeline/README.md) |
+| Agent glue | `bridge/`, `mcp_actions.rs`, `mcp_timeline.rs`, `mcp_frames.rs`, `mcp_clip.rs`, `pi_session.rs`, `preflight.rs`, `context_policy.rs` | [src/bridge/README.md](src/bridge/README.md), [mcp.md](../../docs/mcp.md) |
+| Settings | `settings.rs`, `settings_tool.rs`, `identity.rs` | [settings.md](../../docs/settings.md), [personalise.md](../../docs/personalise.md) |
+| Models and providers | `api_providers.rs`, `inference_engine.rs`, `inference_engine/`, `model_store.rs`, `relay_catalog.rs` | [models.md](../../docs/models.md), [inference-engine.md](../../docs/inference-engine.md) |
+| Background jobs | `background_call.rs`, `background_model.rs`, `background_gate.rs`, `background_t3.rs`, `background_fallback.rs`, `background_wire.rs`, `night_runtime.rs` | [background-call.md](../../docs/background-call.md) |
+| Islands and plan | `islands/`, `island_agent.rs`, `plan_refresher.rs`, `goals/`, `chat_history.rs`, `day_timeline.rs`, `fast_read.rs`, `drops.rs`, `drawing.rs` | [islands-capabilities.md](../../docs/islands-capabilities.md), [one-system.md](../../docs/one-system.md), [goals.md](../../docs/goals.md) |
+| Archive and search | `archive.rs`, `index.rs`, `embeddings.rs` | [archive.md](../../docs/archive.md), [chunk-index.md](../../docs/chunk-index.md) |
+| Speakers and voices | `speakers_runtime.rs`, `speech_split.rs`, `voice_namer.rs`, `voice_suggest.rs`, `speech_voice.rs`, `own_voice.rs`, `voice_bank.rs` | [speakers.md](../../docs/speakers.md), [voices.md](../../docs/voices.md) |
+| Relay and recovery | `emergency.rs`, `emergency_local.rs`, `emergency_recovery.rs`, `watchdog.rs`, `health.rs`, `hang.rs`, `resource_watch.rs` | [claude-relay.md](../../docs/claude-relay.md), [resilience.md](../../docs/resilience.md) |
+| Diagnostics | `diagnostics.rs`, `diagnostics_lines.rs`, `diagnostics_log.rs`, `diagnostics_host.rs`, `latency.rs`, `metrics.rs` | [resilience.md](../../docs/resilience.md) |
+| Setup, home, updates | `setup_wizard.rs`, `setup_cli.rs`, `home_change.rs`, `harness_autonomy.rs`, `updates.rs`, `edition.rs` | [setup.md](../../docs/setup.md), [home.md](../../docs/home.md), [harness-autonomy.md](../../docs/harness-autonomy.md), [updates.md](../../docs/updates.md) |
+| Vella link | `vella.rs`, `vella_asr.rs` | [vella.md](../../docs/vella.md) |
+| Suggester | `suggester.rs`, `suggester_replay.rs` | [suggester.md](../../docs/suggester.md) |
+
+## Run an offline replay
+
+1. `cargo run -p app -- --replay path/to/file.wav` (or a directory of WAVs). Replay always forces dry-run and an
+   isolated data directory under the macOS temporary directory unless `--data-dir` is given, with fake mic, Discord
+   and app sources and fake permission status.
+2. Add `--realtime --streams N` to feed 20 ms chunks from a paced producer into the bounded live worker, or
+   `--source mixed --streams 3` for mic partials, Discord diarization and an app final-only stream.
+3. Add `--macmon PATH` for rootless macmon power brackets with process CPU sampled every 100 ms (owned speaker helper
+   included); macmon watts cover the whole machine, not this process.
+4. Check: each file is finalised before the next and the run ends after the final inference drain; receipts go to
+   ignored `target/release-candidate/` directories.
+
+This simulates capture offline; it does not validate microphone or screen permissions after a grant.
+`--idle-seconds 10..60` measures the resident core with no capture or models (passive device discovery and Mach
+wakeups included, AppKit windows excluded).
+
+## Limits held here
+
+- Replay and live worker queue: 768 chunks per source (`pipeline/sources.rs`), 15.36 s at 20 ms packets; overflow is an
+  indexed gap with the raw audio kept.
+- Speaker actor per source: a 4,096-packet queue (81.92 s, 5 MiB at 320-sample packets, `speakers_runtime.rs`); the
+  helper is reaped after `speakers::call::QUIET_TIMEOUT` (120 s) of quiet, even when capture stops.
+- Raw capture disk credit: at most 64 KiB reserved from a fresh free-space probe, spent per write, expired within 1 s
+  (`archive.rs`); near the floor each write is checked. Floor, margins and retention: [archive.md](../../docs/archive.md).
+- Captured Heimdall playback is context and cannot wake the agent; no audio callback runs inference.
+
+## Tests
+
+- `cargo test -p app` (or `cargo nextest run -p app`); the pipeline tests are the slow part
+  ([src/pipeline/README.md](src/pipeline/README.md)). Main-level test modules are in `src/main_tests/`; module tests
+  sit beside their files as `*_tests.rs`; fixtures in `tests/fixtures/`.
+- Every workspace test with the RAM disk: `scripts/check.sh --tests`.
+- Building a bundle: `scripts/bundle.sh` copies only verified runtime assets, signs the speaker helper, nested native
+  code and the app, and never installs, launches or resets permissions ([install.md](../../docs/install.md)).
+
+## See also
+
+- [architecture.md](../../docs/architecture.md): the workspace crates and data flow
+- [decision-chain.md](../../docs/decision-chain.md): dry-run (Agent off), barge-in and the send decision
+- [agent-window.md](../../docs/agent-window.md): the Agent window and island card

@@ -147,7 +147,8 @@ pub(crate) struct NoteDoc {
     pub image: CFRetained<CGImage>,
     pub w: f64,
     pub h: f64,
-    /// Cut at `MAX_NOTE_H`, ending with a line that says so.
+    /// Cut at `MAX_NOTE_H`, ending with a line that says so (read by the tests).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub cut: bool,
     /// The backing scale it was drawn at, and what it was drawn from (`note`'s arguments), so a move to a display of
     /// another scale draws it again rather than stretching it (bug note 2026-10-24T14-01-17).
@@ -220,9 +221,14 @@ pub(crate) fn draw(content: &Content, size: (f64, f64), scale: f64, notes: &Hash
         Content::Text { lines, font, color: c, line_h } => {
             let f = ns_font(*font);
             let ink = color(*c);
+            // A question's lines share their element's left edge (islands climb, 11 Nov: a centred multi-line question
+            // over left-aligned rows switched alignment mid-card); other lines stay centred in their element.
+            let left = matches!(font, Font::Question);
+            let block = lines.iter().map(|l| width(l, &f)).fold(0.0, f64::max);
             for (i, line) in lines.iter().enumerate() {
                 let lw = width(line, &f);
-                draw_line(line, &f, &ink, cx - lw / 2.0, PAD + line_h * (i as f64 + 0.5));
+                let x = if left { cx - block.max(w) / 2.0 } else { cx - lw / 2.0 };
+                draw_line(line, &f, &ink, x, PAD + line_h * (i as f64 + 0.5));
             }
         }
         Content::Unit { text, focus, size } => {
@@ -260,6 +266,7 @@ pub(crate) fn draw(content: &Content, size: (f64, f64), scale: f64, notes: &Hash
                 Capsule::White | Capsule::Hover | Capsule::Chosen => (NSColor::whiteColor(), NSColor::blackColor()),
                 Capsule::Pressed => (color(Rgba::PRESSED), NSColor::blackColor()),
                 Capsule::Dim => (NSColor::colorWithWhite_alpha(1.0, 0.12), NSColor::colorWithWhite_alpha(1.0, 0.35)),
+                Capsule::Quiet => (NSColor::colorWithWhite_alpha(1.0, 0.16), NSColor::colorWithWhite_alpha(1.0, 0.92)),
             };
             fill_capsule(r, &fill);
             if *style == Capsule::Hover {

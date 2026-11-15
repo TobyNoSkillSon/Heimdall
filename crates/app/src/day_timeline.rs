@@ -14,7 +14,7 @@
 //! Each block also keeps what the row does not show: standard tags (`project:`, `activity:`, `app:`),
 //! a few sentences on what happened, the people, threads and tasks, files and decisions. The tags give the guests
 //! heard, the apps, T3 thread windows and file names in window titles on every pass; the model adds the rest for
-//! the blocks it names. The island opens a row on a click to show them; `search` finds blocks across days.
+//! the blocks it names. The island opens a row on a click to show them.
 //! Storage: `<data>/day-timeline/YYYY-MM-DD.json`, one file per day, kept (blocks, model calls, tokens). `version`
 //! 2 added `meta`; a version 1 file reads as before, its details empty until a pass on that day fills them.
 //! Island: `day` on the left dock after Settled (`preset: note`, title "Today", a `timeline` part the islands app
@@ -92,8 +92,7 @@ pub struct Evidence {
 pub fn read_archive(archive: &Path, from: i64, to: i64) -> Result<Evidence> {
     let index = archive.join(heimdall_archive::store::INDEX);
     ensure!(index.exists(), "no archive index at {}", index.display());
-    let db = rusqlite::Connection::open_with_flags(&index, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
-    db.busy_timeout(Duration::from_secs(5))?;
+    let db = heimdall_archive::store::read_index(archive)?;
     let (a, b) = (from * 1_000_000_000, to * 1_000_000_000);
     let tag = |key: &str| format!("(SELECT value FROM chunk_tags WHERE chunk_id=c.id AND key='{key}' ORDER BY value LIMIT 1)");
     let mut ev = Evidence::default();
@@ -132,10 +131,11 @@ pub fn day_of(at: i64) -> (String, i64) {
     (date.format("%Y-%m-%d").to_string(), start)
 }
 
-/// An app's name as the user knows it, from its bundle id.
+/// An app's name as the user knows it, from its bundle id (the day timeline and `timeline_search` alike):
+/// `com.hnc.Discord` → "Discord", `com.citrolabs.ego.lite` → "Ego Lite".
 pub fn app_name(bundle: &str) -> String {
-    const NAMES: [(&str, &str); 24] = [
-        ("com.citrolabs.ego", "Ego"), ("com.hnc.Discord", "Discord"), ("com.t3tools.t3code", "T3 Code"),
+    const NAMES: [(&str, &str); 28] = [
+        ("com.citrolabs.ego.lite", "Ego Lite"), ("com.citrolabs.ego", "Ego"), ("com.hnc.Discord", "Discord"), ("com.t3tools.t3code", "T3 Code"),
         ("dev.heimdall.app", "Heimdall"), ("dev.arsenal.app", "Arsenal"), ("com.apple.finder", "Finder"),
         ("com.apple.Preview", "Preview"), ("com.brave.Browser", "Brave"), ("com.valvesoftware.steam", "Steam"),
         ("com.apple.Terminal", "Terminal"), ("com.mitchellh.ghostty", "Ghostty"), ("com.apple.dt.Xcode", "Xcode"),
@@ -143,11 +143,20 @@ pub fn app_name(bundle: &str) -> String {
         ("com.spotify.client", "Spotify"), ("ch.protonmail", "Proton Mail"), ("com.apple.Console", "Console"),
         ("com.apple.TextEdit", "TextEdit"), ("com.microsoft.VSCode", "VS Code"), ("dev.vault.floatingislands", "Islands"),
         ("dev.vella", "Vella"), ("com.apple.systempreferences", "Settings"), ("dev.filmcraft", "FilmCraft"),
+        ("com.apple.QuickTimePlayerX", "QuickTime"), ("ch.protonvpn.mac", "Proton VPN"), ("com.apple.UserNotificationCenter", "Notifications"),
     ];
     if let Some((_, n)) = NAMES.iter().find(|(b, _)| bundle == *b || bundle.starts_with(&format!("{b}."))) { return (*n).into() }
-    let last = bundle.rsplit('.').next().unwrap_or(bundle);
-    let mut c = last.chars();
-    c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+    // The words after the vendor, without packaging words: `org.example.someTool` → "SomeTool".
+    let parts: Vec<&str> = bundle.split('.').collect();
+    let noise = |p: &&str| matches!(p.to_ascii_lowercase().as_str(), "app" | "mac" | "macos" | "desktop" | "helper");
+    let mut words: Vec<&str> = parts.iter().skip(2).filter(|p| !noise(p)).copied().collect();
+    if words.is_empty() {
+        words = parts.get(1).into_iter().copied().collect();
+    }
+    if words.is_empty() {
+        return bundle.to_owned();
+    }
+    words.iter().map(|w| { let mut c = w.chars(); c.next().map(|f| f.to_uppercase().chain(c).collect::<String>()).unwrap_or_default() }).collect::<Vec<_>>().join(" ")
 }
 
 /// What an app's time usually is (the deterministic guess; the model may say otherwise).
@@ -163,7 +172,7 @@ pub fn app_kind(bundle: &str) -> &'static str {
 
 /// Speakers that are the user, Heimdall or nobody in particular.
 fn is_guest(speaker: &str) -> bool {
-    !matches!(speaker, "User" | "Heimdall") && !speaker.to_ascii_lowercase().starts_with("unknown")
+    !(speaker == agent::identity::DEFAULT_USER || speaker == "Heimdall") && !speaker.to_ascii_lowercase().starts_with("unknown")
 }
 
 /// A 15-minute slice of the day as the tags show it.
@@ -284,7 +293,7 @@ pub struct Block {
     pub meta: Meta,
 }
 
-/// A block's details, kept for the open row and for search. Lists are unique, in the order first seen.
+/// A block's details, kept for the open row. Lists are unique, in the order first seen.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Meta {
     /// The project worked on ("Heimdall"), when there was one.
@@ -315,16 +324,6 @@ pub struct Meta {
 
 impl Meta {
     pub fn is_empty(&self) -> bool { *self == Meta::default() }
-
-    /// The standard tags: `project:<name>`, `activity:<one of ACTIVITIES>`, `app:<name>` (lowercase, so a search
-    /// for `project:heimdall` finds "Heimdall").
-    pub fn tags(&self) -> Vec<String> {
-        let mut t = vec![];
-        if !self.project.is_empty() { t.push(format!("project:{}", self.project.to_lowercase())) }
-        if !self.activity.is_empty() { t.push(format!("activity:{}", self.activity)) }
-        for a in &self.apps { t.push(format!("app:{}", a.0.to_lowercase())) }
-        t
-    }
 
     /// `other`'s lists added to these (each once); its project, activity and explanation where these have none.
     fn absorb(&mut self, other: &Meta) {
@@ -441,37 +440,9 @@ pub fn parse_day(bytes: &[u8]) -> Option<Day> {
 }
 
 /// Version 1 to 2: the blocks read as they were, with empty details; today's fill on its next pass, from the
-/// archive (an older day keeps its kind, which search still finds as `kind:`).
+/// archive (an older day keeps its kind).
 pub fn migrate(day: &mut Day) {
     day.version = VERSION;
-}
-
-/// Blocks across the day files in `data` (newest day first) whose words or tags hold every word of `query`, any
-/// case: `project:heimdall`, `activity:call`, `app:discord` or plain words ("Morgan islands").
-pub fn search(data: &Path, query: &str) -> Vec<(String, Block)> {
-    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
-    let mut dates: Vec<String> = std::fs::read_dir(data.join("day-timeline")).map(|d| d.flatten().filter_map(|e| e.file_name().to_str()?.strip_suffix(".json").map(str::to_owned)).collect()).unwrap_or_default();
-    dates.sort_by(|a, b| b.cmp(a));
-    let mut out = vec![];
-    for date in dates {
-        let Some(day) = load_day(data, &date) else { continue };
-        for b in day.blocks {
-            let hay = b.search_text();
-            if !words.is_empty() && words.iter().all(|w| hay.contains(w.as_str())) { out.push((date.clone(), b)) }
-        }
-    }
-    out
-}
-
-impl Block {
-    /// Everything a search looks through, lowercase: the row, the details and the tags.
-    pub fn search_text(&self) -> String {
-        let m = &self.meta;
-        let mut t = vec![self.title.clone(), self.line.clone(), format!("kind:{}", self.kind), m.about.clone()];
-        t.extend(m.tags());
-        for l in [&m.people, &m.threads, &m.tasks, &m.files, &m.decisions] { t.extend(l.iter().cloned()) }
-        t.join("\n").to_lowercase()
-    }
 }
 
 pub fn save_day(data: &Path, day: &Day) -> Result<()> {
@@ -563,21 +534,21 @@ fn freeze(day: &mut Day, now: i64) {
 // ---------------------------------------------------------------------------------------------------------
 // The model: group and name the open segments.
 
-pub const SYSTEM: &str = "You keep User's \"Where the day went\" timeline: a glanceable picture of his day, shown on a small island on his Mac. \
+pub const SYSTEM: &str = "You keep {user}'s \"Where the day went\" timeline: a glanceable picture of his day, shown on a small island on his Mac. \
 Heimdall is his voice assistant; most of his work is talking with Heimdall, which runs coding agents for him, so the conversation says what the work was about. \
 You get the newest 15-minute segments of today, each with the apps in front (minutes), window titles, who was heard and lines of what was said. \
 Group consecutive segments into blocks of one project or activity, and name each block.\n\
 Rules:\n\
 - Cover every segment exactly once, in order; a block is consecutive segments. Never join across a gap of more than 30 minutes.\n\
 - Prefer fewer, longer blocks: split only where the project or activity clearly changes (a call starts, another project). A block is usually 30 minutes to 2 hours. A block of a single segment only when that quarter is clearly its own thing; a short aside joins the block around it.\n\
-- title: 1 to 4 words, the project first when there is one (\"Heimdall islands\", \"Arsenal site\", \"Call with Morgan\", \"YouTube\", \"Dota\"). No dates, no times, no \"User\".\n\
+- title: 1 to 4 words, the project first when there is one (\"Heimdall islands\", \"Arsenal site\", \"Call with Morgan\", \"YouTube\", \"Dota\"). No dates, no times, no \"{user}\".\n\
 - line: one short past-tense line on what got done or decided, concrete (\"Menu branch merged; ack voices picked\"). At most 40 characters: it shows on one short line; drop words rather than run long. Empty when nothing can be said.\n\
 - kind: build (projects, coding, agents at work), talk (planning or talking things through with Heimdall), people (calls and chats with others), web (reading, browsing, watching), play (games, music, fun), other.\n\
-The rest is kept for when User opens the block; never guess, leave a field empty when the segments do not say:\n\
-- project: the project's name as User says it (\"Heimdall\", \"Arsenal\"), else empty. activity: the closest of the listed activities (break: away or resting).\n\
+The rest is kept for when {user} opens the block; never guess, leave a field empty when the segments do not say:\n\
+- project: the project's name as {user} says it (\"Heimdall\", \"Arsenal\"), else empty. activity: the closest of the listed activities (break: away or resting).\n\
 - about: two to four plain sentences on what happened and why, concrete, past tense.\n\
-- people: other people talked with or about (not User, not Heimdall). threads: agent threads or chats named or in front. tasks: tasks set, done or handed to an agent. files: files or documents named. decisions: what User decided, one short line each.\n\
-- Speech from other people's apps and videos can show up as unknown speakers; do not treat it as User's work.\n\
+- people: other people talked with or about (not {user}, not Heimdall). threads: agent threads or chats named or in front. tasks: tasks set, done or handed to an agent. files: files or documents named. decisions: what {user} decided, one short line each.\n\
+- Speech from other people's apps and videos can show up as unknown speakers; do not treat it as {user}'s work.\n\
 - Write in English. Return only the JSON.";
 
 pub fn schema() -> Value {
@@ -622,7 +593,7 @@ fn segment_text(s: &Segment) -> String {
     if !s.titles.is_empty() { t += &format!("windows: {}\n", s.titles.iter().map(|w| format!("\"{w}\"")).collect::<Vec<_>>().join(", ")) }
     if !s.people.is_empty() { t += &format!("heard: {}\n", s.people.iter().map(|p| format!("{} ({})", p.0, p.1)).collect::<Vec<_>>().join(", ")) }
     // The user's and Heimdall's lines first (the work), then a few of everyone else's, kept in time order.
-    let own: Vec<usize> = (0..s.lines.len()).filter(|&i| matches!(s.lines[i].speaker.as_str(), "User" | "Heimdall")).collect();
+    let own: Vec<usize> = (0..s.lines.len()).filter(|&i| matches!(s.lines[i].speaker.as_str(), agent::identity::DEFAULT_USER | "Heimdall")).collect();
     let others: Vec<usize> = (0..s.lines.len()).filter(|&i| !own.contains(&i)).collect();
     let mut pick: Vec<usize> = spread(&own, LINES_PER_SEGMENT - LINES_PER_SEGMENT.min(others.len()).min(4));
     pick.extend(spread(&others, LINES_PER_SEGMENT - pick.len()));
@@ -967,7 +938,9 @@ pub fn spawn_live(data: &Path, gate: Arc<agent::delivery::DeliveryGate>, stop: t
             let e = crate::background_model::task_endpoint(crate::background_model::Task::DayTimeline);
             e.key.as_ref()?;
             let model = e.model.clone().unwrap_or_else(crate::background_model::anthropic_model);
-            Some((Arc::new(move |c: &crate::background_call::Call| crate::background_call::ask_blocking(&e, c)) as Ask, model))
+            // Night 8 Nov log sweep, finding 7: a call that meets a spent plan goes once more on the fallback.
+            let resolve = || crate::background_model::task_endpoint(crate::background_model::Task::DayTimeline);
+            Some((Arc::new(move |c: &crate::background_call::Call| crate::background_fallback::once_more_blocking(e.clone(), &resolve, |e| crate::background_call::ask_blocking(e, c))) as Ask, model))
         }),
     };
     Some(spawn(cfg, stop))

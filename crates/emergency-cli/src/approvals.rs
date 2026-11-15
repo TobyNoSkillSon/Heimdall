@@ -164,9 +164,13 @@ const BACKGROUND: &str = "Heimdall's approval hook: a background call answers wi
 /// What the permission hook answers for one prompt, or None to leave it to the harness (a question for the user).
 /// `vault` is Heimdall's home folder, `user` the user's home folder, `cwd` the session's folder.
 pub fn decide(tool: &str, input: &Value, vault: &Path, user: &Path, cwd: Option<&Path>, background: bool) -> Option<Decision> {
+    decide_in(None, tool, input, vault, user, cwd, background)
+}
+/// `decide` for the hook of Heimdall's data folder `data`: a job may release its own memory need (`deny::refuse_in`).
+pub fn decide_in(data: Option<&Path>, tool: &str, input: &Value, vault: &Path, user: &Path, cwd: Option<&Path>, background: bool) -> Option<Decision> {
     if tool == "AskUserQuestion" { return None; }
     if background { return Some(Decision::Deny(BACKGROUND.into())); }
-    Some(match crate::deny::refuse(tool, input, vault, user, cwd) {
+    Some(match crate::deny::refuse_in(data, tool, input, vault, user, cwd, &|_| false) {
         Some(reason) => Decision::Deny(reason),
         None => Decision::Allow,
     })
@@ -189,12 +193,12 @@ pub fn hook_for(data: &Path, vault: &Path, user: &Path, stdin: &str) -> String {
     let background = first.is_some_and(|f| f.trim_start().starts_with(BACKGROUND_PREFIX));
     let tool = input["tool_name"].as_str().unwrap_or("?");
     let cwd = input["cwd"].as_str().map(Path::new);
-    let Some(mut decision) = decide(tool, &input["tool_input"], vault, user, cwd, background) else { return String::new() };
+    let Some(mut decision) = decide_in(Some(data), tool, &input["tool_input"], vault, user, cwd, background) else { return String::new() };
     if !background {
         if grants::touches(tool, &input["tool_input"], data, cwd) {
             decision = Decision::Deny(grants::TOUCHES.into());
         } else if let Decision::Deny(_) = decision {
-            if let Some(granted) = granted(data, tool, &input["tool_input"], vault, user, cwd) {
+            if let Some(granted) = granted(data, tool, &input["tool_input"], vault, user, cwd, &input) {
                 decision = match granted { Ok(_) => Decision::Allow, Err(why) => Decision::Deny(why) };
             }
         }
@@ -224,13 +228,14 @@ pub fn pretool_for(data: &Path, vault: &Path, user: &Path, stdin: &str) -> Strin
         json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason}}).to_string()
     };
     if grants::touches(tool, tool_input, data, cwd) { return deny(grants::TOUCHES.into()); }
-    let Some(reason) = crate::deny::refuse(tool, tool_input, vault, user, cwd) else { return String::new() };
-    match granted(data, tool, tool_input, vault, user, cwd) {
+    let Some(reason) = crate::deny::refuse_in(Some(data), tool, tool_input, vault, user, cwd, &|_| false) else { return String::new() };
+    match granted(data, tool, tool_input, vault, user, cwd, &input) {
         None => deny(reason),
         Some(Err(why)) => deny(why),
         Some(Ok(cards)) => {
-            log(data, &Decision::Allow, tool, &format!("[User's yes on {}] {}", cards.join(", "), what(tool_input)));
-            let reason = format!("User clicked yes on ask card {}, which named exactly this.", cards.join(", "));
+            log(data, &Decision::Allow, tool, &format!("[The user's yes on {}] {}", cards.join(", "), what(tool_input)));
+            let reason = if cards.iter().all(|c| c.starts_with("go-install:")) { "Heimdall's GO INSTALL lets this install click its Quit item once.".to_owned() }
+                else { format!("The user clicked yes on ask card {}, which named exactly this.", cards.join(", ")) };
             json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow", "permissionDecisionReason": reason}}).to_string()
         }
     }
@@ -238,12 +243,19 @@ pub fn pretool_for(data: &Path, vault: &Path, user: &Path, stdin: &str) -> Strin
 
 /// A call the deny list refuses, judged again with the user's live grants: None when no grant covers every refusal in it,
 /// else the scopes used (the cards they came from) or why they could not be.
-fn granted(data: &Path, tool: &str, input: &Value, vault: &Path, user: &Path, cwd: Option<&Path>) -> Option<Result<Vec<String>, String>> {
+/// `hook` is the hook's whole input: its `transcript_path` and the thread in the environment say who is calling, for
+/// a quit grant (`received_go_install`).
+fn granted(data: &Path, tool: &str, input: &Value, vault: &Path, user: &Path, cwd: Option<&Path>, hook: &Value) -> Option<Result<Vec<String>, String>> {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
-    granted_at(data, tool, input, vault, user, cwd, now)
+    let transcript = hook["transcript_path"].as_str().map(Path::new);
+    let env_thread = std::env::var(THREAD_ENV).ok();
+    let received = |thread: &str, clicked_ms: u64| received_go_install(transcript, env_thread.as_deref(), thread, clicked_ms);
+    granted_at(data, tool, input, vault, user, cwd, now, &received)
 }
-fn granted_at(data: &Path, tool: &str, input: &Value, vault: &Path, user: &Path, cwd: Option<&Path>, now_ms: u64) -> Option<Result<Vec<String>, String>> {
+#[allow(clippy::too_many_arguments)]
+fn granted_at(data: &Path, tool: &str, input: &Value, vault: &Path, user: &Path, cwd: Option<&Path>, now_ms: u64, received: &dyn Fn(&str, u64) -> bool) -> Option<Result<Vec<String>, String>> {
     // Review 4 Nov: beside the delete or the removal, only a few read-only programs; nothing that sets HOME.
+    let mut narrow = true;
     if tool == "Bash" {
         let command = input["command"].as_str().unwrap_or("");
         let programs = crate::deny::programs(command);
@@ -253,17 +265,81 @@ fn granted_at(data: &Path, tool: &str, input: &Value, vault: &Path, user: &Path,
         // line can swap the file for a link to another keychain (`ln`, `mv`, `cp`) between this check and the call.
         const KEYCHAIN_BESIDE: [&str; 6] = ["security", "cat", "echo", "test", "ls", "stat"];
         let keychain = programs.iter().any(|p| p == "security") && programs.iter().all(|p| KEYCHAIN_BESIDE.contains(&p.as_str()));
-        if command.contains("HOME=") || !(removal || keychain || programs.iter().all(|p| BESIDE.contains(&p.as_str()))) { return None; }
+        if command.contains("HOME=") { return None; }
+        narrow = removal || keychain || programs.iter().all(|p| BESIDE.contains(&p.as_str()));
     }
-    let ledger = grants::Ledger::load(data, &format!("{tool}\n{input}"), now_ms);
+    let mut ledger = grants::Ledger::load(data, &format!("{tool}\n{input}"), now_ms);
+    ledger.quit_only_for(received);
     if ledger.is_empty() { return None; }
     let used = std::cell::RefCell::new(Vec::<grants::Scope>::new());
     let covered = |s: &grants::Scope| { let ok = ledger.covers(s); if ok { used.borrow_mut().push(s.clone()); } ok };
-    if crate::deny::refuse_with(tool, input, vault, user, cwd, &covered).is_some() { return None; }
+    if crate::deny::refuse_in(Some(data), tool, input, vault, user, cwd, &covered).is_some() { return None; }
     let used = used.into_inner();
     if used.is_empty() { return None; }
+    // Review 1110 item 3: the install's quit grant has no path to swap, so the click may sit in the install's own
+    // script (wait, swap, launch); every other refusal in the line still needs its own scope.
+    if !narrow && used.iter().any(|s| *s != grants::Scope::QuitInstall) { return None; }
     Some(ledger.consume(&used))
 }
+
+// --- Quit grant's caller (second review 1110, should-fix 1) ---
+/// Whether the session calling the hook is the one Heimdall sent the `GO INSTALL` that wrote the quit grant for T3
+/// thread `thread` at `clicked_ms` (`grants::write_quit`, written just before the send). Its Claude transcript must hold
+/// that message, in Heimdall's mark (`[From Heimdall…]`, `t3::workers::from_heimdall`) followed by `GO INSTALL`,
+/// recorded no earlier than the grant (a second's grace), as a user turn or a message queued mid-turn; and its thread,
+/// when the environment names one (`THREAD_ENV`, which T3 sets and the hook inherits), must be the grant's. Another
+/// worker, a `delegate_task` child or the user's own session therefore never gets the one click, nor its repeat window.
+/// A caller with no transcript gets none either.
+pub fn received_go_install(transcript: Option<&Path>, env_thread: Option<&str>, thread: &str, clicked_ms: u64) -> bool {
+    if env_thread.is_some_and(|t| grants::quit_thread(t) != thread) { return false; }
+    let Some(file) = transcript.and_then(|t| std::fs::File::open(t).ok()) else { return false };
+    let from_heimdall = |text: &str| {
+        let text = text.trim_start();
+        text.strip_prefix("[From Heimdall").and_then(|rest| rest.split_once(']')).is_some_and(|(_, rest)| grants::go_install(rest))
+    };
+    let texts = |content: &Value| -> Vec<String> {
+        match content {
+            Value::String(s) => vec![s.clone()],
+            Value::Array(parts) => parts.iter().filter(|p| p["type"] == "text").filter_map(|p| p["text"].as_str().map(str::to_owned)).collect(),
+            _ => vec![],
+        }
+    };
+    for line in std::io::BufReader::new(file).lines() {
+        let Ok(line) = line else { return false };
+        if !line.contains("GO INSTALL") { continue; }
+        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+        let said = match v["type"].as_str() {
+            Some("user") if v["isMeta"] != true => texts(&v["message"]["content"]),
+            Some("attachment") if v["attachment"]["type"] == "queued_command" => texts(&v["attachment"]["prompt"]),
+            _ => continue,
+        };
+        if !said.iter().any(|t| from_heimdall(t)) { continue; }
+        if v["timestamp"].as_str().and_then(iso_ms).is_some_and(|at| at + 1000 >= clicked_ms) { return true; }
+    }
+    false
+}
+/// Milliseconds since the epoch of a transcript's UTC timestamp (`2026-11-10T01:02:03.456Z`).
+fn iso_ms(text: &str) -> Option<u64> {
+    let b = text.as_bytes();
+    if b.len() < 20 || b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':' || b[16] != b':' || !text.ends_with('Z') { return None; }
+    let n = |r: std::ops::Range<usize>| text.get(r)?.parse::<i64>().ok();
+    let (y, m, d, hh, mm, ss) = (n(0..4)?, n(5..7)?, n(8..10)?, n(11..13)?, n(14..16)?, n(17..19)?);
+    let frac = text[19..text.len() - 1].strip_prefix('.').map_or(Some(0), |f| {
+        let digits: String = f.chars().take(3).collect();
+        format!("{digits:0<3}").parse::<i64>().ok()
+    })?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) { return None; }
+    // Days from 1970-01-01 (Howard Hinnant's days_from_civil).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    u64::try_from(((days * 86_400 + hh * 3600 + mm * 60 + ss) * 1000) + frac).ok()
+}
+// --- end quit grant's caller ---
 
 fn what(input: &Value) -> &str {
     input["command"].as_str().or(input["file_path"].as_str()).or(input["path"].as_str()).unwrap_or("")
@@ -389,6 +465,25 @@ mod tests {
         assert!(log.contains("approved Bash: cat >> ") && log.contains(" ⏎ "), "{log}");
     }
 
+    /// Bug note 2026-11-08T02-03-44: both hooks let a job delete its own memory-need file in their data folder (the
+    /// gate declined it twice on 8 Nov and Jarvis stayed out until the user's click), and still decline the folder itself.
+    #[test]
+    fn both_hooks_let_a_job_release_its_memory_need() {
+        let dir = tempfile::tempdir().unwrap();
+        // A data folder outside the allowed areas (a temporary one would be inside them already). It does not exist, so
+        // the hooks' own log line is dropped (no folder can be made under /Users).
+        let data = user().join("Library/Application Support/Heimdall");
+        let need = data.join("memory-needs/job.json");
+        let t = transcript(dir.path(), "t.jsonl", "any");
+        let release = format!("rm -f \"{}\"", need.display());
+        let all = format!("rm -rf \"{}\"", data.join("memory-needs").display());
+        assert_eq!(ask(&data, &t, "Bash", json!({"command": release}))["hookSpecificOutput"]["decision"]["behavior"], "allow");
+        assert_eq!(ask(&data, &t, "Bash", json!({"command": all}))["hookSpecificOutput"]["decision"]["behavior"], "deny");
+        let pre = |c: &str| pretool_for(&data, &vault(), &user(), &json!({"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":c},"cwd":"/"}).to_string());
+        assert_eq!(pre(&release), "", "PreToolUse leaves it to the permission mode, which approves");
+        assert!(pre(&all).contains("\"deny\""), "{}", pre(&all));
+    }
+
     #[test]
     fn the_deny_list_is_declined_with_why_and_questions_are_left_alone() {
         let dir = tempfile::tempdir().unwrap();
@@ -475,7 +570,7 @@ mod tests {
         };
         assert_eq!(ask(&c), "allow", "the permission hook honours the same grant for the same command");
         assert_eq!(ask("rm -rf ~/Documents"), "deny");
-        assert!(std::fs::read_to_string(data.join(LOG)).unwrap().contains("[User's yes on ask-7]"));
+        assert!(std::fs::read_to_string(data.join(LOG)).unwrap().contains("[The user's yes on ask-7]"));
     }
 
     /// Bug note 2026-11-04T18-59-48: the relay's card carried no grant (its tool schema was the one it loaded on 3 Nov,
@@ -535,7 +630,7 @@ mod tests {
         assert_eq!(verdict(&out), "allow", "{out}");
         assert!(out["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().contains("ask-k"));
         assert_eq!(verdict(&pre(&data, &format!("security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k pw {k} >/dev/null"))), "allow", "a later step");
-        assert!(std::fs::read_to_string(data.join(LOG)).unwrap().contains("[User's yes on ask-k] security create-keychain"));
+        assert!(std::fs::read_to_string(data.join(LOG)).unwrap().contains("[The user's yes on ask-k] security create-keychain"));
     }
 
     #[test]
@@ -632,5 +727,144 @@ mod tests {
         assert!(std::fs::read_to_string(&real).unwrap().contains("hook permission"));
         std::fs::write(&file, "{ not json").unwrap();
         assert!(install(&file, Some(&new)).is_err(), "a settings file it cannot read is left alone");
+    }
+
+    /// Review 1110 item 3: the install's steps exactly as docs/personal/nightly-build.md section 4 gives them. Staging and taking
+    /// a stage away need no go-ahead; the quit-and-swap step passes only with a build staged and Heimdall's GO INSTALL
+    /// grant (`grants::write_quit`), once, within 15 minutes. A stage alone (which any agent can make, or a failed
+    /// install left behind), an expired or used grant, or a forged one never unlocks it.
+    #[test]
+    #[ignore = "reads docs/nightly-build.md, the personal install guide, which is not in the public repository"]
+    fn the_install_steps_in_the_doc_pass_with_go_install_and_stage_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let (user, data) = (root.join("home"), root.join("data"));
+        let vault = user.join("Vault");
+        std::fs::create_dir_all(vault.join("Projects/Heimdall/dist")).unwrap();
+        let doc = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/personal/nightly-build.md")).unwrap();
+        let section = &doc[doc.find("## 4. Install").unwrap()..doc.find("## 5.").unwrap()];
+        let steps: Vec<String> = section.split("```bash\n").skip(1).map(|b| b[..b.find("```").unwrap()].replace("/Users/user", &user.display().to_string())).collect();
+        assert_eq!(steps.len(), 3, "stage, quit and swap, take the stage away");
+        assert!(steps[1].contains("whose name begins with \"Quit \"") && steps[1].contains("failed-stage"), "{}", steps[1]);
+        // Second review 1110, should-fix 1: the grant serves only the session that received the GO INSTALL. The tests
+        // run inside whatever T3 thread started cargo, so the grant names that thread (`THREAD_ENV`) when there is one.
+        let me = std::env::var(THREAD_ENV).unwrap_or_else(|_| "integrator".into());
+        let (integrator, other) = (root.join("integrator.jsonl"), root.join("other.jsonl"));
+        let said = |at: u64, text: &str| {
+            let stamp = iso(at);
+            json!({"type":"user","message":{"role":"user","content":text},"timestamp":stamp}).to_string() + "\n"
+        };
+        std::fs::write(&integrator, said(now() - 3_600_000, "[From Heimdall, User's voice assistant] integrate tonight's branches")).unwrap();
+        std::fs::write(&other, said(now() - 3_600_000, "a night worker's brief: GO INSTALL is the integrator's")).unwrap();
+        let pre_as = |transcript: &Path, c: &str| {
+            let stdin = json!({"hook_event_name":"PreToolUse","cwd":vault.join("Projects/Heimdall"),"transcript_path":transcript,"tool_name":"Bash","tool_input":{"command":c}}).to_string();
+            serde_json::from_str::<Value>(&pretool_for(&data, &vault, &user, &stdin)).unwrap_or(Value::Null)
+        };
+        let pre = |c: &str| pre_as(&integrator, c);
+        let reason = |v: &Value| v["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or("").to_owned();
+        for s in [&steps[0], &steps[2]] { assert_eq!(verdict(&pre(s)), "none", "{s}"); }
+        let quit = &steps[1];
+        // A go-ahead with nothing staged.
+        grants::write_quit(&data, &me, now() - grants::QUIT_LIFETIME_MS - 1).unwrap();
+        let out = pre(quit);
+        assert_eq!(verdict(&out), "deny");
+        assert!(reason(&out).contains("new build staged"), "{out}");
+        // Staged, but the only go-ahead has expired: the stage alone is not enough.
+        let stage = user.join("Applications/.Heimdall.app.stage/Contents");
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::write(stage.join("Info.plist"), "x").unwrap();
+        let out = pre(quit);
+        assert_eq!(verdict(&out), "deny");
+        assert!(reason(&out).contains("15 minutes of Heimdall's GO INSTALL"), "{out}");
+        // A grant file written by anything but the app (no valid signature) is ignored.
+        let forged = json!({"card":"go-install:x","option":"GO INSTALL","clickedMs":now(),"expiresMs":now() + 60_000,"quitInstall":true,"mac":"00"});
+        std::fs::write(data.join(grants::DIR).join("forged.json"), forged.to_string()).unwrap();
+        assert_eq!(verdict(&pre(quit)), "deny", "forged");
+        // A card's delete grant is no go-ahead either.
+        grants::write(&data, &user, &vault, "ask-1", "q1", "Delete", &["/Volumes/Backup/old/x".into()], &[], now()).unwrap();
+        assert_eq!(verdict(&pre(quit)), "deny", "another grant");
+        // Heimdall's GO INSTALL: a grant for the integrator, and the message in its transcript. A GO INSTALL from
+        // before the grant (an earlier night's) does not count.
+        let mut old = std::fs::read_to_string(&integrator).unwrap();
+        old.push_str(&said(now() - 3_000_000, "[From Heimdall, the orchestrator that started this task, speaking for User] GO INSTALL (last night)"));
+        std::fs::write(&integrator, &old).unwrap();
+        grants::write_quit(&data, &me, now()).unwrap();
+        assert_eq!(verdict(&pre(quit)), "deny", "the go-ahead is not in the integrator's transcript yet");
+        // Another session (a worker following an old doc, the user's own session): refused, and its try uses nothing.
+        let mut theirs = std::fs::read_to_string(&other).unwrap();
+        theirs.push_str(&said(now(), "GO INSTALL"));
+        std::fs::write(&other, &theirs).unwrap();
+        let out = pre_as(&other, quit);
+        assert_eq!(verdict(&out), "deny", "another session: {out}");
+        assert!(reason(&out).contains("GO INSTALL"), "{out}");
+        assert_eq!(verdict(&pre_as(&root.join("none.jsonl"), quit)), "deny", "a session without a transcript");
+        // The receiving session: its transcript has the GO INSTALL, as a message queued mid-turn.
+        old.push_str(&(json!({"type":"attachment","attachment":{"type":"queued_command","prompt":"[From Heimdall, the orchestrator that started this task, speaking for User] GO INSTALL now."},"timestamp":iso(now())}).to_string() + "\n"));
+        std::fs::write(&integrator, &old).unwrap();
+        let out = pre(quit);
+        assert_eq!(verdict(&out), "allow", "{out}");
+        assert!(reason(&out).contains("GO INSTALL"), "{out}");
+        assert_eq!(verdict(&pre_as(&other, quit)), "deny", "the repeat window is the receiving session's only");
+        let ask = |c: &str| {
+            let stdin = json!({"hook_event_name":"PermissionRequest","cwd":vault.join("Projects/Heimdall"),"transcript_path":integrator,"tool_name":"Bash","tool_input":{"command":c}}).to_string();
+            serde_json::from_str::<Value>(&hook_for(&data, &vault, &user, &stdin)).unwrap()["hookSpecificOutput"]["decision"]["behavior"].clone()
+        };
+        assert_eq!(ask(quit), "allow", "the permission hook honours the same go-ahead for the same command");
+        let alone = "osascript -e 'tell application \"System Events\" to tell process \"Heimdall\" to click menu item \"Quit Heimdall\" of menu 1 of menu bar item 1 of menu bar 1'";
+        assert_eq!(verdict(&pre(alone)), "deny", "its one click is used");
+        // The go-ahead covers only the click: a delete outside the Vault in the same line is still refused.
+        grants::write_quit(&data, &me, now() + 1).unwrap();
+        assert_eq!(verdict(&pre(&format!("{alone}; rm -rf /Users/t/Applications/Old.app"))), "deny");
+        assert_eq!(verdict(&pre(alone)), "allow", "and the refused line used nothing");
+    }
+
+    /// RFC 3339 UTC text for `ms`, the way Claude's transcripts stamp lines (tests only; `iso_ms` reads it back).
+    fn iso(ms: u64) -> String {
+        let (secs, frac) = ((ms / 1000) as i64, ms % 1000);
+        let (days, rest) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+        // Howard Hinnant's civil_from_days.
+        let z = days + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let y = yoe + era * 400 + i64::from(m <= 2);
+        format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.{frac:03}Z", rest / 3600, rest % 3600 / 60, rest % 60)
+    }
+
+    /// Second review 1110, should-fix 1: who counts as the session that received GO INSTALL.
+    #[test]
+    fn only_the_session_that_received_go_install_may_use_its_quit_grant() {
+        assert_eq!(iso_ms("2026-11-07T09:12:27.031Z"), Some(1_794_042_747_031));
+        assert_eq!(iso_ms("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(iso_ms(&iso(1_794_042_747_031)), Some(1_794_042_747_031));
+        assert_eq!(iso_ms("2026-11-07 09:12:27"), None);
+        let dir = tempfile::tempdir().unwrap();
+        let t = dir.path().join("t.jsonl");
+        let at = 1_794_042_747_031;
+        let line = |v: Value| v.to_string() + "\n";
+        let go = "[From Heimdall, the orchestrator that started this task, speaking for User] GO INSTALL";
+        std::fs::write(&t, line(json!({"type":"user","message":{"content":[{"type":"text","text":go}]},"timestamp":iso(at + 5)}))).unwrap();
+        assert!(received_go_install(Some(&t), None, "thread-a", at), "its transcript has the go-ahead");
+        assert!(received_go_install(Some(&t), Some("thread-a"), "thread-a", at), "and its thread is the grant's");
+        assert!(!received_go_install(Some(&t), Some("thread-b"), "thread-a", at), "another thread, even with a copied transcript path");
+        assert!(!received_go_install(Some(&t), None, "thread-a", at + 10_000), "a go-ahead older than the grant");
+        assert!(!received_go_install(None, Some("thread-a"), "thread-a", at), "no transcript");
+        // Not Heimdall's message: unmarked, quoted inside other text, Claude's own reply, or a tool result.
+        for v in [
+            json!({"type":"user","message":{"content":"GO INSTALL"},"timestamp":iso(at)}),
+            json!({"type":"user","message":{"content":"the doc says [From Heimdall] GO INSTALL"},"timestamp":iso(at)}),
+            json!({"type":"user","isMeta":true,"message":{"content":go},"timestamp":iso(at)}),
+            json!({"type":"assistant","message":{"content":[{"type":"text","text":go}]},"timestamp":iso(at)}),
+            json!({"type":"user","message":{"content":[{"type":"tool_result","content":go}]},"timestamp":iso(at)}),
+            json!({"type":"user","message":{"content":go}}),
+            json!({"type":"user","message":{"content":"[From Heimdall, User's voice assistant] ready for your GO INSTALL?"},"timestamp":iso(at)}),
+        ] {
+            std::fs::write(&t, line(v.clone())).unwrap();
+            assert!(!received_go_install(Some(&t), None, "thread-a", at), "{v}");
+        }
     }
 }

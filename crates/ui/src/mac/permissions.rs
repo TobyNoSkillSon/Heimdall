@@ -1,5 +1,7 @@
 //! The macOS permission calls behind Setup. `status` never prompts. `request_all` prompts: it runs only from Setup's
-//! Allow All button, and never when the UI runs with `Options::fake_permissions` (the demo).
+//! Allow All button, and never when the UI runs with `Options::fake_permissions` (the demo). `request_at_launch` asks
+//! again for a grant macOS has no answer for once Setup was allowed (an update's new signature drops the old grant;
+//! crates/app/src/launch_permissions.rs decides), never with `fake_permissions` either.
 //!
 //! System Audio Recording Only has no public status or request call (E-macos-feasibility.md): macOS asks when the
 //! first audio tap starts, so `request_all` hands that step to the app through a callback, and the app reports the
@@ -44,6 +46,20 @@ pub fn status() -> Vec<(Permission, PermissionState)> {
         (Permission::Accessibility, accessibility()),
     ]
 }
+
+/// Records the grants in `states` for `granted_once`. Only the installed app calls it (lab and test runs would record
+/// their own process's grants).
+pub fn remember_grants(states: &[(Permission, PermissionState)]) {
+    let defaults = NSUserDefaults::standardUserDefaults();
+    for (p, s) in states {
+        if *s == PermissionState::Granted && !defaults.boolForKey(&granted_key(*p)) { defaults.setBool_forKey(true, &granted_key(*p)); }
+    }
+}
+
+fn granted_key(p: Permission) -> objc2::rc::Retained<NSString> { NSString::from_str(&format!("permissionGranted.{}", p.title())) }
+/// Whether this app (its bundle ID, any build) was seen holding `p` (`remember_grants`): an optional grant that is gone
+/// now was lost (an update's new signature), not declined.
+pub fn granted_once(p: Permission) -> bool { NSUserDefaults::standardUserDefaults().boolForKey(&granted_key(p)) }
 
 pub fn microphone() -> PermissionState {
     let Some(audio) = (unsafe { AVMediaTypeAudio }) else { return PermissionState::NotDetermined };
@@ -119,6 +135,24 @@ pub(super) fn request_all(request_system_audio: impl Fn() + Send + Sync + 'stati
         });
         unsafe { AVCaptureDevice::requestAccessForMediaType_completionHandler(audio, &block) };
     } else { rest(); }
+}
+
+/// Asks macOS again at launch, after Setup was allowed: the microphone (`AVCaptureDevice`, only while not determined)
+/// and Screen Recording (`CGRequestScreenCaptureAccess`, which macOS shows only to a build it has no answer for). The
+/// once-only ledger is not consulted: it remembers Setup's ask, not this build's grant. When the microphone answers,
+/// the states are read again and the app hears `PermissionsChanged`.
+pub fn request_at_launch(mic: bool, screen: bool) {
+    super::with_state(move |s| {
+        if s.options.fake_permissions || s.options.render_dir.is_some() { return; }
+        if screen && !objc2_core_graphics::CGPreflightScreenCaptureAccess() { objc2_core_graphics::CGRequestScreenCaptureAccess(); }
+        let Some(audio) = (unsafe { AVMediaTypeAudio }) else { return };
+        if mic && microphone() == PermissionState::NotDetermined {
+            let block = RcBlock::new(move |_granted: Bool| {
+                dispatch2::DispatchQueue::main().exec_async(|| super::with_state(|s| s.poll_permissions()));
+            });
+            unsafe { AVCaptureDevice::requestAccessForMediaType_completionHandler(audio, &block) };
+        }
+    });
 }
 
 /// Opens the permission's Privacy pane for any unresolved grant.

@@ -53,7 +53,7 @@ impl AgentRuntime {
                 // Scheduled wakes and the delivery heartbeat (agent::wakes, selfwake night 21 Oct), beside the watcher.
                 let mut heartbeat = tools.mcp_actions.wakes.as_ref().ok().cloned().map(|w| tokio::spawn(w.heartbeat(workers.actions.clone(), tools.agent_enabled.clone(), watch_rx.clone())));
                 // Plan refresher (night 1022): ends with the watcher's stop signal.
-                let _plan_refresher = tools.mcp_actions.spawn_plan_refresher(workers.clone(), tools.agent_enabled.clone(), watch_rx.clone());
+                let _plan_refresher = tools.mcp_actions.spawn_plan_refresher(tools.agent_enabled.clone(), watch_rx.clone());
                 // Background Tasks ▸ Goals (31 Oct): the shadow keeps Goals true from the conversation (docs/goals.md).
                 let _goals = crate::goals::spawn_live(&data, tools.agent_enabled.clone(), watch_rx.clone());
                 // Background Tasks ▸ Day Timeline: the left island of where the day went, every 15 minutes.
@@ -77,8 +77,11 @@ impl AgentRuntime {
                 let mut emergency_task=emergency_run();
                 tools.emergency.configure(relay_options(&settings));
                 // Claude Code subscription's models and accounts, for the menu and the settings tool before the menu first opens.
-                tools.relay_catalog.connect(workers.client.clone(),tokio::runtime::Handle::current());
-                tools.refresh_relay_catalog();
+                // A lab run has no T3 to ask (`McpActions::lab`).
+                if !tools.mcp_actions.lab(){
+                    tools.relay_catalog.connect(workers.client.clone(),tokio::runtime::Handle::current());
+                    tools.refresh_relay_catalog();
+                }
                 let mut detector=agent::emergency::Detector::default();
                 let mut watcher = Some(tokio::spawn(workers.clone().watch(tools.agent_enabled.clone(), watch_rx)));
                 let mut connections = tokio::task::JoinSet::new();
@@ -114,6 +117,9 @@ impl AgentRuntime {
                     let mut compaction_hold=CompactionHold::default();
                     // A compaction the agent's provider refused moves to another model (bug note 2026-10-28T19-41-00).
                     let mut fallback=CompactionFallback::default();
+                    // Relay mode ended: the history Pi takes over is fitted to its model once it is idle (bug note
+                    // 2026-11-08T02-03-47); the note says where the part left out can be read.
+                    let mut handover:Option<String>=None;
                     macro_rules! started {() => {{
                         // A new process: a compaction that dies with it is counted again (`compaction_killed!`).
                         compaction_hold.new_process();
@@ -130,6 +136,8 @@ impl AgentRuntime {
                         if b.start_pending(){
                             let on=launch_on.take().unwrap_or_else(agent::now_ms);
                             if start_contexts {start=start_context(&b,&session,on,&mut carried);} else {b.abandon_start_context();}
+                            // Relay mode ends with this start: Heimdall kept running (bug note 2026-11-08T02-03-47).
+                            if let Some(ctx)=start.as_mut(){ctx.relay_back=!settings.dry_run&&!settings.agent_relay&&tools.emergency.relay_chosen();}
                         }
                         // Relay mode is the user's setting (docs/claude-relay.md): on, the relay is the agent from this start.
                         // The session first: a relay that starts at once builds its context from it (review 27 Oct).
@@ -288,6 +296,8 @@ impl AgentRuntime {
                                         },
                                         Some(Command::WakePending {images,urgent,through,observation,speaker})=>{
                                             if !tools.send_context.lock().unwrap().has_pending_through(through) {
+                                                // A phone-microphone turn waiting for this wake gets no delivery from it: over (remote.rs).
+                                                if speaker==agent::Speaker::Owner {crate::remote::spoken_wake_delivered(observation.as_deref(),&agent::WakeOutcome::NothingNew);}
                                                 b.harness.journal.event("send_decision_delivery","agent",&[],capture::host_now_ns(),json!({"through":through,"outcome":"superseded_by_barrier"}))?;
                                                 return Ok(false);
                                             }
@@ -305,7 +315,7 @@ impl AgentRuntime {
                                             ui::agent_notice::AgentNoticeAction::Dismiss {request_id} => {
                                                 let weak = Arc::downgrade(&tools);
                                                 connections.spawn(async move { tokio::task::spawn_blocking(move || {
-                                                    if let Some(t) = weak.upgrade() { t.dismiss_question(&request_id); }
+                                                    if let Some(t) = weak.upgrade() { t.dismiss_question(&request_id); crate::remote::answered(&request_id, &[]); }
                                                 }).await.ok(); });
                                             }
                                             ui::agent_notice::AgentNoticeAction::Answer {request_id,answers,by_hand} => {
@@ -315,6 +325,12 @@ impl AgentRuntime {
                                                         if let Err(e) = permit.check().and_then(|()| t.answer_question(&request_id,&answers,&by_hand)) {
                                                             t.record_diagnostic("health",json!({"component":"agent-question", "state":"unavailable", "request_id":request_id, "reason":format!("{e:#}")}));
                                                             if let Some(ui)=*t.notice_ui.lock().unwrap(){notice_outcome(ui,request_id.clone(),ui::agent_notice::NoticeOutcome::QuestionUnavailable);}
+                                                            // Phone endpoint: only a card that can no longer be answered closes on the phone; a
+                                                            // temporary failure (Agent Off, a busy store) leaves it to try again (review 8 Nov).
+                                                            if t.question_gone(&request_id) {crate::remote::publish("ask_close",json!({"request_id":request_id,"answer":""}));}
+                                                        } else {
+                                                            // Phone endpoint: a clicked or tapped card closes on the phone too.
+                                                            crate::remote::answered(&request_id, &answers);
                                                         }
                                                     }
                                                 }).await.ok(); });
@@ -364,7 +380,11 @@ impl AgentRuntime {
                                         b.harness.journal.event("agent_wake",b.harness.source(),&[],capture::host_now_ns(),json!({"urgent":urgent,"image_ids":image_ids}))?;
                                         if settings.dry_run||gate.load(Ordering::Acquire){
                                             let busy=matches!(&b.harness.inner,Adapter::Pi(pi) if pi.active()); // Latency map (lab/latency).
-                                            let delivered=b.wake_keyed_through(None,&instruction,&images,urgent,admission.clone(),pending_observation.as_deref(),pending_speaker).await?;
+                                            let outcome=b.wake_keyed_outcome(None,&instruction,&images,urgent,admission.clone(),pending_observation.as_deref(),pending_speaker).await;
+                                            // ---- phone endpoint: a wake of the user's is followed by its own delivery: a Mac turn's, or a phone-microphone
+                                            // turn's, delivered, queued, held or merged (remote.rs). A wake that failed delivered nothing. ----
+                                            if pending_speaker==agent::Speaker::Owner {crate::remote::spoken_wake_delivered(pending_observation.as_deref(),outcome.as_ref().unwrap_or(&agent::WakeOutcome::NothingNew));}
+                                            let delivered=match outcome? {agent::WakeOutcome::Delivered(id)=>Some(id),_=>None};
                                             if let (Some(id),false)=(&pending_observation,settings.dry_run){crate::latency::delivered(id,busy||delivered.is_none());} // queued: its wait shows as Pi start
                                             // The island's send arrow means delivered now, not queued (18 Oct: "Sent" showed for refused wakes).
                                             if delivered.is_some()&&!settings.dry_run{if let Some(u)=ui{u.send(ui::UiUpdate::AgentSent);}}
@@ -372,6 +392,9 @@ impl AgentRuntime {
                                                 let mut context=tools.send_context.lock().unwrap();
                                                 context.sent(through);tools.persist_send_context(&context)?;
                                             }
+                                        } else if pending_speaker==agent::Speaker::Owner {
+                                            // The gate is closed: nothing went (remote.rs: a phone-microphone turn waiting for it ends).
+                                            crate::remote::spoken_wake_delivered(pending_observation.as_deref(),&agent::WakeOutcome::NothingNew);
                                         }
                                     }
                                     Some(Command::WakePending {..})=>unreachable!("pending wakes normalized above"),
@@ -397,7 +420,7 @@ impl AgentRuntime {
                                             validate_message(&text)?;if settings.dry_run{return Err(WindowActionRejected("Agent is off".into()).into());}gate.check()?;
                                             typed_delivery(&tools,&text,true,send_typed_message(&mut b,&text,steer,admission.clone(),Some(&echo))).await
                                         }.await;
-                                        if sent.is_err(){if let Some(u)=ui{u.send(typed_echo(&echo,&text,Echo::Failed));}crate::chat_history::typed_failed(&echo);}
+                                        if sent.is_err(){if let Some(u)=ui{u.send(typed_echo(&echo,&text,Echo::Failed));}crate::chat_history::typed_failed(&echo);crate::remote::delivery_failed(&echo);}
                                         sent?;
                                         // Still queued (a turn runs): the queued row under the bubble's ID; else it reached the agent.
                                         if let Some(u)=ui{match b.last_queued()?.filter(|w|w["uuid"].as_str()==Some(echo.as_str())) {
@@ -413,7 +436,9 @@ impl AgentRuntime {
                                         validate_message(&text)?;if settings.dry_run{return Err(WindowActionRejected("Agent is off".into()).into());}gate.check()?;
                                         let image_ids:Vec<_>=images.iter().map(|i|b.harness.journal.image(&i.bytes,&i.media_type)).collect::<Result<_>>()?;
                                         b.harness.journal.event("notch_drop",b.harness.source(),&[],capture::host_now_ns(),json!({"image_ids":image_ids}))?;
-                                        typed_delivery(&tools,&text,false,send_dropped(&mut b,&text,&images,admission.clone())).await?;
+                                        let dropped=typed_delivery(&tools,&text,false,send_dropped(&mut b,&text,&images,admission.clone())).await?;
+                                        // ---- phone endpoint: a notch drop is a Mac turn followed by its own delivery (remote.rs) ----
+                                        if let Some(id)=&dropped {crate::remote::mac_turn_delivery(id);}
                                         if let Some(u)=ui{if let Some(wire)=b.last_queued()?{let mut view=agent::view::LiveView::default();u.send(ui::UiUpdate::AgentWindow(ui::AgentWindowUpdate::Entries(view.sent(&wire,agent::now_ms()).into_iter().map(|e|{let mut e=live_entry(e);e.sent=false;e.queued=true;e}).collect())));}}
                                     }
                                     Some(Command::EditAndResend{session_entry_id,text})=>{
@@ -454,6 +479,8 @@ impl AgentRuntime {
                                     Some(Command::Cancel)=>{
                                         // The user's Stop (window, island, or an approved spoken stop phrase; E3): audio and the
                                         // speech queue stop, waiting notices become context, queued wakes are not delivered.
+                                        // A phone turn ends with it: its queued words are not delivered and its run is over.
+                                        crate::remote::phone_turn_failed();
                                         tools.interrupt();tools.replies.lock().unwrap().reset();b.stop()?;if let Adapter::Pi(pi)=&mut b.harness.inner{pi.abort().await?;}drain_ready(&mut b,&tools).await?;
                                         // In emergency mode the cover agent is the one acting: it stops too.
                                         if b.holding_turns(){(tools.emergency.relay())(agent::emergency::Relayed{id:format!("stop-{}",agent::now_ms()),kind:"stop".into(),text:"Stop speaking and stop what you are doing; wait for User.".into(),images:vec![]});}
@@ -468,6 +495,7 @@ impl AgentRuntime {
                                     Some(Command::EmergencyRelease{back})=>{
                                         b.hold_turns(None).await?;
                                         b.harness.journal.event("agent_emergency","agent:pi",&[],capture::host_now_ns(),json!({"state":if back.is_some(){"released"}else{"off"}}))?;
+                                        handover=tools.emergency.handover_note(agent::now_ms());
                                         if let Some(back)=back{
                                             let key=format!("{}{}",agent::notice::EMERGENCY_BACK,agent::now_ms());
                                             b.notice(&key,"while you were down",&back,agent::notice::NoticeKind::Scheduled,Some(gate.permit()?)).await?;
@@ -562,6 +590,8 @@ impl AgentRuntime {
                                         // A reply that ends while Agent off waits is not shown or said: Off stopped the turn.
                                         if value["type"]=="heimdall_final_answer" && stopping.is_none() {tools.agent_final_answer(value["text"].as_str().context("final answer text missing")?,value["stop_reason"].as_str().unwrap_or_default())?;}
                                     }
+                                    // ---- phone endpoint: the phone turn's delivery reached, and its run done (remote.rs) ----
+                                    crate::remote::agent_event(&event,matches!(&event,Event::Complete {query:true,..}) && !b.turn_running());
                                     if let Event::Complete {query:true,..}=&event {tools.agent_working(false)?;tools.replies.lock().unwrap().settled();}
                                     // speech-policy (night 3): only the last completion of a settled run ends the user's address; a turn his name-wake
                                     // restarted (night pass H2) is still running when the aborted turn's completions arrive.
@@ -651,6 +681,12 @@ impl AgentRuntime {
                             settle_dry(&mut b)?;
                             // Nothing new reaches a Pi that only finishes crucial work before it stops.
                             let live=gate.load(Ordering::Acquire)&&stopping.is_none();
+                            if reload.is_none()&&!settings.dry_run&&live&&!fallback.busy(){
+                                if let Adapter::Pi(pi)=&mut b.harness.inner{if !pi.active()&&pi.input_blocked().is_none(){if let Some(note)=handover.take(){
+                                    let limits=match settings.selected_api_model(){Some(m)=>m.limits(),None=>agent::provider::Limits::for_context(pi.context_usage().await.map(|u|u.1).unwrap_or(0).max(8192),None)};
+                                    if let Err(e)=fallback.handover(pi,&data,limits,note).await{eprintln!("Agent: the history from the relay was not fitted to this model: {e:#}");}
+                                }}}
+                            }
                             if reload.is_none()&&!settings.dry_run&&live{
                                 deliver_start(&mut b,&mut start,&mut carried,&settings,compaction_hold.held(),&data,&gate).await?;
                                 if !stale_receipts.is_empty()&&matches!(b.harness.inner,Adapter::Pi(_)){stale_receipts=complete_receipts(&data,&gate,std::mem::take(&mut stale_receipts));}
@@ -782,6 +818,7 @@ impl AgentRuntime {
         if dry_run { Arc::new(agent::delivery::DeliveryGate::new(true)).permit() }
         else { self.gate.permit() }
     }
+    #[cfg(test)]
     pub fn wake_pending_with_permit(&self,images:Vec<Attachment>,urgent:bool,through:u64,permit:agent::delivery::DeliveryPermit)->Result<()> {
         self.wake_pending_through_with_permit(images,urgent,through,None,agent::Speaker::Owner,permit)
     }
@@ -793,10 +830,12 @@ impl AgentRuntime {
         permit.check()?;
         self.send(Command::Scoped { command: Box::new(Command::LateImages { caption, images }), permit })
     }
+    #[cfg(test)]
     pub fn wake_with_permit(&self, images: Vec<Attachment>, urgent: bool, permit: agent::delivery::DeliveryPermit) -> Result<()> {
         permit.check()?;
         self.send(Command::Scoped { command: Box::new(Command::Wake { images, urgent }), permit })
     }
+    #[cfg(test)]
     pub fn notice(
         &self,
         id: impl Into<String>,
@@ -873,5 +912,5 @@ pub(super) fn take_fresh_late(held:&mut Vec<LateImage>,now_ns:u64)->Vec<LateImag
 }
 /// How the relay picks its harness, from the settings (docs/claude-relay.md).
 fn relay_options(s:&Settings)->crate::emergency::Options{
-    crate::emergency::Options{order:if s.relay_order.is_empty(){agent::emergency::default_order(crate::edition::PUBLIC)}else{s.relay_order.clone()},skip_relay:s.relay_skip,relay_model:s.agent_relay_model.clone(),relay_account:s.agent_relay_account.clone()}
+    crate::emergency::Options{order:if s.relay_order.is_empty(){agent::emergency::default_order()}else{s.relay_order.clone()},skip_relay:s.relay_skip,relay_model:s.agent_relay_model.clone(),relay_account:s.agent_relay_account.clone()}
 }

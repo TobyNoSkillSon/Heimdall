@@ -83,7 +83,7 @@ pub fn ensure(root: &Root, now: i64, seed: bool) -> Result<Vec<String>> {
             std::fs::remove_file(&todo)?;
         }
         did.push("Goals, Scheduled and Settled start empty".into());
-        if proposed > 0 { did.push(format!("{proposed} goal(s) proposed for User's yes")) }
+        if proposed > 0 { did.push(format!("{proposed} goal(s) proposed for {}'s yes", agent::identity::user())) }
         Ok(())
     })?;
     Ok(did)
@@ -163,7 +163,7 @@ mod tests {
         let (_d, r) = root();
         ensure(&r, 5, true).unwrap();
         let g = r.read("goals").unwrap();
-        assert_eq!(proposals::queue(&g).len(), 4);
+        assert_eq!(proposals::queue(&g).len(), ops::SEED.len(), "the four seeds; none compiled into the public edition");
         assert!(g["goals"].as_array().unwrap().is_empty());
         assert!(ops::ensure(&r, 6, true).unwrap().is_empty(), "no seeding over the slate");
         let (_d2, p) = root();

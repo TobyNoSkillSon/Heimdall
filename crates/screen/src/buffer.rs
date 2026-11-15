@@ -849,7 +849,7 @@ mod tests {
         assert!(selected.errors[0].contains("archive blob hot/v/missing-for-retrieval-test missing"));
         let matched = crate::PhraseMatch { source:"mic".into(), phrase:"screenshot this".into(), start_ns:1_000_000_000, trigger_ns:1_000_000_000 };
         let shots = tempfile::tempdir().unwrap();
-        let error = crate::attach_screenshot(&mut shared.lock().unwrap(), &matched, 1_000_000_000, shots.path()).unwrap_err();
+        let error = crate::commands::write_ring_action(shared.lock().unwrap().select(1_000_000_000, 1_000_000_000), &matched, 1_000_000_000, shots.path()).unwrap_err();
         assert!(format!("{error:#}").contains("screen frame retrieval failed: display 1: archive blob"));
         db.execute("UPDATE video_samples SET sha256=?1", [&sha]).unwrap();
         assert!(hold.select(1_000_000_000).errors.is_empty());

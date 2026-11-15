@@ -181,7 +181,7 @@ mod tests {
     fn catalog() -> Value {
         json!({"providers":[
             {"providerInstanceId":"claudeAgent","driverKind":"claudeAgent","displayName":"Claude","models":[{"id":"claude-opus-5-5"},{"id":"claude-sonnet-5-5"}]},
-            {"providerInstanceId":"claudeAgent_claude_code_2","driverKind":"claudeAgent","displayName":"Claude code 2","models":[{"id":"claude-opus-5-5"},{"id":"claude-sonnet-5-5"}]},
+            {"providerInstanceId":"claudeAgent_2","driverKind":"claudeAgent","displayName":"Claude code 2","models":[{"id":"claude-opus-5-5"},{"id":"claude-sonnet-5-5"}]},
             {"providerInstanceId":"codex","driverKind":"codex","displayName":"Codex","models":[{"id":"gpt-6"}]},
             {"providerInstanceId":"grok","driverKind":"grok","displayName":"Grok","models":[{"id":"grok-5"}]},
             {"providerInstanceId":"off","driverKind":"claudeAgent","displayName":"Old","models":[{"id":"claude-opus-5-5"}],"constraints":["Provider instance is disabled."]}
@@ -197,25 +197,25 @@ mod tests {
     fn the_soonest_weekly_reset_wins_then_the_five_hour_one() {
         let mut quotas = Quotas::new();
         quotas.insert("claudeAgent".into(), q(10.0, 3 * H, 50.0, 100 * H));
-        quotas.insert("claudeAgent_claude_code_2".into(), q(80.0, 1 * H, 90.0, 20 * H));
+        quotas.insert("claudeAgent_2".into(), q(80.0, 1 * H, 90.0, 20 * H));
         // Account 2's week ends sooner: its quota would go unused.
         let h = initial(&catalog(), &quotas, &order(), Some("claude-opus-5-5"), None);
-        assert_eq!(names(&h)[..2], ["claudeAgent_claude_code_2/claude-opus-5-5", "claudeAgent/claude-opus-5-5"]);
+        assert_eq!(names(&h)[..2], ["claudeAgent_2/claude-opus-5-5", "claudeAgent/claude-opus-5-5"]);
         // The same weekly hour: the five-hour reset decides.
         quotas.insert("claudeAgent".into(), q(10.0, 30 * 60_000, 50.0, 20 * H + 600_000));
         let h = initial(&catalog(), &quotas, &order(), None, None);
         assert_eq!(h[0].instance, "claudeAgent");
         // Then the other providers, in the edition's order; disabled instances never.
-        assert_eq!(h.iter().map(|h| h.instance.as_str()).collect::<Vec<_>>(), ["claudeAgent", "claudeAgent_claude_code_2", "codex", "grok"]);
+        assert_eq!(h.iter().map(|h| h.instance.as_str()).collect::<Vec<_>>(), ["claudeAgent", "claudeAgent_2", "codex", "grok"]);
     }
 
     #[test]
     fn exhausted_never_wins_unknown_comes_after_known_and_a_tight_window_goes_last() {
         let mut quotas = Quotas::new();
         quotas.insert("claudeAgent".into(), q(100.0, H, 40.0, 2 * H));
-        quotas.insert("claudeAgent_claude_code_2".into(), q(20.0, 4 * H, 30.0, 150 * H));
+        quotas.insert("claudeAgent_2".into(), q(20.0, 4 * H, 30.0, 150 * H));
         let h = initial(&catalog(), &quotas, &order(), None, None);
-        assert_eq!(h[0].instance, "claudeAgent_claude_code_2", "spent, though it resets soonest");
+        assert_eq!(h[0].instance, "claudeAgent_2", "spent, though it resets soonest");
         assert!(!h.iter().any(|h| h.instance == "claudeAgent"));
         // The provider says the limit is reached: out, whatever the numbers.
         let mut reached = q(10.0, H, 10.0, 2 * H);
@@ -224,10 +224,10 @@ mod tests {
         assert!(!initial(&catalog(), &quotas, &order(), None, None).iter().any(|h| h.instance == "claudeAgent"));
         // Unknown (unreadable) after a known account with a later reset.
         quotas.insert("claudeAgent".into(), Quota { error: Some("no get_usage reply".into()), ..Quota::default() });
-        assert_eq!(initial(&catalog(), &quotas, &order(), None, None)[0].instance, "claudeAgent_claude_code_2");
+        assert_eq!(initial(&catalog(), &quotas, &order(), None, None)[0].instance, "claudeAgent_2");
         // Five-hour at 97% with the soonest week: after the account with headroom.
         quotas.insert("claudeAgent".into(), q(97.0, H, 10.0, 2 * H));
-        assert_eq!(initial(&catalog(), &quotas, &order(), None, None)[0].instance, "claudeAgent_claude_code_2");
+        assert_eq!(initial(&catalog(), &quotas, &order(), None, None)[0].instance, "claudeAgent_2");
         // Nothing known at all: T3's order.
         assert_eq!(initial(&catalog(), &Quotas::new(), &order(), None, None)[0].instance, "claudeAgent");
     }
@@ -236,21 +236,21 @@ mod tests {
     fn the_account_owner_picked_leads_unless_it_is_spent() {
         let mut quotas = Quotas::new();
         quotas.insert("claudeAgent".into(), q(10.0, H, 10.0, 2 * H));
-        let h = initial(&catalog(), &quotas, &order(), None, Some("claudeAgent_claude_code_2"));
-        assert_eq!(h[0].instance, "claudeAgent_claude_code_2", "unknown quota, but his choice");
-        quotas.insert("claudeAgent_claude_code_2".into(), q(100.0, H, 10.0, 2 * H));
-        assert_eq!(initial(&catalog(), &quotas, &order(), None, Some("claudeAgent_claude_code_2"))[0].instance, "claudeAgent");
+        let h = initial(&catalog(), &quotas, &order(), None, Some("claudeAgent_2"));
+        assert_eq!(h[0].instance, "claudeAgent_2", "unknown quota, but his choice");
+        quotas.insert("claudeAgent_2".into(), q(100.0, H, 10.0, 2 * H));
+        assert_eq!(initial(&catalog(), &quotas, &order(), None, Some("claudeAgent_2"))[0].instance, "claudeAgent");
     }
 
     #[test]
     fn failover_keeps_the_model_on_the_other_account_first_then_other_providers_for_the_main_assistant_only() {
         let failed = Failed { instance: Some("claudeAgent".into()), driver: Some("claudeAgent".into()), model: Some("claude-sonnet-5-5".into()), pi_provider: None };
         let h = failover(&catalog(), &Quotas::new(), &failed, &order(), true);
-        assert_eq!(names(&h), ["claudeAgent_claude_code_2/claude-sonnet-5-5", "codex/gpt-6", "grok/grok-5"]);
-        assert_eq!(names(&failover(&catalog(), &Quotas::new(), &failed, &order(), false)), ["claudeAgent_claude_code_2/claude-sonnet-5-5"], "no other provider");
+        assert_eq!(names(&h), ["claudeAgent_2/claude-sonnet-5-5", "codex/gpt-6", "grok/grok-5"]);
+        assert_eq!(names(&failover(&catalog(), &Quotas::new(), &failed, &order(), false)), ["claudeAgent_2/claude-sonnet-5-5"], "no other provider");
         // The other Claude account spent too: straight to the next provider.
         let mut quotas = Quotas::new();
-        quotas.insert("claudeAgent_claude_code_2".into(), q(100.0, H, 50.0, 9 * H));
+        quotas.insert("claudeAgent_2".into(), q(100.0, H, 50.0, 9 * H));
         assert_eq!(names(&failover(&catalog(), &quotas, &failed, &order(), true)), ["codex/gpt-6", "grok/grok-5"]);
         // Codex fails: Codex accounts first (none left), then Claude, ranked.
         let codex = Failed { instance: Some("codex".into()), driver: Some("codex".into()), model: Some("gpt-6".into()), pi_provider: None };
@@ -265,14 +265,14 @@ mod tests {
     fn pi_failing_on_chatgpt_skips_codex_and_ranks_the_claude_accounts() {
         let mut quotas = Quotas::new();
         quotas.insert("claudeAgent".into(), q(10.0, H, 10.0, 90 * H));
-        quotas.insert("claudeAgent_claude_code_2".into(), q(10.0, H, 10.0, 30 * H));
+        quotas.insert("claudeAgent_2".into(), q(10.0, H, 10.0, 30 * H));
         let pi = Failed { pi_provider: Some(crate::provider::CHATGPT.into()), ..Failed::default() };
         let h = failover(&catalog(), &quotas, &pi, &order(), true);
-        assert_eq!(h.iter().map(|h| h.instance.as_str()).collect::<Vec<_>>(), ["claudeAgent_claude_code_2", "claudeAgent", "grok"]);
+        assert_eq!(h.iter().map(|h| h.instance.as_str()).collect::<Vec<_>>(), ["claudeAgent_2", "claudeAgent", "grok"]);
         // Bug note 2026-11-02T14-47-39: Codex's own quota reads usable (5-hour 0%, weekly 74%): it is offered.
         quotas.insert("codex".into(), q(0.0, H, 74.0, 50 * H));
         let h = failover(&catalog(), &quotas, &pi, &order(), true);
-        assert_eq!(h.iter().map(|h| h.instance.as_str()).collect::<Vec<_>>(), ["claudeAgent_claude_code_2", "claudeAgent", "codex", "grok"]);
+        assert_eq!(h.iter().map(|h| h.instance.as_str()).collect::<Vec<_>>(), ["claudeAgent_2", "claudeAgent", "codex", "grok"]);
         // Spent with the same plan: out, as before.
         quotas.insert("codex".into(), q(100.0, H, 74.0, 50 * H));
         assert!(!failover(&catalog(), &quotas, &pi, &order(), true).iter().any(|h| h.instance == "codex"));
@@ -281,9 +281,9 @@ mod tests {
     #[test]
     fn a_spent_chosen_account_or_every_claude_account_spent_is_a_failure_not_a_skip() {
         let mut quotas = Quotas::new();
-        quotas.insert("claudeAgent_claude_code_2".into(), q(100.0, H, 10.0, 2 * H));
-        let h = spent_choice(&catalog(), &quotas, &order(), Some("claude-sonnet-5-5"), Some("claudeAgent_claude_code_2")).unwrap();
-        assert_eq!((h.instance.as_str(), h.model.as_str()), ("claudeAgent_claude_code_2", "claude-sonnet-5-5"));
+        quotas.insert("claudeAgent_2".into(), q(100.0, H, 10.0, 2 * H));
+        let h = spent_choice(&catalog(), &quotas, &order(), Some("claude-sonnet-5-5"), Some("claudeAgent_2")).unwrap();
+        assert_eq!((h.instance.as_str(), h.model.as_str()), ("claudeAgent_2", "claude-sonnet-5-5"));
         assert!(spent_choice(&catalog(), &quotas, &order(), None, None).is_none(), "Automatic: the other Claude account runs");
         quotas.insert("claudeAgent".into(), q(10.0, H, 100.0, 9 * H));
         assert_eq!(spent_choice(&catalog(), &quotas, &order(), None, None).unwrap().instance, "claudeAgent", "every Claude account spent");
@@ -308,13 +308,13 @@ mod tests {
         let q = quotas_from(&[
             AccountQuota { instance: "claudeAgent".into(), kind: Kind::Claude, windows: vec![w("5-hour", 40.0, 1), w("weekly", 100.0, 2)], reached: None, error: None },
             AccountQuota { instance: "codex".into(), kind: Kind::Codex, windows: vec![w("5-hour", 10.0, 3)], reached: Some("primary".into()), error: None },
-            AccountQuota { instance: "claudeAgent_claude_code_2".into(), kind: Kind::Claude, windows: vec![], reached: None, error: Some("no reply".into()) },
+            AccountQuota { instance: "claudeAgent_2".into(), kind: Kind::Claude, windows: vec![], reached: None, error: Some("no reply".into()) },
         ]);
         let c = &q["claudeAgent"];
         assert_eq!((c.five_hour.used_pct, c.weekly.reset_ms), (Some(40.0), Some(2)));
         assert!(c.exhausted() && c.known());
         assert!(q["codex"].exhausted() && q["codex"].weekly == Window::default());
-        assert!(!q["claudeAgent_claude_code_2"].known() && !q["claudeAgent_claude_code_2"].exhausted(), "a failed read is unknown, not spent");
+        assert!(!q["claudeAgent_2"].known() && !q["claudeAgent_2"].exhausted(), "a failed read is unknown, not spent");
     }
 
 }

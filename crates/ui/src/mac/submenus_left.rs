@@ -193,6 +193,7 @@ pub(crate) fn recorded() -> usize {
 /// key events are posted and the cursor never moves. Each open menu window's frame is read back, and the frame each
 /// submenu had when it was ordered in; `<scenario>.png` draws the open menus from their own views. Returns the failed
 /// checks.
+#[cfg(feature = "lab")]
 pub(crate) mod check {
     use std::cell::RefCell;
     use std::path::{Path, PathBuf};

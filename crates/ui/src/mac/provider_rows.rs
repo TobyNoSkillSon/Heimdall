@@ -159,7 +159,7 @@ mod tests {
         // The custom kinds: the menu lists those still missing, Setup both, each by its provider's index.
         let provider = |id: &str, auth| crate::ApiProviderRow {
             id: id.into(), name: id.into(), icon: String::new(), console_url: String::new(), auth, notice: None, sign_in: false,
-            credit: None, spend: None, custom_url: true, key_required: false, endpoint: None, group: Default::default(), key_fallback: false,
+            custom_url: true, key_required: false, endpoint: None, group: Default::default(), key_fallback: false,
         };
         let api = ApiProviders {
             providers: vec![provider("openai", ProviderAuth::Missing), provider("anthropic-compatible", ProviderAuth::Missing), provider("openai-compatible", ProviderAuth::Connected)],

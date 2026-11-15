@@ -1,5 +1,5 @@
-//! Heimdall's voice-bank runtime: the clip store under the archive, playing a chosen bank line through the
-//! same single voice as agent speech, the background fill job, and recording every synthesized clip.
+//! Heimdall's voice-bank runtime: the clip store under the archive, playing a bank clip (an instant acknowledgement)
+//! through the same single voice as agent speech, the background fill job, and recording every synthesized clip.
 //!
 //! One voice at a time. Every audible Heimdall output (agent speech chunk or bank line) holds `playback`.
 //! - A bank line is skipped when agent speech is queued, synthesizing or playing, when the user is talking, when
@@ -13,7 +13,6 @@ use crate::bridge::Tools;
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::{
-    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -25,8 +24,8 @@ use voicebank::{ClipMeta, Store};
 
 /// The editable line list beside the archive: `<data>/voice-bank-lines.json`. Clips live in the archive store.
 pub const LINES_FILE: &str = "voice-bank-lines.json";
-/// The speech model Heimdall speaks with. Bank takes, offered lines and recorded clips are keyed by it;
-/// a new model changes this one value (and `Tools::fill_generator`).
+/// The generator of the in-app fill's takes and of recorded clips: Supertonic, the lighter voice (Jarvis's bank takes
+/// come from the offline `heimdall-voicebank` tool). A new model changes this one value (and `Tools::fill_generator`).
 pub const GENERATOR: &str = voicebank::SUPERTONIC_ID;
 
 pub type OutputFactory = Box<dyn Fn() -> Box<dyn speak::AudioOutput> + Send + Sync>;
@@ -46,9 +45,6 @@ pub struct Bank {
     ack_waiting: Arc<AtomicBool>,
     /// The acknowledgements said most recently, oldest first (the rule avoids repeating them).
     pub(crate) recent_acks: Mutex<std::collections::VecDeque<String>>,
-    // The end-of-turn reply line left the decider (29 Oct, Decider V5); bank lines stay playable and tested.
-    #[cfg_attr(not(test), allow(dead_code))]
-    rotation: Mutex<HashMap<(String, String, String), usize>>,
     recorder: Mutex<Option<mpsc::SyncSender<(ClipMeta, speak::Audio)>>>,
     fill_started: AtomicBool,
     output: Mutex<OutputFactory>,
@@ -69,7 +65,6 @@ impl Bank {
             ack_stop: Arc::new(AtomicBool::new(false)),
             ack_waiting: Arc::new(AtomicBool::new(false)),
             recent_acks: Mutex::new(Default::default()),
-            rotation: Mutex::new(HashMap::new()),
             recorder: Mutex::new(None),
             fill_started: AtomicBool::new(false),
             // Tests never touch a speaker device.
@@ -78,12 +73,6 @@ impl Bank {
             }),
             lines_played: AtomicU64::new(0),
         }
-    }
-    /// The archive store holding the bank.
-    // The end-of-turn reply line left the decider (29 Oct, Decider V5); bank lines stay playable and tested.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn root(&self) -> &Path {
-        &self.root
     }
     /// Opened on first use: a primary-mic turn with Speaking on, a spoken clip, or the fill job.
     pub fn store(&self) -> Result<Arc<Store>> {
@@ -157,19 +146,6 @@ impl Bank {
             eprintln!("Voice bank writer backlog full; clip not kept");
         }
     }
-    /// Next take of a line, rotating so repeats do not sound identical.
-    // The end-of-turn reply line left the decider (29 Oct, Decider V5); bank lines stay playable and tested.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn pick_take(&self, voice: &str, generator: &str, line: &str, takes: &[i64]) -> Option<i64> {
-        if takes.is_empty() {
-            return None;
-        }
-        let mut r = self.rotation.lock().unwrap();
-        let n = r.entry((voice.into(), generator.into(), line.into())).or_insert(0);
-        let take = takes[*n % takes.len()];
-        *n += 1;
-        Some(take)
-    }
 }
 
 /// Holds the playback lock for the duration of one output. Agent speech uses it so it never overlaps a line.
@@ -184,7 +160,7 @@ impl<O: speak::AudioOutput> speak::AudioOutput for Exclusive<O> {
     }
     fn output_stream(&mut self,chunks:speak::PlaybackStream,cancel:&dyn Fn()->bool,signal:speak::Cancellation)->Result<()> {
         // Take the playback lock for the entire utterance, not each codec chunk.
-        let _guard=self.lock.lock().unwrap();
+        let _guard=self.lock.lock().unwrap_or_else(|e| e.into_inner());
         self.inner.output_stream(chunks,cancel,signal)
     }
 
@@ -216,10 +192,10 @@ pub fn blocked(tools: &Tools, epoch: u64) -> Option<&'static str> {
     }
 }
 
-/// Plays a stored clip on its own thread; the pipeline never waits. `Err` is an immediate skip reason. The
-/// outcome (finished, interrupted, skipped, failed) is journalled as `voice_reply_playback`.
-// The end-of-turn reply line left the decider (29 Oct, Decider V5); bank lines stay playable and tested.
-#[cfg_attr(not(test), allow(dead_code))]
+/// Plays a stored clip on its own thread, as a plain line (not an acknowledgement); the pipeline never waits. `Err` is
+/// an immediate skip reason. The outcome is journalled as `voice_reply_playback`. Only tests play plain lines since the
+/// end-of-turn reply line left the decider (29 Oct, Decider V5); they drive the player acknowledgements share.
+#[cfg(test)]
 pub fn play(tools: &Arc<Tools>, clip: i64, epoch: u64, utterance: &str) -> std::result::Result<(), &'static str> {
     play_line(tools, clip, epoch, utterance, None)
 }
@@ -247,7 +223,7 @@ pub fn play_ack(tools: &Arc<Tools>, clip: i64, utterance: &str, speakers: bool) 
     Ok(receipt.recv_timeout(ACK_START_WAIT).unwrap_or(false))
 }
 /// An instant acknowledgement that waits `delay` for the user's quiet before it plays (pipeline/ack.rs: the wake goes to
-/// the agent now; the ack sounds 2.5 s after his last word). With no delay it is `play_ack`. Otherwise it waits on its
+/// the agent now; the ack sounds `ack_delay_ms` after his last word, 0 by default). With no delay it is `play_ack`. Otherwise it waits on its
 /// own thread and plays only if, at its moment, nothing blocks it (`blocked`: the user talking again, agent speech already
 /// going, an interruption, Speaking off); a skipped one is journalled as `voice_ack_playback` and `done` is called
 /// with the reason, so the wake's line is withdrawn while it is still untold and the wake sound can stand in. Once it
@@ -309,7 +285,7 @@ pub fn play_ack_after(tools: &Arc<Tools>, clip: i64, utterance: &str, speakers: 
     Ok(true)
 }
 /// How early an acknowledgement's span opens: Parakeet may date the echo's first word up to a block before it
-/// arrives. The user has been quiet 2.5 s by then, so it never reaches back into his words.
+/// arrives. The user has finished his turn by then (Smart Turn's end of turn), so it never reaches back into his words.
 pub const ACK_LEAD: Duration = Duration::from_millis(300);
 /// How long after an ack's last sample the microphone may still carry it (output and input latency, the room), for
 /// words that began while it sounded. Echo guard (23 Oct): 600 ms missed the 23:40:01 echo by 70 ms and the 23:40:23
@@ -320,6 +296,13 @@ pub const ACK_TAIL: Duration = Duration::from_nanos(crate::pipeline::echo_guard:
 fn play_line(tools: &Arc<Tools>, clip: i64, epoch: u64, utterance: &str, ack: Option<AckPlay>) -> std::result::Result<(), &'static str> {
     if let Some(reason) = blocked(tools, epoch) {
         return Err(reason);
+    }
+    // While the phone owns the output (a phone turn, its route), the line goes to the phone, never the Mac's speaker
+    // (bug note 2026-11-08T03-36-42). Acknowledgements too, the decider's and a typed arrival's, during a phone turn
+    // as well ("using an iPhone should feel exactly as using just a different microphone on the Mac";
+    // this reverses his 8 Nov 04:24 rule that dropped them for a phone turn).
+    if crate::remote::phone_owns_output() {
+        return line_to_phone(tools, clip, ack);
     }
     let bank = &tools.voice_bank;
     if bank.line_playing.swap(true, Ordering::AcqRel) {
@@ -412,6 +395,23 @@ fn play_line(tools: &Arc<Tools>, clip: i64, epoch: u64, utterance: &str, ack: Op
         return Err("player_unavailable");
     }
     Ok(())
+}
+/// A bank line (an acknowledgement) said on the phone: its recorded audio at the user's speed, sent as `speak` with its
+/// words, in order with the rest of the phone's speech. Nothing sounds on the Mac, so it is no echo there.
+fn line_to_phone(tools: &Arc<Tools>, clip: i64, ack: Option<AckPlay>) -> std::result::Result<(), &'static str> {
+    let sent = (|| -> Result<()> {
+        let store = tools.voice_bank.store()?;
+        let mut audio = store.audio(clip)?;
+        let about = store.describe(clip)?;
+        audio.samples = speak::stretch::stretch(&audio.samples, tools.voice_rate());
+        let text = about["text"].as_str().unwrap_or("").to_owned();
+        let language = about["language"].as_str().unwrap_or("en").to_owned();
+        anyhow::ensure!(crate::remote::audio_on_phone(&text, &language, crate::remote::wav_bytes(&audio.samples, audio.sample_rate)?), "User stopped the phone's speech");
+        Ok(())
+    })();
+    if let Err(e) = &sent { eprintln!("voice: a line for the phone was not sent: {e:#}"); }
+    if let Some(a) = ack { let _ = a.started.send(sent.is_ok()); }
+    sent.map_err(|_| "phone_line_failed")
 }
 fn blocked_except_line(tools: &Tools, epoch: u64) -> Option<&'static str> {
     blocked(tools, epoch).filter(|r| *r != "line_playing")
@@ -532,34 +532,6 @@ fn fill_once(
     voicebank::tick(conditions, &store, &lines, speak::VOICE, &mut generator, voicebank::TAKES, exhausted, &cancel)
 }
 
-/// Lines with at least one take for this voice and generator, in list order, with their takes.
-/// A line offered to the decider with its stored takes.
-// The end-of-turn reply line left the decider (29 Oct, Decider V5); bank lines stay playable and tested.
-#[cfg_attr(not(test), allow(dead_code))]
-pub type Offered = (voicebank::Line, Vec<i64>);
-/// Prefer accepted Jarvis takes; an empty deferred bank keeps immediate replies
-/// usable through the Supertonic stand-in.
-// The end-of-turn reply line left the decider (29 Oct, Decider V5); bank lines stay playable and tested.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn offer_with_fallback(bank:&Bank,preferred:(String,&'static str),fallback_voice:&str)
-    -> Result<(String,&'static str,Vec<Offered>,Option<String>)> {
-    let (voice,generator)=preferred;
-    let (offered,error)=offer(bank,&voice,generator)?;
-    if !offered.is_empty() || generator!=speak::drama3::GENERATOR {
-        return Ok((voice,generator,offered,error));
-    }
-    let (offered,fallback_error)=offer(bank,fallback_voice,voicebank::SUPERTONIC_ID)?;
-    Ok((fallback_voice.into(),voicebank::SUPERTONIC_ID,offered,fallback_error.or(error)))
-}
-// The end-of-turn reply line left the decider (29 Oct, Decider V5); bank lines stay playable and tested.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn offer(bank: &Bank, voice: &str, generator: &str) -> Result<(Vec<Offered>, Option<String>)> {
-    let (lines, error) = bank.lines.current();
-    let mut takes: BTreeMap<String, Vec<i64>> = bank.store()?.takes(voice, generator)?;
-    let offered = lines.iter().filter_map(|l| takes.remove(&l.id).map(|t| (l.clone(), t))).collect();
-    Ok((offered, error))
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -572,7 +544,7 @@ pub(crate) mod tests {
         Ok(speak::drama3::Service::new(assets.into()))
     }
     #[test]
-    fn imported_jarvis_takes_are_offered_by_the_live_reply_path_without_resident_drama() -> Result<()> {
+    fn imported_jarvis_takes_are_visible_to_the_open_bank_without_resident_drama() -> Result<()> {
         assert_eq!(crate::settings::Settings::default().free_space_floor_bytes,
             voicebank::import::DEFAULT_FREE_SPACE_FLOOR_BYTES);
         let temp=tempfile::tempdir()?;
@@ -589,34 +561,38 @@ pub(crate) mod tests {
             language:"en".into(),voice:speak::drama3::VOICE.into(),generator:speak::drama3::GENERATOR.into(),settings},&pcm)?;
         // Open the app's bank before import, so this tests fresh visibility on
         // its already-open SQLite connection rather than constructing a new app.
-        assert!(offer(&tools.voice_bank,speak::drama3::VOICE,speak::drama3::GENERATOR)?.0.is_empty());
+        let takes=||tools.voice_bank.store().and_then(|s| s.takes(speak::drama3::VOICE,speak::drama3::GENERATOR));
+        assert!(takes()?.is_empty());
         let report=voicebank::import::run(&source,&data,true)?;
         assert_eq!(report.inserted,1);
         assert!(!tools.drama3.ready());
-        let (voice,generator,offered,error)=offer_with_fallback(&tools.voice_bank,tools.bank_identity(),speak::VOICE)?;
+        assert_eq!(tools.bank_identity(),(speak::drama3::VOICE.to_string(),speak::drama3::GENERATOR));
+        let takes=takes()?;
         tools.drama3.stop();
-        assert_eq!(voice,"jarvis");assert_eq!(generator,speak::drama3::GENERATOR);assert!(error.is_none());
-        assert_eq!(offered.len(),1);assert_eq!(offered[0].0.id,"sure");assert_eq!(offered[0].1.len(),1);
-        let picked=tools.voice_bank.pick_take(&voice,generator,&offered[0].0.id,&offered[0].1).unwrap();
-        assert_eq!(picked,offered[0].1[0]);
-        let back=tools.voice_bank.store()?.audio(picked)?;
+        assert_eq!(takes.len(),1);assert_eq!(takes["sure"].len(),1);
+        let back=tools.voice_bank.store()?.audio(takes["sure"][0])?;
         assert_eq!(back.samples,pcm.samples);
         Ok(())
     }
+    /// A panic while some output held the playback lock poisons it; streamed speech (Jarvis, bank lines) still plays
+    /// afterwards, like a plain output (VOX-A12: `output_stream` panicked on the speech thread from then on).
     #[test]
-    fn empty_drama_bank_uses_supertonic_takes_and_accepted_drama_takes_win() {
-        let (_temp,tools)=tools();let bank=&tools.voice_bank;
-        let fallback=add_clip(&tools,"sure",100);
-        let preference=||(speak::drama3::VOICE.into(),speak::drama3::GENERATOR);
-        let (voice,generator,offered,_)=offer_with_fallback(bank,preference(),speak::VOICE).unwrap();
-        assert_eq!(voice,speak::VOICE);assert_eq!(generator,voicebank::SUPERTONIC_ID);
-        assert!(offered.iter().any(|(_,takes)|takes.contains(&fallback)));
-        let audio=speak::Audio {samples:vec![0.2;100],sample_rate:44100,first_audio_ms:0.,synthesis_ms:0.};
-        bank.store().unwrap().insert(&voicebank::ClipMeta {origin:Origin::Bank,line_id:Some("sure".into()),
-            text:"Sure.".into(),language:"en".into(),voice:speak::drama3::VOICE.into(),
-            generator:speak::drama3::GENERATOR.into(),settings:speak::drama3::settings()},&audio).unwrap();
-        let (voice,generator,offered,_)=offer_with_fallback(bank,preference(),speak::VOICE).unwrap();
-        assert_eq!(voice,speak::drama3::VOICE);assert_eq!(generator,speak::drama3::GENERATOR);assert!(!offered.is_empty());
+    fn a_poisoned_playback_lock_does_not_stop_streamed_speech() {
+        let (_temp, tools) = tools();
+        let lock = tools.voice_bank.playback.clone();
+        let _ = std::thread::spawn(move || {
+            let _held = lock.lock().unwrap();
+            panic!("an output panicked while it played");
+        })
+        .join();
+        assert!(tools.voice_bank.playback.is_poisoned());
+        let mut out = tools.voice_bank.exclusive(Silent);
+        let (tx, rx) = mpsc::channel();
+        drop(tx);
+        let stream = speak::PlaybackStream::new(rx, Arc::new(AtomicU64::new(0)));
+        speak::AudioOutput::output_stream(&mut out, stream, &|| false, speak::Cancellation::new(|| false)).unwrap();
+        let audio = speak::Audio { samples: vec![0.; 10], sample_rate: 44100, first_audio_ms: 0., synthesis_ms: 0. };
+        speak::AudioOutput::output(&mut out, &audio, &|| false).unwrap();
     }
     /// Plays until cancelled or `hold` passes; records what it was given.
     pub(crate) struct Probe {
@@ -690,6 +666,34 @@ pub(crate) mod tests {
         }
     }
 
+    /// ("using an iPhone should feel exactly as using just a different microphone on the Mac"; his 8 Nov
+    /// 04:24 rule reversed): a phone turn's ack reaches the phone as speech, named with the turn, with its recorded
+    /// audio; nothing plays on the Mac, and the agent is told it was said.
+    #[cfg(feature = "phone")]
+    #[test]
+    fn a_phone_turns_acknowledgement_goes_to_the_phone_not_the_mac() {
+        let (_t, tools) = tools();
+        let tools = Arc::new(tools);
+        let clip = add_clip(&tools, "On it.", 1600);
+        let log = probe(&tools, Duration::from_millis(5));
+        let _g = crate::remote::tests::ROUTE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (id, rx) = crate::remote::HUB.subscribe(64);
+        crate::remote::phone_turn_began_with(Some("ack-turn-1".into()));
+        assert_eq!(play_ack(&tools, clip, "phone", true), Ok(true), "said, on the phone");
+        let began = Instant::now();
+        let mut frames = vec![];
+        while began.elapsed() < Duration::from_secs(2) && !frames.iter().any(|f: &String| f.starts_with("event: speak\n")) {
+            frames.extend(rx.try_iter().map(|f| f.to_string()));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let speak = frames.iter().find(|f| f.starts_with("event: speak\n")).expect("a speak frame for the phone");
+        assert!(speak.contains("On it.") && speak.contains("\"turn\":\"ack-turn-1\"") && speak.contains("\"audio\":"), "{speak}");
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(log.lock().unwrap().is_empty(), "nothing played on the Mac");
+        crate::remote::phone_turn_failed();
+        assert!(!crate::remote::phone_turn());
+        crate::remote::HUB.unsubscribe(id);
+    }
     #[test]
     fn line_plays_and_each_interruption_stops_it() {
         let (_t, tools) = tools();
@@ -817,7 +821,7 @@ pub(crate) mod tests {
             assert!(start.elapsed() < Duration::from_secs(5), "{counts:?}");
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert_eq!(bank.root(), tools.archive_session.lock().unwrap().as_ref().unwrap().parent().unwrap());
+        assert_eq!(bank.root.as_path(), tools.archive_session.lock().unwrap().as_ref().unwrap().parent().unwrap());
     }
 
     #[test]

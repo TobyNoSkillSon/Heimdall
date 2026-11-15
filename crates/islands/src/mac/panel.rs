@@ -39,6 +39,14 @@ define_class!(
             false
         }
 
+        /// ⌘-scroll over an open viewer zooms it before any view scrolls (bug note 2026-11-10T10-52-07).
+        #[unsafe(method(sendEvent:))]
+        fn send_event(&self, e: &NSEvent) {
+            if !super::viewer::command_scroll(self, e) {
+                let _: () = unsafe { msg_send![super(self), sendEvent: e] };
+            }
+        }
+
         #[unsafe(method(cancelOperation:))]
         fn cancel_operation(&self, _sender: Option<&AnyObject>) {
             if let Some(c) = self.ivars().ctl.borrow().upgrade() {
@@ -137,6 +145,14 @@ define_class!(
             }
         }
 
+        /// An open viewer's resize cursor over its edges (night 1107).
+        #[unsafe(method(mouseMoved:))]
+        fn mouse_moved(&self, e: &NSEvent) {
+            if let Some(c) = self.ctl() {
+                c.mouse_moved(e);
+            }
+        }
+
         #[unsafe(method(keyDown:))]
         fn key_down(&self, e: &NSEvent) {
             if e.keyCode() == 53 {
@@ -203,6 +219,7 @@ define_class!(
 
         #[unsafe(method(draggingSession:endedAtPoint:operation:))]
         fn session_ended(&self, _s: &NSDraggingSession, p: NSPoint, op: NSDragOperation) {
+            #[cfg(feature = "lab")]
             super::share::LAB_ENDED.with(|e| e.set(Some((p.x, p.y, op.0))));
         }
     }

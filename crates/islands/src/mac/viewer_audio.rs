@@ -1,4 +1,4 @@
-//! The viewer's audio player (Swift `ViewerAudio.swift`): play/pause, a waveform drawn once from the file
+//! The viewer's audio player: play/pause, a waveform drawn once from the file
 //! (AVAudioFile, off the main thread), click or drag on it to scrub, elapsed and total time. Only playback moves the
 //! playhead; paused, nothing runs. With `FI_MUTE=1` in the environment the player is muted (lab runs).
 #![allow(unused_unsafe)]
@@ -401,7 +401,11 @@ impl AudioPlayerView {
         let w = self.wave_rect();
         look::quiet(|| iv.bright_mask.setFrame(cgr(Rect::new(0.0, 0.0, w.w * f, w.h))));
         if let Some(e) = iv.elapsed.borrow().as_ref() {
-            e.setStringValue(&ns(&clock(if t.is_finite() { t } else { 0.0 })));
+            // The text changes once a second; setting it 30 times a second redrew the field each time (audit ISL-22).
+            let text = clock(if t.is_finite() { t } else { 0.0 });
+            if e.stringValue().to_string() != text {
+                e.setStringValue(&ns(&text));
+            }
         }
     }
 
@@ -447,6 +451,7 @@ impl AudioPlayerView {
     }
 
     // Lab hooks (the self-test).
+    #[cfg(feature = "lab")]
     pub fn is_playing(&self) -> bool {
         self.playing()
     }
@@ -459,9 +464,11 @@ impl AudioPlayerView {
     pub fn mute(&self) {
         unsafe { self.ivars().player.setMuted(true) }
     }
+    #[cfg(feature = "lab")]
     pub fn is_muted(&self) -> bool {
         unsafe { self.ivars().player.isMuted() }
     }
+    #[cfg(feature = "lab")]
     pub fn has_peaks(&self) -> bool {
         self.ivars().peaks.borrow().is_some()
     }
@@ -480,9 +487,11 @@ impl AudioPlayerView {
         let q = self.convertPoint_toView(CGPoint::new(p.x, p.y), None);
         Point::new(q.x, q.y)
     }
+    #[cfg(feature = "lab")]
     pub fn button_centre_in_window(&self) -> Point {
         self.to_window(self.button_centre())
     }
+    #[cfg(feature = "lab")]
     pub fn wave_point_in_window(&self, fraction: f64) -> Point {
         self.to_window(self.wave_point(fraction))
     }

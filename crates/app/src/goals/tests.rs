@@ -330,6 +330,29 @@ fn a_segment_past_its_budget_compacts_into_a_header_of_the_goals_and_the_last_li
 }
 
 #[test]
+fn a_call_over_t3s_message_cap_starts_the_context_over_before_it_goes() {
+    // 8 Nov: twelve turns under the token estimate still made a 145,000-character first message, which
+    // t3_thread_launch refuses past 120,000; the call failed every few minutes and never shrank.
+    let l = lab();
+    let mut s = Shadow::open(&l.dir, &l.root, T0, true).unwrap();
+    s.fresh = false;
+    s.compact_tokens = u64::MAX;
+    let old_key = s.segment.key();
+    for i in 0..12 {
+        s.segment.turns.push(super::segment::Turn { user: "x".repeat(9_000), volatile: String::new(), assistant: "{\"ops\":[]}".into(), at: T0 + i });
+    }
+    s.ingest(&[owner("e1", None, T0, "Let's finish the signing step.")], T0, None).unwrap();
+    let req = s.request(T0 + 60 * S).unwrap();
+    assert_ne!(req.key, old_key, "the call goes in a new segment");
+    assert!(req.history.is_empty() && req.stable.starts_with("<goals_at_start") && req.stable.contains("signing step"));
+    let size = super::shadow::fixed_bytes() + req.user().len();
+    assert!(size <= super::shadow::CALL_BYTES, "{size}");
+    assert!(crate::background_call::t3::message(&super::call("m", &req)).chars().count() < 120_000);
+    // Saved: a restart continues in the new segment.
+    assert_eq!(Shadow::open(&l.dir, &l.root, T0 + 61 * S, true).unwrap().segment.key(), req.key);
+}
+
+#[test]
 fn the_call_carries_the_turns_as_history_and_the_segment_as_its_session() {
     let l = lab();
     let mut s = Shadow::open(&l.dir, &l.root, T0, true).unwrap();
@@ -496,6 +519,24 @@ fn removing_goals_then_a_fresh_asks_only_file_loses_no_goal_or_finished_task() {
     assert!(f["goals"].as_array().unwrap().iter().all(|g| g["tasks"].as_array().unwrap().len() <= 1), "no reseed added anything");
 }
 
+/// Bug note 2026-11-06T11-42-43, item 1: the job noticing a goal's aim is met asks the user with a "done?" card under the
+/// goal; it never closes the goal itself, and an ongoing goal is never asked.
+#[test]
+fn a_goal_the_job_sees_reached_is_asked_about_never_closed() {
+    let mut f = ops::fresh();
+    f.insert("goals".into(), json!([
+        {"id": "g-arsenal", "title": "Ship Arsenal", "state": "active", "tasks": []},
+        {"id": "g-better", "title": "Improve Heimdall and Arsenal", "state": "active", "ongoing": true, "tasks": []}]));
+    let ev = ops::Evidence::text("Heimdall: Arsenal 1.0.3 is published on GitHub and the site is live");
+    let r = ops::apply(&mut f, &[op(json!({"op":"finish_goal","goal":"g-arsenal","quote":"Arsenal 1.0.3 is published on GitHub"}))], &ev, 7);
+    assert!(r[0].kept, "{:?}", r[0]);
+    assert_eq!(f["goals"][0]["state"], "active", "the job never closes a goal");
+    let card = crate::islands::proposals::queue(&f).into_iter().next().unwrap();
+    assert_eq!((card["kind"].as_str(), card["goal"].as_str(), card["by"].as_str()), (Some("complete"), Some("g-arsenal"), Some("goals")));
+    let r = ops::apply(&mut f, &[op(json!({"op":"finish_goal","goal":"g-better","quote":"Arsenal 1.0.3 is published on GitHub"}))], &ev, 7);
+    assert!(!r[0].kept && r[0].reason.contains("ongoing"), "{:?}", r[0]);
+}
+
 /// Item 2: removing ops need a three-word quote; an answer is the user's (his words or his click); an ask the shadow did
 /// not raise leaves only on his word.
 #[test]
@@ -607,7 +648,8 @@ fn the_session_cursor_handles_replaced_files_and_branches_back() {
     assert_eq!(super::read_new(&mut s, &mut cur, &data, T0).unwrap(), 2);
 }
 
-/// Item 8: every goal says what work serves it; the model reads it.
+/// Item 8: every goal says what work serves it; the model reads it. (Personal edition: it reads a seed's words.)
+#[cfg(not(feature = "public"))]
 #[test]
 fn goals_carry_an_about_line_the_model_reads() {
     let l = lab();
@@ -752,6 +794,43 @@ fn a_question_cards_click_is_owners_answer() {
     assert!(super::stream::owners_click(&l), "{:?}", l);
     let said = render(&heimdall("h1", "q1", T0, "User clicked Install both earlier."), 0).unwrap();
     assert!(!super::stream::owners_click(&said));
+}
+
+/// Cleanup 14 Nov (ISL-5): the user's clicks are read from the notice's shape, whatever the user is called (the
+/// configured name, or "The user" while none is chosen), never from the word the user; what is not a click stays out.
+#[test]
+fn a_click_counts_whatever_the_user_is_called() {
+    let notice = |id: &str, body: &str| render(&json!({"type":"custom_message","id":"n","parentId":null,"timestamp":iso(T0),
+        "customType":"heimdall_context","content":format!("[Heimdall notice: {id}]\n{body}")}), 0).unwrap();
+    let click = |id: &str, body: &str| super::stream::owners_click(&notice(id, body));
+    for who in ["Ada", "The user", "Mary Ann Smith", "User", "Sinéad O'Brien", "Ana María de la Cruz"] {
+        assert!(click("islands-answer:1", &format!("{who} chose Later on the approval 'Pick the cut'.")), "{who}");
+        assert!(click("islands-context:2", &format!("{who} ticked 'Privacy scan' in Goals.")), "{who}");
+        assert!(click("islands-answer:3", &format!("{who} set 'Speed' to 1.5 on 'Notes'.")), "{who}");
+        assert!(click("ask-1", &format!("Question ask-1: {who} clicked Install both. Question: Install?")), "{who}");
+        // Not clicks: an untick, a close, an open.
+        assert!(!click("islands-context:4", &format!("{who} unticked 'Privacy scan' in Goals.")), "{who}");
+        assert!(!click("islands-context:5", &format!("{who} closed the island 'Notes'.")), "{who}");
+        assert!(!click("islands-context:6", &format!("{who} opened /tmp/set up.html from the island 'Notes'.")), "{who}");
+        // Review 14 Nov: a click verb inside what was opened is not a click.
+        assert!(!click("islands-context:8", &format!("{who} opened ~/Movies/Clip set 2.mov from the island 'Notes'.")), "{who}");
+        assert!(!click("islands-context:9", &format!("{who} opened ~/a/User chose.md from the island 'Notes'.")), "{who}");
+    }
+    // A verb inside a quoted title is not the actor's: "Scheduled item now due: 'Ada chose …'".
+    assert!(!click("islands-context:7", "Scheduled item now due: 'Ada chose a cut'."));
+    // Only the islands' and the cards' own notices count.
+    assert!(!click("terminal:th-1", "Ada chose Later on the approval 'Pick the cut'."));
+    // A notice the islands build under another name is read as the click it is.
+    let d = tempfile::tempdir().unwrap();
+    let h = crate::islands::Host::new(Root(d.path().to_path_buf()), None);
+    h.root.put("notes", json!({"title": "Notes"}).as_object().unwrap()).unwrap();
+    h.remember(&h.root.all());
+    let r = json!({"island": "notes", "kind": "button", "action": "go"});
+    for name in ["Ada", ""] {
+        let (class, line) = crate::islands::with_user(name, || crate::islands::responses::handle(&h, r.as_object().unwrap())).unwrap();
+        assert!(!line.contains("User"), "{line}");
+        assert!(click(class.prefix(), &line), "{line}");
+    }
 }
 
 /// Night 1 Nov: one notice can report several finished pieces; each entry with its number becomes a task, a repeat
@@ -956,4 +1035,28 @@ fn a_threads_notice_framing_is_never_the_quote() {
     let led = super::ledger::build(&[render(&n, 0).unwrap()], &Map::new());
     assert_eq!(led.done[0].quote, "The first build is live on localhost and the review passed.");
     assert!(led.done[0].show.starts_with("[Heimdall website: first build] The first build"), "{}", led.done[0].show);
+}
+
+/// VM run 14 Nov: the personal seed goals ("Get a job", "Ship Arsenal" and two more) were compiled into the public
+/// binary as text, though never shown. The public edition has none (`SEED` is empty, so no title either), and none of
+/// their "about" lines is in this binary (the app's whole public code; other tests' fixtures still name the titles,
+/// so the scan reads the lines only `SEED` held).
+#[cfg(feature = "public")]
+#[test]
+fn the_public_edition_carries_no_seed_goals() {
+    assert!(ops::SEED.is_empty());
+    let bin = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+    // Written backwards: pieces of a needle stored side by side would themselves spell it in the binary.
+    let forwards = |s: &str| s.chars().rev().collect::<String>();
+    let needles = [
+        ".sweivretni ,snoitacilppa ,hcraes boj ,VC",
+        "sledom IA ecived-no snur taht ppa caM eht ,lanesrA",
+        "ycavirp ,secnecil ,snoitide( esaeler cilbup",
+        "retsaf dna repaehc )3 amarD( eciov sivraJ ehT"];
+    for needle in needles.map(forwards) {
+        assert!(!bin.windows(needle.len()).any(|w| w == needle.as_bytes()), "{needle:?} is in the public binary");
+    }
+    // The control: the same scan finds text the binary does carry.
+    let present = forwards("tsil slaoG ytpme na detrats");
+    assert!(bin.windows(present.len()).any(|w| w == present.as_bytes()), "the scan finds what the binary carries");
 }

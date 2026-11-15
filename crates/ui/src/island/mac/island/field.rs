@@ -41,10 +41,11 @@ define_class!(
             true
         }
 
-        /// ⌘C while the island has the keyboard (`copy::command_c`).
+        /// ⌘C while the island has the keyboard (`copy::command_c`), and the field's other Edit keys (⌘V, ⌘X, ⌘A, ⌘Z,
+        /// ⇧⌘Z: `copy::edit_command`, bug note 2026-11-10T16-30-03).
         #[unsafe(method(performKeyEquivalent:))]
         fn perform_key_equivalent(&self, event: &objc2_app_kit::NSEvent) -> bool {
-            super::copy::command_c(self, event) || unsafe { msg_send![super(self), performKeyEquivalent: event] }
+            super::copy::command_c(self, event) || super::copy::edit_command(self, event) || unsafe { msg_send![super(self), performKeyEquivalent: event] }
         }
     }
 );
@@ -134,6 +135,12 @@ pub(crate) struct Fields {
     focused: HashSet<String>,
     /// A field that had the keyboard left the screen (`take_released`).
     released: bool,
+    /// Night 1111 [input]: the composer's kind last placed (`COMPOSER` or `SECRET`): the lock switched it while it
+    /// showed, so the new one takes the keyboard.
+    composer_kind: Option<&'static str>,
+    /// Night 1111 [input]: until this wall time (ms) the composer's field is being swapped by its lock: the old field
+    /// leaving does not give the keyboard back (`composer_switching`).
+    switch_until_ms: u64,
 }
 
 /// Where the native field sits against its slot: its cell draws text 1.75 pt in and 1.5 pt higher than the island draws
@@ -143,6 +150,8 @@ const TEXT_SHIFT: (f64, f64) = (-1.75, 1.5);
 
 /// The composer's owner key (`format!("{owner:?}")` of `Target::Composer`).
 const COMPOSER: &str = "Composer";
+/// Night 1111 [input]: the locked composer's owner key (`Target::ComposerSecret`).
+const SECRET: &str = "ComposerSecret";
 
 impl Fields {
     /// Places the frame's fields on their slots (`parent` is the click target's content view, `size` the window's
@@ -150,6 +159,12 @@ impl Fields {
     /// fields of cards that are gone are dropped. `cards` are the request ids of the cards the island still holds.
     pub(crate) fn sync(&mut self, frame: &FrameModel, parent: &NSView, size: (f64, f64), cards: &HashSet<String>, mtm: MainThreadMarker) {
         let mut shown: HashSet<String> = HashSet::new();
+        let mut composer_now: Option<&'static str> = None;
+        let mut handed_over = false;
+        // Night 1111 [input]: the lock's switch cross-fades the two fields; while it runs, the keyboard waits for the new
+        // one instead of going back to the app the user was in. A pull-up is no switch: its field gives the keyboard back.
+        let switching = now_ms() < self.switch_until_ms
+            && frame.slots.iter().any(|s| matches!(&*s.content, Content::Field { owner: Target::Composer | Target::ComposerSecret, .. }));
         for s in &frame.slots {
             // A leaving copy (`~`) of a field is not the field: its window is removed as the copy leaves, never kept
             // (the last frame of a motion may still hold it, and nothing would place it again).
@@ -176,7 +191,14 @@ impl Fields {
             // A name field that answers the user's click takes the keyboard once, as it is first placed, and only while the
             // card is still the answer to that click (not after it waited behind another card or tucked away).
             let card_focus = now_ms() < *focus_until_ms && entry.card.as_ref().is_some_and(|c| self.focused.insert(c.clone()));
-            if (self.focus && key == COMPOSER) || card_focus {
+            // Night 1111 [input]: the lock switched the composer while it showed: the other field takes the keyboard.
+            let kind = match key.as_str() { COMPOSER => Some(COMPOSER), SECRET => Some(SECRET), _ => None };
+            let switched = kind.is_some() && self.composer_kind.is_some() && self.composer_kind != kind;
+            if kind.is_some() {
+                composer_now = kind;
+            }
+            handed_over |= switched;
+            if (self.focus && key == COMPOSER) || card_focus || switched {
                 if key == COMPOSER {
                     self.focus = false;
                 }
@@ -191,8 +213,20 @@ impl Fields {
         }
         for (key, fv) in &self.views {
             if !shown.contains(key) && unsafe { fv.view.superview() }.is_some() {
-                self.released |= remove(&fv.view);
+                // The secret field's own switch hands the keyboard to the composer: not a release.
+                let released = remove(&fv.view);
+                self.released |= released && !switching;
             }
+            // Night 1111 [input]: a secret never waits off screen in its field.
+            if key == SECRET && !shown.contains(key) && !fv.view.stringValue().is_empty() {
+                fv.view.setStringValue(&ns(""));
+            }
+        }
+        if composer_now.is_some() || !switching {
+            self.composer_kind = composer_now;
+        }
+        if handed_over {
+            self.switch_until_ms = 0;
         }
         // A dropped field leaves the view too: a card can go while its leaving frame still places the field, and a
         // field forgotten on the view stays there invisible, taking the clicks meant for what is drawn under it
@@ -222,11 +256,15 @@ impl Fields {
 
     /// Every field off the screen (the island is at rest, or the window hides).
     pub(crate) fn hide(&mut self) {
-        for fv in self.views.values() {
+        for (key, fv) in &self.views {
             if unsafe { fv.view.superview() }.is_some() {
                 self.released |= remove(&fv.view);
             }
+            if key == SECRET {
+                fv.view.setStringValue(&ns(""));
+            }
         }
+        self.composer_kind = None;
     }
 
     /// Builds the composer's field and readies AppKit's text editing ahead of time (at install, while the click
@@ -246,6 +284,11 @@ impl Fields {
         fv.view.removeFromSuperview();
     }
 
+    /// Night 1111 [input]: the lock is swapping the composer's field (for up to two seconds of its motion).
+    pub(crate) fn composer_switching(&mut self) {
+        self.switch_until_ms = now_ms() + 2000;
+    }
+
     /// The composer takes the keyboard the next time it is placed (now, if it is on screen).
     pub(crate) fn focus_composer(&mut self) {
         self.focus = true;
@@ -258,7 +301,12 @@ impl Fields {
 
     /// Whether the composer is on screen and edits (it has the keyboard's field editor).
     pub(crate) fn composer_focused(&self) -> bool {
-        self.views.get(COMPOSER).is_some_and(|fv| unsafe { fv.view.superview() }.is_some() && fv.view.currentEditor().is_some())
+        [COMPOSER, SECRET].iter().any(|k| self.views.get(*k).is_some_and(|fv| unsafe { fv.view.superview() }.is_some() && fv.view.currentEditor().is_some()))
+    }
+
+    /// Checks: the locked composer's secure field (placed or not).
+    pub(crate) fn secret_field(&self) -> Option<Retained<NSTextField>> {
+        self.views.get(SECRET).map(|fv| fv.view.clone())
     }
 
     /// Whether a field that had the keyboard left the screen since the last call.
@@ -295,7 +343,13 @@ fn local(r: Rect, (w, h): (f64, f64)) -> NSRect {
 
 fn new_view(owner: &Target, font: crate::island::object::Font, mtm: MainThreadMarker) -> FieldView {
     let target = FieldTarget::new(owner.clone(), mtm);
-    let view = NSTextField::initWithFrame(NSTextField::alloc(mtm), rect(0.0, 0.0, 10.0, 10.0));
+    // Night 1111 [input]: the locked composer is a secure field: bullets on screen (and in the archive's screen
+    // recording), and AppKit refuses copy and cut from it.
+    let view: Retained<NSTextField> = if *owner == Target::ComposerSecret {
+        objc2_app_kit::NSSecureTextField::initWithFrame(objc2_app_kit::NSSecureTextField::alloc(mtm), rect(0.0, 0.0, 10.0, 10.0)).into_super()
+    } else {
+        NSTextField::initWithFrame(NSTextField::alloc(mtm), rect(0.0, 0.0, 10.0, 10.0))
+    };
     view.setBezeled(false);
     view.setBordered(false);
     view.setDrawsBackground(false);
@@ -337,7 +391,7 @@ fn changed(owner: &Target, text: String) {
             let (id, question) = (id.clone(), *question);
             with_host(|h| h.apply(Event::AskOther { id, question, text }));
         }
-        Target::Composer => {
+        Target::Composer | Target::ComposerSecret => {
             let empty = text.is_empty();
             with_host(|h| h.apply(Event::ComposerEmpty(empty)));
         }
@@ -357,6 +411,12 @@ fn returned(owner: &Target, field: &NSTextField) {
             let text = field.stringValue().to_string();
             field.setStringValue(&ns(""));
             with_host(|h| h.apply(Event::ComposerSent(text)));
+        }
+        // Night 1111 [input]: the secret leaves the field at once, to the app only (`Event::SecretSent`).
+        Target::ComposerSecret => {
+            let secret = crate::model::SecretText::new(field.stringValue().to_string().trim());
+            field.setStringValue(&ns(""));
+            with_host(|h| h.apply(Event::SecretSent(secret)));
         }
         _ => {}
     }

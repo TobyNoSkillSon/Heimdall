@@ -315,7 +315,7 @@ mod tests {
     /// Confirm; the relay keeps its model, and the account it runs on is the choice already.
     #[test]
     fn a_relay_account_is_clicked_then_confirmed_and_keeps_the_model() {
-        let second = Some("claudeAgent_claude_code_2".to_string());
+        let second = Some("claudeAgent_2".to_string());
         let settings = Settings { agent_relay: true, agent_relay_model: Some("claude-sonnet-5-5".into()), ..Default::default() };
         assert_eq!(current_account(&settings), Some(Choice::RelayAccount(None)));
         assert_eq!(current_account(&Settings::default()), None, "the relay off: every account row proposes it");

@@ -18,6 +18,10 @@ pub(crate) fn available_memory_bytes() -> Option<u64> {
 #[path = "diagnostics_lines.rs"]
 mod lines;
 pub(crate) use lines::line;
+/// One `action:` line per action the user takes, with its source (bug note 2026-11-13T13-55-33).
+pub(crate) fn action_line(source: &str, action: &ui::UiAction) {
+    lines::write_action(source, &format!("{action:?}"));
+}
 /// Tests: the log line a record gets.
 #[cfg(test)]
 pub(crate) use lines::evidence as evidence_line;
@@ -95,7 +99,6 @@ pub(crate) fn startup_record(args: &crate::Args) -> anyhow::Result<()> {
     if args.replay.is_none()
         && args.idle.is_none()
         && !args.settings_only
-        && !args.hotswap_smoke
         && !args.night_replay_smoke
         && !args.night_lab_worker
     {
@@ -646,7 +649,8 @@ mod tests {
                 assert!(line.len() > 24 && line.as_bytes()[4] == b'-' && line.as_bytes()[13] == b':', "{line}");
             }
             assert!(log.contains("health: ? problem: synthetic archive failure"), "{log}");
-            assert!(log.contains("speech: voice_reply (mic): error: reply question requires audio"), "{log}");
+            // Bug note 2026-11-13T13-55-33: a voice reply has its own line, its error included.
+            assert!(log.contains("speech: voice reply failed: reply question requires audio"), "{log}");
             // The per-turn JSON stream stays out of the log.
             assert!(!log.contains("event stream sentinel"), "{log}");
             if panic {

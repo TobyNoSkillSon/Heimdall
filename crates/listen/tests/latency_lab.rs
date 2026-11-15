@@ -1,7 +1,7 @@
 //! Lab run for the latency map (lab/latency/MAP.md): how long the engine works after it decides a pause ended a turn —
 //! Smart Turn, then the final Parakeet decode — on the real pinned models. Each fixture is pushed as fast as the engine
-//! takes it, followed by 2.6 s of silence, so the marks measure compute, not waiting. The pause wait itself is the
-//! policy's silence (`models/smart-turn/owner-policy.json`), not measured here.
+//! takes it, followed by 2.6 s of silence, so the marks measure compute, not waiting. The pause wait itself is set by
+//! the Smart Turn checks (`engine::TUNED_TURN_CHECKS`: 300 ms to 1.5 s, 2.5 s ceiling), not measured here.
 //!
 //! `HEIMDALL_LISTEN_LAB=1 cargo test -p listen --release --test latency_lab -- --ignored --nocapture`
 #[cfg(target_os = "macos")]

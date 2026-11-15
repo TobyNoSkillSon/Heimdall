@@ -49,15 +49,27 @@ pub fn when(at_ms: u64, now_ms: u64) -> String {
 
 /// The limit `text` reports, `None` when it is not a spent limit or balance (a passing error, a crash).
 pub fn parse(text: &str, now_ms: u64) -> Option<Limit> {
-    let lower = text.to_ascii_lowercase();
+    // Claude Code may print a curly apostrophe ("You’ve hit your …"), as `t3::failover::usage_limit` already reads.
+    let lower = text.to_ascii_lowercase().replace('\u{2019}', "'");
     let billing = ["402 payment required", "status 402", "balance exhausted", "credit balance", "insufficient balance", "insufficient credit", "insufficient_quota"]
         .iter().any(|p| lower.contains(p));
     let marker = marker(text);
-    let spent = billing || marker.is_some() || ["you've hit your", "you have hit your", "usage limit", "usage_limit", "limit reached|"].iter().any(|p| lower.contains(p));
+    let reached = ["you've reached your", "you have reached your"].iter().any(|p| lower.contains(p)) && lower.contains("limit");
+    let spent = billing || marker.is_some() || reached || ["you've hit your", "you have hit your", "usage limit", "usage_limit", "limit reached|"].iter().any(|p| lower.contains(p));
     if !spent { return None; }
     let window = marker.as_ref().and_then(|(w, _)| w.clone()).or_else(|| window_of(&lower));
     let reset_ms = marker.and_then(|(_, r)| r).or_else(|| stated(&lower, now_ms)).or_else(|| relative(&lower, now_ms)).or_else(|| piped(text));
     Some(Limit { window, reset_ms, billing: billing && reset_ms.is_none() })
+}
+
+/// Whether a provider's error says the conversation is too long for the model ("prompt is too long", OpenAI's
+/// `context_length_exceeded`, "maximum context length"). The one list: the agent's notice, the compaction fallback and
+/// background calls read a too-long request the same way (AGT-E3).
+pub fn too_long(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    ["prompt is too long", "context length", "context_length_exceeded", "maximum context", "request_too_large", "too many tokens",
+        "input is too long", "context window"]
+        .iter().any(|w| lower.contains(w))
 }
 
 /// `…usage-limit:…:seven_day:1793620800` in a T3 item id (percent-encoded or not): the window and the reset.
@@ -198,5 +210,11 @@ mod tests {
         assert_eq!(parse("You've hit your limit · resets 13:30", late).unwrap().reset_ms, Some(local(2026, 11, 3, 13, 30)));
         assert_eq!(parse("Claude AI usage limit reached|1793066649", 0).unwrap().reset_ms, Some(1_793_066_649_000));
         assert_eq!(parse("You've hit your 5-hour limit · resets 12am", late).unwrap().reset_ms, Some(local(2026, 11, 3, 0, 0)));
+        // AGT-A5: the wordings `t3::failover::usage_limit` takes are limits here too, with their window and reset.
+        let curly = parse("You\u{2019}ve hit your weekly limit · resets 1pm", late).unwrap();
+        assert_eq!((curly.window.as_deref(), curly.reset_ms), (Some("weekly"), Some(local(2026, 11, 3, 13, 0))));
+        let reached = parse("You've reached your weekly limit · resets 1pm", late).unwrap();
+        assert_eq!((reached.window.as_deref(), reached.reset_ms), (Some("weekly"), Some(local(2026, 11, 3, 13, 0))));
+        assert_eq!(parse("You've reached your destination.", late), None, "no limit named");
     }
 }

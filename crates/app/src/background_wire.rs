@@ -1,5 +1,5 @@
 //! The three request formats a tool loop speaks (deep search runs on Background Tasks ▸
-//! Model whatever provider it is, "no provider-specific code paths in deep search"). `background_call::run_tools` is
+//! Model whatever provider it is, "no provider-specific code paths in deep search"). `background_call::run_tools_on` is
 //! one loop; everything that differs between the formats is here, so no caller ever sees which one ran:
 //! - Anthropic Messages: Anthropic, and OpenCode Go's Claude models. The body is `background_call::tool_body`.
 //! - OpenAI chat completions: OpenRouter, OpenCode Go's other models, Custom (any OpenAI-compatible URL), Own Engine
@@ -104,8 +104,11 @@ fn responses_turns(p: &super::Prompt) -> Vec<Value> {
     p.blocks.iter().map(|b| json!({"role": "user", "content": b.text})).collect()
 }
 
+/// Effort names a level may carry (`Call::effort` is `&'static str`): OpenAI's, least first (`EFFORT_ORDER`), then
+/// Anthropic's and T3's Claude extras.
+pub const EFFORT_NAMES: [&str; 11] = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "ultrathink", "ultracode", "auto"];
 /// Reasoning efforts, least first, in OpenAI's names (the ChatGPT sign-in's list goes on to "max" and "ultra").
-const EFFORT_ORDER: [&str; 8] = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+const EFFORT_ORDER: &[&str] = EFFORT_NAMES.split_at(8).0;
 
 /// The efforts a model's catalog entry lists (`agent::provider::ApiModel::efforts`) as `Loop::efforts`; unknown names
 /// are left out.

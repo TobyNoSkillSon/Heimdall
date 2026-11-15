@@ -40,7 +40,6 @@
                 let generation = tools.intent_generation();
                 tools.menu_intent(reason, true);
                 assert!(!tools.file_intent(reason, true));
-                assert!(!tools.resume_agent_intent(generation.agent));
                 assert_eq!(generation, tools.intent_generation());
                 Ok(())
             }, || {

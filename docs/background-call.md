@@ -1,210 +1,276 @@
-# The background call path and its backends
+# Background calls
 
-Every background job (island agent, plan lists, voice names, day timeline, suggestions, deep search) is a short,
-stateless call through one path, `app::background_call` (`ask`, `ask_blocking`, `ask_tools_blocking`). Each call
-carries its own full input; no job keeps a session, except the Goals shadow (below). Background
-Tasks ▸ Model picks the backend, and no job knows which one ran.
+Every background job (the island agent, plan lists, Goals, voice names, the day timeline, suggestions) asks a model
+through one shared path, `app::background_call`. This page covers that path: the jobs, the backends, a task's own
+model, the fallback when a backend runs out, calls on T3, the rolling session and how to add a job.
+
+Read this when: you want to add a background job, change which model a job runs, debug a job that stopped calling or
+moved to another backend, read a line in `agent/background-runs.jsonl`, or change how background calls run on T3.
+Code: `crates/app/src/background_call.rs`, `background_model.rs`, `background_fallback.rs`, `background_gate.rs`,
+`background_t3.rs`, `background_wire.rs` (all in `crates/app/src/`).
+
+## The jobs
+
+Each job is its own short, stateless call that carries its whole input; no job keeps a session except Goals (see
+[A rolling session](#a-rolling-session-goals-only)). Each job has a row in Background Tasks (`ui::BackgroundTask`), its
+own on/off switch (`settings.json` `background_off`) and a log and ledger label (the `JOB` constant in its file).
+
+| Task row | Code | Label | Wakes on | Writes |
+|---|---|---|---|---|
+| Island Agent | `island_agent.rs` | `island agent` | code signals of one bound job island: a stage change, a run end, a new picture, a finished helper, a new eval, training loss (`LOSS_POINTS` new points, at most once per `LOSS_EVERY`, 10 min), a heartbeat every `HEARTBEAT` (30 min) when anything changed; per island at least `MIN_GAP` (120 s) between calls and `COALESCE` (90 s) after the first signal, one call in flight | the island's now line, graphic parts, icon, title, helper names, open target and its `sent` line |
+| Plan Lists | `plan_refresher.rs` | `plan refresher` | the user's words or `refresh_plan` (`PERIOD`, 5 min after the last pass); other changes wait `SLOW_LANES` gaps, `QUIET_LANES` gaps after `QUIET_AFTER` (1 h) of silence | proposals for Scheduled, job islands without a thread |
+| Goals | `goals/` | `goals` | see [goals.md](goals.md) | ops on `goals.json` |
+| Voice Names | `voice_namer.rs` | `voice namer` | its own clock | voice name proposals |
+| Day Timeline | `day_timeline.rs` | `day timeline` | every `PERIOD` (15 min) | the timeline island |
+| Suggestions | `suggester.rs` | `suggester` | the suggest key | the suggestion card ([suggester.md](suggester.md)) |
+
+A thread-bound job island is code-driven: after every T3 pass the binding (`crates/app/src/islands/binding.rs`, `crates/app/src/islands/stages.rs`)
+writes its stage, clock, progress and band with no model. The island agent only makes the island richer; it never
+writes state, stage or the band.
+
+## How a call runs
+
+```mermaid
+flowchart LR
+  J[Job] --> E["task_endpoint(task)"]
+  E --> R["background_fallback::route"]
+  R --> P["endpoint_for(model)"]
+  J --> A["ask / ask_blocking / ask_tools_blocking"]
+  A --> G{background_gate}
+  G -->|Agent off or emergency pause| X[no call]
+  G --> W["HTTP wire: Messages, Responses, chat completions"]
+  G --> T["T3 thread: background_t3"]
+  W --> L["agent/background-runs.jsonl"]
+  T --> L
+```
+
+1. Right before each call the job resolves its endpoint: `background_model::task_endpoint(task)` reads the task's
+   model and passes it to `background_fallback::route`, which returns the pick's endpoint or a fallback's. A call that
+   started on a backend finishes or fails there.
+2. `background_call::ask` (async), `ask_blocking` (from a plain thread) or `ask_tools_blocking` (a tool loop) sends
+   the call. Every call first passes `background_gate::check`: with Agent off or during emergency mode's pause
+   (`background_gate::emergency_pause`) it stops quietly. Setup's agent check (`setup_ready::AGENT_CHECK_JOB`) is the
+   one call that skips the Agent-off check.
+3. Each run is one line in `agent/background-runs.jsonl` (`api_providers::Hub::record_background`) with usage, cost
+   and outcome; a T3 run's model reads `t3:<instance>/<model>`.
+
+Callers that are not tasks (`Heimdall --background-probe`, tests, lab runs) use `background_model::endpoint` or
+`tool_endpoint`: the shared model on its own provider, with no fallback and no Background Tasks sign.
 
 ## Backends
 
-| Choice (`settings.json` `background_model.provider`) | Request | Billing, ledger |
+Background Tasks ▸ Model sets `settings.json` `background_model` (provider, id). No job knows which backend ran.
+
+| Provider id | Request | Billing |
 |---|---|---|
-| `anthropic` (API key) | Messages API, one-hour prompt cache, structured output | Anthropic list prices, $0.50 a run |
-| `openai` (Sign in with ChatGPT, the Codex subscription) | Responses, streamed | rounds at $0 |
-| `opencode-go`, `openrouter`, Custom, Own Engine | Messages or chat completions, as the model's catalog entry says | rounds at $0 |
-| `t3:<instance>` (a Claude Code instance in T3, e.g. `t3:claudeAgent_claude_code_2`) | one short-lived T3 thread per call (below) | one line at $0 |
+| `anthropic` (API key) | Messages, one-hour prompt cache, structured output | Anthropic prices; `LIMIT_USD` ($0.50) a run |
+| `openai` (Sign in with ChatGPT) | Responses | counted at $0 |
+| `opencode-go`, `openrouter`, Custom, Own Engine | Messages, Responses or chat completions, as the model's catalog entry says | counted at $0 |
+| `local` (the built-in engine) | chat completions on the engine's local server (`agent::runtime::BASE_URL`) | counted at $0 |
+| `t3:<instance>` (a harness instance in T3) | one short-lived T3 thread per call | one ledger line at $0 |
 
-`background_model::endpoint_for` resolves the choice; a provider without its credential gets no call. While the
-choice is spent or unavailable the task's next calls go to a fallback (below). Every call passes `background_gate`
-first: Agent off or emergency mode's pause stop it quietly. Each run is one line in
-`agent/background-runs.jsonl`; a T3 run's `model` is `t3:<instance>/<model>`.
+- `background_model::endpoint_for` resolves a model to an endpoint. A provider without its credential gets an endpoint
+  with no key, and no call is made.
+- `t3:` alone names `ui::T3_DEFAULT_INSTANCE`.
+- The personal edition's default `background_model` is `ui::BACKGROUND_DEFAULT` (Claude Haiku 5.5 on Anthropic); the
+  public edition starts with none, and no job calls until one is chosen.
 
-## A task's own model
+Limits on a priced (Anthropic) run, from `background_call.rs`:
 
-A task may run its own model instead of Background Tasks ▸ Model (`settings.json` `task_models`: task, provider,
-id; `UiAction::SetTaskModel`, an empty provider puts the task back on the shared model). The
-island agent defaults to Claude Haiku 5.5 through T3 on the second Claude Code account
-(`ui::ISLANDS_DEFAULT`, `t3:claudeAgent_claude_code_2`), while the saved Background Tasks ▸ Model keeps driving the
-other jobs. Every task reads its own (`background_model::reads_own_model`): Islands, Plan Lists, Voice Names, Day
-Timeline and Suggestions (each with its own model pick); a task without an entry runs the
-shared model. Suggestions is a tool loop, so a T3 pick for it is refused (`background_model::task_accepts`, in the
-menu action and the settings tool). Deep search is not a task and stays on the shared model. A settings file from before the
-split (no `task_models`) whose Islands was off also turns Plan Lists off, once, because Islands off used to stop the
-plan refresher; there are no task models by default. The field is always written, so a task put back on the
-shared model stays there. A job with its own model reads `background_model::task_endpoint(task)` (the island agent:
-`task_endpoint(Task::Islands)`); the model's thinking level applies as for any model. The settings tool sets it as
-`background_model` with the task as item (`shared` to go back).
+- `max_tokens` is the model's maximum (`MODELS`), lowered only where `LIMIT_USD` needs it. The worst case is priced
+  before the call (every cached stretch as a cold one-hour write, input estimated at 2.5 bytes a token); when not even
+  `MIN_OUTPUT` (4,096) tokens fit, the run is skipped (`OverLimit`). A model missing from `MODELS` is priced as the
+  dearest one.
+- Every request has a whole-request deadline of `TIMEOUT` (600 s).
+- A paid run that gave no usable answer (refused, cut off, empty, timed out) ends in `Stopped` with its usage: the job
+  treats that input as seen and calls again only on something new.
+- Other providers run unpriced, with `max_rounds` as a tool loop's limit.
 
-## When a backend runs out: the fallback (`background_fallback.rs`)
+## Give a task its own model
 
-A simpler form of the main agent's emergency mode. When a call fails because a quota or limit ran
-out (a usage-limit reply, a 429, Claude's "usage limit reached", Codex's plan limit, spent credit) or the backend is
-unavailable (T3 not running or not connected, a refused connection, a 5xx), the task's next call goes to the next
-backend, and it keeps working:
+A task may run its own model instead of the shared one: `settings.json` `task_models` (task, provider, id), set from
+Background Tasks ▸ a task's Model (`UiAction::SetTaskModel`; an empty provider puts the task back on the shared model).
 
-1. the same Claude model on another Claude Code account (T3's Claude instances, `claudeAgent` and
-   `claudeAgent_claude_code_2`; with more than one left, the one whose quota renews soonest first, by
-   `agent::accounts::earliest_reset_first`; an account the quota reading shows spent is skipped);
-2. Codex through the ChatGPT sign-in (Responses), on the shared model when that is a Codex model, else a default ChatGPT model;
-   never a Codex T3 instance;
-3. OpenCode Go (the shared model when it lists it, else its default), then
-   the Anthropic API key last, only when the user allowed a paid fallback: `settings.json` `background_fallback_paid`
-   (false by default; `UiAction::SetBackgroundFallbackPaid`, no menu row; the settings tool sets it as
-   `background_model` with item `paid_fallback`).
-
-A pick that is not a Claude model takes Claude Haiku 5.5 on the Claude accounts and the API key. A tool loop
-(Suggestions) has no T3 step. Only a pick on a cloud subscription or API falls back (a T3 instance, the ChatGPT sign-in,
-OpenCode Go, the Anthropic API: `background_fallback::falls_back`); Custom (OpenAI- or
-Anthropic-compatible) and Own Engine never do, because they may be on this Mac or the private network and a local
-choice never sends the plan or a transcript to the cloud. A step that is not configured (no credential, T3 not
-connected) is skipped; nothing usable: no call. A pick that was never connected (no key, signed out) makes no call, as
-before; only T3 not connected counts as unavailable. Deep search and the shared `background_model::endpoint` /
-`tool_endpoint` are not tasks: they stay on Background Tasks ▸ Model, with no fallback and no sign.
-
-Rules:
-- Decided when a job resolves its endpoint (`background_model::task_endpoint`, `endpoint`, `tool_endpoint` call
-  `background_fallback::route`), right before each call: a call that started on a backend finishes or fails there; the
-  next call goes to the fallback. Every call stays one-off.
-- Spent or down is `background_gate`'s episodes, marked where a call fails, by one classification for every wire
-  (`background_gate::fault`): spent for a usage or rate limit (429), a plan limit or spent credit; down for overloaded or
-  a 5xx, no connection, T3 not running (the episode `t3:*`, which no provider id can name; a bare "t3:" is the default
-  instance) or the sign-in lost (401, "please run /login"). A job's own failure (a 400, a prompt too long, a malformed
-  answer, a refused T3 launch) changes no backend and moves no task. A backend is skipped until its stated reset, else
-  until a probe is due: 10 minutes after it failed, doubling with each failed probe up to an hour (failures of calls
-  already running inside the wait renew nothing), read between calls only. The task goes back to its pick at the first
-  call after the pick is usable again. Down counts for routing only: a down pick with nowhere else to go is tried again
-  on the next pass as before the fallback, and its calls are never refused (a whole-request timeout marks nothing; the
-  logs say "down", "unreachable" or "overloaded"). Only a spent plan or credit refuses calls ("… usage is spent").
-- The accounts' quota is read by `Tools/subscription_quota.py` (when that script exists; read-only, no prompt) only when the
-  choice depends on it (`background_fallback::quota_matters`: the step chosen is a Claude account with another one
-  beside it, or Codex), at most every 20 minutes (`accounts::FALLBACK_TTL`), on its own thread; no call waits for it.
-  The script runs in its own process group, killed whole at the timeout, so no `claude` or `codex` process is left.
-- Each move is logged once ("Background tasks · Islands: t3:claudeAgent_claude_code_2/claude-haiku-5-5 is spent or
-  unavailable until 09:00; its calls run on t3:claudeAgent/claude-haiku-5-5 (another Claude Code account) until it is
-  back"), and so is the return. `UiUpdate::BackgroundRoutes` lists the tasks off their pick with what they run on now,
-  sent whenever that changes (an empty list when all are back), from inside the one lock that changes it, so lists
-  arrive in order. A route clears without waiting for the task's next call when the task is turned off, its pick
-  changes (every settings change) or its pick answers again (`background_fallback::refresh_routes`). No card, no
-  failure notice.
-- Emergency mode's pause (`background_gate::emergency_pause`) is unchanged: while the main agent is covered no
-  background job runs. Outside it a spent T3 instance no longer stops its task: the task falls back.
-
-## Merging with the relay's account selection
-
-One reader, one reading: `agent::accounts` (`Script`, `Board`) is the only
-quota source; the relay's own Rust reader (`app::subscription_quota`) is gone. The board is made once in the pipeline
-(`background_fallback::set_quota_board`) with T3's Claude instances and their folders
-(`accounts::config_dirs_from_t3`, read again at every run), and the relay reads it through `background_fallback::quota_board`
-(`emergency::T3Cover::quotas`, `Board::fresh`: at most a minute old, up to 20 s wait, none after a failed read), converted by
-`agent::routing::quotas_from`.
-
-The rankings stay two on purpose: the background fallback takes `accounts::earliest_reset_first` (any window's soonest
-reset), the relay `agent::routing`'s rule (exhausted never, known before unknown, a
-5-hour window at 95% last, weekly reset first, then 5-hour). Both rank the same reading.
+- Every task reads its own model (`background_model::reads_own_model`); a task without an entry runs the shared model.
+- Suggestions is a tool loop (`background_model::tool_task`), so a T3 pick for it is refused
+  (`background_model::task_accepts`, in the menu action and the settings tool).
+- Defaults (`background_model::default_task_models`): the public edition has none; the personal edition gives the
+  island agent and Goals `ui::ISLANDS_DEFAULT`.
+- The `settings` tool sets it as `background_model` with the task as item (`shared` goes back); see
+  [settings.md](settings.md).
 
 ## Thinking level per model
 
-Background Tasks ▸ Model lets the user pick a level for each model from that model's own list
-(`settings.json` `background_efforts`: provider, id, level; `UiAction::SetBackgroundEffort`; an empty level removes
-the entry). A model with a level runs every job at it; a model without one runs each job's own default
-(`background_call::with_effort`). The level reaches each format's own field: Messages `output_config.effort`,
-Responses `reasoning.effort` and chat completions `reasoning_effort` (mapped to the nearest level the model lists),
-and T3 `modelSelection.options.effort` (or `reasoningEffort`, as T3's catalog names the option; a level the model does
-not list falls back to its default). The menu's "off" is each format's least: "low" on Messages and T3, "minimal" on
-the OpenAI formats. The prompt hash includes the effort, so each level keeps its own prompt cache.
+Background Tasks ▸ Model has a level picker per model (`settings.json` `background_efforts`: provider, id, level;
+`UiAction::SetBackgroundEffort`; an empty level removes the entry).
+
+- A model with a level runs every job at it; a model without one runs each job's own default
+  (`background_call::with_effort`).
+- The level goes to each format's own field: Messages `output_config.effort`, Responses `reasoning.effort`, chat
+  completions `reasoning_effort` (mapped to the nearest level the model lists), T3 `modelSelection.options.effort` or
+  `reasoningEffort` (as T3's catalog names it; a level the model does not list falls back to its default).
+- The menu's "off" is each format's least: `low` on Messages and T3, `minimal` on the OpenAI formats
+  (`background_call::effort_name`).
+- Suggestions never runs above its own effort (`LIVE_JOBS`, `capped_effort`), because the user waits on it.
+- The prompt hash includes the effort, so each level keeps its own prompt cache.
+
+## When a backend runs out: the fallback
+
+When a call fails because the backend's quota ran out or the backend is unavailable, the task's next call goes to the
+next backend in `background_fallback::chain`, and the task returns to its pick at the first call after the pick is
+usable again.
+
+The chain, after the pick itself:
+
+1. The same Claude model on another Claude Code account (T3's Claude instances; with quota known, the one whose quota
+   renews soonest first, `agent::accounts::earliest_reset_first`; an account the reading shows spent is skipped).
+   Skipped for a tool loop.
+2. Codex through the ChatGPT sign-in (Responses): the shared model when it is a Codex model, else
+   `background_fallback::CODEX_DEFAULT`. Never a Codex T3 instance.
+3. OpenCode Go (the shared model when it lists it, else its default).
+4. The built-in engine, when it is on.
+5. The Anthropic API key, only when `settings.json` `background_fallback_paid` is true (false by default;
+   `UiAction::SetBackgroundFallbackPaid`, no menu row; the `settings` tool sets it as `background_model` with item
+   `paid_fallback`). It costs money, so the agent asks the user before turning it on.
+
+A pick that is not a Claude model takes Claude Haiku 5.5 on the Claude steps and the API key.
+
+Rules:
+
+- Only a pick on a cloud subscription or API falls back (a T3 instance, the ChatGPT sign-in, OpenCode Go, Anthropic:
+  `background_fallback::falls_back`). The built-in engine, Custom and Own Engine never do. Why: they may run on this
+  Mac or a private network, and a local choice must never send a plan or a transcript to the cloud.
+- A step that is not configured (no credential, T3 not connected) is skipped; with nothing usable there is no call. A
+  pick that was never connected (no key, signed out) makes no call and does not fall back; only T3 not connected counts
+  as unavailable.
+- One classification for every wire, `background_gate::fault`: **spent** is a 429, a usage or plan limit or spent
+  credit; **down** is overloaded or a 5xx, no connection, T3 not running (episode `background_gate::T3_ALL`) or a lost
+  sign-in (401, "please run /login"). A job's own failure (a 400, a prompt too long, a malformed answer, a refused T3
+  launch) marks nothing.
+- A marked backend is skipped until its stated reset, else until a probe is due: `FIRST_PROBE_MS` (10 min) after it
+  failed, doubling with each failed probe up to `MAX_PROBE_MS` (1 h). It is read between calls only.
+- Down counts for routing only: a down pick with nowhere else to go is still tried. Only a spent pick refuses calls
+  ("… usage is spent").
+- A call that fails on its backend's own fault goes once more, at once, on the new route
+  (`background_fallback::once_more`, `once_more_blocking`; used by the island agent and the day timeline). Never more
+  than once.
+- Each move and each return is logged once ("Background tasks · Island Agent: … its calls run on … until it is
+  back"). `UiUpdate::BackgroundRoutes` lists the tasks off their pick (an empty list when all are back), shown as
+  Background Tasks' small sign. A route clears without waiting for the task's next call when the task is turned off,
+  its pick changes or its pick answers again (`background_fallback::refresh_routes`). There is no card and no failure
+  notice.
+- Emergency mode's pause still stops every background job.
+
+The accounts' quota comes from `agent::accounts` (`Board`), read only when it could change the choice
+(`background_fallback::quota_matters`), at most every `accounts::FALLBACK_TTL` (20 min), on its own thread; no call
+waits for it. The relay reads the same board (`background_fallback::quota_board`). The personal edition supplies the
+quota reader; the public edition has none, so its Claude accounts are tried in T3's order.
+
+## A call on T3
+
+`background_call::ask` sends a call whose provider is `t3:<instance>` to `background_t3::ask` (module path
+`background_call::t3`). One call is one short-lived thread:
+
+1. The thread lives in the T3 project `PROJECT_TITLE` ("Heimdall background"), an empty folder `PROJECT_DIR`
+   (`background-t3`) in Heimdall's data folder, found by its folder or made once. If T3 refuses to make it, the
+   threads go to the project that holds Heimdall's home folder.
+2. `t3_thread_launch`: title `[heimdall-bg] <job> <tag>` (`background_t3::TITLE`; the tag is the start of the launch's
+   `clientRequestId`, so a launch whose answer was lost is found by its title, interrupted and archived),
+   `modelSelection {instanceId, model, options}`, runtime mode `approval-required` (T3's most restrictive), workspace
+   root. The one message holds the instruction to use no tools and answer with only the JSON, then the job's system
+   prompt, the JSON schema and the prompt, stable parts first.
+3. `t3_thread_wait` in 15 s slices (`Limits::slice`), reading the activity between slices. A tool item, or a wait on an
+   approval or a question, interrupts the run and fails the call (`Stopped`). T3's own `system_notice` and `error`
+   items are the run's failure, not tools: a "Claude usage limit reached" notice marks the instance spent until its
+   reset (`agent::limits`), so the task falls back.
+4. The last assistant message is read in full; the JSON is cut out of it and checked against the schema's top-level
+   shape (type, required keys, each present property's type).
+5. The thread is archived whatever happened (T3 has no thread delete).
+
+Limits (`background_t3::Limits`): the work gets `TIMEOUT` less 30 s; the interrupt and the archive get 10 s each of
+their own, so the whole call stays within `TIMEOUT`. A T3 call whose own deadline runs out never drops the app's
+shared T3 connection; only a transport or protocol failure reconnects. A launch message over `LAUNCH_MAX_CHARS`
+(120,000 UTF-16 units, as T3 counts) is not sent, and a launch T3 refuses for its arguments
+(`background_t3::rejected_arguments`) is `Stopped`, so no job resends the same input. On the HTTP wires a 413 or
+"prompt is too long" is `Stopped` the same way.
+
+Nothing waits for the user: Heimdall's permission hook declines a prompt in a background thread (launches are recorded
+in `approvals/launched-background`, see [harness-autonomy.md](harness-autonomy.md)), and the T3 observer never follows
+a `[heimdall-bg]` thread, so no call wakes the agent. When the relay finds an account spent, background calls on it
+move off too (`emergency::Side::account_spent`).
+
+A periodic sweep (from `background_t3::set_client`: first after 60 s, then every 10 min) interrupts and archives any
+`[heimdall-bg]` thread still active `STALE_AFTER` (`TIMEOUT` + 120 s) after its last change, at most five a sweep,
+never one a call holds.
+
+Outcomes: an answer, or `Stopped` for a tool request, no text, no JSON, the wrong shape or the deadline. A harness
+error reply (`agent::emergency::harness_error_reply`) or a failed run is a plain error, retried next pass; a usage-limit
+reply marks `t3:<instance>` spent with the reset Claude states, any other harness error marks it down, and T3 not
+answering marks every instance down. The next answer ends the episode.
+
+Tool loops (`ask_tools_blocking`, the suggester) never run on T3: their tools run inside Heimdall and a T3 thread
+cannot call them, so the call fails with `NoToolsOnT3`. Point such a job at an API or local model.
+
+### Which T3 instances are offered
+
+`UiUpdate::T3Instances` comes from T3's live `orchestrator_capabilities` (`background_t3::publish_catalog`), sent
+when the relay's model list is (`Msg::RelayModels`, when the menu opens): every enabled instance that can run a thread
+in `approval-required` and lists models, with each model's effort values and default. The personal edition lists only
+Claude-driver instances; the public edition lists every usable one. A choice is checked against the last list
+(`background_t3::choice_ok`).
 
 ## A rolling session (Goals only)
 
-The Goals job is like a rolling context, like the agent's own but on a much cheaper model, so it can shadow the agent
-completely because the calls hit the cache. This reverses the stateless rule for this one job only;
-every other job leaves both fields empty and sends the same bytes as before (`a_job_without_history_sends_the_same_bytes_as_before_rolling_sessions`
-pins the day timeline's request on every format).
+Goals keeps one rolling, cached conversation instead of stateless calls, so the provider's prefix cache serves all but
+the newest turn. Every other job leaves both fields empty and sends the same bytes as before
+(`a_job_without_history_sends_the_same_bytes_as_before_rolling_sessions` pins this).
 
-A `Call` carries `history: Vec<Turn>` (the earlier turns, oldest first, each `Turn { user: Prompt, assistant: String }`:
-the message as sent and the answer's text as it came back) and `session: Option<String>` (the current segment's key,
-"goals-<segment id>"). The job appends each answered turn and starts a new key when it compacts; `ask` sends the history
-before the new prompt, so the provider's prefix cache serves all but the newest turn.
+- A `Call` carries `history: Vec<Turn>` (earlier turns, oldest first: the message as sent and the answer's text) and
+  `session: Option<String>` (the segment's key, `goals-<segment id>`). The job appends each answered turn and starts a
+  new key when it compacts.
+- Messages: each turn's user blocks and answer, then the new message. Breakpoints on the system, the end of the last
+  earlier answer and the new message's last stable stretch (three of the API's four, one-hour TTL). The history is
+  priced as cached prefix; `LIMIT_USD` still holds.
+- Responses and chat completions: the same turns as input items or messages; Responses' `prompt_cache_key` (and the
+  `session_id` and `x-client-request-id` headers) is `heimdall-<session>`.
+- T3: one thread per session key. The first call launches it (title `[heimdall-bg] <job> <session> <tag>`) with the
+  whole history; each later call sends only the new input (`t3_thread_send`, mode `auto`) and reads only that turn's
+  items. The thread stays open after an answer; anything else (a tool, no JSON, a failed run, the deadline) interrupts
+  and archives it. A remembered thread that has not answered exactly `history.len()` turns on the same instance, model,
+  effort, prompt and project, or that refuses the send, is archived and relaunched with the whole history. A new
+  session key archives the old thread; `background_call::t3::end_session(key)` does so on the job's word.
+- The session map is in memory only. Before each session launch the job's session threads no session holds are
+  archived: at most five a sweep (`SWEEP_MAX`), within one 10 s cleanup deadline.
+- A call that falls back sends the whole history to the other backend (a cold cache once).
 
-- Messages: for each turn its user blocks (unmarked) and its answer, then the new user message. Breakpoints: the system;
-  the end of the last earlier answer (the previous run's prefix, read from cache); the new message's last stable
-  stretch (the next run reads it). Three of the API's four, one-hour TTL. The budget counts the history as cached
-  prefix (a cold one-hour write at worst); the $0.50 limit stands.
-- Responses and chat completions: the same turns as input items or messages, in the same order every call; Responses'
-  `prompt_cache_key` (and with it the `session_id` / `x-client-request-id` headers) is `heimdall-<session>`, so every
-  turn of a segment routes to the cache that holds its prefix.
-- T3: one thread per session key. The first call launches it (title `[heimdall-bg] <job> <session> <tag>`, the
-  background project, `approval-required`, the no-tools instruction) with the whole history in its first message; each
-  later call sends only the new input into it (`t3_thread_send`, mode `auto`) and follows that run as any call, reading
-  only that turn's items. The thread stays open after an answer; anything else (a tool, no JSON, a failed run, the
-  deadline) interrupts and archives it. A remembered thread that has not answered exactly `history.len()` turns on the
-  same instance, model, effort, prompt and project (a restart, a fallback that ran elsewhere, a failed turn), or that
-  refuses the send, is archived and a fresh launch carries the whole history. A job's new session key archives its old
-  thread; `background_call::t3::end_session(key)` does so on the job's word. The map is in memory only: a restart
-  relaunches once, and before each session launch the job's session threads no session holds (`[heimdall-bg] <job>
-  <key> <tag>`: a restart's, or one whose archive failed while T3 was away) are archived: at most five a sweep, within
-  one cleanup deadline (10 s), skipping those T3 lists as archived and those this process archived (T3's list has no
-  archived filter), so the launch keeps its budget. A send T3 queued without a
-  run id never takes the previous turn's finished run for the new one.
-- Fallback is unchanged: a call that moves to another backend sends the whole history there (a cold cache once), and
-  its T3 thread, now a turn behind, is replaced when the task comes back.
-- Usage and the ledger are as for any call: one line a call, cache reads and writes as the provider reports them.
+## Add a background job
 
-## A call on T3 (`background_t3.rs`)
+1. Add a variant to `ui::BackgroundTask` (with `ALL`, `title`, `key`, `icon`), and decide it in
+   `background_model::reads_own_model` and `tool_task` (both match without a wildcard, so the compiler asks).
+2. In the job, read `background_model::enabled(task)` and `task_endpoint(task)` right before each call, and build a
+   `background_call::Call` with the whole input: stable parts first (`Prompt::stable`), the volatile rest last.
+3. Give it a `JOB` label constant and its own trigger. It never reads what another job owns and never keeps a growing
+   shared session.
+4. Check: `cargo test -p app background_model` and `cargo test -p app background_gate` (Agent off and emergency mode
+   stop it), then the job's own tests.
 
-1. The thread lives in the T3 project "Heimdall background", an empty folder `background-t3` in Heimdall's data
-   folder, found by its folder or made once. No project's instructions reach the model, and the user's projects stay clean.
-2. `t3_thread_launch` on the instance: title `[heimdall-bg] <job> <tag>` (the tag is the start of the launch's
-   `clientRequestId`, so a launch whose answer was lost, by a timeout or an answer without its thread id, is still
-   found by its title, interrupted and archived), `modelSelection {instanceId, model, options}`,
-   runtime mode `approval-required` (T3's most restrictive), workspace root. The one message carries the instruction
-   to use no tools and answer with only the JSON, then the job's system prompt, the JSON schema and the whole prompt,
-   stable parts first.
-3. `t3_thread_wait` in 15-second slices (a wait that answers "idle" before the launched run has started keeps
-   waiting for that run); between slices the activity is read. A tool item, or the thread waiting on
-   an approval or a question, interrupts the run and fails the call (`Stopped`). T3's own `system_notice` and `error`
-   items are not tools: they are the run's failure. A spent account shows "Claude usage limit reached …" as a notice
-   (its id carrying the reset), and that marks the instance spent until then (`agent::limits`), so the task falls
-   back; it once read as a tool request and Goals and the island agent stayed on a spent account for five hours. When the main agent's relay finds an account spent, background helpers on it move
-   off too (`emergency::Side::account_spent`). Nothing ever waits for the user:
-   Heimdall's permission hook declines a prompt in a thread Heimdall launched (`heimdall-emergency hook permission`,
-   which finds the launch the client recorded; background launches have their own list,
-   `approvals/launched-background`, so they never push a long-running task out of the main one), and the T3 observer
-   never follows a `[heimdall-bg]` thread, so no
-   call wakes Heimdall's agent.
-4. The last assistant message is read in full. The JSON is cut out of it (a fence or prose around it is dropped) and
-   checked against the schema's top-level shape: its type, the required keys, and each present property's type.
-5. The thread is archived whatever happened. T3 has no thread delete, so archived threads stay in that project.
-6. The work has `TIMEOUT` less 30 s; a run past it is interrupted and counted as timed out. The interrupt and the
-   archive get 10 s each of their own, outside the work's budget, so the whole call stays within `TIMEOUT` (600 s).
-   A T3 call whose own deadline runs out never drops the app's shared T3 connection (`t3::client::TIMEOUT`): only a
-   real transport or protocol failure reconnects.
+## Checks
 
-Outcomes: an answer, or `Stopped` for a tool request, no text, no JSON, the wrong shape or the deadline (the job
-treats that input as seen). A harness error reply (`agent::emergency::harness_error_reply`: "API Error …", "Claude AI
-usage limit reached|…") or a failed run is a plain error, retried next pass. A usage-limit reply starts the instance's
-quota episode under provider id `t3:<instance>`, with the reset Claude states, and any other harness error marks the
-instance down; T3 not answering marks every instance down. The next answer ends it; meanwhile the task falls back.
-Emergency mode pauses T3 calls like every background request.
+- `cargo test -p app background_` runs the call path, the fallback, the gate and the T3 path.
+- `cargo test -p app background_t3` runs the T3 path against a scripted T3: launch, wait, JSON, archive, rolling
+  sessions, harness errors and quota, tool requests and approval waits, the deadline, malformed answers, efforts, tool
+  loops, Agent off, emergency mode and the instance list from a captured catalog
+  (`background_t3_capabilities.json`).
+- Opt-in live checks (`-- --ignored`): `background_t3::tests::live_one_tiny_haiku_call_on_claude_code_2` runs one tiny
+  Haiku call through T3 with a T3 session of its own and a temporary project it deletes.
+- `Heimdall --background-probe` makes one small real call on Background Tasks ▸ Model and prints the provider, model,
+  format and outcome.
 
-Not on T3: tool loops (`ask_tools_blocking`: the suggester, deep search). Their tools run inside Heimdall and a T3
-thread cannot call them; a loop typed out as text would be a fake, so the call fails with `NoToolsOnT3` ("not on
-T3") and the job should be pointed at an API model.
+## See also
 
-### Which instances are offered
-
-`UiUpdate::T3Instances` comes from T3's live `orchestrator_capabilities`, sent at the moments the relay's model list
-is (`Msg::RelayModels`, when the menu opens): every enabled instance that can run a thread in `approval-required`
-and lists models, with each model's effort values and default. Every
-usable instance is listed. A choice is checked
-against the last published list (`background_t3::choice_ok`).
-
-### Checks
-
-`cargo test -p app background_t3` runs the T3 path against a scripted T3 (launch, wait, reply JSON, archive; a rolling
-session's launch with history, its next turn sent alone into the same thread, a mismatch or refused send relaunching,
-`end_session` and a new key archiving, a failed turn interrupted and archived; a cut-off
-reply; harness error and quota; a tool request and an approval wait; the deadline; malformed answers; a failed run;
-efforts; tool loops; Agent off and emergency mode; the instances from a captured catalog; choices). The opt-in live
-check `background_t3::tests::live_one_tiny_haiku_call_on_claude_code_2` (`-- --ignored`) runs one tiny Haiku call on
-`claudeAgent_claude_code_2` with a 15-minute T3 session of its own (`t3 auth session issue`, revoked afterwards) and
-a temporary project it deletes, so the running app's connection is never touched.
+- [goals.md](goals.md): the Goals shadow that uses the rolling session
+- [suggester.md](suggester.md): the suggestion cards, the one tool-loop job
+- [models.md](models.md): the agent's own models and providers
+- [settings.md](settings.md): every settings key, including the `settings` tool
+- [claude-relay.md](claude-relay.md): the relay, which reads the same quota board
+- [t3-orchestration.md](t3-orchestration.md): how Heimdall connects to T3

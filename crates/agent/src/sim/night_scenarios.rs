@@ -635,7 +635,7 @@ fn r9e_a_click_during_an_idle_compaction_goes_out_as_it_ends() {
     sim.settle();
     sim.advance(31 * S);
     assert!(sim.world.lock().unwrap().idle_compacting());
-    sim.notice("ask-1", "User clicked Yes on your question \"Delete AllForOne's heavy files?\"");
+    sim.notice("ask-1", "User clicked Yes on your question \"Delete Atlas's heavy files?\"");
     assert!(sim.world.lock().unwrap().idle_compacting(), "the click does not cut it");
     sim.advance(45 * S);
     let ended = sim.world.lock().unwrap().compactions[0].1;

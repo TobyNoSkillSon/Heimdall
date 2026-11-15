@@ -1,107 +1,132 @@
 # Vella integration
 
-Vella (a dictation app) and Heimdall talk over two local channels. Both are optional: each app
-works alone, and nothing is sent anywhere off the Mac.
+Vella is a separate dictation app. Heimdall and Vella talk over two local channels: Vella tells Heimdall when the user
+dictates, so dictated words never wake the agent, and Vella can borrow the transcription model Heimdall already holds.
+Both channels are optional, both editions have them, and nothing leaves the Mac.
 
-1. **Dictation state and keybind** (Vella → Heimdall): macOS distributed notifications. While Vella records,
-   Heimdall keeps capturing and archiving, but nothing heard can wake the agent; those lines reach the agent's
-   context marked as dictated to Vella, and the island shows Vella's mark.
-2. **Shared transcription model** (Vella → Heimdall → Vella): a Unix socket. When both apps run Parakeet Ultra,
-   Vella sends a finished dictation's audio to the model Heimdall already holds instead of loading its own copy.
+Read this when: you want to change how dictated lines are treated, debug why speech during dictation woke (or did not
+wake) Heimdall, change the transcription socket's protocol or limits, or test the link without Vella.
+Code: `crates/app/src/vella.rs`, `crates/app/src/pipeline/vella.rs`, `crates/app/src/vella_asr.rs`,
+`crates/listen/src/worker.rs` (`transcribe_external`).
 
-## Why notifications, not a key tap
+```mermaid
+flowchart LR
+  V[Vella] -- "dev.vella.dictation.state" --> L[vella.rs Link]
+  L --> P[pipeline/vella.rs]
+  P -- "dictated: no wake" --> A[agent context]
+  V -- "asr.sock request" --> S[vella_asr.rs]
+  S --> W[listen worker]
+  W -- "text" --> V
+  S -- "dev.heimdall.asr" --> V
+```
 
-Vella owns the hotkey (Carbon `RegisterEventHotKey`, or an event tap for modifier-only and mouse triggers) and knows
-the real state: whether a press actually started recording (no model, no microphone permission, hold-to-talk,
-tap-or-hold, a menu click, `vella` CLI). A listen-only tap in Heimdall would see presses, not state, would need Input
-Monitoring permission, and would drift whenever a press does not toggle. Vella's own announcement carries the state
-and the current keybind, so a keybind change in Vella reaches Heimdall with no second setting to keep in sync.
+## Channel 1: dictation state
 
-## Channel 1: `dev.vella.dictation.state`
+Vella owns the hotkey and knows whether a press really started recording, so it announces state; Heimdall never taps
+keys. Why: a key tap would need Input Monitoring and would drift whenever a press does not toggle.
 
-Posted by Vella on `NSDistributedNotificationCenter.default` with object `"dev.vella.dictation"` and
-`deliverImmediately: true`. userInfo (property-list types only):
+Vella posts `dev.vella.dictation.state` (`vella::NOTIFICATION`) on the distributed notification center with object
+`dev.vella.dictation`. userInfo, parsed by `Notice::parse` (version 1 only; anything else is journalled as ignored):
 
 | key | type | meaning |
 |---|---|---|
-| `v` | Int | protocol version, 1 |
-| `state` | String | `"on"` while Vella records (from the press that starts preparing until recording stops), else `"off"` |
-| `reason` | String | `start`, `stop`, `heartbeat`, `hello` (launch, keybind change, or a reply to Heimdall's query), `quit` |
-| `session` | String | UUID of the recording session (empty when off and none ran) |
+| `v` | Int | protocol version, `1` |
+| `state` | String | `on` while Vella records, else `off` |
+| `reason` | String | `start`, `stop`, `heartbeat`, `hello` (launch, keybind change, or reply to Heimdall's query), `quit` |
+| `session` | String | UUID of the recording session |
 | `pid` | Int | Vella's process id |
 | `sent` | Double | Unix seconds when posted |
 | `mode` | String | `dictation` or `streaming` |
-| `shortcut` | String | the active binding as JSON, exactly Vella's `shortcuts.json` form |
-| `shortcutLabel` | String | display form, e.g. `⌃⌘N · Toggle` |
+| `shortcut` | String | the active binding as JSON, Vella's `shortcuts.json` form |
+| `shortcutLabel` | String | display form, for example `⌃⌘N · Toggle` |
 
-While `on`, Vella posts a `heartbeat` every 15 s. Vella posts `quit` (state off) from `applicationWillTerminate`.
+- At start Heimdall posts `dev.heimdall.vella.query` (`vella::QUERY`, object `dev.heimdall`); Vella answers `hello`.
+- While `on`, Vella posts a `heartbeat` every 15 s.
+- Dictation counts as on only while a start or heartbeat arrived within `TIMEOUT_NS` (45 s) and Vella's pid is alive.
+  A missed `stop` therefore ends dictation within 45 s (`Pipeline::vella_tick`, run on the live loop's settings tick).
+- Heimdall stamps each notice on its host clock at receipt, less the posting delay, clamped to `MAX_DELAY_NS` (2 s).
+- Every notice except an unchanged heartbeat is journalled as a `vella_dictation` evidence event.
+- The island shows Vella's mark while dictation is on.
 
-Heimdall posts `dev.heimdall.vella.query` (object `"dev.heimdall"`, no userInfo) when it starts; Vella answers with
-a `hello`.
+## Which lines count as dictated
 
-**Heimdall's safety timeout:** dictation counts as on only while a heartbeat arrived within the last 45 s and
-Vella's pid is alive. A missed `stop` (crash, lost notification) therefore restores normal waking within 45 s;
-a dictation that genuinely runs longer keeps its heartbeats and stays muted.
-
-**Which utterances are dictated:** Heimdall stamps `start`/`stop` on its host clock at receipt (less the posting
-delay, clamped to 0–2 s). An utterance whose audio overlaps dictation intervals for at least half its length is
-dictated: archived as usual, never sent early, never a spoken command, never decided on, never a wake; it enters
-the agent's context as `[dictated to Vella] …`.
-Triggers are judged per word, whatever the line's share: only words whose middle lies outside dictation can name
-Heimdall, say "send it", stop it or match a spoken command, so a few dictated words in a
-spoken line never wake it and words said after the stop wake as usual. In such a mixed line the decider and the agent
-see the dictated run marked `[dictated to Vella: …]`; the archive keeps the words as said.
+- An utterance on the user's microphone is dictated when dictation intervals cover at least `DICTATED_SHARE` (half)
+  of it. It is archived as usual, never sent early, never a spoken command, never decided on and never a wake. The
+  agent sees it prefixed `[dictated to Vella] ` (`DICTATED_PREFIX`).
+- Triggers are judged per word: a word is dictated when its middle lies inside dictation (`Pipeline::vella_split`).
+  Only words outside dictation can name Heimdall, say "send it", stop it or match a spoken command.
+- In a mixed line the agent and the decider see each dictated run as `[dictated to Vella: …]`; the archive keeps the
+  words as said.
+- Dictated words never barge in or stop Heimdall when it talks over them.
 
 ## Channel 2: the transcription socket
 
-Heimdall announces itself with `dev.heimdall.asr` (object `"dev.heimdall"`) when its listen model is ready and when
-it stops, and in reply to Vella's `dev.vella.asr.query`. userInfo: `v` 1, `state` (`ready` | `gone`), `socket`
-(absolute path, mode 0600), `model` (`parakeet-v3-ultra`), `pid`, `sent`, `app` (the announcing edition's app ID).
+Heimdall serves its loaded Parakeet Ultra over a Unix socket so Vella need not load a second copy. The audio never
+reaches VAD, Smart Turn, the archive, the decider or the agent.
 
-The socket has one fixed folder per edition, chosen by the build's edition, never by the movable data folder, so the
-two editions never share app data or answer for each other:
+Announcement: Heimdall posts `dev.heimdall.asr` (object `dev.heimdall`) when the listen model becomes ready, when it
+goes, and in reply to Vella's `dev.vella.asr.query`. userInfo: `v` 1, `state` (`ready` or `gone`), `socket` (absolute
+path), `model` (`parakeet-v3-ultra`, `vella_asr::MODEL`), `pid`, `sent`, `app` (the edition's app ID).
+
+Socket place (`vella_asr::socket_dir`): a fixed folder per edition, never the movable data folder, so the two editions
+never answer for each other.
 
 | edition | app ID | socket |
 |---|---|---|
-| personal | `dev.heimdall.app` | `~/Library/Application Support/Heimdall/asr.sock` (the original profile folder; after a home move it is the link to the new place) |
-| public | `com.tobynoskillson.heimdall` | `~/Library/Application Support/com.tobynoskillson.heimdall/asr.sock` (beside `home.json`) |
+| personal | `dev.heimdall.app` | `Library/Application Support/Heimdall/asr.sock` in the user's home (after a home move, the link left there) |
+| public | `com.tobynoskillson.heimdall` | `Library/Application Support/com.tobynoskillson.heimdall/asr.sock` in the user's home, beside `home.json` |
 
-A lab or test run on its own `--data` keeps the socket in that folder. Path limit: macOS socket paths are under 104
-bytes, which the public path meets for user names up to 31 characters; a longer name makes the socket refuse to start
-(logged, retried every 30 s) and Vella keeps its own model.
+- A run on its own `--data` folder keeps the socket in that folder, so a lab run never takes the installed app's
+  socket.
+- The socket is mode 0600. macOS limits socket paths to 104 bytes; the public path fits user names up to 31
+  characters. If the socket cannot start, the error is logged and `VellaAsr::sync` retries every 30 s (`RETRY`).
 
-Vella trusts a `ready` only when its socket is one of those two paths, `app` is the matching edition, the socket is
-owned by the user with mode 0600 and not a link, and the connected peer runs as the user with the announced pid. With
-both editions ready, Vella borrows from the personal edition and names the one it uses in its status.
-
-One connection per request. Request: one JSON line, then raw audio:
+Protocol, one connection per request. Request: one JSON line (within 4096 bytes and 2 s), then raw audio:
 
 ```
 {"v":1,"op":"transcribe","model":"parakeet-v3-ultra","rate":16000,"samples":N,"format":"f32le"}\n
-<N × 4 bytes, mono 16 kHz little-endian float32>
+<N x 4 bytes, mono 16 kHz little-endian float32>
 ```
 
-`{"v":1,"op":"status"}\n` asks for readiness without audio.
+`{"v":1,"op":"status"}\n` answers `{"v":1,"ok":true,"state":"ready","model":"parakeet-v3-ultra","busy":false}`.
 
 Response: one JSON line, then the connection closes:
 
 ```
-{"v":1,"ok":true,"text":"…","queue_ms":3,"decode_ms":120,"audio_ms":8400}
+{"v":1,"ok":true,"text":"…","queue_ms":3,"decode_ms":120,"audio_ms":8400,"model_ms":110,"windows":1}
 {"v":1,"ok":false,"error":"busy|unavailable|too_long|bad_request|model_mismatch"}
 ```
 
-Limits: at most 10 minutes of audio per request, at most one request decoding and one waiting; more is `busy`.
+Limits:
 
-**Starvation:** Heimdall's listen worker owns the model on one thread. A Vella request is cut into the engine's
-15 s windows and decoded one window per scheduling turn, round-robin with the live sources, so a long dictation
-never holds Heimdall's microphone queue (1.6 s per source) long enough to overflow, and live listening never holds a
-dictation for more than one live step.
+- At most `EXTERNAL_MAX_SAMPLES` (9,600,000 samples, ten minutes) per request; more is `too_long`.
+- `EXTERNAL_SLOTS` (2): one request decoding and one waiting; more is `busy`. At most four connections at once.
+- A stalled read is dropped after 10 s; a write times out after 5 s.
+- A request is decoded in the engine's 15 s windows (`listen::long::WINDOW_SAMPLES`), one window per scheduling turn,
+  between live batches. Why: decoding a long request at once would overflow the live per-source queues.
 
-**Vella's choice and fallback:** Vella's Models table has a "Parakeet v3 Ultra · from Heimdall" row, a normal
-selectable row. It is the default for a user who never chose, and a selection of Vella's own Ultra made before this
-integration moves to it when Heimdall is present; any explicit choice afterwards stands. While that row is chosen,
-Vella sends one request per finished dictation and keeps its own Ultra unloaded and undownloaded. Any connect failure,
-`ok:false` or no reply within 5 s plus a tenth of the audio length falls back, for that dictation, to Vella's own Ultra
-if it is already downloaded (otherwise its usual Get offer; never a silent download), and marks Heimdall unavailable
-until its next `ready`. With Heimdall absent the row is greyed; its link to Heimdall's public page opens nothing until
-that URL is configured.
+## Vella's side
+
+Vella's own code holds these rules; they are listed so the protocol's other end is clear. Vella trusts a `ready` only
+when the socket is one of the two edition paths above, `app` matches, the socket is the user's, mode 0600 and not a
+link, and the peer runs as the user with the announced pid. It offers "Parakeet v3 Ultra · from Heimdall" as a model
+row, sends one request per finished dictation, and on a connect failure, `ok:false` or no reply within 5 s plus a
+tenth of the audio length, falls back to its own model if downloaded and marks Heimdall unavailable until the next
+`ready`.
+
+## Test the link without Vella
+
+1. Dictation state: `cargo run -p app --bin heimdall-vella-link-lab -- [SECONDS]` (default 60, at most 600) installs
+   the observer, posts the query and prints each notice from a running Vella and the link's state after it.
+2. Socket: `cargo run --release -p app --bin heimdall-vella-asr-lab -- --data-dir <scratch dir> --probe <file.wav>
+   --exit-after-probe` loads only the listen model, serves the socket in that folder and decodes the WAV through it.
+   Add `--no-announce` to keep a running Vella from borrowing it.
+3. Unit tests: `cargo test -p app vella` covers `vella.rs`, `vella_asr.rs` and
+   `crates/app/src/pipeline/tests/vella_tests.rs`.
+
+## See also
+
+- [setup.md](setup.md): the Setup window's Vella row and its install button
+- [decision-chain.md](decision-chain.md): what a non-dictated line goes through
+- [listen-vocabulary.md](listen-vocabulary.md): the listen model and its vocabulary
+- [capture.md](capture.md): the microphone sources

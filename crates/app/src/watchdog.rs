@@ -34,6 +34,16 @@ pub const QUIT_CAP: Duration = Duration::from_secs(30);
 pub const CHECK_EVERY: Duration = Duration::from_secs(10);
 /// While quitting, how often the Quit limit is checked: to the quarter second, not to the next round.
 const QUIT_POLL: Duration = Duration::from_millis(250);
+/// How long a stalled Quit waits for its stacks to be saved before it ends anyway.
+pub const QUIT_STACKS_WAIT: Duration = Duration::from_secs(2);
+
+/// Runs `work` on its own thread and waits at most `wait` for it; true when it finished in time. A late or blocked
+/// `work` is left behind (the caller is about to exit).
+fn bounded(wait: Duration, work: impl FnOnce() + Send + 'static) -> bool {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new().name("heimdall-quit-stacks".into()).spawn(move || { work(); let _ = tx.send(()); });
+    spawned.is_ok() && rx.recv_timeout(wait).is_ok()
+}
 /// Automatic relaunches allowed per window.
 pub const RELAUNCHES: usize = 2;
 pub const RELAUNCH_WINDOW_SECONDS: u64 = 30 * 60;
@@ -62,6 +72,9 @@ pub struct Beats {
     quit: AtomicU64,
     /// The last teardown step that finished after Quit (0: none yet; the click counts).
     quit_progress: AtomicU64,
+    /// The teardown step running now (`quit_step`): a Quit that trips the limit names it (bug note
+    /// 2026-11-08T02-03-52: two forced quits on record said only "quit did not finish").
+    quit_step: std::sync::Mutex<&'static str>,
     /// The live loop has beaten at least once since it started.
     live_started: AtomicBool,
     /// The live loop runs (set when it starts; cleared while it shuts down on purpose).
@@ -77,6 +90,7 @@ impl Default for Beats {
             ui: AtomicU64::new(0),
             quit: AtomicU64::new(0),
             quit_progress: AtomicU64::new(0),
+            quit_step: std::sync::Mutex::new("the click"),
             live_started: AtomicBool::new(false),
             armed: AtomicBool::new(false),
         }
@@ -105,6 +119,7 @@ impl Stall {
 }
 
 impl Beats {
+    #[cfg(test)]
     pub fn with_limits(limits: Limits) -> Beats {
         Beats { limits, ..Beats::default() }
     }
@@ -135,6 +150,20 @@ impl Beats {
         if self.is_quitting() {
             self.quit_progress.store(self.now_ms(), Ordering::Release);
         }
+    }
+    /// The next teardown step begins: progress, and the step a stalled Quit names.
+    pub fn quit_step(&self, step: &'static str) {
+        if self.is_quitting() {
+            *self.quit_step.lock().unwrap() = step;
+            self.quit_progress();
+        }
+    }
+    /// The step Quit is in and how long it has gone without progress (`None` outside Quit).
+    pub fn quit_stuck(&self) -> Option<(&'static str, Duration)> {
+        let quit = self.quit.load(Ordering::Acquire);
+        if quit == 0 { return None; }
+        let last = self.quit_progress.load(Ordering::Acquire).max(quit);
+        Some((*self.quit_step.lock().unwrap(), Duration::from_millis(self.now_ms().saturating_sub(last))))
     }
     /// Quit (or a deliberate shutdown) has begun: an error while shutting down never relaunches Heimdall.
     pub fn is_quitting(&self) -> bool {
@@ -200,6 +229,19 @@ pub fn watch_quit_progress(beats: &Arc<Beats>) {
 pub fn progress() {
     if let Some(beats) = QUIT_WATCH.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade) {
         beats.quit_progress();
+    }
+}
+/// A named teardown step begins (`Beats::quit_step`). A no-op outside Quit and outside the live app.
+pub fn progress_step(step: &'static str) {
+    if let Some(beats) = QUIT_WATCH.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade) {
+        beats.quit_step(step);
+    }
+}
+/// The line a stalled Quit logs: the step it was in and how long it made no progress.
+pub fn quit_line(stuck: Option<(&'static str, Duration)>) -> String {
+    match stuck {
+        Some((step, quiet)) => format!("{} (in {step}, no progress for {:.1} s)", Stall::Quit.reason(), quiet.as_secs_f64()),
+        None => Stall::Quit.reason().to_owned(),
     }
 }
 
@@ -355,12 +397,22 @@ pub struct Relauncher {
 
 impl OnStall for Relauncher {
     fn stalled(&mut self, stall: Stall) {
-        eprintln!("Watchdog: {}", stall.reason());
         if stall == Stall::Quit {
+            // The step and the stacks (bug note 2026-11-08T02-03-52): the next slow Quit says where it waited.
+            let stuck = QUIT_WATCH.lock().unwrap().as_ref().and_then(std::sync::Weak::upgrade).and_then(|b| b.quit_stuck());
+            let line = quit_line(stuck);
+            eprintln!("Watchdog: {line}");
+            // The stacks are best effort: sampling can block on a lock the stuck thread holds, so it runs on its own
+            // thread and Quit ends after QUIT_STACKS_WAIT whether or not they were saved (review, 8 Nov).
+            let logs = self.data.join("logs");
+            if !bounded(QUIT_STACKS_WAIT, move || crate::hang::record_quit(&logs, &line)) {
+                eprintln!("Watchdog: Quit stacks not saved within {} s", QUIT_STACKS_WAIT.as_secs());
+            }
             record_forced_quit(&self.data);
-            self.tools.record_diagnostic("health", serde_json::json!({"component":"watchdog", "state":"stalled", "reason":stall.reason()}));
+            self.tools.record_diagnostic("health", serde_json::json!({"component":"watchdog", "state":"stalled", "reason":stall.reason(), "step":stuck.map(|s| s.0)}));
             force_exit(0);
         }
+        eprintln!("Watchdog: {}", stall.reason());
         self.tools.record_diagnostic("health", serde_json::json!({"component":"watchdog", "state":"stalled", "reason":stall.reason()}));
         if RecoveryLog::load(&self.data).is_ok_and(|log| log.allows(unix_now())) {
             self.ui.send(ui::UiUpdate::Health(ui::HealthCue::Restarting {
@@ -460,6 +512,15 @@ pub fn start_relaunch(data: &Path, reason: &str, automatic: bool, tools: &crate:
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_blocked_quit_stack_capture_does_not_hold_quit() {
+        // Review, 8 Nov: sampling stacks can block on a lock the stuck thread holds; Quit must still end.
+        let start = Instant::now();
+        assert!(!super::bounded(Duration::from_millis(100), || std::thread::sleep(Duration::from_secs(5))));
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert!(super::bounded(Duration::from_secs(2), || {}));
+    }
+
     use super::*;
 
     #[test]
@@ -572,6 +633,18 @@ mod tests {
         assert_eq!(b.check_at(quit + 2 * limit + 1_000), Some(Stall::Quit), "no step for the limit");
         b.quit_progress.store(quit + QUIT_CAP.as_millis() as u64, Ordering::Release);
         assert_eq!(b.check_at(quit + QUIT_CAP.as_millis() as u64 + 1), Some(Stall::Quit), "the cap holds");
+        // Bug note 2026-11-08T02-03-52: a Quit past its limit names the step it waited in.
+        let named = Beats::default();
+        named.quit_step("ignored before Quit");
+        assert_eq!(named.quit_stuck(), None);
+        named.quitting();
+        named.quit_step("the agent's stop");
+        let (step, quiet) = named.quit_stuck().unwrap();
+        assert_eq!(step, "the agent's stop");
+        assert!(quiet < QUIT_LIMIT, "a step just began: {quiet:?}");
+        let line = quit_line(Some(("the agent's stop", Duration::from_millis(8_200))));
+        assert_eq!(line, "quit did not finish (in the agent's stop, no progress for 8.2 s)");
+        assert_eq!(quit_line(None), "quit did not finish");
         let b = Beats::default();
         b.set_for_test(1_000, 1_000, true, true);
         b.rebaseline();

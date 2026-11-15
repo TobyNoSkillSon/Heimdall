@@ -580,7 +580,7 @@ mod durability_tests {
     /// Lab timing, not a check (disk-bound; `lab/opt-1023/REPORT.md`): per-record commit time of `event` vs `note`
     /// on one connection, interleaved in blocks. `cargo test -p heimdall-archive --lib note_commit_timing -- --ignored --nocapture`
     #[test]
-    #[ignore]
+    #[ignore = "lab timing, disk-bound: run by hand"]
     fn note_commit_timing() {
         let temp = tempfile::tempdir().unwrap();
         let journal = Journal::open(&temp.path().join("session-timing")).unwrap();

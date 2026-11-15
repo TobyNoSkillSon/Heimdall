@@ -15,6 +15,26 @@ pub fn words(s: &str) -> usize {
     s.split_whitespace().count()
 }
 
+// A title over three words is shortened, not refused (same rule as Heimdall's agent::mcp_contract::first_words; the
+// islands crate stands alone, so it is repeated here).
+const JOINERS: [&str; 22] = ["and", "or", "of", "on", "the", "a", "an", "for", "with", "to", "in", "at", "by", "then", "plus", "vs", "&", "/", "-", "—", "–", "+"];
+
+/// The first `n` words of a title, cut at a clause break inside them ("Phone app: before / after" → "Phone app"),
+/// trailing joiners and punctuation dropped ("Deep thought and" → "Deep thought").
+pub fn first_words(text: &str, n: usize) -> String {
+    let words: Vec<&str> = text.split_whitespace().filter(|w| w.chars().any(char::is_alphanumeric)).collect();
+    let mut kept: Vec<&str> = words.iter().take(n).copied().collect();
+    if let Some(k) = kept.iter().take(n.saturating_sub(1)).position(|w| w.ends_with([',', ':', ';'])) { kept.truncate(k + 1) }
+    let mut s = kept.join(" ");
+    loop {
+        let t = s.trim_end_matches(|c: char| c.is_whitespace() || ",;:/-—–(&+".contains(c)).to_string();
+        let last = t.rsplit(char::is_whitespace).next().unwrap_or("");
+        if t.contains(char::is_whitespace) && JOINERS.contains(&last.to_lowercase().as_str()) { s = t[..t.len() - last.len()].to_string() } else { s = t; break }
+    }
+    if s.is_empty() { words.first().map(|w| w.to_string()).unwrap_or_default() } else { s }
+}
+// ---- end lane T ----
+
 /// `String.count`: user-perceived characters (Foundation's composed character sequences).
 pub fn count(s: &str) -> usize {
     let ns = NSString::from_str(s);

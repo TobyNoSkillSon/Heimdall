@@ -46,7 +46,6 @@ pub(crate) struct CardClick {
 /// One of the user's spoken lines in the wake (host clock).
 #[derive(Clone, Debug)]
 pub(crate) struct Spoken {
-    pub start_ns: u64,
     pub end_ns: u64,
     pub text: String,
 }
@@ -120,7 +119,7 @@ pub(crate) fn card_trigger(explicit: Option<decide::send::Trigger>, card: CardSt
 /// Whether a wake trigger means the speech was for Heimdall (a counted line, module docs).
 pub(crate) fn for_heimdall(trigger: decide::send::Trigger) -> bool {
     use decide::send::Trigger;
-    matches!(trigger, Trigger::D1 | Trigger::Name | Trigger::SendIt | Trigger::OpenQuestion | Trigger::Typed | Trigger::Dropped)
+    matches!(trigger, Trigger::D1 | Trigger::Name | Trigger::SendIt | Trigger::OpenQuestion | Trigger::Typed | Trigger::Dropped | Trigger::PhonePress)
 }
 /// Clicks remembered for the override check: a decision and a wake take well under this.
 pub(crate) const CLICK_MEMORY_NS: u64 = 120_000_000_000;
@@ -147,7 +146,7 @@ pub(crate) fn notes(plan: &Plan, open: &[OpenCard], answered: bool) -> Vec<Strin
     let question = |id: &str| open.iter().find(|c| c.id == id).map(|c| c.question.clone()).unwrap_or_default();
     let mut lines = Vec::new();
     if let (Some((id, _)), false) = (&plan.close, answered) {
-        lines.push(format!("Your question {:?} ({id}) stays open: User spoke, and only his click, Option and a digit, typed Other, or your ask_close answers it.", question(id)));
+        lines.push(format!("Your question {:?} ({id}) stays open: {} spoke, and only his click, Option and a digit, typed Other, or your ask_close answers it.", question(id), agent::identity::user()));
     }
     if let Some(id) = &plan.kept {
         lines.push(format!("Your question {:?} ({id}) stays open: only his click approves it.", question(id)));
@@ -162,11 +161,9 @@ mod tests {
     fn card(id: &str, shown: u64) -> OpenCard {
         OpenCard { id: id.into(), question: format!("{id}?"), shown_ns: shown * S, click_only: false }
     }
-    fn said(start: u64, end: u64, text: &str) -> Spoken {
-        Spoken { start_ns: start * S, end_ns: end * S, text: text.into() }
-    }
-    fn click(id: &str, shown: u64, at: u64, choice: &str) -> CardClick {
-        CardClick { id: id.into(), question: format!("{id}?"), choice: choice.into(), shown_ns: shown * S, at_ns: at * S }
+    /// A line said from `_start` to `end` seconds (the plan reads its end).
+    fn said(_start: u64, end: u64, text: &str) -> Spoken {
+        Spoken { end_ns: end * S, text: text.into() }
     }
 
     /// 19 Oct 18:44:33 "Start a thread on one test desktop widget?"; 18:45:00 "Yes, but let's keep it as a separate
@@ -178,7 +175,7 @@ mod tests {
         assert_eq!(p.close, Some(("ask-widget".into(), "Yes, but let's keep it as a separate project for Heimdall, okay?".into())));
         let lines = notes(&p, &open, false);
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].starts_with("Your question \"ask-widget?\" (ask-widget) stays open: User spoke"), "{}", lines[0]);
+        assert!(lines[0].starts_with("Your question \"ask-widget?\" (ask-widget) stays open: the user spoke"), "{}", lines[0]);
     }
 
     /// 18:44:25 "That would be really cool actually" ended before the 18:44:33 card: not an answer to it.

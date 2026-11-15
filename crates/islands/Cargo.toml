@@ -3,7 +3,7 @@ name = "islands"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
-description = "Floating Islands in Rust: the FloatingIslands helper app (AppKit + Core Animation through objc2) and the islands CLI, the same file protocol as islands/ (Swift)."
+description = "Floating Islands in Rust: the FloatingIslands helper app (AppKit + Core Animation through objc2) and the islands CLI; islands/README.md is its file protocol."
 
 [lib]
 name = "islands"
@@ -16,6 +16,11 @@ path = "src/bin/floating_islands.rs"
 [[bin]]
 name = "islands"
 path = "src/bin/islands.rs"
+
+[features]
+# The lab harnesses (`--selftest`, `--render`, `--viewer-shots`, …; `src/mac/mod.rs`): off in the bundled helper
+# (scripts/bundle_islands.sh); lab scripts build with `--features lab`.
+lab = []
 
 [dependencies]
 serde_json = { version = "1", features = ["float_roundtrip"] }
@@ -30,8 +35,6 @@ objc2-uniform-type-identifiers = "0.3"
 objc2-av-foundation = { workspace = true }
 objc2-avf-audio = "0.3"
 objc2-core-media = "0.3"
-objc2-image-io = "0.3"
 block2 = { workspace = true }
-dispatch2 = { workspace = true }
 
 [dev-dependencies]

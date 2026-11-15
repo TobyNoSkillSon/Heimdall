@@ -1,4 +1,4 @@
-//! A TrainingLab run as a job island sees it (30 Oct, background-jobs redesign): `Projects/TrainingLab/runs/<run>/`
+//! A ModelLab run as a job island sees it (30 Oct, background-jobs redesign): `Projects/ModelLab/runs/<run>/`
 //! holds `meta.json` (`total_steps`, `started`) and `metrics.jsonl` (`k: m` steps with `loss`, `tokens_per_s`,
 //! `sys_mem_gb`; `k: e` evals; `k: end` with a status; `k: resume`). Round 1 of the island design learned that
 //! "Training" from command text alone is wrong (edits to `train_v5.py` before the launch looked like training): only a
@@ -148,13 +148,13 @@ fn thin(v: &[f64]) -> Vec<f64> {
 
 fn round4(x: f64) -> f64 { (x * 10_000.0).round() / 10_000.0 }
 
-/// TrainingLab's runs folder (the personal edition's; the public one has none).
+/// ModelLab's runs folder (the personal edition's; the public one has none).
 pub fn runs_root() -> Option<PathBuf> {
     if crate::edition::PUBLIC { return None }
-    Some(heimdall_home::home_dir().join("Projects/TrainingLab/runs"))
+    Some(heimdall_home::home_dir().join("Projects/ModelLab/runs"))
 }
 
-/// The run a thread's commands point at: one they name (`TrainingLab/runs/<name>`, a glob prefix like
+/// The run a thread's commands point at: one they name (`ModelLab/runs/<name>`, a glob prefix like
 /// `decider-v5-2026*` matches the newest run under it), else one that started within `HINT_WINDOW` after a
 /// training command (`train_v5.py --run`, which names no run folder: trainlog makes it). Newest first.
 pub fn find(root: &Path, named: &[String], hints: &[f64]) -> Option<PathBuf> {
@@ -183,10 +183,10 @@ fn first_time(dir: &Path) -> Option<f64> {
     serde_json::from_str::<Value>(&line).ok()?["t"].as_f64()
 }
 
-/// Run names a command points at: the folder after `TrainingLab/runs/`, cut at the first glob or shell character
+/// Run names a command points at: the folder after `ModelLab/runs/`, cut at the first glob or shell character
 /// (`decider-v5-2026*` → `decider-v5-2026`); at least four characters.
 pub fn named_runs(text: &str) -> Vec<String> {
-    const AT: &str = "TrainingLab/runs/";
+    const AT: &str = "ModelLab/runs/";
     let mut out = Vec::new();
     let mut from = 0;
     while let Some(i) = text[from..].find(AT) {
@@ -240,8 +240,8 @@ mod tests {
 
     #[test]
     fn named_runs_are_folder_prefixes_and_a_training_command_finds_the_run_it_started() {
-        assert_eq!(named_runs("D=$(ls -d /Users/t/Work/Projects/TrainingLab/runs/decider-v5-2026*); tail $D/metrics.jsonl"), ["decider-v5-2026"]);
-        assert_eq!(named_runs("cat Projects/TrainingLab/runs/.server-8766.log"), Vec::<String>::new());
+        assert_eq!(named_runs("D=$(ls -d /Users/t/Work/Projects/ModelLab/runs/decider-v5-2026*); tail $D/metrics.jsonl"), ["decider-v5-2026"]);
+        assert_eq!(named_runs("cat Projects/ModelLab/runs/.server-8766.log"), Vec::<String>::new());
         let d = tempfile::tempdir().unwrap();
         let run = d.path().join("decider-v5-20261029-050146");
         std::fs::create_dir_all(&run).unwrap();

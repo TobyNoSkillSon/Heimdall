@@ -120,6 +120,7 @@ fn register(r: Registered) { REGISTERED.with(|c| *c.borrow_mut() = Some(r)) }
 /// with their project folder under `data`.
 pub fn set_client(client: Arc<::t3::Client>, data: &Path) {
     register(Registered { calls: Arc::new(Real(client)), folder: data.join(PROJECT_DIR), limits: Limits::default(), own_runtime: true });
+    start_stale_sweeps();
 }
 
 /// Tests and lab runs: any `Calls`, any folder and limits, on the caller's runtime.
@@ -494,6 +495,10 @@ async fn run(r: Registered, j: Job) -> Result<Answer> {
             if resumed.is_none() && s.turns == j.turns && s.on == on { resumed = Some(s) } else { cleanup(&r, j.job, &s.thread, false).await; }
         }
     }
+    // The thread this call works on is never swept while the call runs (night review, 6 Nov): a resumed session is out
+    // of the session list until it answers.
+    let mut in_flight = InFlight(None);
+    if let Some(s) = &resumed { in_flight.hold(&s.thread) }
     let resumed = match resumed {
         Some(s) => match send(&*r.calls, &s.thread, &j.next, left(Duration::from_secs(60))).await {
             Ok(run_id) => Some((s, run_id)),
@@ -516,6 +521,7 @@ async fn run(r: Registered, j: Job) -> Result<Answer> {
             (t, run_id, None, None)
         }
     };
+    in_flight.hold(&thread);
     let followed = tokio::time::timeout_at(work_until, follow(&*r.calls, &thread, &mut run_id, stale.as_deref(), r.limits.slice, &mut after)).await;
     // A run that still works is stopped, and the thread is archived, but a rolling session's thread that answered.
     let still_running = !matches!(followed, Ok(Ok(Follow::Reply(_) | Follow::Failed(..))));
@@ -532,8 +538,31 @@ async fn run(r: Registered, j: Job) -> Result<Answer> {
     answer
 }
 
+/// T3's cap on a `t3_thread_launch` message, in characters as T3 counts them: JavaScript string length, UTF-16 code
+/// units (an emoji is two).
+pub const LAUNCH_MAX_CHARS: usize = 120_000;
+
+/// A message's length as T3 measures it.
+pub fn t3_len(s: &str) -> usize { s.encode_utf16().count() }
+
+/// A message T3 would refuse for its length: the call is stopped, not retried (the same input is refused every time;
+/// 8 Nov, Goals retried one 18 times).
+fn too_long(message: &str) -> Option<anyhow::Error> {
+    let n = t3_len(message);
+    (n > LAUNCH_MAX_CHARS).then(|| stopped(format!("the message is {n} characters, over T3's {LAUNCH_MAX_CHARS}")))
+}
+
+/// T3 refused the call's arguments (its schema's validation: "Invalid parameters for tool …", a value too long): the
+/// same input fails the same way every time, so the call is settled, never retried unchanged (bug note
+/// 2026-11-08T02-03-41: the refusal itself was retried 18 times).
+pub fn rejected_arguments(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("invalid parameters for tool") || lower.contains("expected a value with a length")
+}
+
 /// The launch of a call's thread in `project`: its id and run.
 async fn launch(r: &Registered, j: &Job, project: &str, deadline: Duration) -> Result<(String, Option<String>)> {
+    if let Some(e) = too_long(&j.message) { return Err(e) }
     // The title carries the request's own tag, so a launch whose answer was lost can still be found and cleaned up.
     let request = uuid::Uuid::new_v4().simple().to_string();
     let tag = &request[..12];
@@ -553,7 +582,12 @@ async fn launch(r: &Registered, j: &Job, project: &str, deadline: Duration) -> R
                     // T3 down: every instance. A refused launch (T3_TOOL_FAILED: a project, an argument) is this job's
                     // failure and changes no backend (review 30 Oct).
                     t3_down(&err);
-                    if format!("{err:#}").to_ascii_lowercase().contains("project") { forget_project(&r.folder); }
+                    let text = format!("{err:#}");
+                    if text.to_ascii_lowercase().contains("project") { forget_project(&r.folder); }
+                    if rejected_arguments(&text) {
+                        line(j, "rejected");
+                        return Err(stopped(format!("T3 did not start the {} thread: it refused the arguments ({})", j.job, bounded(&text, 300))));
+                    }
                     err.context(format!("T3 did not start the {} thread", j.job))
                 }
                 Ok(_) => anyhow::anyhow!("T3 launch lacks a thread id"),
@@ -645,7 +679,12 @@ fn judge(r: &Registered, j: &Job, followed: std::result::Result<Result<Follow>, 
     }
     crate::background_gate::quota_back(j.provider);
     let Some(v) = extract(&text) else { line(j, "failed"); return Err(stopped("the answer is not JSON".into())) };
-    if let Err(why) = check_shape(&v, &j.schema) { line(j, "failed"); return Err(stopped(format!("the answer is not the JSON the schema asks for: {why}"))) }
+    if let Err(why) = check_shape(&v, &j.schema) {
+        // Night 8 Nov log sweep, finding 2: the rejected answer itself, so the next failure can be read.
+        eprintln!("Background tasks · {}: the answer fails the schema ({why}): {}", j.job, bounded(&text, 600));
+        line(j, "failed");
+        return Err(stopped(format!("the answer is not the JSON the schema asks for: {why}")));
+    }
     line(j, "answered");
     Ok(Answer { text: v.to_string(), usage: Usage::default(), usd: 0.0 })
 }
@@ -659,9 +698,101 @@ async fn cleanup(r: &Registered, job: &str, thread: &str, interrupt: bool) {
     }
     match r.calls.call("t3_thread_organize", json!({"threadId": thread, "action": "archive"}), r.limits.cleanup).await {
         Ok(_) => mark_archived(thread),
+        // Archived already (by the user, or an earlier sweep): done, never swept again.
+        Err(err) if format!("{err:#}").contains("already archived") => mark_archived(thread),
         Err(err) => eprintln!("Background tasks · {job}: the T3 thread {thread} was not archived: {err:#}"),
     }
 }
+
+// ---- stale background threads (bug note 2026-11-06T02-06-02) ----
+// 3 Nov 18:43: T3 hung, the island agent's launch timed out ("T3 did not start the island agent thread: T3_TIMEOUT …
+// A mutation may have been accepted"), T3 made the thread anyway, `find_launched` could not see it in time, and the
+// thread sat "preparing" for 55 hours as an agent at work. A one-call thread's state is in memory only and `sweep`
+// covers session threads, so nothing reaped it, nor any call's thread a quit cut short. Now the app sweeps every
+// `[heimdall-bg]` thread still active past every call's deadline: interrupted and archived (T3 has no delete).
+
+/// A background thread still active this long after its last change is past every call's deadline (`TIMEOUT`, with
+/// room for its cleanup): no call of any process follows it any more.
+pub const STALE_AFTER: Duration = Duration::from_secs(TIMEOUT.as_secs() + 120);
+
+/// Whether a listed thread is a background call's thread left active past `STALE_AFTER` (its newest of `createdAt` and
+/// `updatedAt`). A thread without a readable time is never taken for one.
+pub fn stale(t: &Value, now_ms: u64) -> bool {
+    let ms = |k: &str| t[k].as_str().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()).map(|d| d.timestamp_millis().max(0) as u64);
+    let active = ["preparing", "queued", "starting", "running", "waiting"].contains(&t["status"].as_str().unwrap_or(""));
+    let ours = t["title"].as_str().is_some_and(|x| x.starts_with(TITLE));
+    let archived = t["archived"] == true || t["archivedAt"].as_str().is_some_and(|a| !a.is_empty());
+    let last = ms("createdAt").max(ms("updatedAt"));
+    ours && active && !archived && last.is_some_and(|l| now_ms.saturating_sub(l) >= STALE_AFTER.as_millis() as u64)
+}
+
+/// Threads a call is working on right now: the sweep leaves them alone.
+fn in_flight<T>(f: impl FnOnce(&mut std::collections::HashSet<String>) -> T) -> T {
+    static IN_FLIGHT: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
+    f(IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default))
+}
+/// Holds one thread in `in_flight` until the call ends (dropped on every return path).
+struct InFlight(Option<String>);
+impl InFlight {
+    fn hold(&mut self, thread: &str) {
+        if self.0.as_deref() == Some(thread) { return }
+        if let Some(old) = self.0.take() { in_flight(|s| s.remove(&old)); }
+        in_flight(|s| s.insert(thread.to_owned()));
+        self.0 = Some(thread.to_owned());
+    }
+}
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        if let Some(t) = self.0.take() { in_flight(|s| s.remove(&t)); }
+    }
+}
+
+/// One sweep: at most `SWEEP_MAX` stale threads (`stale`) of any project interrupted and archived, never a session's
+/// own thread nor one this process archived. Returns how many; a list call that fails is the error, logged by the
+/// periodic sweep (night review H5, 6 Nov: it returned 0 silently, so the log could not say whether a sweep ran).
+async fn sweep_stale(r: &Registered) -> Result<usize> {
+    let args = json!({"allProjects": true, "titleContains": TITLE, "statuses": ["preparing", "queued", "starting", "running", "waiting"], "limit": 50});
+    let page = r.calls.call("t3_thread_list", args, r.limits.cleanup).await.context("the stale-thread sweep could not list T3's threads")?;
+    let held: Vec<String> = sessions(|all| all.iter().map(|s| s.thread.clone()).collect());
+    let now = agent::now_ms();
+    let mut done = 0;
+    for t in page["threads"].as_array().into_iter().flatten() {
+        if done == SWEEP_MAX { break }
+        let Some(id) = t["threadId"].as_str() else { continue };
+        if !stale(t, now) || held.iter().any(|h| h == id) || in_flight(|s| s.contains(id)) || was_archived(id) { continue }
+        eprintln!("Background tasks: the T3 thread {id} ('{}') was still {} past every call's deadline; interrupted and archived",
+            bounded(t["title"].as_str().unwrap_or(""), 80), t["status"].as_str().unwrap_or("?"));
+        cleanup(r, "stale sweep", id, true).await;
+        done += 1;
+    }
+    Ok(done)
+}
+
+/// The app's periodic sweep (`set_client`), on this module's own runtime, for the life of the process.
+#[cfg(not(test))]
+fn start_stale_sweeps() {
+    /// The first sweep this long after T3 is connected, then one every `STALE_EVERY`.
+    const STALE_FIRST: Duration = Duration::from_secs(60);
+    const STALE_EVERY: Duration = Duration::from_secs(10 * 60);
+    static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if STARTED.swap(true, std::sync::atomic::Ordering::SeqCst) { return }
+    runtime().spawn(async {
+        tokio::time::sleep(STALE_FIRST).await;
+        loop {
+            if let Some(r) = registered() {
+                match tokio::time::timeout(Duration::from_secs(120), sweep_stale(&r)).await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => eprintln!("Background tasks: {e:#}; trying again in {} min", STALE_EVERY.as_secs() / 60),
+                    Err(_) => eprintln!("Background tasks: the stale-thread sweep took over 120 s and was stopped; trying again in {} min", STALE_EVERY.as_secs() / 60),
+                }
+            }
+            tokio::time::sleep(STALE_EVERY).await;
+        }
+    });
+}
+#[cfg(test)]
+fn start_stale_sweeps() {}
+// ---- end stale background threads ----
 
 /// The thread a launch made whose answer was lost: the project's thread whose title has the request's tag (two looks,
 /// a moment apart, as T3 may still be making it).

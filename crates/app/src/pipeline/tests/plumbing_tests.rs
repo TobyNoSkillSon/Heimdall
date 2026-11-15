@@ -46,6 +46,8 @@ pub(crate) struct Hooks {
     pub(crate) voice_fn: Option<Box<dyn FnMut(&[f32]) -> Option<f32> + Send>>,
     /// Whole microphone utterances' (user, Heimdall) cosines for the next verdicts (mic_voice.rs); empty: unverified.
     pub(crate) mic_voice: VecDeque<(Option<f32>, Option<f32>)>,
+    /// The microphone name each barge-in check was asked with (`request_voice_check`), in order.
+    pub(crate) voice_devices: Vec<String>,
     /// The next this many checks are asked but never answered (the encoder's thread gone).
     pub(crate) lose_voice_answers: usize,
     /// Checks answered, waiting for the live loop (`barge_voice`).
@@ -981,7 +983,7 @@ fn talk_while_a_question_card_is_up_goes_through_d1_at_the_cards_lower_bar() {
 #[test]
 fn no_follow_up_window_with_or_without_a_card() {
     let (_t, mut a, mic) = rig(true);
-    let card = a.tools.test_open_card("Delete AllForOne's heavy files and archive the rest?", 20 * S);
+    let card = a.tools.test_open_card("Delete Atlas's heavy files and archive the rest?", 20 * S);
     a.tools.playback_ended(20 * S);
     turn(&mut a, &mic, 22 * S, "Oh shit, that's my mom calling", Detect::Final, 0, Some(0.2), 3 * S, |_| {});
     a.agent.as_ref().unwrap().barrier().unwrap();
@@ -1331,17 +1333,60 @@ fn islands_on_streams_is_off_by_default_saved_and_shown() {
     assert!(screen::EXCLUDED_WINDOW_TITLES.contains(&ui::ISLAND_WINDOW_TITLE));
 }
 
-/// `look` with Seeing off answers in words and captures nothing; `point` refuses a mistake with its line.
+/// `look` with Seeing off fails with an error that says Seeing is off (bug notes 2026-11-10T15-35-42 and
+/// 2026-11-10T17-55-57: it was a success reading "screen capture is unavailable", three times on 10 Nov while Seeing
+/// had been switched off); `point` refuses a mistake with its line.
 #[tokio::test]
 async fn look_respects_seeing_and_point_mistakes_come_back() {
     let (_t, a, _mic) = rig(false);
     let gate = std::sync::Arc::new(agent::delivery::DeliveryGate::new(true));
     let permit = gate.permit().unwrap();
-    a.tools.screen_off.store(true, std::sync::atomic::Ordering::Release);
-    let seen = a.tools.look(None, &permit).await.unwrap();
-    assert_eq!(seen["content"][0]["text"], crate::bridge::SCREEN_OFF);
-    assert!(seen["content"].as_array().unwrap().iter().all(|c| c["type"] == "text"));
+    let grabs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = grabs.clone();
+    *a.tools.test_grabber.lock().unwrap() = Some(Arc::new(move |_| { counted.fetch_add(1, Ordering::SeqCst); anyhow::bail!("unused") }));
+    a.tools.set_screen_off(true, true);
+    let err = a.tools.look(None, &permit).await.unwrap_err().to_string();
+    assert!(err.starts_with(crate::bridge::SCREEN_OFF) && err.contains("off since Heimdall started"), "{err}");
+    a.tools.set_screen_off(false, false);
+    a.tools.set_screen_off(true, false);
+    let err = a.tools.look(None, &permit).await.unwrap_err().to_string();
+    assert!(err.contains("Seeing is switched off") && err.contains("(off since ") && !err.contains("started"), "{err}");
+    assert_eq!(grabs.load(Ordering::SeqCst), 0, "Seeing off never grabs");
     // Pointing needs the UI's main thread; without one it says so rather than hanging.
     let err = crate::drawing::point(&a.tools, &serde_json::json!({"spec":"size 10 10\nbox 1 1 2 2"}), &permit).unwrap_err();
     assert!(err.to_string().contains("UI_UNAVAILABLE"), "{err}");
+}
+
+/// Bug notes 2026-11-10T15-35-42 and 2026-11-10T17-55-57: with Seeing on, `look` says why it cannot see (a permission
+/// off, a locked Mac, a sleeping display) without grabbing; a grab that fails once is retried and the screen comes
+/// back; one that keeps failing is an error, never a success.
+#[tokio::test]
+async fn look_with_seeing_on_retries_once_and_says_why_it_cannot_see() {
+    let (_t, a, _mic) = rig(false);
+    let gate = std::sync::Arc::new(agent::delivery::DeliveryGate::new(true));
+    let permit = gate.permit().unwrap();
+    a.tools.set_screen_off(false, true);
+    let grabs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let fail_first = Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX));
+    let (counted, failing) = (grabs.clone(), fail_first.clone());
+    *a.tools.test_grabber.lock().unwrap() = Some(Arc::new(move |id| {
+        let n = counted.fetch_add(1, Ordering::SeqCst);
+        anyhow::ensure!(n >= failing.load(Ordering::SeqCst), "SCStream: the stream stopped");
+        let display = screen::DisplayInfo { id, x: 0., y: 0., width: 4, height: 2 };
+        screen::Frame::new(display, capture::host_now_ns(), 4, 2, [200, 10, 9].repeat(8))
+    }));
+    *a.tools.test_blocker.lock().unwrap() = Some("Screen Recording permission is off for Heimdall".into());
+    let err = a.tools.look(None, &permit).await.unwrap_err().to_string();
+    assert!(err.starts_with("CAPTURE_UNAVAILABLE:") && err.contains("Screen Recording permission is off"), "{err}");
+    assert_eq!(grabs.load(Ordering::SeqCst), 0, "a known blocker answers without a grab");
+    *a.tools.test_blocker.lock().unwrap() = None;
+    if ui::drawing::pointer_display().is_none() { return; } // no display to aim at (a headless runner)
+    let err = a.tools.look(None, &permit).await.unwrap_err().to_string();
+    assert!(err.starts_with("CAPTURE_UNAVAILABLE:") && err.contains("failed twice") && err.contains("the stream stopped"), "{err}");
+    assert_eq!(grabs.load(Ordering::SeqCst), 2, "one retry");
+    fail_first.store(3, Ordering::SeqCst); // the next grab (the third) fails, its retry works
+    let seen = a.tools.look(None, &permit).await.unwrap();
+    assert_eq!(grabs.load(Ordering::SeqCst), 4);
+    assert_eq!(seen["content"][0]["type"], "image", "{seen}");
+    assert!(seen["content"][1]["text"].as_str().unwrap().starts_with("Display "), "{seen}");
 }

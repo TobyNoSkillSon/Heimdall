@@ -242,7 +242,7 @@
         .unwrap();
         let began = Instant::now();
         for id in ["a", "b", "c"] {
-            archive.queue(&decide::barge::input(id, "stop", "working").unwrap(), None, None, None);
+            archive.queue(&tests::command_input(id, "look at this"), None, None, None);
         }
         assert!(began.elapsed() < Duration::from_millis(100), "queueing waited for the archive");
         for _ in 0..3 {
@@ -266,7 +266,7 @@
         })
         .unwrap();
         for id in ["bad", "good"] {
-            archive.queue(&decide::barge::input(id, "stop", "working").unwrap(), None, None, None);
+            archive.queue(&tests::command_input(id, "look at this"), None, None, None);
         }
         let until = Instant::now() + Duration::from_secs(5);
         while written.lock().unwrap().is_empty() && Instant::now() < until {

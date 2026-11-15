@@ -147,23 +147,6 @@ async fn dry_run_never_wakes_for_observation() {
     assert_eq!(b.status, Status::Idle);
 }
 #[tokio::test]
-async fn limit_collects_and_reset_flushes() {
-    let mut b = Bridge::dry_run(":memory:").unwrap();
-    b.handle(&Event::Limit {
-        rejected: true,
-        reset: Some(agent::now_ms() / 1000 + 1),
-        status: "rejected".into(),
-    })
-    .unwrap();
-    b.observe(observation(1)).await.unwrap();
-    assert!(b.wake("urgent", &[], true).await.unwrap().is_none());
-    assert_eq!(b.harness.log.len(), 0);
-    assert_eq!(b.pending_observations().unwrap(), 1);
-    b.wait_for_reset().await.unwrap();
-    assert_eq!(b.harness.log.len(), 1);
-    assert_eq!(b.harness.log[0]["would_send"]["priority"], "now");
-}
-#[tokio::test]
 async fn crash_keeps_session_and_requires_reconciliation() {
     let p = std::env::temp_dir().join(format!(
         "heimdall-agent-test-{}.sqlite",
@@ -186,28 +169,11 @@ async fn crash_keeps_session_and_requires_reconciliation() {
         let _ = std::fs::remove_file(format!("{}{ext}", p.display()));
     }
 }
-#[test]
-fn warning_does_not_mean_rejection() {
-    let e = Event::Limit {
-        rejected: false,
-        reset: Some(123),
-        status: "allowed_warning".into(),
-    };
-    let mut b = Bridge::dry_run(":memory:").unwrap();
-    b.handle(&e).unwrap();
-    assert_eq!(b.status, Status::Idle);
-}
 #[tokio::test]
 async fn rejected_result_retries_with_newly_collected_transcript() {
     let mut b = Bridge::dry_run(":memory:").unwrap();
     b.observe(observation(1)).await.unwrap();
     let id = b.wake("answer", &[], false).await.unwrap().unwrap();
-    b.handle(&Event::Limit {
-        rejected: true,
-        reset: Some(agent::now_ms() / 1000),
-        status: "rejected".into(),
-    })
-    .unwrap();
     b.handle(&Event::Complete {
         id: Some(id),
         query: true,
@@ -229,12 +195,6 @@ async fn rate_limit_after_tool_call_is_never_blindly_replayed() {
     let mut b = Bridge::dry_run(":memory:").unwrap();
     let id = b.wake("do it", &[], false).await.unwrap().unwrap();
     b.handle(&Event::Other(json!({"type":"tool_execution_start","delivery_id":id,"message":{"content":[{"type":"tool_use","name":"Bash"}]}}))).unwrap();
-    b.handle(&Event::Limit {
-        rejected: true,
-        reset: Some(agent::now_ms() / 1000),
-        status: "rejected".into(),
-    })
-    .unwrap();
     b.handle(&Event::Complete {
         id: Some(id),
         query: true,
@@ -274,60 +234,6 @@ async fn noquery_fallback_buffers_until_wake() {
 }
 
 #[tokio::test]
-async fn reset_timer_and_restart_preserve_effect_reconciliation() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("ledger.sqlite");
-    let mut b = Bridge::dry_run(&path).unwrap();
-    let first = b.wake("act", &[], false).await.unwrap().unwrap();
-    b.handle(&Event::Other(json!({"type":"tool_execution_start","delivery_id":first,"message":{"content":[{"type":"tool_use","name":"speak"}]}}))).unwrap();
-    b.handle(&Event::Limit {
-        rejected: true,
-        reset: Some(agent::now_ms() / 1000),
-        status: "rejected".into(),
-    })
-    .unwrap();
-    // A second wake arrives while inference is limited.
-    // Use an unknown reset to ensure it remains queued.
-    b.handle(&Event::Limit {
-        rejected: true,
-        reset: None,
-        status: "rejected".into(),
-    })
-    .unwrap();
-    assert!(b.wake("next", &[], false).await.unwrap().is_none());
-    b.handle(&Event::Limit {
-        rejected: true,
-        reset: Some(agent::now_ms() / 1000),
-        status: "rejected".into(),
-    })
-    .unwrap();
-    b.handle(&Event::Complete {
-        id: Some(first.clone()),
-        query: true,
-        error: true,
-        text: "limited after effect".into(),
-    })
-    .unwrap();
-    // Repeated limit notifications must not release the same guard either.
-    b.handle(&Event::Limit {
-        rejected: true,
-        reset: Some(agent::now_ms() / 1000),
-        status: "rejected".into(),
-    })
-    .unwrap();
-    let sent = b.harness.log.len();
-    b.wait_for_reset().await.unwrap();
-    // The effect-bearing wake settled without replay; only the wake queued during the limit goes out.
-    assert_eq!(b.harness.log.len(), sent + 1);
-    assert_ne!(b.harness.log.last().unwrap()["would_send"]["uuid"], first.as_str());
-    let state: String = rusqlite::Connection::open(&path).unwrap().query_row("SELECT state FROM deliveries WHERE id=?1", [&first], |r| r.get(0)).unwrap();
-    assert_eq!(state, "completed");
-    drop(b);
-    let b = Bridge::dry_run(&path).unwrap();
-    assert!(!matches!(b.status, Status::NeedsReconciliation(ref id) if id == &first));
-}
-
-#[tokio::test]
 async fn steering_during_unlabelled_tool_call_never_retries_either_wake() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("ledger.sqlite");
@@ -343,12 +249,6 @@ async fn steering_during_unlabelled_tool_call_never_retries_either_wake() {
     b.handle(&Event::Other(
         json!({"type":"tool_execution_start","toolCallId":"effect","toolName":"speak"}),
     ))
-    .unwrap();
-    b.handle(&Event::Limit {
-        rejected: true,
-        reset: Some(0),
-        status: "fixture".into(),
-    })
     .unwrap();
     for _ in 0..2 {
         b.handle(&Event::Complete {
@@ -1256,4 +1156,27 @@ async fn recovery_resolves_every_interrupted_wake_from_the_session_file() {
     let mut context = agent::notice::StartContext::new(0, None);
     assert!(b.deliver_start_context(&mut context, |_| u64::MAX).await.unwrap());
     assert_eq!(b.pending_observations().unwrap(), 0, "and never ride a wake");
+}
+
+/// What became of a wake (`wake_keyed_outcome`, phone live mic re-review 1): delivered now; queued behind a compaction
+/// under its own id; merged into that queued wake (that wake's id); or nothing new (a key already used). `None` from
+/// `wake_keyed_through` covered all three, and the phone turn read a queued wake as "nothing delivered".
+#[tokio::test]
+async fn a_wake_says_whether_it_went_waits_merged_or_brought_nothing_new() {
+    use agent::WakeOutcome as W;
+    let mut b=Bridge::open(SteerSink {sent:vec![],blocked:false,steering:true,fallbacks:vec![]},":memory:").unwrap();
+    b.observe(observation(1)).await.unwrap();
+    assert_eq!(b.wake_keyed_outcome(Some("A"),"A",&[],false,None,None,agent::Speaker::Owner).await.unwrap(), W::Delivered("A".into()));
+    b.harness.blocked=true;
+    b.observe(observation(2)).await.unwrap();
+    assert_eq!(b.wake_keyed_outcome(Some("B"),"B",&[],false,None,None,agent::Speaker::Owner).await.unwrap(), W::Pending("B".into()), "queued: compaction");
+    assert_eq!(b.last_queued().unwrap().unwrap()["queue_reason"],"Compaction in progress");
+    b.observe(observation(3)).await.unwrap();
+    assert_eq!(b.wake_keyed_outcome(Some("C"),"C",&[],false,None,None,agent::Speaker::Owner).await.unwrap(), W::Pending("B".into()), "merged into the queued wake");
+    assert_eq!(b.wake_keyed_outcome(Some("C"),"again",&[],false,None,None,agent::Speaker::Owner).await.unwrap(), W::NothingNew, "its key was used");
+    // `wake_keyed_through` keeps its answer: an id only when delivered now.
+    b.observe(observation(4)).await.unwrap();
+    assert!(b.wake_keyed_through(Some("D"),"D",&[],false,None,None,agent::Speaker::Owner).await.unwrap().is_none());
+    b.harness.blocked=false; b.flush_queued().await.unwrap();
+    assert_eq!(b.harness.sent.iter().map(|w|w["uuid"].as_str().unwrap()).collect::<Vec<_>>(),vec!["A","B"], "B carried C and D");
 }

@@ -491,9 +491,9 @@ fn recorded_representatives_prepare_screen_and_moment_hot_and_cold() -> Result<(
         if cold {
             // Activity resumes after admission: cancel during re-encoding, retain hot refs.
             let mut checks=0;
-            assert_eq!(heimdall_archive::compact::compact_video_while(t.path(),heimdall_archive::DAY_NS+10*S,&mut ||true,&mut ||{checks+=1;checks<4})?,0);
+            assert_eq!(video::tier_while(t.path(),heimdall_archive::DAY_NS+10*S,video::PASS_EPOCHS,&mut ||{checks+=1;checks<4})?.tiered,0);
             assert_eq!(video::segments(t.path(),cs[0].session)?[0].tier,"hot");
-            assert_eq!(heimdall_archive::compact::compact_video_while(t.path(),heimdall_archive::DAY_NS+10*S,&mut ||true,&mut ||true)?,1);
+            assert_eq!(video::tier_while(t.path(),heimdall_archive::DAY_NS+10*S,video::PASS_EPOCHS,&mut ||true)?.tiered,1);
             assert_eq!(video::segments(t.path(),cs[0].session)?[0].tier,"archive");
         }
         for c in &cs {

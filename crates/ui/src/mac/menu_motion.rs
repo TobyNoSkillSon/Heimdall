@@ -99,6 +99,7 @@ pub(crate) fn between(a: NSRect, b: NSRect, t: f64) -> NSRect {
     NSRect::new(NSPoint::new(mix(a.origin.x, b.origin.x), mix(a.origin.y, b.origin.y)), NSSize::new(mix(a.size.width, b.size.width), mix(a.size.height, b.size.height)))
 }
 
+#[cfg(test)]
 fn same(a: NSRect, b: NSRect) -> bool {
     (a.origin.x - b.origin.x).abs() < 0.5 && (a.origin.y - b.origin.y).abs() < 0.5 && (a.size.width - b.size.width).abs() < 0.5 && (a.size.height - b.size.height).abs() < 0.5
 }
@@ -633,11 +634,6 @@ pub(crate) fn plan(old: &[Old], now: &[(usize, f64, f64)], p: f64) -> Plan {
         Some(BandAt { from: missing.laid, top: missing.y + d, shown: end - missing.laid })
     })();
     Plan { rows, ghost, tail }
-}
-
-/// Resizes under way (checks: none once every motion has ended).
-pub(crate) fn running() -> usize {
-    RESIZES.with(|r| r.borrow().len())
 }
 
 #[cfg(test)]

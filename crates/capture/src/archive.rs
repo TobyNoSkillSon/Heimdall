@@ -227,11 +227,7 @@ impl Archive {
     fn tick(&mut self) -> Result<()> {
         self.pending += 1;
         if self.last_commit.elapsed() >= std::time::Duration::from_secs(1) {
-            if let Err(e) = self.flush() {
-                // Behind a held lock the next attempt is a second away, not on every callback.
-                self.last_commit = std::time::Instant::now();
-                return Err(e);
-            }
+            return self.flush();
         }
         Ok(())
     }
@@ -252,7 +248,16 @@ impl Archive {
         self.sealed.push((object, p.format, p.samples));
         Ok(())
     }
+    /// A failed flush keeps everything for the next one, a second away on the commit clock (behind a held lock or a
+    /// failing disk, not on every callback, nor back to back on the committer: each attempt re-encodes the sealed audio).
     pub fn flush(&mut self) -> Result<()> {
+        let result = self.commit();
+        if result.is_err() {
+            self.last_commit = std::time::Instant::now();
+        }
+        result
+    }
+    fn commit(&mut self) -> Result<()> {
         anyhow::ensure!(!self.read_only, "archive session was opened read-only");
         let sources: Vec<_> = self.buffered.keys().cloned().collect();
         for id in sources {
@@ -521,6 +526,29 @@ mod tests {
         for (row, pcm) in blocks.iter().zip(expected) {
             assert_eq!(audio::pcm_bytes(&row.samples), audio::pcm_bytes(&pcm));
         }
+    }
+    /// CAP-25 (cleanup 14 Nov): a failed flush on the committer's clock was retried at once, re-encoding all sealed
+    /// audio back to back for as long as the failure lasted; `tick` already waited a second. Now every failed flush
+    /// waits the commit clock's second.
+    #[test]
+    fn a_failed_flush_waits_a_second_before_the_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = session(&dir);
+        let mut archive = Archive::create(&path).unwrap();
+        let format = NativeFormat { sample_rate: 16000, channels: 1 };
+        let source = SourceInfo::new(SourceKind::InputDevice { name: "Synthetic".into(), uid: "failed-flush".into() }, format, 1);
+        archive.add_source(&source, 0).unwrap();
+        archive.append(&source.id, 0, format, &[0.1; 512], false).unwrap();
+        // The hot pack cannot be opened (a folder in its place): the flush fails at once, its audio kept.
+        let pack = store::pack_path(&archive.root, store::HOT).unwrap();
+        std::fs::create_dir_all(&pack).unwrap();
+        archive.last_commit = std::time::Instant::now() - std::time::Duration::from_secs(5);
+        assert!(archive.flush().is_err());
+        let wait = archive.commit_wait().expect("the audio is still pending");
+        assert!(wait > std::time::Duration::from_millis(500), "the next flush comes {wait:?} later");
+        std::fs::remove_dir(&pack).unwrap();
+        archive.flush().unwrap();
+        assert_eq!(archive.read_blocks(&source.id).unwrap().len(), 1, "the kept audio commits afterwards");
     }
     #[test]
     fn flush_holds_the_shared_index_only_briefly_and_rows_wait_for_it() {

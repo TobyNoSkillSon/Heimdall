@@ -3,9 +3,9 @@
   "revision": "914f7f89142e33e77833254d9c9b90c3cef7303b",
   "precision": "bfloat16",
   "runtime_precision": "bfloat16",
-  "runtime_tree_sha256": "4f1c3b8cb984a8eb930b101adb4ec085af9b1b7247fdbbf43c9a41cdc06d6cc0",
+  "runtime_tree_sha256": "bcf2c77e5065766c5d882b78afa3854d29c9a1bf1959c2f35cb92b016069b128",
   "runtime_files": 6,
-  "runtime_bytes": 40440054,
+  "runtime_bytes": 40549255,
   "mlx_vlm_revision": "3d87e88402f307efbf68e568971aa887ee7d9ed0",
   "files": [
     {

@@ -179,7 +179,8 @@ pub fn decode_object(rate: u32, channels: u16, frames: usize, codec: &str, bytes
         }
         "f32-zstd" => pcm_from_bytes(&zstd::bulk::decompress(bytes, frames * channels as usize * 4)?)?,
         "opus-har1" => decode_opus(bytes)?,
-        "flac16" => decode_flac(bytes, frames)?,
+        OPUS_NATIVE => decode_opus_native(bytes, rate)?,
+        "flac16" => decode_flac_as(bytes, rate, channels, frames)?,
         _ => anyhow::bail!("unknown audio codec {codec}"),
     };
     ensure!(samples.len() == frames * channels as usize, "decoded length mismatch");
@@ -289,6 +290,10 @@ pub fn read_block_cached(db: &Connection, id: i64, cache: &mut ObjectCache) -> R
     Ok(Pcm { rate: p.rate, channels: p.channels, samples })
 }
 pub fn mono_16k(samples: &[f32], rate: u32, channels: u16) -> Result<Vec<f32>> {
+    mono_at(samples, rate, channels, 16000)
+}
+/// Mono downmix resampled to `out` Hz.
+pub fn mono_at(samples: &[f32], rate: u32, channels: u16, out_rate: u32) -> Result<Vec<f32>> {
     use rubato::{FftFixedInOut, Resampler};
     ensure!(
         rate > 0 && channels > 0 && samples.len().is_multiple_of(channels as usize),
@@ -298,16 +303,16 @@ pub fn mono_16k(samples: &[f32], rate: u32, channels: u16) -> Result<Vec<f32>> {
         .chunks_exact(channels as usize)
         .map(|c| c.iter().sum::<f32>() / channels as f32)
         .collect();
-    if rate == 16000 {
+    if rate == out_rate {
         return Ok(mono);
     }
     if mono.is_empty() {
         return Ok(vec![]);
     }
-    let mut r = FftFixedInOut::<f32>::new(rate as usize, 16000, 1024, 1)?;
+    let mut r = FftFixedInOut::<f32>::new(rate as usize, out_rate as usize, 1024, 1)?;
     let step = r.input_frames_next();
     let delay = r.output_delay();
-    let wanted = mono.len() * 16000 / rate as usize;
+    let wanted = mono.len() * out_rate as usize / rate as usize;
     let mut out = vec![];
     for c in mono.chunks(step) {
         let mut b = vec![0.; step];
@@ -383,20 +388,24 @@ pub fn decode_opus(bytes: &[u8]) -> Result<Vec<f32>> {
     Ok(out[look..look + n].to_vec())
 }
 pub fn encode_flac(pcm: &[f32]) -> Result<Vec<u8>> {
+    encode_flac_as(pcm, 16000, 1)
+}
+/// FLAC, 16-bit, at `rate` with 1 or 2 interleaved channels (stereo decorrelated by the encoder).
+pub fn encode_flac_as(pcm: &[f32], rate: u32, channels: u16) -> Result<Vec<u8>> {
     use flacenc::{component::BitRepr, error::Verify};
     ensure!(
-        !pcm.is_empty() && pcm.iter().all(|x| x.is_finite()),
+        !pcm.is_empty() && pcm.iter().all(|x| x.is_finite()) && (1..=2).contains(&channels) && pcm.len().is_multiple_of(channels as usize) && (8000..=192_000).contains(&rate),
         "invalid FLAC speech"
     );
     let mut samples: Vec<i32> = pcm
         .iter()
         .map(|x| (x.clamp(-1., 1.) * 32768.).round().clamp(-32768., 32767.) as i32)
         .collect();
-    samples.resize(samples.len().max(16), 0);
+    samples.resize(samples.len().max(16 * channels as usize), 0);
     let config = flacenc::config::Encoder::default()
         .into_verified()
         .map_err(|(_, e)| anyhow::anyhow!("FLAC config: {e}"))?;
-    let source = flacenc::source::MemSource::from_samples(&samples, 1, 16, 16000);
+    let source = flacenc::source::MemSource::from_samples(&samples, channels as usize, 16, rate as usize);
     let stream = flacenc::encode_with_fixed_block_size(&config, source, config.block_size)
         .map_err(|e| anyhow::anyhow!("FLAC encode: {e}"))?;
     let mut sink = flacenc::bitsink::ByteSink::new();
@@ -406,10 +415,14 @@ pub fn encode_flac(pcm: &[f32]) -> Result<Vec<u8>> {
     Ok(sink.as_slice().to_vec())
 }
 pub fn decode_flac(bytes: &[u8], samples: usize) -> Result<Vec<f32>> {
+    decode_flac_as(bytes, 16000, 1, samples)
+}
+/// `frames` frames of a FLAC object catalogued at `rate` and `channels`, interleaved.
+pub fn decode_flac_as(bytes: &[u8], rate: u32, channels: u16, frames: usize) -> Result<Vec<f32>> {
     let mut reader = claxon::FlacReader::new(bytes)?;
     ensure!(
-        reader.streaminfo().channels == 1
-            && reader.streaminfo().sample_rate == 16000
+        reader.streaminfo().channels == channels as u32
+            && reader.streaminfo().sample_rate == rate
             && reader.streaminfo().bits_per_sample == 16,
         "invalid cold FLAC geometry"
     );
@@ -417,8 +430,70 @@ pub fn decode_flac(bytes: &[u8], samples: usize) -> Result<Vec<f32>> {
         .samples()
         .map(|x| x.map(|v| v as f32 / 32768.))
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    ensure!(values.len() == samples.max(16), "cold FLAC length mismatch");
-    Ok(values[..samples].to_vec())
+    let n = frames * channels as usize;
+    ensure!(values.len() == n.max(16 * channels as usize), "cold FLAC length mismatch");
+    Ok(values[..n].to_vec())
+}
+/// Codec of mono Opus at an Opus rate (`HAR2`): non-speech of voice sources, fullband.
+pub const OPUS_NATIVE: &str = "opus-har2";
+/// The Opus rate a native rate is stored at: itself when Opus takes it, else 48 kHz.
+pub fn opus_rate(rate: u32) -> u32 {
+    if [8000, 12000, 16000, 24000, 48000].contains(&rate) { rate } else { 48000 }
+}
+/// Self-contained mono Opus packets at `rate` (an Opus rate), 20 ms each: `HAR2`, frames, lookahead, bitrate, rate,
+/// then length-prefixed packets. Lookahead and the zero-padded tail are removed on decode.
+pub fn encode_opus_native(pcm: &[f32], rate: u32, bitrate: i32) -> Result<Vec<u8>> {
+    ensure!(
+        !pcm.is_empty()
+            && pcm.len() <= rate as usize * 120
+            && pcm.iter().all(|x| x.is_finite())
+            && (6000..=256000).contains(&bitrate),
+        "invalid Opus input"
+    );
+    let mut enc = opus::Encoder::at(rate as i32, bitrate, false)?;
+    let (look, frame) = (enc.get_lookahead()? as usize, enc.frame());
+    let mut out = b"HAR2".to_vec();
+    out.extend((pcm.len() as u32).to_le_bytes());
+    out.extend((look as u32).to_le_bytes());
+    out.extend(bitrate.to_le_bytes());
+    out.extend(rate.to_le_bytes());
+    let mut block = vec![0f32; frame];
+    let mut packet = [0; 1275];
+    for offset in (0..pcm.len() + look).step_by(frame) {
+        block.iter_mut().for_each(|x| *x = 0.);
+        let n = pcm.len().saturating_sub(offset).min(frame);
+        if n > 0 {
+            block[..n].copy_from_slice(&pcm[offset..offset + n]);
+        }
+        let n = enc.encode_float(&block, &mut packet)?;
+        out.extend((n as u16).to_le_bytes());
+        out.extend(&packet[..n]);
+    }
+    Ok(out)
+}
+pub fn decode_opus_native(bytes: &[u8], rate: u32) -> Result<Vec<f32>> {
+    ensure!(bytes.len() >= 20 && &bytes[..4] == b"HAR2", "invalid Opus archive header");
+    let word = |i: usize| u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap()) as usize;
+    let (n, look, stored) = (word(4), word(8), word(16) as u32);
+    ensure!(stored == rate, "Opus object at {stored} Hz catalogued at {rate} Hz");
+    ensure!(n <= rate as usize * 120 && look < rate as usize, "Opus archive too large");
+    let mut dec = opus::Decoder::at(rate as i32)?;
+    let frame = rate as usize / 50;
+    let mut pos = 20;
+    let mut out = Vec::with_capacity(n + look + frame);
+    let mut block = vec![0f32; frame];
+    while pos < bytes.len() {
+        ensure!(pos + 2 <= bytes.len(), "truncated packet length");
+        let size = u16::from_le_bytes(bytes[pos..pos + 2].try_into().unwrap()) as usize;
+        pos += 2;
+        ensure!(size > 0 && pos + size <= bytes.len() && out.len() < n + look + frame, "invalid packet extent");
+        let got = dec.decode_float(&bytes[pos..pos + size], &mut block)?;
+        ensure!(got == frame, "unexpected Opus frame length");
+        out.extend_from_slice(&block);
+        pos += size;
+    }
+    ensure!(out.len() == (n + look).div_ceil(frame) * frame, "missing Opus tail");
+    Ok(out[look..look + n].to_vec())
 }
 
 #[cfg(test)]

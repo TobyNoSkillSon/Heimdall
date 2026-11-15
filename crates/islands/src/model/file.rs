@@ -47,6 +47,10 @@ impl Paths {
     pub fn visibility() -> PathBuf {
         Self::root().join("visibility.json")
     }
+    /// Heimdall's Islands Display (`DisplayLock`).
+    pub fn display() -> PathBuf {
+        Self::root().join("display.json")
+    }
 
     pub fn ensure() {
         for u in [Self::islands(), Self::responses()] {
@@ -172,8 +176,7 @@ impl IslandFile {
         }
     }
 
-    /// Pretty, sorted keys, slashes unescaped (JSONSerialization's `.prettyPrinted, .sortedKeys, .withoutEscapingSlashes`),
-    /// byte-for-byte what the Swift build writes.
+    /// Pretty, sorted keys, whole doubles as integers (`jsonfmt`).
     pub fn encode(o: &Json) -> Vec<u8> {
         super::jsonfmt::to_string(&Value::Object(o.clone()), true).into_bytes()
     }
@@ -355,6 +358,46 @@ impl IslandFile {
         Self::write_atomic(&o, &url).ok().map(|_| url)
     }
 }
+
+// ---- islands display (night 1107, bug note 2026-11-07T02-02-35) ----
+/// Heimdall's Islands Display: `display.json` holds `{"display": "MSI MAG 271QPX"}` while the islands are locked to that
+/// display, and `{"display": null}` (or nothing) while they follow the pointer, the default. Heimdall's notch island
+/// reads the same setting (`ui::islands_display`, whose matching this repeats).
+pub struct DisplayLock;
+
+impl DisplayLock {
+    pub fn locked_in(o: Option<&Json>) -> Option<String> {
+        o.and_then(|o| o.get("display")).and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+    }
+    /// The display the islands are locked to, by name (`None`: they follow the pointer).
+    pub fn locked() -> Option<String> {
+        Self::locked_in(IslandFile::read(&Paths::display()).as_ref())
+    }
+    /// The display a name picks among the connected displays' names: the same name first (case and punctuation
+    /// aside), else the one display whose name contains it ("MSI" finds "MSI MAG 271QPX"); several or none: `None`,
+    /// and the islands follow the pointer.
+    pub fn find(names: &[&str], wanted: &str) -> Option<usize> {
+        let fold = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect::<String>();
+        let want = fold(wanted);
+        if want.is_empty() {
+            return None;
+        }
+        if let Some(i) = names.iter().position(|n| fold(n) == want) {
+            return Some(i);
+        }
+        let partial: Vec<usize> = (0..names.len()).filter(|i| fold(names[*i]).contains(&want)).collect();
+        match partial.as_slice() {
+            [one] => Some(*one),
+            _ => None,
+        }
+    }
+    /// Whether the islands' display follows the pointer, so pointer moves must be watched: more than one display and
+    /// no locked one connected (audit ISL-3, 14 Nov: a locked display ignores the pointer, and every move woke the app).
+    pub fn follows_pointer(names: &[&str], locked: Option<&str>) -> bool {
+        names.len() > 1 && locked.and_then(|l| Self::find(names, l)).is_none()
+    }
+}
+// ---- end islands display ----
 
 /// Heimdall's Show Islands on Streams: `streams.json` holds `{"shown": true}` while the
 /// islands appear in screen shares, streams and screenshots. Missing or unreadable: they do not, the default.

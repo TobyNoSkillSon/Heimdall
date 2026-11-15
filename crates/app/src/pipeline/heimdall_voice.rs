@@ -56,6 +56,22 @@ pub(crate) const USER_MARGIN: f32 = 0.10;
 /// echo stop, 0.7% of guest utterances and 6.7% of media clips, and a median 1.04 s from his first word (one window:
 /// 0.76 s, but guests 4%).
 pub(crate) const USER_WINDOWS: u32 = 2;
+/// `USER_MIN` for a window on his own headset microphone (`headset_device`: AirPods, Beats) while Heimdall plays in
+/// the headphones (bug note 2026-11-13T13-23-33: he talked over a long reply on his AirPods for five seconds and it
+/// went on). There his voice comes through the headset's own voice processing and scores lower on short windows,
+/// while nothing else reaches that microphone: Heimdall's voice is in his ears, not in the room (his echo scored
+/// 0.07-0.31 there), and so is any call or video. Measured on the archive (13 Nov, every barge-in since 9 Nov, 79
+/// talk-overs): at 13:22 his AirPods windows scored 0.46 0.55 0.51 0.61 0.60 0.49 (the whole line 0.69, his) and
+/// two in a row at 0.60 never came; at 0.50 the stop comes at the fourth window. No talk-over that was not his scored
+/// above 0.38, and the 29 Oct measurement put guests' windows at p95 0.39 and media at p95 0.41. The margin over
+/// Heimdall's score and the two windows in a row stay.
+pub(crate) const HEADSET_USER_MIN: f32 = 0.50;
+/// His own headset (AirPods, Beats), by the microphone's name: a close microphone worn by him (`HEADSET_USER_MIN`).
+/// An iPhone's microphone is personal (`personal_device`) but not worn, so it keeps `USER_MIN`.
+pub(crate) fn headset_device(label: &str) -> bool {
+    let l = label.to_lowercase();
+    ["airpods", "beats"].iter().any(|k| l.contains(k))
+}
 /// A window quieter than this is not speech and is never scored: near-silent windows on his microphone score like him
 /// (about 0.7) against a profile that carries that microphone's noise floor. 0.01 was the measurement's speech gate.
 pub(crate) const SPEECH_RMS: f32 = 0.0095;
@@ -70,13 +86,26 @@ pub(crate) const USER_MAX_SAMPLES: usize = 16;
 /// A new sample joins only if it matches at least half of those kept this well (the speaker model's calibrated
 /// same-speaker threshold for 6-second windows, `speakers.json`), so one stray sample can never admit another voice.
 pub(crate) const USER_JOIN: f32 = 0.455;
-/// After this many rejected samples in a row that all match each other, the profile starts again from them (his mic or
-/// voice changed); misfits that do not agree with each other (guests, the room) never replace it.
+/// Supported samples his print does not fit that must all agree with each other before they become a set of his
+/// voice on that microphone (`UserVoice`); misfits that do not agree (guests, the room) never do.
 pub(crate) const USER_RESTART: usize = 5;
 pub(crate) const USER_FILE: &str = "user-voice.json";
 pub(crate) const USER_RECIPE: &str = "user-voice-v1;wakes;middle-6s";
 
 /// The user's own voice, learned from his wakes (module docs).
+///
+/// Speaker identity across microphones (~08:15 and ~08:25: "microphones really change the voice", and "I
+/// should also be an exception… I should have much tighter tolerance, or maybe we can just keep it as it is"). His print
+/// keeps today's tolerance and is never widened on voice alone:
+/// - A sample joins his print only inside it: it matches at least half of the kept samples and also his first ones
+///   (`anchors`), so samples that each fit the newest ones cannot walk the print away from him.
+/// - A line is scored against his print and the set of the microphone it was heard on, never another microphone's.
+/// - A microphone his print does not fit gets a set of its own (`devices`, keyed by the microphone's name) only from
+///   lines with support besides the voice (`Support::Addressed`: he addressed Heimdall by name, the decider sent it,
+///   outside calls, Heimdall silent, no app talking) that agree with each other: `USER_DEVICE_START` of them on his
+///   own headset or phone (`personal_device`), `USER_RESTART` on any other microphone. Such a set never replaces his
+///   print (until 12 Nov, five agreeing misfits replaced it whole).
+/// - Lines with no support never count toward anything.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct UserVoice {
     pub(crate) embeddings: Vec<Embedding>,
@@ -84,13 +113,89 @@ pub(crate) struct UserVoice {
     pub(crate) recipe: String,
     #[serde(default)]
     pub(crate) updated_ms: u64,
-    /// Recent samples that did not fit (`USER_RESTART`).
-    #[serde(default)]
+    /// Recent samples with support that fit no set, by microphone (`USER_RESTART`). Older files kept them here
+    /// without a microphone; they are dropped on load.
+    #[serde(default, skip_serializing)]
     pub(crate) rejected: Vec<Embedding>,
+    /// His first samples (Setup's phrase, or the first `USER_MIN_SAMPLES` wakes): every later sample must match them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) anchors: Vec<Embedding>,
+    /// Sets of his voice on other microphones, by the microphone's name.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub(crate) devices: std::collections::BTreeMap<String, DeviceVoice>,
+}
+/// His voice on one microphone his print does not fit (`UserVoice`).
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DeviceVoice {
+    #[serde(default)]
+    pub(crate) embeddings: Vec<Embedding>,
+    /// Supported samples that fit nothing yet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) rejected: Vec<Embedding>,
+    /// When each of `rejected` was held (ms), so each ages on its own (`USER_HELD_FOR_MS`). A file without them drops
+    /// its held samples on load.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) rejected_ms: Vec<u64>,
+    #[serde(default)]
+    pub(crate) updated_ms: u64,
+}
+/// What besides his voice says a sample is his (`UserVoice`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Support {
+    /// Nothing but the voice (and the decider): it may join his print from inside, nothing more.
+    Voice,
+    /// He addressed Heimdall by name and the decider sent it, outside calls, Heimdall silent, no app talking.
+    Addressed,
+}
+/// How a sample of his voice came (`Pipeline::user_voice_heard`).
+#[derive(Clone, Debug)]
+pub(crate) enum Sample {
+    /// Setup's phrase (`UserVoice::enrol`).
+    Setup,
+    /// A wake of his on microphone `device` (`UserVoice::add_on`).
+    Wake { device: String, support: Support },
+    /// A supported line his print did not match (`UserVoice::misfit`).
+    Held { device: String },
+}
+/// Agreeing supported samples that start a set for his own headset or phone.
+pub(crate) const USER_DEVICE_START: usize = 3;
+/// Held lines older than this no longer count toward a microphone's set, each by its own age (review of the night pass,
+/// 13 Nov, non-blocker 3: the age was the gap since the last held line, so five lines over months still counted).
+pub(crate) const USER_HELD_FOR_MS: u64 = 7 * 24 * 3600_000;
+/// A held line counts toward a microphone's set only when it scores at least this against one of his first samples
+/// (`anchors`). Review of the night pass (13 Nov, non-blocker 3: a guest saying "Heimdall" five times on the Shure
+/// could become the user there). Measured by lane I on 12 Nov (lane-i-identity.md): playback voices scored 0.15–0.29
+/// against his print and his own lines have a 5th percentile of 0.60, so 0.30 keeps every measured playback voice and
+/// part of other people out while his own voice on a microphone that costs him up to 0.30 still gets a set.
+pub(crate) const USER_HELD_FLOOR: f32 = 0.30;
+/// Microphones at most kept besides his print.
+pub(crate) const USER_DEVICES: usize = 4;
+/// His own headset or phone, by the microphone's name (AirPods, Beats, an iPhone's microphone): the device is part of
+/// the support.
+pub(crate) fn personal_device(label: &str) -> bool {
+    let l = label.to_lowercase();
+    ["airpods", "beats", "iphone"].iter().any(|k| l.contains(k))
+}
+fn fits(set: &[Embedding], e: &Embedding) -> bool {
+    2 * set.iter().filter(|k| k.cosine(e) >= USER_JOIN).count() >= set.len()
 }
 impl UserVoice {
     pub(crate) fn load(path: &std::path::Path) -> Self {
-        std::fs::read(path).ok().and_then(|b| serde_json::from_slice::<Self>(&b).ok()).filter(|v| v.recipe == USER_RECIPE).unwrap_or_default()
+        let mut v = std::fs::read(path).ok().and_then(|b| serde_json::from_slice::<Self>(&b).ok()).filter(|v| v.recipe == USER_RECIPE).unwrap_or_default();
+        v.rejected.clear();
+        for d in v.devices.values_mut() {
+            if d.rejected_ms.len() != d.rejected.len() {
+                // Held before each had its own time: their ages are unknown, so they no longer count.
+                d.rejected.clear();
+                d.rejected_ms.clear();
+            }
+        }
+        if v.anchors.is_empty() && v.ready() {
+            // A print from before anchors: its oldest kept samples (measured 12 Nov: all 16 kept match its oldest three
+            // at 0.60 or more).
+            v.anchors = v.embeddings[..USER_MIN_SAMPLES].to_vec();
+        }
+        v
     }
     pub(crate) fn save(&self, path: &std::path::Path) -> Result<()> {
         let tmp = path.with_extension("json.tmp");
@@ -102,58 +207,128 @@ impl UserVoice {
         self.embeddings.len() >= USER_MIN_SAMPLES
     }
     /// Setup's phrase as the user's whole profile: ready at once, refined by later samples (`add`).
+    /// It is his own confirmation, so it starts everything again, other microphones' sets included.
     pub(crate) fn enrol(&mut self, e: Embedding, now_ms: u64) {
         self.recipe = USER_RECIPE.into();
         self.rejected.clear();
+        self.devices.clear();
+        self.anchors = vec![e.clone()];
         self.embeddings = vec![e; USER_MIN_SAMPLES];
         self.updated_ms = now_ms;
     }
-    #[cfg_attr(test, allow(dead_code))]
+    /// His score on his print alone (the barge-in, and any microphone without a set of its own).
+    #[cfg(test)]
     pub(crate) fn similarity(&self, query: &Embedding) -> Option<f32> {
-        self.ready().then(|| self.embeddings.iter().map(|e| e.cosine(query)).fold(f32::NEG_INFINITY, f32::max))
+        self.similarity_on(query, "")
     }
-    /// Adds one sample of his voice. Returns whether it was kept. A sample joins when it matches at least half of the
-    /// kept ones (the first starts the profile; while it is not ready, a misfit starts it again from the newest, so the
-    /// first three agree with each other).
+    /// His score for a line heard on microphone `device`: his print, and that microphone's own set when it is ready
+    /// (review 12 Nov: never another microphone's set, so a set learned on one microphone cannot speak for him on all).
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn similarity_on(&self, query: &Embedding, device: &str) -> Option<f32> {
+        let best = |v: &[Embedding]| v.iter().map(|e| e.cosine(query)).fold(f32::NEG_INFINITY, f32::max);
+        self.ready().then(|| {
+            let own = self.devices.get(device.trim()).filter(|d| !device.trim().is_empty() && d.embeddings.len() >= USER_MIN_SAMPLES);
+            own.map_or(f32::NEG_INFINITY, |d| best(&d.embeddings)).max(best(&self.embeddings))
+        })
+    }
+    /// Adds one sample of his voice with no support but the voice (`add_on`).
+    #[cfg(test)]
     pub(crate) fn add(&mut self, e: Embedding, now_ms: u64) -> bool {
-        self.recipe = USER_RECIPE.into();
-        let matching = self.embeddings.iter().filter(|k| k.cosine(&e) >= USER_JOIN).count();
-        let fits = self.embeddings.is_empty() || 2 * matching >= self.embeddings.len();
-        if !fits && !self.ready() {
-            self.embeddings.clear();
-        } else if !fits {
-            return self.restart_with(e, now_ms);
-        }
-        self.rejected.clear();
-        self.embeddings.push(e);
-        if self.embeddings.len() > USER_MAX_SAMPLES {
-            self.embeddings.remove(0);
-        }
-        self.updated_ms = now_ms;
-        true
+        self.add_on(e, now_ms, "", Support::Voice)
     }
-}
-impl UserVoice {
-    /// A sample whose voice did not match his print (a line d1 would have sent, held as another voice's): it only
-    /// counts toward `USER_RESTART`, never joins. Returns whether the profile started again from the misfits.
-    pub(crate) fn misfit(&mut self, e: Embedding, now_ms: u64) -> bool {
+    /// Adds one sample of his voice heard on microphone `device`. Returns whether it was kept. Before his print is
+    /// ready, the first samples must agree with each other (a misfit starts it again from the newest). Then a sample
+    /// joins his print when it fits it (half of the kept ones) and his first samples; otherwise it joins `device`'s
+    /// set when it fits that; otherwise, with `Support::Addressed`, it counts toward starting `device`'s set.
+    pub(crate) fn add_on(&mut self, e: Embedding, now_ms: u64, device: &str, support: Support) -> bool {
+        self.recipe = USER_RECIPE.into();
         if !self.ready() {
+            if !self.embeddings.is_empty() && !fits(&self.embeddings, &e) {
+                self.embeddings.clear();
+            }
+            self.embeddings.push(e);
+            if self.ready() {
+                self.anchors = self.embeddings.clone();
+            }
+            self.updated_ms = now_ms;
+            return true;
+        }
+        let anchored = self.anchors.is_empty() || self.anchors.iter().any(|a| a.cosine(&e) >= USER_JOIN);
+        if anchored && fits(&self.embeddings, &e) {
+            self.embeddings.push(e);
+            if self.embeddings.len() > USER_MAX_SAMPLES {
+                self.embeddings.remove(0);
+            }
+            self.updated_ms = now_ms;
+            return true;
+        }
+        let device = device.trim();
+        if let Some(d) = self.devices.get_mut(device).filter(|d| d.embeddings.len() >= USER_MIN_SAMPLES) {
+            if fits(&d.embeddings, &e) && d.embeddings[..USER_MIN_SAMPLES].iter().any(|a| a.cosine(&e) >= USER_JOIN) {
+                d.embeddings.push(e);
+                if d.embeddings.len() > USER_MAX_SAMPLES {
+                    // Its first samples stay: they are what later ones must match (no walk).
+                    d.embeddings.remove(USER_MIN_SAMPLES);
+                }
+                d.rejected.clear();
+                d.rejected_ms.clear();
+                d.updated_ms = now_ms;
+                return true;
+            }
+        }
+        if support == Support::Addressed && !device.is_empty() {
+            return self.start_device(device, e, now_ms);
+        }
+        false
+    }
+    /// A supported line whose voice did not match his print (a line addressing Heimdall by name that d1 would have
+    /// sent, held as another voice's): it never joins his print; it only counts toward a set for `device`.
+    pub(crate) fn misfit(&mut self, e: Embedding, now_ms: u64, device: &str) -> bool {
+        if !self.ready() || device.trim().is_empty() {
             return false;
         }
-        self.restart_with(e, now_ms)
+        self.start_device(device.trim(), e, now_ms)
     }
-    fn restart_with(&mut self, e: Embedding, now_ms: u64) -> bool {
-        self.rejected.push(e);
-        if self.rejected.len() > USER_RESTART {
-            self.rejected.remove(0);
+    /// Counts `e` toward a set for `device`: once the last `USER_DEVICE_START` (his headset or phone) or
+    /// `USER_RESTART` (any other microphone) supported misfits, each at least `USER_HELD_FLOOR` against his first
+    /// samples and none older than `USER_HELD_FOR_MS`, all agree with each other, they become that microphone's set.
+    /// His print is never touched.
+    fn start_device(&mut self, device: &str, e: Embedding, now_ms: u64) -> bool {
+        if !self.anchors.is_empty() && !self.anchors.iter().any(|a| a.cosine(&e) >= USER_HELD_FLOOR) {
+            // Too far from his first samples to be his voice on another microphone (a guest, playback).
+            return false;
         }
-        let agree = self.rejected.len() == USER_RESTART
-            && self.rejected.iter().all(|a| self.rejected.iter().all(|b| a.cosine(b) >= USER_JOIN));
+        let need = if personal_device(device) { USER_DEVICE_START } else { USER_RESTART };
+        if !self.devices.contains_key(device) && self.devices.len() >= USER_DEVICES {
+            // The microphone heard least recently gives its place.
+            if let Some(old) = self.devices.iter().min_by_key(|(_, d)| d.updated_ms).map(|(k, _)| k.clone()) {
+                self.devices.remove(&old);
+            }
+        }
+        let d = self.devices.entry(device.to_owned()).or_default();
+        if d.rejected_ms.len() != d.rejected.len() {
+            d.rejected.clear();
+            d.rejected_ms.clear();
+        }
+        // Held lines too far apart are not one change of microphone: each ages on its own.
+        let keep: Vec<bool> = d.rejected_ms.iter().map(|&at| now_ms.saturating_sub(at) <= USER_HELD_FOR_MS).collect();
+        let mut k = keep.iter();
+        d.rejected.retain(|_| *k.next().unwrap());
+        let mut k = keep.iter();
+        d.rejected_ms.retain(|_| *k.next().unwrap());
+        d.rejected.push(e);
+        d.rejected_ms.push(now_ms);
+        if d.rejected.len() > need {
+            d.rejected.remove(0);
+            d.rejected_ms.remove(0);
+        }
+        d.updated_ms = now_ms;
+        let agree = d.rejected.len() == need && d.rejected.iter().all(|a| d.rejected.iter().all(|b| a.cosine(b) >= USER_JOIN));
         if !agree {
             return false;
         }
-        self.embeddings = std::mem::take(&mut self.rejected);
-        self.updated_ms = now_ms;
+        d.embeddings = std::mem::take(&mut d.rejected);
+        d.rejected_ms.clear();
         true
     }
 }
@@ -179,12 +354,17 @@ pub(crate) enum Who {
 /// The verdict on one window. With the user's profile: his voice at `USER_MIN` or more, beating Heimdall's score by
 /// `USER_MARGIN`, and the window not Heimdall's own voice. Before his profile is ready (a fresh install, before his
 /// first three wakes): a window confidently not Heimdall's voice counts as his, so he can always stop it.
+#[cfg(test)]
 pub(crate) fn user_verdict(s: &Scores) -> Who {
+    user_verdict_at(s, USER_MIN)
+}
+/// `user_verdict` with his bar at `user_min` (`HEADSET_USER_MIN` on his headset with Heimdall in the headphones).
+pub(crate) fn user_verdict_at(s: &Scores, user_min: f32) -> Who {
     let heimdall = s.heimdall.as_ref().map(|(_, c)| *c).filter(|c| c.is_finite());
     let own = heimdall.is_some_and(|c| judge(c) == Speaker::Heimdall);
     match s.user.filter(|c| c.is_finite()) {
         Some(_) if own => Who::Heimdall,
-        Some(u) if u >= USER_MIN && heimdall.is_none_or(|h| u - h >= USER_MARGIN) => Who::User,
+        Some(u) if u >= user_min && heimdall.is_none_or(|h| u - h >= USER_MARGIN) => Who::User,
         Some(_) if heimdall.is_some_and(|h| judge(h) == Speaker::Other) => Who::Other,
         Some(_) => Who::Unsure,
         None if s.user.is_some() => Who::Unsure,
@@ -244,6 +424,21 @@ pub(crate) fn mic_verdict(s: &Scores, reliable: bool, heimdall_audible: bool) ->
         Some(u) if reliable && u < MIC_OTHER_MAX => MicVoice::Unknown,
         // No print of his yet (a fresh install, before three wakes), or too little to tell.
         _ => MicVoice::Unverified,
+    }
+}
+
+/// While an app on the Mac was talking around the line (pipeline/playback.rs), a line clearly unlike his print (below
+/// `MIC_OTHER_MAX`) is not his even when it is quiet: playback through the speakers reaches his microphone quietly, and
+/// quiet lines otherwise keep the benefit of the doubt (bug note 2026-11-12T12-58-51). A short line at speaking level
+/// still does (half of his own lines under 0.8 s miss his print). Measured (archive, 11-12 Nov): the 22 playback
+/// lines with a score scored 0.15-0.29; of 1,254 other lines of his while an app spoke, 5 scored below 0.40 with no
+/// verdict, 3 of them quiet lines that read as playback, 2 short loud ones of his that keep their benefit of the doubt.
+pub(crate) fn app_audible_verdict(v: MicVoice, s: Option<&Scores>, app_audible: bool, voiced_ns: u64, level: f32) -> MicVoice {
+    let unlike = s.and_then(|s| s.user).is_some_and(|u| u.is_finite() && u < MIC_OTHER_MAX);
+    if v == MicVoice::Unverified && app_audible && unlike && (voiced_ns >= MIC_RELIABLE_NS || level < SPEECH_RMS) {
+        MicVoice::Unknown
+    } else {
+        v
     }
 }
 
@@ -529,8 +724,6 @@ pub(crate) struct State {
     pub(crate) user_path: Option<PathBuf>,
     /// A user sample is being embedded.
     pub(crate) user_pending: bool,
-    /// The sample on its way is Setup's phrase: it makes the user's profile (`UserVoice::enrol`), not one more sample.
-    pub(crate) user_enrolling: bool,
     pub(crate) encoder: Option<Arc<Encoder>>,
     pub(crate) enrolling: Option<String>,
     pub(crate) retry: std::collections::HashMap<String, Instant>,
@@ -540,12 +733,13 @@ pub(crate) struct State {
 impl State {
     pub(crate) fn new(profiles: std::collections::BTreeMap<String, HeimdallVoice>, encoder: Option<Arc<Encoder>>, user_path: Option<PathBuf>) -> Self {
         let user = user_path.as_deref().map(UserVoice::load).unwrap_or_default();
-        Self { profiles, user, user_path, user_pending: false, user_enrolling: false, encoder, enrolling: None, retry: Default::default(), key: Default::default() }
+        Self { profiles, user, user_path, user_pending: false, encoder, enrolling: None, retry: Default::default(), key: Default::default() }
     }
-    /// A window's scores against the user's profile and Heimdall's voices.
-    #[cfg_attr(test, allow(dead_code))]
-    pub(crate) fn scores(&self, query: &Embedding) -> Scores {
-        Scores { user: self.user.similarity(query), heimdall: self.similarity(query) }
+    /// A window's or a line's scores against the user's profile and Heimdall's voices, for a line heard on microphone
+    /// `device` (`UserVoice::similarity_on`).
+    #[cfg_attr(test, allow(dead_code))] // the live path only; tests take a hook instead
+    pub(crate) fn scores_on(&self, query: &Embedding, device: &str) -> Scores {
+        Scores { user: self.user.similarity_on(query, device), heimdall: self.similarity(query) }
     }
     /// `route`'s profile key, remembered for the last voice asked about.
     pub(crate) fn key(&self, tools: &crate::bridge::Tools, route: &crate::speech_voice::Route) -> String {
@@ -587,9 +781,12 @@ impl super::Pipeline {
     }
     /// Ask the encoder for one window's verdict; the answer comes back on the live loop (`barge_voice`).
     /// False: no check can run now (the barge-in decides without one).
-    pub(super) fn request_voice_check(&mut self, id: u64, samples: Vec<f32>) -> bool {
+    /// `device` is the microphone's name: his score uses that microphone's own set too (`UserVoice::similarity_on`,
+    /// bug note 2026-11-13T13-23-33), as the whole-line check does (mic_voice.rs).
+    pub(super) fn request_voice_check(&mut self, id: u64, samples: Vec<f32>, device: String) -> bool {
         #[cfg(test)]
         {
+            self.hooks.voice_devices.push(device);
             let heimdall = match self.hooks.voice.pop_front() {
                 Some(c) => Some(c),
                 None => self.hooks.voice_fn.as_mut().map(|f| f(&samples)),
@@ -620,7 +817,7 @@ impl super::Pipeline {
             encoder.check(samples, Box::new(move |result| {
                 let result = result.map_err(|e| format!("{e:#}"));
                 let _ = tx.send(super::Internal::Inference(Box::new(move |p: &mut super::Pipeline| {
-                    let scored = result.map(|e| p.heimdall_voice.scores(&e));
+                    let scored = result.map(|e| p.heimdall_voice.scores_on(&e, &device));
                     p.barge_voice(id, scored)
                 })));
             }))
@@ -636,19 +833,17 @@ impl super::Pipeline {
     /// Setup's phrase, said by the user: their voice's profile from it (`UserVoice::enrol`), embedded off this thread.
     pub(crate) fn user_voice_enrol(&mut self, samples: &[f32]) {
         if self.heimdall_voice.user_pending { return; }
-        self.heimdall_voice.user_enrolling = true;
-        self.user_voice_heard(samples, false);
-        if !self.heimdall_voice.user_pending { self.heimdall_voice.user_enrolling = false; }
+        self.user_voice_heard(samples, Sample::Setup);
     }
     /// One of his own turns woke Heimdall (outside a call, Heimdall silent): a sample of the user's voice, embedded off
     /// this thread and added to his profile (`UserVoice::add`).
-    pub(super) fn user_voice_heard(&mut self, samples: &[f32], misfit: bool) {
+    pub(super) fn user_voice_heard(&mut self, samples: &[f32], how: Sample) {
         if samples.len() < (WINDOW_NS / 62_500) as usize || self.heimdall_voice.user_pending {
             return;
         }
         #[cfg(test)]
         if let Some(e) = self.hooks.user_samples.pop_front() {
-            return self.user_voice_embedded(Ok(e), misfit);
+            return self.user_voice_embedded(Ok(e), how);
         }
         let Some(encoder) = self.heimdall_voice.encoder.clone().filter(|e| e.available()) else { return };
         self.heimdall_voice.user_pending = true;
@@ -658,7 +853,7 @@ impl super::Pipeline {
             let _ = heimdall_night::gate::background_thread();
             let result = encoder.embed_blocking(&audio);
             let _ = tx.send(super::Internal::Inference(Box::new(move |p: &mut super::Pipeline| {
-                p.user_voice_embedded(result, misfit);
+                p.user_voice_embedded(result, how);
                 Ok(())
             })));
         });
@@ -666,7 +861,7 @@ impl super::Pipeline {
             self.heimdall_voice.user_pending = false;
         }
     }
-    pub(super) fn user_voice_embedded(&mut self, result: Result<Embedding>, misfit: bool) {
+    pub(super) fn user_voice_embedded(&mut self, result: Result<Embedding>, how: Sample) {
         self.heimdall_voice.user_pending = false;
         let e = match result {
             Ok(e) => e,
@@ -676,10 +871,15 @@ impl super::Pipeline {
             }
         };
         let was = self.heimdall_voice.user.ready();
-        let kept = if std::mem::take(&mut self.heimdall_voice.user_enrolling) {
-            self.heimdall_voice.user.enrol(e, unix_ms());
-            true
-        } else if misfit { self.heimdall_voice.user.misfit(e, unix_ms()) } else { self.heimdall_voice.user.add(e, unix_ms()) };
+        let kept = match how {
+            // Setup's phrase makes the user's profile, not one more sample.
+            Sample::Setup => {
+                self.heimdall_voice.user.enrol(e, unix_ms());
+                true
+            }
+            Sample::Held { device } => self.heimdall_voice.user.misfit(e, unix_ms(), &device),
+            Sample::Wake { device, support } => self.heimdall_voice.user.add_on(e, unix_ms(), &device, support),
+        };
         if let Some(path) = &self.heimdall_voice.user_path {
             if let Err(e) = self.heimdall_voice.user.save(path) {
                 eprintln!("voice check: the user's voice was not saved: {e:#}");
@@ -726,7 +926,7 @@ impl super::Pipeline {
                 // The user talking, a reply or a sample stops the enrolment; it is tried again later.
                 ensure!(busy(false).is_none(), "Heimdall or User started talking");
                 let rendered = tools.render_voice_lines(&route, &LINES, &|| busy(false).is_some())?;
-                let lines = rendered.iter().map(|a| crate::audio::mono_16k(&a.samples, a.sample_rate, 1)).collect::<Result<Vec<_>>>()?;
+                let lines = rendered.iter().map(|a| heimdall_archive::audio::mono_16k(&a.samples, a.sample_rate, 1)).collect::<Result<Vec<_>>>()?;
                 let mut voice = profile(&lines, speed, &mut |x| encoder.embed_blocking(x), unix_ms())?;
                 voice.recipe = recipe;
                 Ok(voice)

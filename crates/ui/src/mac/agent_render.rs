@@ -224,7 +224,7 @@ fn agent_window(run: &mut Run, mtm: MainThreadMarker) {
         error: false,
         sent: true,
         queued: false,
-        owner_text: None,
+        user_text: None,
         usage: None,
     };
     for text in ["Running", "Running the capture", "Running the capture tests on the resampler branch now"] {
@@ -311,7 +311,7 @@ fn agent_window(run: &mut Run, mtm: MainThreadMarker) {
     pump(0.3);
     run.window("agent-kinds");
     let text = with_state_now(|s| s.agent_window.as_ref().unwrap().text.string().to_string()).unwrap();
-    for word in ["History compacted", "Reloaded", "Thinking…", "Screenshot · failed", "Bash · running", "User · queued", "Stopped"] {
+    for word in ["History compacted", "Reloaded", "Thinking…", "Screenshot · failed", "Bash · running", "You · queued", "Stopped"] {
         run.check(&format!("kinds: shows {word}"), text.contains(word));
     }
     with_state_now(|s| s.agent_window.as_ref().unwrap().scroll_to_top());
@@ -428,7 +428,7 @@ fn busy() -> Vec<AgentLiveEntry> {
         error: false,
         sent: true,
         queued: false,
-        owner_text: None,
+        user_text: None,
         usage: None,
     };
     let tool = |id: &str, at: (u64, u64), kind: AgentLiveKind, name: &str, text: &str, error: bool| {
@@ -446,7 +446,7 @@ fn busy() -> Vec<AgentLiveEntry> {
         e(id, at, AgentLiveKind::Prompt, &format!("[Heimdall delivery: {id}]\nTranscript:\n{said}\n\nOwner's wake instruction:\n{}", agent_view::WAKE_INSTRUCTION))
     };
     let mut typed = e("m1", (6, 10), AgentLiveKind::Prompt, "[Heimdall delivery: m1]\n[Heimdall typed message]\nCan you summarise what the night pass changed?");
-    typed.owner_text = Some("Can you summarise what the night pass changed?".into());
+    typed.user_text = Some("Can you summarise what the night pass changed?".into());
     typed.editable = true;
     let mut rate = e("provider-rate-wait", (6, 12), AgentLiveKind::Compaction, "Anthropic rate limit · retrying in 6 seconds");
     rate.finished = false;
@@ -490,7 +490,7 @@ fn kinds() -> Vec<AgentLiveEntry> {
         error: false,
         sent: true,
         queued: false,
-        owner_text: None,
+        user_text: None,
         usage: None,
     };
     let compaction = e("k0", (9, 2), AgentLiveKind::Compaction, "User and Dave traced the meter drop to Discord ducking; the fix is on the resampler branch, whose capture tests pass.");
@@ -520,7 +520,7 @@ fn kinds() -> Vec<AgentLiveEntry> {
         q.sent = false;
         q.queued = true;
         q.editable = true;
-        q.owner_text = Some(text.into());
+        q.user_text = Some(text.into());
         q
     };
     // The user's words steered the turn mid-request (audit 27 Oct, F4): a calm stop row, not an orange failure.
@@ -872,7 +872,7 @@ fn failure(id: &str, text: &str, at: (u64, u64)) -> AgentLiveEntry {
         error: true,
         sent: false,
         queued: false,
-        owner_text: None,
+        user_text: None,
         usage: None,
     }
 }
@@ -1028,7 +1028,7 @@ fn streaming(run: &mut Run) {
         error: false,
         sent: false,
         queued: false,
-        owner_text: None,
+        user_text: None,
         usage: None,
     };
     let sentence = "The capture clock and the transcript agree on this span, so the audio range covers exactly what was said. ";

@@ -117,14 +117,41 @@ mod hal {
 /// The default output's route now.
 pub(crate) fn current() -> Route {
     #[cfg(target_os = "macos")]
-    return hal::route();
+    let route = hal::route();
     #[cfg(not(target_os = "macos"))]
-    Route::Headphones
+    let route = Route::Headphones;
+    // ---- every event (bug note 2026-11-13T13-55-33): a route change is a line, seen at the read after it ----
+    if let Some(line) = changed(&LAST, route) {
+        crate::diagnostics::line("audio", &line);
+    }
+    // ---- end every event ----
+    route
+}
+static LAST: std::sync::Mutex<Option<Route>> = std::sync::Mutex::new(None);
+/// "output route: speakers (was headphones)" when this read differs from the last one; the first read says where it is.
+fn changed(last: &std::sync::Mutex<Option<Route>>, route: Route) -> Option<String> {
+    let name = |r: Route| if r == Route::Speakers { "speakers" } else { "headphones" };
+    let mut last = last.try_lock().ok()?;
+    let before = last.replace(route);
+    match before {
+        Some(b) if b == route => None,
+        Some(b) => Some(format!("output route: {} (was {})", name(route), name(b))),
+        None => Some(format!("output route: {}", name(route))),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Bug note 2026-11-13T13-55-33: one line per route change, none while it stays.
+    #[test]
+    fn a_route_change_is_one_line() {
+        let last = std::sync::Mutex::new(None);
+        assert_eq!(changed(&last, Route::Headphones).as_deref(), Some("output route: headphones"));
+        assert_eq!(changed(&last, Route::Headphones), None);
+        assert_eq!(changed(&last, Route::Speakers).as_deref(), Some("output route: speakers (was headphones)"));
+        assert_eq!(changed(&last, Route::Speakers), None);
+    }
     #[test]
     fn routes_by_transport_source_and_input() {
         assert_eq!(classify(Some(TRANSPORT_BUILT_IN), Some(fourcc(b"ispk")), Some("BuiltInSpeakerDevice"), false), Route::Speakers, "MacBook speakers");

@@ -69,6 +69,8 @@ pub(super) struct DownloadRow {
 
 /// Memory search's model, as its download row is titled.
 pub(crate) const MEMORY_MODEL: &str = "EmbeddingGemma 2";
+/// The one row the models' rows become once all are in.
+pub(crate) const MODELS: &str = "Models";
 
 /// One row of the list as words, whether it comes from a download or a readiness check.
 #[derive(Clone, Debug, PartialEq)]
@@ -116,8 +118,14 @@ pub(crate) fn lines(downloads: &ModelDownloads, ready: &SetupReadiness) -> Vec<(
     // Memory search's row (once its model is in: whether it can run) stands for its download row.
     let own_memory = ready.rows.iter().any(|r| r.key == "memory");
     let retry = || Some(ReadyFix::Action { title: "Retry".into(), action: Box::new(UiAction::RetryModelDownloads) });
-    let mut list: Vec<(Line, Option<ReadyFix>)> = downloads.rows.iter().filter(|d| !(own_decider && d.title == "Decider") && !(own_memory && d.title == MEMORY_MODEL))
-        .map(|d| (download_line(d), matches!(d.state, DownloadState::Failed(_)).then(retry).flatten())).collect();
+    let models: Vec<&ModelDownload> = downloads.rows.iter().filter(|d| !(own_decider && d.title == "Decider") && !(own_memory && d.title == MEMORY_MODEL)).collect();
+    // Once every model is in, one row says so (VM run 14 Nov: ten rows pushed the phrase card under the fold).
+    let mut list: Vec<(Line, Option<ReadyFix>)> = if models.len() > 1 && models.iter().all(|d| d.state == DownloadState::Done) {
+        let total = models.iter().map(|d| d.total).sum();
+        vec![(download_line(&ModelDownload { title: MODELS.into(), detail: None, symbol: "arrow.down.circle".into(), done: total, total, state: DownloadState::Done }), None)]
+    } else {
+        models.into_iter().map(|d| (download_line(d), matches!(d.state, DownloadState::Failed(_)).then(retry).flatten())).collect()
+    };
     list.extend(ready.rows.iter().map(|r| {
         if let ReadyState::Optional { fix: Some(f), .. } = &r.state { return (ready_line(r), Some(f.clone())); }
         let fix = match &r.state { ReadyState::Problem { fix, .. } => fix.clone(), _ => None };
@@ -294,12 +302,20 @@ mod lines_tests {
         if cfg!(feature = "public") { assert!(!super::super::start_allowed(&ModelDownloads::default(), &green), "Start waits for the models"); }
         // Memory search that can't run here (VM run 5 Nov 05:43): its own row in place of its download, its reason in
         // grey with no spinner or fix, and Start doesn't wait for it.
-        let memory = ReadyState::Optional { why: "Needs 8 GB free memory".into(), fix: None };
+        let memory = ReadyState::Optional { why: "Needs 6 GB free memory".into(), fix: None };
         let with_memory = SetupReadiness { rows: vec![r("agent", ReadyState::Ready), r("memory", memory)] };
         let both = ModelDownloads { rows: vec![d("Parakeet", DownloadState::Done), d(MEMORY_MODEL, DownloadState::Done)] };
         let l = lines(&both, &with_memory);
         assert_eq!(l.iter().map(|(l, _)| l.title.as_str()).collect::<Vec<_>>(), ["Parakeet", "agent", "memory"]);
-        assert!(!l[2].0.working && !l[2].0.done && !l[2].0.problem && !l[2].0.dim && l[2].0.words == "Needs 8 GB free memory" && l[2].1.is_none());
+        // VM run 14 Nov: every model in, one row for them, their sizes added (the phrase card stays above the fold).
+        let mut all_in = both.clone();
+        all_in.rows.push(ModelDownload { title: "Memory ranking".into(), state: DownloadState::Done, total: 2, done: 2, ..Default::default() });
+        let l = lines(&all_in, &with_memory);
+        assert_eq!(l.iter().map(|(l, _)| l.title.as_str()).collect::<Vec<_>>(), [MODELS, "agent", "memory"]);
+        assert!(l[0].0.done && l[0].0.words == size_text(3) && l[0].1.is_none());
+        all_in.rows[2].state = DownloadState::Downloading;
+        assert_eq!(lines(&all_in, &with_memory).len(), 4, "while one still downloads, each model has its row");
+        assert!(!l[2].0.working && !l[2].0.done && !l[2].0.problem && !l[2].0.dim && l[2].0.words == "Needs 6 GB free memory" && l[2].1.is_none());
         assert!(super::super::start_allowed(&both, &with_memory), "memory search is not needed to start");
         // Closing an unfinished Setup asks to quit, in these exact words.
         assert_eq!(super::super::QUIT_ALERT.0, "Quit Heimdall?");

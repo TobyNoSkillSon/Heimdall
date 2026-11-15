@@ -33,7 +33,7 @@ pub(crate) fn format(area: &str, text: &str) -> String {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
     format!("{area}: {}", bounded(&redact(&flat), LINE_LIMIT))
 }
-/// The archive hook: an evidence record that is a failure, fallback, retry, timeout or state change becomes one line.
+/// The archive hook: every evidence record that is an event (not a `QUIET` stream) becomes one line.
 pub(crate) fn enqueued(r: &Record) {
     if let Some((line, repeats)) = evidence(r) {
         let line = match repeats {
@@ -178,9 +178,10 @@ pub(crate) fn evidence(r: &Record) -> Option<(String, Repeats)> {
         }
         "agent_state" => ("agent", agent_state(&r.source, p)?, Kept),
         "send_decision" => ("decider", decision(r)?, Kept),
-        "settings_applied" => ("settings", switches(p)?, Kept),
+        "settings_applied" | "timeline_settings" => ("settings", switches(p)?, Kept),
         "barge_in" => ("speech", barge_in(p)?, Kept),
-        "speech_held" | "speech_skipped" => ("speech", generic(r), Folded),
+        // A held or skipped line is an event of its own (bug note 2026-11-13T13-55-33): never folded into a count.
+        "speech_held" | "speech_skipped" => ("speech", generic(r), Kept),
         "tts_error" => ("speech", format!("lighter voice failed: {} (sentence {})", plain(&p["error"]).unwrap_or_default(), quoted(&p["text"])), Kept),
         "invariant_violation" => ("check", invariant(p)?, Folded),
         "listening_ready" => ("listen", format!("models ready {} ms after Listening on", p["ms_since_on"].as_f64().map_or("?".into(), |ms| format!("{ms:.0}"))), Kept),
@@ -190,11 +191,205 @@ pub(crate) fn evidence(r: &Record) -> Option<(String, Repeats)> {
         "agent_history_repair" => ("agent", plain(&p["line"])?, Kept),
         "agent_start_failed" | "agent_runtime_ended" | "agent_queue_fallback" | "agent_loop_guard" | "agent_reload" | "agent_reload_stale" | "agent_idle_compaction_failed" | "agent_preflight" | "agent_stop_wait" => ("agent", generic(r), Kept),
         "command_action" if heimdall_archive::diagnostics::problem(kind, p) => ("command", generic(r), Kept),
-        _ if heimdall_archive::diagnostics::problem(kind, p) => (area_of(kind), generic(r), Folded),
-        _ => return None,
+        // ---- every event (bug note 2026-11-13T13-55-33): an event's own line, a failure included ("delivery … refused") ----
+        _ => match (event(r), heimdall_archive::diagnostics::problem(kind, p)) {
+            // A failing event keeps its error even when its own line has no place for it.
+            (Some(Some((area, text))), problem) => match plain(&p["error"]).filter(|e| problem && !text.contains(e.as_str())) {
+                Some(e) => (area, format!("{text}; error: {e}"), Kept),
+                None => (area, text, Kept),
+            },
+            (_, true) => (area_of(kind), generic(r), Folded),
+            // A known kind whose record is not an event (an island hold), or a quiet kind.
+            (Some(None), false) => return None,
+            (None, false) if QUIET.contains(&kind) => return None,
+            // A kind with no line of its own yet: its kind, source and the fields that say what happened.
+            (None, false) => (area_of(kind), brief(r), Folded),
+        },
+        // ---- end every event ----
     };
     Some((format(area, &text), repeats))
 }
+// ---- every event (bug note 2026-11-13T13-55-33) ----
+// "on the Mac we should be also logging every single event or whatever is happening so that
+// debugging is easier". Every record kind now gets one line unless it is listed here: streams and per-frame telemetry
+// (hundreds to millions a day) and records whose payload is message text (transcripts, the agent's wire traffic and
+// context). Each of these has an event line elsewhere (an utterance's decision, the agent's state, a delivery) or is
+// read from the archive (`heimdall-archive timeline`). The audit: lab/event-log-audit-2026-11-13.md.
+pub(crate) const QUIET: &[&str] = &[
+    // Per frame or per audio chunk.
+    "model_output", "night_model_output", "tts_model_output", "speaker_probabilities", "speaker_segments_delta",
+    "speaker_segments_finalized", "speaker_embeddings", "listen_event", "vad", "speech_audio",
+    "speech_split_call_cpu", "speech_split_progress", "speech_split_asr_output", "speech_split_admission",
+    "speech_split_completed", "speech_split_pending",
+    // Per utterance, carrying its words or its scoring; the wake, the command and the delivery have lines.
+    "utterance", "utterance_binding", "transcript_segment", "transcript_revision", "mic_voice", "suggest_decision",
+    "command_decision", "send_context", "user_message", "typed",
+    // The agent's wire traffic and context (message bodies); deliveries and the agent's state have lines.
+    "agent_transport_send", "agent_reply", "agent_context",
+    "agent_context_routing", "agent_thinking",
+    // The island's copy of a health cue (the `health` record has the line).
+    "health_cue",
+];
+/// The line for an event record: `Some(None)` for a known kind whose record is not an event, `None` for a kind with no
+/// line of its own (it gets `brief`).
+fn event(r: &Record) -> Option<Option<(&'static str, String)>> {
+    let p = &r.payload;
+    let yes = |b: &Value| b.as_bool() == Some(true);
+    let ms = |v: &Value| v.as_f64().map(|ms| format!(" after {ms:.0} ms")).unwrap_or_default();
+    let why = |v: &Value| plain(v).map(|w| format!(" ({w})")).unwrap_or_default();
+    let n = |v: &Value| v.as_u64().or_else(|| v.as_array().map(|a| a.len() as u64)).unwrap_or(0);
+    let images = |v: &Value| match n(v) { 0 => String::new(), 1 => ", 1 image".into(), k => format!(", {k} images") };
+    let line = |area: &'static str, text: String| Some(Some((area, text)));
+    match r.kind.as_str() {
+        // Deliveries to the agent and their acknowledgement.
+        "agent_delivery" => {
+            let id = plain(&p["message_id"]).unwrap_or_else(|| "?".into());
+            match plain(&p["error"]) {
+                Some(e) => line("agent", format!("delivery {id} refused: {e}")),
+                None if yes(&p["transport_accepted"]) => line("agent", format!("delivery {id} accepted by the agent")),
+                None => line("agent", format!("delivery {id} not accepted")),
+            }
+        }
+        "agent_delivery_resolved" => line("agent", format!("delivery {} resolved: {}{}", plain(&p["id"]).unwrap_or_else(|| "?".into()),
+            plain(&p["outcome"]).unwrap_or_else(|| "?".into()), why(&p["reason"]))),
+        "send_decision_delivery" => line("agent", format!("decided line delivered{}", why(&p["outcome"]))),
+        "agent_wake" => line("agent", format!("woke{}{}", if yes(&p["urgent"]) { " (urgent)" } else { "" }, images(&p["image_ids"]))),
+        "agent_steer" => line("agent", format!("steered the running turn ({}{})", if yes(&p["delivered"]) { "delivered" } else { "not delivered" }, images(&p["image_ids"]))),
+        "notch_drop" => line("notch", format!("drop received: {} {}{}{}", n(&p["items"]), plain(&p["kind"]).unwrap_or_else(|| "items".into()),
+            plain(&p["label"]).map(|l| format!(" ({})", bounded(&l, 80))).unwrap_or_default(),
+            if yes(&p["composer"]) { " in the composer" } else { "" })),
+        "notch_drop_delivery" => line("notch", format!("drop delivered to the agent ({}{}{})", plain(&p["label"]).map(|l| bounded(&l, 80)).unwrap_or_else(|| "drop".into()),
+            images(&p["images"]), if yes(&p["joined"]) { ", joined to an utterance" } else { "" })),
+        // Speech: the agent's lines, acknowledgements and their playback. Word counts, never the words.
+        "speak_back" => {
+            let words = p["text"].as_str().map_or(0, |t| t.split_whitespace().count());
+            let off = if p["enabled"] == false { "; Speaking is off, not spoken" } else { "" };
+            line("speech", format!("the agent asked to speak {words} words ({}){off}", plain(&p["language"]).unwrap_or_else(|| "?".into())))
+        }
+        "voice_ack" => line("speech", match plain(&p["outcome"]) {
+            Some(o) => format!("acknowledgement {o}{}", plain(&p["decider_line"]).map(|l| format!(" (line {l})")).unwrap_or_default()),
+            None => format!("no acknowledgement{}", why(&p["reason"])),
+        }),
+        "voice_ack_playback" | "voice_reply_playback" => {
+            let what = if r.kind == "voice_ack_playback" { "acknowledgement" } else { "voice-bank reply" };
+            let clip = plain(&p["clip_id"]).map(|c| format!(" {c}")).unwrap_or_default();
+            let outcome = plain(&p["outcome"]).unwrap_or_else(|| "?".into());
+            let error = plain(&p["error"]).map(|e| format!(": {e}")).unwrap_or_default();
+            line("speech", format!("{what}{clip} {outcome}{}{error}{}", why(&p["reason"]), ms(&p["elapsed_ms"])))
+        }
+        "speech_stopped" => line("speech", format!("stopped{}{}", why(&p["reason"]), plain(&p["speaker"]).map(|s| format!(" by {s}")).unwrap_or_default())),
+        "voice_reply" => line("speech", match (plain(&p["error"]).or_else(|| plain(&p["audio_error"])), plain(&p["outcome"])) {
+            (Some(e), _) => format!("voice reply failed: {e}"),
+            (None, o) => format!("voice reply: {}{}", o.unwrap_or_else(|| "?".into()), why(&p["reason"])),
+        }),
+        "echo_guard" => line("listen", format!("echo guard: {}", plain(&p["outcome"]).unwrap_or_else(|| "?".into()))),
+        // The user's keys and the island.
+        "hotkey" => line("hotkey", match p["key"].as_str() {
+            Some("wake") if yes(&p["woke"]) => format!("wake pressed: woke the agent with {} line(s)", n(&p["lines"])),
+            Some("wake") => "wake pressed: nothing sent (the agent is off or stopped)".into(),
+            Some("stop") => format!("stop pressed{}", if yes(&p["speaking"]) { " while Heimdall spoke" } else { "" }),
+            Some(key) => format!("{key} pressed"),
+            None => "a key pressed".into(),
+        }),
+        "island_report" => {
+            let kind = plain(&p["kind"]).unwrap_or_else(|| "?".into());
+            let label = plain(&p["label"]).map(|l| format!(" \"{}\"", bounded(&l, 80))).unwrap_or_default();
+            line("island", match p["event"].as_str() {
+                Some("shown") => format!("opened {kind}{label}{}", ms(&p["waited_ms"])),
+                Some("cut") => format!("cut {kind}{label} after {} ms{}", n(&p["shown_ms"]), why(&p["why"])),
+                Some("left") => format!("closed {kind} after {} ms{}", n(&p["shown_ms"]), why(&p["why"])),
+                _ => format!("{kind}{label}"),
+            })
+        }
+        "island_cue" => match p["cue"].as_str() {
+            Some("agent_sent") => line("island", "sent to the agent".into()),
+            Some("vella") => line("island", format!("Vella dictation {}", if yes(&p["on"]) { "on" } else { "off" })),
+            Some("agent_notice") => line("island", format!("agent notice ({}): \"{}\"", plain(&p["kind"]).unwrap_or_else(|| "?".into()),
+                bounded(p["text"].as_str().unwrap_or(""), 80))),
+            _ => Some(None),
+        },
+        "command_cue" => line("command", format!("cue {} #{}", plain(&p["phase"]).unwrap_or_else(|| "?".into()), plain(&p["id"]).unwrap_or_else(|| "?".into()))),
+        "command_execution" => line("command", format!("voice command #{} ran: {}", plain(&p["cue_id"]).unwrap_or_else(|| "?".into()),
+            bounded(&plain(&p["command"]).unwrap_or_default(), 80))),
+        "screen_command" => line("command", format!("screen command{}", if yes(&p["screen_off"]) { ": Seeing is off, nothing captured" } else { "" })),
+        // State: Listening, the people Heimdall listens to, sources and devices.
+        "heimdall_on" | "heimdall_off" => line("listen", format!("Listening {}{}", if r.kind == "heimdall_on" { "on" } else { "off" }, why(&p["reason"]))),
+        "listening_changed" => line("listen", format!("listening to {} {}{}", plain(&p["speaker"]).unwrap_or_else(|| "?".into()),
+            if yes(&p["on"]) { "on" } else { "off" }, plain(&p["by"]).map(|b| format!(" (by {b})")).unwrap_or_default())),
+        // `kind` is `"Microphone"` or `{"InputDevice":{…}}` / `{"Process":{…}}` (capture::SourceKind).
+        "source" => line("capture", format!("source added: {} \"{}\" (generation {})",
+            p["kind"].as_str().map(str::to_owned).or_else(|| p["kind"].as_object().and_then(|o| o.keys().next().cloned())).unwrap_or_else(|| "?".into()),
+            bounded(p["label"].as_str().unwrap_or(""), 80), n(&p["generation"]))),
+        // A turn handed to the agent's process and its acknowledgement (relay and Pi alike); context reads, stats
+        // polls and the streamed message parts stay out (`wire` carries message text: never quoted).
+        "agent_transport_sent" => match p["wire"]["type"].as_str() {
+            Some(t @ ("prompt" | "steer" | "follow_up" | "abort")) => line("agent", format!("sent {t} {}", short_id(&p["wire"]["id"]))),
+            _ => Some(None),
+        },
+        "agent_transport_reply" => match (p["wire"]["type"].as_str(), p["wire"]["command"].as_str()) {
+            (Some("response"), Some(c @ ("prompt" | "steer" | "follow_up" | "abort"))) => line("agent", match p["wire"]["success"].as_bool() {
+                Some(true) => format!("{c} {} acknowledged{}", short_id(&p["wire"]["id"]), plain(&p["wire"]["data"]["disposition"]).map(|d| format!(" ({d})")).unwrap_or_default()),
+                _ => format!("{c} {} refused: {}", short_id(&p["wire"]["id"]), plain(&p["wire"]["error"]).unwrap_or_else(|| "no reason given".into())),
+            }),
+            (Some("response"), _) if p["wire"]["success"] == false => line("agent", format!("{} {} refused: {}",
+                plain(&p["wire"]["command"]).unwrap_or_else(|| "request".into()), short_id(&p["wire"]["id"]), plain(&p["wire"]["error"]).unwrap_or_else(|| "no reason given".into()))),
+            _ => Some(None),
+        },
+        "vella_dictation" => line("vella", match (&p["notice"], &p["expired"]) {
+            (Value::Object(_), _) => format!("dictation notice: {}", plain(&p["notice"]["reason"]).unwrap_or_else(|| "?".into())),
+            (_, Value::Null) => "a malformed notice, ignored".into(),
+            (_, by) => format!("dictation ended ({})", plain(by).unwrap_or_else(|| "expired".into())),
+        }),
+        "agent_look" => line("agent", format!("looked at display {} ({}×{})", n(&p["display"]), n(&p["width"]), n(&p["height"]))),
+        _ => None,
+    }
+}
+/// A wire id as far as its first group: "control-4808440b".
+fn short_id(v: &Value) -> String {
+    let id = v.as_str().unwrap_or("?");
+    let end = id.match_indices('-').nth(1).map_or(id.len(), |(at, _)| at);
+    bounded(&id[..end], 40)
+}
+/// `kind (source): key: value; …` from the fields that say what happened, never free text (bodies, transcripts,
+/// prompts) or nested objects: the catch-all for a kind with no line of its own.
+fn brief(r: &Record) -> String {
+    const KEYS: [&str; 18] = ["event", "state", "outcome", "status", "phase", "stage", "component", "check", "command", "key", "on",
+        "by", "reason", "cause", "error", "exit_code", "count", "ms"];
+    let p = &r.payload;
+    let parts: Vec<String> = KEYS.iter().filter_map(|k| match &p[*k] {
+        v @ (Value::Bool(_) | Value::Number(_)) => Some(format!("{k}: {v}")),
+        Value::String(s) if !s.trim().is_empty() => Some(format!("{k}: {}", bounded(s.trim(), 120))),
+        _ => None,
+    }).collect();
+    let source = (!r.source.is_empty() && r.source != "heimdall").then(|| format!(" ({})", bounded(&r.source, 60))).unwrap_or_default();
+    format!("{}{source}{}", r.kind, if parts.is_empty() { String::new() } else { format!(": {}", parts.join("; ")) })
+}
+/// One line per action the user takes, with where it came from: `menu` (the Mac's menu, island and windows), `phone`
+/// (the phone's settings and cards), `agent tool` (the agent's `settings` tool). Typed text, secrets,
+/// paths and names are left out: a variant with a string or a list in it is named only by its variant path.
+pub(crate) fn action(source: &str, debug: &str) -> Option<String> {
+    Some(format("action", &format!("{source}: {}", action_name(debug)?)))
+}
+/// Writes `action`'s line.
+pub(crate) fn write_action(source: &str, debug: &str) {
+    if let Some(line) = action(source, debug) {
+        write(&line);
+    }
+}
+fn action_name(debug: &str) -> Option<String> {
+    // Telemetry, not an action: the island's own shown/closed reports have their `island_report` line.
+    if debug.starts_with("Island(") {
+        return None;
+    }
+    if !debug.contains('"') && debug.len() <= 160 {
+        return Some(debug.to_owned());
+    }
+    let head = &debug[..debug.find(['"', '[']).unwrap_or(debug.len())];
+    let path: Vec<&str> = head.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .filter(|w| w.chars().next().is_some_and(|c| c.is_ascii_uppercase())).collect();
+    Some(format!("{} (details withheld)", path.join(" ")))
+}
+// ---- end every event ----
 /// A failed invariant with its scalar evidence (`queue_depth=2, unresolved=3 items`). The `drama3_problem` and
 /// `send_decision_problem` checks repeat a record that already has its own line.
 fn invariant(p: &Value) -> Option<String> {
@@ -333,7 +528,7 @@ fn drama3(p: &Value) -> Option<(String, Repeats)> {
             (format!("Jarvis ready{engine}, loaded in {:.1} s", p["load_ms"].as_f64().unwrap_or(0.) / 1000.), Folded)
         }
         "engine_fallback" => (format!("Jarvis's Rust engine failed to start, the Python worker takes over until restart: {reason}"), Kept),
-        // One greppable event per switch, its fields first so the line bound never cuts them (docs/nightly-build.md).
+        // One greppable event per switch, its fields first so the line bound never cuts them (docs/personal/nightly-build.md).
         "voice_switch" => {
             let error = plain(&p["error"]).map(|e| inner_reason(&e)).unwrap_or_else(|| reason.clone());
             let cause = p["cause"].as_str().map(str::to_owned).unwrap_or_else(|| speak::drama3::fallback_cause(&error).into());
@@ -375,19 +570,40 @@ fn drama3(p: &Value) -> Option<(String, Repeats)> {
         }
         "stall" if p["reason"] != "word coverage" => (format!("Jarvis take failed (sentence {}, attempt {} of {}): {reason}", p["sentence"], p["attempt"].as_u64().map_or(0, |a| a + 1), speak::drama3::ATTEMPTS), Kept),
         "restart_first" => ("Jarvis restarts his first sentence (the live take stalled)".into(), Kept),
-        "fatal" => (format!("Jarvis stopped: {reason}{free}"), Folded),
-        "memory_refusal" => (format!("Jarvis not loaded: {reason}"), Folded),
+        // Each carries its cause class, so the night pass's sweep (`cause=`, docs/personal/nightly-build.md 1a) finds a drop that
+        // wrote no fallback line (9 Nov 12:38: a refused reload left only "Jarvis stopped: Need 55 GB …").
+        "fatal" => (format!("Jarvis stopped: {reason}{free} [cause={}]", speak::drama3::fallback_cause(&reason)), Folded),
+        "memory_refusal" => (format!("Jarvis not loaded: {reason} [cause=memory]"), Folded),
+        "previous_worker_reaped" => (format!("Jarvis's reload waited {:.1} s for the stopped worker to free its memory",
+            p["waited_ms"].as_f64().unwrap_or(0.) / 1000.), Folded),
+        "previous_worker_lingering" => (format!("Jarvis's reload found a stopped worker still holding memory after {:.1} s; loading anyway",
+            p["waited_ms"].as_f64().unwrap_or(0.) / 1000.), Kept),
         // At load the refusal or fatal line just before says why.
         "memory_unload" if phase == "loading" && p["reason"].is_null() => return None,
         // The memory line (bug note 2026-11-03T22-38-44): the give-way line says why; the unload just after is quiet.
-        "memory_give_way" => {
-            let by = p["needed_by"].as_array().map(|w| w.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
-            (format!("Jarvis gives way to Phonon S: {reason}{}", if by.is_empty() { String::new() } else { format!(" [needed by {by}]") }), Kept)
-        }
+        // Every give-way, hold and return names its reason, the need files and the hold (bug note 2026-11-08T02-03-45).
+        "memory_give_way" => (format!("Jarvis gives way to Phonon S: {reason}{}; {}", needed_by(p), hold_after(p)), Kept),
+        "memory_hold" => (format!("Jarvis held out for memory: {reason}{}; {}", needed_by(p), hold_after(p)), Kept),
         "memory_unload" if phase == "give_way" => return None,
         // The same GB (GiB) as the give-way reason (`memory_line::gb`), never this file's decimal `gb`.
-        "memory_return" => (format!("Jarvis reloading: memory back under the 95 GB line with room for him ({} GB in use)",
-            speak::memory_line::gb(p["used_bytes"].as_u64().unwrap_or(0))), Kept),
+        "memory_return" => (format!("Jarvis reloading: memory back under the {} GB line with room for him ({} GB in use){}{}",
+            speak::memory_line::line_gb(), speak::memory_line::gb(p["used_bytes"].as_u64().unwrap_or(0)),
+            p["out_s"].as_f64().map(|s| format!("; out {}", span(s))).unwrap_or_default(),
+            match (p["released"].as_bool() == Some(true), p["hold_s"].as_f64()) {
+                (true, Some(h)) => format!(", the need released and a {} hold waited out", span(h)),
+                (false, Some(h)) => format!(" after a {} hold", span(h)),
+                _ => String::new(),
+            }), Kept),
+        // A switch, not the memory line (bug note 2026-11-08T02-03-45: 01:38:01 read as a give-way with no reason).
+        "unwanted" => {
+            let held = plain(&p["held"]).map(|h| format!("; still held for memory: {h}")).unwrap_or_default();
+            let what = if p["resident"] == true { "Jarvis unloaded" } else { "Jarvis no longer wanted" };
+            (format!("{what}: {reason} (a switch, not the memory line{}){held}", in_use(p)), Kept)
+        }
+        "wanted" => {
+            let held = plain(&p["held"]).map(|h| format!("; held for memory until it is back: {h}")).unwrap_or_else(|| "; loading".into());
+            (format!("Jarvis wanted: {reason}{}{held}", in_use(p)), Kept)
+        }
         "memory_line" => return None,
         "memory_unload" => (format!("Jarvis exited for memory (exit 73, while {phase}): {reason}"), Folded),
         "failure" => (format!("Jarvis failed: {reason} [cause={}]", speak::drama3::fallback_cause(&reason)), Folded),
@@ -395,6 +611,31 @@ fn drama3(p: &Value) -> Option<(String, Repeats)> {
         "verifier_unload_pending" | "verifier_reserve_carried" => (format!("word-check decoder still running; {} kept reserved", gb(&p["retained_bytes"]).unwrap_or_default()), Folded),
         _ => return None,
     })
+}
+/// " [needed by Vella Nemotron (angel-nemotron-wer.json)]" from a memory event's declared needs.
+fn needed_by(p: &Value) -> String {
+    let by = p["needed_by"].as_array().map(|w| w.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+    if by.is_empty() { String::new() } else { format!(" [needed by {by}]") }
+}
+/// How long memory must stay back before he returns, from the event's `hold_s`.
+fn hold_after(p: &Value) -> String {
+    match p["hold_s"].as_f64() {
+        Some(h) => format!("he returns once memory stays back for {}", span(h)),
+        None => "he returns once memory is back".into(),
+    }
+}
+/// "; 46.0 GB in use" in GB as the memory line counts them, when the event carries a reading.
+fn in_use(p: &Value) -> String {
+    p["used_bytes"].as_u64().filter(|b| *b > 0).map(|b| format!("; {} GB in use", speak::memory_line::gb(b))).unwrap_or_default()
+}
+/// A duration as a person says it: "45 s", "2 min", "6 min 12 s".
+fn span(seconds: f64) -> String {
+    let s = seconds.max(0.).round() as u64;
+    match (s / 60, s % 60) {
+        (0, s) => format!("{s} s"),
+        (m, 0) => format!("{m} min"),
+        (m, s) => format!("{m} min {s} s"),
+    }
 }
 fn agent_state(source: &str, p: &Value) -> Option<String> {
     static LAST: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
@@ -423,6 +664,15 @@ fn decision(r: &Record) -> Option<String> {
         return None;
     }
     let trigger = plain(&p["trigger"]).unwrap_or_else(|| "d1".into());
+    // Night 8 Nov log sweep, finding 9: the triggers in words. "trigger dropped" (a file the user dropped on the notch
+    // with his words, decide::send::Trigger::Dropped) read as if the wake had been lost, though the agent woke.
+    let trigger = match trigger.as_str() {
+        "dropped" => "a drop on the notch".to_string(),
+        "send_it" => "send it".to_string(),
+        "open_question" => "open question".to_string(),
+        "follow_up" => "follow-up".to_string(),
+        _ => trigger,
+    };
     let model = plain(&p["choice"]).map(|c| format!("; model said {c}{}", p["probabilities"][&c].as_f64().map(|x| format!(" {x:.2}")).unwrap_or_default())).unwrap_or_default();
     let latency = p["latency_ms"].as_f64().map(|ms| format!("; {ms:.0} ms")).unwrap_or_default();
     Some(format!("woke the agent (trigger {trigger}{model}{latency})"))
@@ -441,21 +691,51 @@ fn switches(p: &Value) -> Option<String> {
     } else {
         plain(&s["agent_model"]["api"]["id"]).map(|m| format!(" ({m})")).unwrap_or_default()
     };
+    // A change written into settings.json by something outside Heimdall says so; a menu click, the settings tool or
+    // Heimdall's own change does not (bug note 2026-11-08T02-03-45).
+    let from = if p["from"] == "settings.json" { " (from settings.json)" } else { "" };
     let line = format!("Listening {}, Seeing {}, Speaking {}, Agent {}{model}, Engine {}",
         on(!flag("paused")), on(!flag("screen_off")), on(flag("speak_replies")), on(!flag("dry_run")), on(flag("engine_on")));
+    // Every other setting that changed since the last record, by name (bug note 2026-11-13T13-55-33).
+    let changed = changed_settings(s);
     if let Ok(mut last) = LAST.get_or_init(Default::default).try_lock() {
-        if last.as_ref() == Some(&line) {
+        if last.as_ref() == Some(&line) && changed.is_empty() {
             return None;
         }
         *last = Some(line.clone());
     }
-    Some(line)
+    let changed = if changed.is_empty() { String::new() } else { format!("; changed: {}", changed.join(", ")) };
+    Some(format!("{line}{changed}{from}"))
+}
+/// The settings that differ from the previous record's: `name=value` for a short scalar, the name alone for a list, an
+/// object, a long string or anything named like a credential. Nothing on the first record.
+fn changed_settings(s: &Value) -> Vec<String> {
+    static LAST: OnceLock<Mutex<Option<serde_json::Map<String, Value>>>> = OnceLock::new();
+    let Some(now) = s.as_object() else { return vec![] };
+    let Ok(mut last) = LAST.get_or_init(Default::default).try_lock() else { return vec![] };
+    let Some(before) = last.replace(now.clone()) else { return vec![] };
+    diff_settings(&before, now)
+}
+fn diff_settings(before: &serde_json::Map<String, Value>, now: &serde_json::Map<String, Value>) -> Vec<String> {
+    let secret = |k: &str| ["key", "token", "secret", "password", "credential", "auth", "cookie"].iter().any(|w| k.contains(w));
+    let mut names: Vec<&String> = now.keys().chain(before.keys()).collect();
+    names.sort();
+    names.dedup();
+    names.into_iter().filter(|k| now.get(*k) != before.get(*k)).map(|k| match now.get(k) {
+        _ if secret(k) => k.clone(),
+        Some(v @ (Value::Bool(_) | Value::Number(_))) => format!("{k}={v}"),
+        Some(Value::String(v)) if v.len() <= 60 => format!("{k}={v}"),
+        // `Settings` leaves a false flag out of its JSON (`is_false`).
+        None if before.get(k).is_some_and(Value::is_boolean) => format!("{k}=false"),
+        None | Some(Value::Null) => format!("{k} cleared"),
+        Some(_) => k.clone(),
+    }).collect()
 }
 fn barge_in(p: &Value) -> Option<String> {
     let outcome = plain(&p["outcome"])?;
     let heard = p["side_transcript"]["text"].as_str().filter(|t| !t.is_empty()).map(|t| format!("; heard {}", quoted(&Value::from(t)))).unwrap_or_default();
     let reason = plain(&p["reason"]).map(|r| format!(" ({r})")).unwrap_or_default();
-    Some(format!("User spoke while Heimdall talked: {outcome}{reason}{heard}"))
+    Some(format!("{} spoke while Heimdall talked: {outcome}{reason}{heard}", agent::identity::user_start()))
 }
 
 #[cfg(test)]
@@ -484,9 +764,9 @@ mod tests {
         let l = line_of("drama3", json!({"event":"voice_switch","id":6,"sentence":10,"notice":"Jarvis missed a sentence · lighter voice","reason":"incomplete sentence after retries","text":"Splash lacks MTP for this model and vllm metal turns the cache off while drafting."}));
         assert_eq!(l, "voice: fallback cause=word_check from=jarvis to=lighter error=\"incomplete sentence after retries\" · Jarvis missed a sentence · lighter voice: the lighter voice says \"Splash lacks MTP for this model and vllm metal turns the cache off while drafting.\"");
         let l = line_of("drama3", json!({"event":"fatal","reason":"Drama 3 memory guard: swap grew by 0 MB since Jarvis loaded (52.9 GiB available)"}));
-        assert_eq!(l, "voice: Jarvis stopped: Drama 3 memory guard: swap grew by 0 MB since Jarvis loaded (52.9 GiB available)");
+        assert_eq!(l, "voice: Jarvis stopped: Drama 3 memory guard: swap grew by 0 MB since Jarvis loaded (52.9 GiB available) [cause=memory]");
         let l = line_of("drama3", json!({"event":"memory_refusal","reason":"Not enough free memory for Jarvis right now (needs 31.1 GB, 15.7 GB free)","available_bytes":15699345408u64}));
-        assert_eq!(l, "voice: Jarvis not loaded: Not enough free memory for Jarvis right now (needs 31.1 GB, 15.7 GB free)");
+        assert_eq!(l, "voice: Jarvis not loaded: Not enough free memory for Jarvis right now (needs 31.1 GB, 15.7 GB free) [cause=memory]");
         let l = line_of("drama3", json!({"event":"memory_unload","phase":"idle","exit_code":73,"reason":"Swap grew by 54 MB with 20.1 GB free. Using the lighter voice."}));
         assert_eq!(l, "voice: Jarvis exited for memory (exit 73, while idle): Swap grew by 54 MB with 20.1 GB free. Using the lighter voice.");
         assert_eq!(line_of("drama3", json!({"event":"memory_unload","phase":"load","exit_code":73})), "", "the refusal before it says why");
@@ -521,14 +801,46 @@ mod tests {
         assert_eq!(line_of("drama3", json!({"event":"batch","first":1,"rows":3,"lead_s":2.46})), "voice: Jarvis batch: sentences 2 to 4 together, 2.5 s of audio ahead");
         assert_eq!(line_of("drama3", json!({"event":"stall","reason":"word coverage"})), "");
         assert_eq!(line_of("drama3", json!({"event":"memory_wait","reason":"x"})), "");
+        // A drop with no fallback line still carries its cause class for the night pass's sweep (9 Nov 12:38).
+        assert_eq!(line_of("drama3", json!({"event":"fatal","reason":"Need 55 GB available before loading Drama 3"})),
+            "voice: Jarvis stopped: Need 55 GB available before loading Drama 3 [cause=memory]");
+        assert_eq!(line_of("drama3", json!({"event":"previous_worker_reaped","waited_ms":1830.0})),
+            "voice: Jarvis's reload waited 1.8 s for the stopped worker to free its memory");
         // The memory line: one line when he gives way and one when he returns; each held line is logged quietly.
-        let l = line_of("drama3", json!({"event":"memory_give_way","reason":"Memory would pass 95 GB (70.0 GB in use plus 30.0 GB needed for Arsenal). Jarvis unloaded to free memory; Phonon S speaks.","used_bytes":75_161_927_680u64,"need_bytes":32_212_254_720u64,"needed_by":["Arsenal"]}));
-        assert_eq!(l, "voice: Jarvis gives way to Phonon S: Memory would pass 95 GB (70.0 GB in use plus 30.0 GB needed for Arsenal). Jarvis unloaded to free memory; Phonon S speaks. [needed by Arsenal]");
+        let l = line_of("drama3", json!({"event":"memory_give_way","reason":"Memory would pass 105 GB (80.0 GB in use plus 30.0 GB needed for Arsenal). Jarvis unloaded to free memory; Phonon S speaks.","used_bytes":85_899_345_920u64,"need_bytes":32_212_254_720u64,"needed_by":["Arsenal"]}));
+        assert_eq!(l, "voice: Jarvis gives way to Phonon S: Memory would pass 105 GB (80.0 GB in use plus 30.0 GB needed for Arsenal). Jarvis unloaded to free memory; Phonon S speaks. [needed by Arsenal]; he returns once memory is back");
         assert_eq!(line_of("drama3", json!({"event":"memory_unload","phase":"give_way","reason":"x"})), "");
         assert_eq!(line_of("drama3", json!({"event":"memory_line","text":"Noted.","reason":"x"})), "");
         assert_eq!(line_of("drama3", json!({"event":"memory_return","used_bytes":51_539_607_552u64})),
-            "voice: Jarvis reloading: memory back under the 95 GB line with room for him (48.0 GB in use)", "GiB, as the give-way line");
+            "voice: Jarvis reloading: memory back under the 105 GB line with room for him (48.0 GB in use)", "GiB, as the give-way line");
         assert_eq!(line_of("drama3", json!({"event":"stall","reason":"duration or stall","sentence":0,"attempt":2})), "voice: Jarvis take failed (sentence 0, attempt 3 of 3): duration or stall");
+    }
+    /// Bug note 2026-11-08T02-03-45: every give-way, hold and return is one voice: line with the reason, the GB figures,
+    /// the need file and the hold; an unload by a switch says so, so it is never read as the memory line's.
+    #[test]
+    fn give_way_hold_return_and_switch_unloads_each_say_why() {
+        let gib = 1u64 << 30;
+        let reason = "Memory would pass 105 GB (46.0 GB in use plus 62.0 GB needed for Vella Nemotron (angel-nemotron-wer.json)). Jarvis unloaded to free memory; Phonon S speaks.";
+        let l = line_of("drama3", json!({"event":"memory_give_way","reason":reason,"used_bytes":46 * gib,"need_bytes":62 * gib,
+            "needed_by":["Vella Nemotron (angel-nemotron-wer.json)"],"hold_s":120.0}));
+        assert_eq!(l, format!("voice: Jarvis gives way to Phonon S: {reason} [needed by Vella Nemotron (angel-nemotron-wer.json)]; he returns once memory stays back for 2 min"));
+        let l = line_of("drama3", json!({"event":"memory_hold","reason":"Not enough room under 105 GB for Jarvis (90.0 GB in use). Phonon S speaks.","used_bytes":90 * gib,"hold_s":60.0}));
+        assert_eq!(l, "voice: Jarvis held out for memory: Not enough room under 105 GB for Jarvis (90.0 GB in use). Phonon S speaks.; he returns once memory stays back for 1 min");
+        let l = line_of("drama3", json!({"event":"memory_return","used_bytes":48 * gib,"hold_s":60.0,"out_s":372.4,"released":true}));
+        assert_eq!(l, "voice: Jarvis reloading: memory back under the 105 GB line with room for him (48.0 GB in use); out 6 min 12 s, the need released and a 1 min hold waited out");
+        let l = line_of("drama3", json!({"event":"memory_return","used_bytes":48 * gib,"hold_s":120.0,"out_s":120.0,"released":false}));
+        assert_eq!(l, "voice: Jarvis reloading: memory back under the 105 GB line with room for him (48.0 GB in use); out 2 min after a 2 min hold");
+        // 01:38:01 and 01:46:20 as they would read now.
+        let l = line_of("drama3", json!({"event":"unwanted","reason":"Speaking off","resident":true,"held":null,"used_bytes":46 * gib}));
+        assert_eq!(l, "voice: Jarvis unloaded: Speaking off (a switch, not the memory line; 46.0 GB in use)");
+        let l = line_of("drama3", json!({"event":"unwanted","reason":"Speaking off","resident":false,"held":"Memory would pass 105 GB.","used_bytes":0}));
+        assert_eq!(l, "voice: Jarvis no longer wanted: Speaking off (a switch, not the memory line); still held for memory: Memory would pass 105 GB.");
+        assert_eq!(line_of("drama3", json!({"event":"wanted","reason":"Speaking on","held":null,"used_bytes":50 * gib})), "voice: Jarvis wanted: Speaking on; 50.0 GB in use; loading");
+        assert_eq!(line_of("drama3", json!({"event":"wanted","reason":"Speaking on","held":"Memory would pass 105 GB."})),
+            "voice: Jarvis wanted: Speaking on; held for memory until it is back: Memory would pass 105 GB.");
+        // Distinct events: two give-ways a minute apart are two lines, never folded into a count.
+        assert_eq!(evidence(&record("drama3", json!({"event":"unwanted","reason":"Speaking off","resident":true}))).map(|(_, r)| r), Some(Repeats::Kept));
+        assert_eq!(evidence(&record("drama3", json!({"event":"memory_hold","reason":"x"}))).map(|(_, r)| r), Some(Repeats::Kept));
     }
     #[test]
     fn health_agent_decider_settings_and_capture_lines() {
@@ -547,15 +859,21 @@ mod tests {
         assert_eq!(evidence(&failed).unwrap().0, "agent: NeedsReview — Anthropic 529 overloaded");
         assert_eq!(line_of("send_decision", json!({"outcome":"send","trigger":"name","choice":"not_for_heimdall","probabilities":{"not_for_heimdall":0.81},"latency_ms":85.2,"prompt":"x".repeat(8000)})),
             "decider: woke the agent (trigger name; model said not_for_heimdall 0.81; 85 ms)");
+        // Night 8 Nov log sweep, finding 9 (8 Nov 01:19:16, a screenshot dropped on the notch at 01:19:08).
+        assert_eq!(line_of("send_decision", json!({"outcome":"send","trigger":"dropped","choice":"send","probabilities":{"send":0.97},"latency_ms":101.0})),
+            "decider: woke the agent (trigger a drop on the notch; model said send 0.97; 101 ms)");
+        assert_eq!(line_of("send_decision", json!({"outcome":"send","trigger":"open_question","latency_ms":90.0})), "decider: woke the agent (trigger open question; 90 ms)");
         assert_eq!(line_of("send_decision", json!({"outcome":"not_for_heimdall","pending_truncated":true,"prompt":"x"})), "", "not every sentence");
         assert_eq!(line_of("send_decision", json!({"error":"decider owner failed: deadline"})), "decider: decision failed: decider owner failed: deadline");
         let s = json!({"settings":{"paused":false,"screen_off":false,"speak_replies":true,"dry_run":false,"engine_on":false,"agent_model":{"api":{"id":"claude-opus-5-5"}},"anthropic_api_key":"sk-ant-api03-secretsecretsecret"}});
-        assert_eq!(line_of("settings_applied", s.clone()), "settings: Listening on, Seeing on, Speaking on, Agent on (claude-opus-5-5), Engine off");
-        assert_eq!(line_of("settings_applied", s.clone()), "", "unchanged switches: no line");
+        // Other tests share the last-settings state: the first line may name settings changed since theirs.
+        assert!(line_of("settings_applied", s.clone()).starts_with("settings: Listening on, Seeing on, Speaking on, Agent on (claude-opus-5-5), Engine off"));
+        assert!(!line_of("settings_applied", s.clone()).contains("anthropic_api_key=") , "no credential value");
         let mut relay = s.clone();
         relay["settings"]["agent_relay"] = json!(true);
         relay["settings"]["agent_relay_model"] = json!("claude-sonnet-5-5");
-        assert_eq!(line_of("settings_applied", relay), "settings: Listening on, Seeing on, Speaking on, Agent on (Claude via T3 · claude-sonnet-5-5), Engine off", "relay mode names itself");
+        let l = line_of("settings_applied", relay);
+        assert!(l.starts_with("settings: Listening on, Seeing on, Speaking on, Agent on (Claude via T3 · claude-sonnet-5-5), Engine off"), "relay mode names itself: {l}");
         // G1 (20 Oct 18:16:30 "settings: Listening off, Seeing off, Speaking off, Agent on" while both ran): the real
         // serialised Settings omit `paused` and `screen_off` when false.
         let mut real = crate::settings::Settings { dry_run: false, engine_on: true, speak_replies: false, ..Default::default() };
@@ -565,6 +883,11 @@ mod tests {
         real.paused = true;
         real.screen_off = true;
         assert!(line_of("settings_applied", json!({"settings": real})).starts_with("settings: Listening off, Seeing off, Speaking off, Agent on"));
+        // Bug note 2026-11-08T02-03-45: a change read from settings.json names its source.
+        let mut file = json!({"settings": real, "from": "settings.json"});
+        file["settings"]["speak_replies"] = json!(true);
+        let l = line_of("settings_applied", file);
+        assert!(l.contains("Engine on") && l.ends_with("(from settings.json)"), "{l}");
         assert_eq!(line_of("capture_gap", json!({"reason":"native clock discontinuity without queue loss"})), "capture: capture_gap (heimdall:voice): reason: native clock discontinuity without queue loss");
         assert_eq!(line_of("utterance", json!({"decision":{"audio_error":"utterance waveform unavailable after capture gap","status":"unavailable_audio"},"text":"private words"})),
             "listen: utterance (heimdall:voice): decision.audio_error: utterance waveform unavailable after capture gap");
@@ -573,11 +896,137 @@ mod tests {
         assert_eq!(line_of("capture_discontinuity", json!({"capture_flag":true,"clock_gap":true})), "capture: capture_discontinuity (heimdall:voice): capture_flag: true; clock_gap: true");
         assert_eq!(line_of("invariant_violation", json!({"check":"agent_queue_depth","evidence":{"evidence_id":10009056,"queue_depth":2,"unresolved":["a","b","c"]}})), "check: agent_queue_depth: queue_depth=2, unresolved=3 items");
         assert_eq!(line_of("invariant_violation", json!({"check":"drama3_problem:heimdall:voice","evidence":{"event":"memory_refusal"}})), "", "the drama3 line already says it");
-        // Ordinary records stay out of the log.
-        for (kind, payload) in [("agent_delivery", json!({"error":null,"transport_accepted":true})), ("transcript_segment", json!({"text":"hello"})), ("voice_reply", json!({"outcome":"nothing"}))] {
-            assert_eq!(line_of(kind, payload), "", "{kind}");
-        }
+        // Bug note 2026-11-13T13-55-33: deliveries and voice replies are events with a line; transcripts stay out.
+        assert_eq!(line_of("agent_delivery", json!({"message_id":"m-7","error":null,"transport_accepted":true})), "agent: delivery m-7 accepted by the agent");
+        assert_eq!(line_of("voice_reply", json!({"outcome":"nothing"})), "speech: voice reply: nothing");
+        assert_eq!(line_of("transcript_segment", json!({"text":"hello"})), "");
     }
+    // ---- every event (bug note 2026-11-13T13-55-33) ----
+    /// Every record kind in a day of the live store (12–13 Nov, 70 kinds, `lab/event-log-audit-2026-11-13.md`) plus the
+    /// event kinds the code emits: each is exactly one line, or is a listed quiet kind with none.
+    #[test]
+    fn every_kind_of_a_live_day_is_one_line_or_listed_quiet() {
+        let events: Vec<(&str, Value, &str)> = vec![
+            ("agent_delivery", json!({"message_id":"m-1","transport_accepted":false,"error":"Agent off"}), "agent: delivery m-1 refused: Agent off"),
+            ("agent_delivery_resolved", json!({"id":"d-2","outcome":"Completed","reason":null}), "agent: delivery d-2 resolved: Completed"),
+            ("agent_wake", json!({"urgent":true,"image_ids":["a","b"]}), "agent: woke (urgent), 2 images"),
+            ("agent_steer", json!({"image_ids":[],"delivered":true}), "agent: steered the running turn (delivered)"),
+            ("notch_drop", json!({"label":"shot.png","kind":"image","items":1,"owner_speaking":false}), "notch: drop received: 1 image (shot.png)"),
+            ("notch_drop_delivery", json!({"label":"shot.png","lines":2,"images":1,"joined":true}), "notch: drop delivered to the agent (shot.png, 1 image, joined to an utterance)"),
+            ("speak_back", json!({"text":"The build is green and pushed.","language":"en","enabled":true}), "speech: the agent asked to speak 6 words (en)"),
+            ("voice_ack", json!({"outcome":"playing","decider_line":"ok-3"}), "speech: acknowledgement playing (line ok-3)"),
+            ("voice_ack", json!({"reason":"agent_off"}), "speech: no acknowledgement (agent_off)"),
+            ("voice_ack_playback", json!({"clip_id":"c9","outcome":"played","reason":null,"error":null,"elapsed_ms":412.3}), "speech: acknowledgement c9 played after 412 ms"),
+            ("voice_reply_playback", json!({"clip_id":"r1","outcome":"failed","error":"device gone","elapsed_ms":3.0}), "speech: voice-bank reply r1 failed: device gone after 3 ms"),
+            ("speech_stopped", json!({"reason":"guest_voice","speaker":"Dave"}), "speech: stopped (guest_voice) by Dave"),
+            ("speech_held", json!({"reason":"in a call"}), "speech: speech_held (heimdall:voice): reason: in a call"),
+            ("echo_guard", json!({"outcome":"echo_words_left_out","heard":"private words","kept":"words"}), "listen: echo guard: echo_words_left_out"),
+            ("hotkey", json!({"key":"wake","woke":true,"lines":3}), "hotkey: wake pressed: woke the agent with 3 line(s)"),
+            ("hotkey", json!({"key":"stop","speaking":true}), "hotkey: stop pressed while Heimdall spoke"),
+            ("island_report", json!({"event":"shown","kind":"Agent","label":"Working","waited_ms":12}), "island: opened Agent \"Working\" after 12 ms"),
+            ("island_report", json!({"event":"left","kind":"Agent","shown_ms":2400,"why":"done"}), "island: closed Agent after 2400 ms (done)"),
+            ("island_cue", json!({"cue":"agent_sent"}), "island: sent to the agent"),
+            ("island_cue", json!({"cue":"agent_notice","kind":"progress","text":"Checking the build"}), "island: agent notice (progress): \"Checking the build\""),
+            ("command_cue", json!({"phase":"heard","id":4}), "command: cue heard #4"),
+            ("command_execution", json!({"cue_id":4,"command":"pause"}), "command: voice command #4 ran: pause"),
+            ("screen_command", json!({"screen_off":true}), "command: screen command: Seeing is off, nothing captured"),
+            ("heimdall_off", json!({"reason":"menu"}), "listen: Listening off (menu)"),
+            ("listening_changed", json!({"speaker":"Dave","on":true,"by":"phone"}), "listen: listening to Dave on (by phone)"),
+            ("source", json!({"id":"mic:x","label":"Shure MV7i","kind":"Microphone","generation":2}), "capture: source added: Microphone \"Shure MV7i\" (generation 2)"),
+            // The live shapes (13 Nov 09:08, a phone turn through the relay).
+            ("source", json!({"format":{"channels":2,"sample_rate":48000},"generation":1,"id":"mic:Shure","kind":{"InputDevice":{"uid":"x"}},"label":"Shure MV7i [AppleUSBAudioEngine]"}),
+                "capture: source added: InputDevice \"Shure MV7i [AppleUSBAudioEngine]\" (generation 1)"),
+            ("agent_transport_sent", json!({"wire":{"id":"control-4808440b-a949-4921-923b-bb33c292fcfb","message":"/heimdall_context [Phone · User] That was a knife.","type":"prompt"}}),
+                "agent: sent prompt control-4808440b"),
+            ("agent_transport_reply", json!({"wire":{"command":"prompt","data":{"disposition":"handled"},"id":"control-4808440b-a949-4921-923b-bb33c292fcfb","success":true,"type":"response"}}),
+                "agent: prompt control-4808440b acknowledged (handled)"),
+            ("agent_transport_reply", json!({"wire":{"command":"prompt","id":"control-1","success":false,"error":"busy","type":"response"}}),
+                "agent: prompt control-1 refused: busy"),
+            ("vella_dictation", json!({"expired":"timeout"}), "vella: dictation ended (timeout)"),
+            ("agent_look", json!({"display":1,"width":3456,"height":2234}), "agent: looked at display 1 (3456×2234)"),
+            // No line of its own: the catch-all names the kind and its state fields, folded when it loops.
+            ("agent_catchup", json!({"state":"added","lines":12,"bytes":4000,"reason":"start"}), "agent: agent_catchup (heimdall:voice): state: added; reason: start"),
+            ("speaker_name", json!({"name":"Dave","track":"t1"}), "speakers: speaker_name (heimdall:voice)"),
+            ("screenshot", json!({"image_id":"i1"}), "heimdall: screenshot (heimdall:voice)"),
+            ("source_removed", json!({"reason":"device gone"}), "capture: source_removed (heimdall:voice): reason: device gone"),
+        ];
+        for (kind, payload, want) in events {
+            let got = evidence(&record(kind, payload.clone()));
+            let (line, _) = got.unwrap_or_else(|| panic!("{kind} {payload}: no line"));
+            assert_eq!(line, want, "{kind}");
+            assert!(!line.contains('\n') && line.len() <= LINE_LIMIT + 40, "{kind}: one bounded line");
+        }
+        // The rest of the day's 70 kinds: a line from their own arm (checked above or in the tests before) or quiet.
+        let day = ["model_output", "speaker_probabilities", "speaker_segments_delta", "listen_event", "send_context", "utterance_binding",
+            "agent_transport_reply", "agent_context_routing", "send_decision", "agent_reply", "agent_transport_send", "agent_transport_sent", "drama3",
+            "mic_voice", "transcript_revision", "agent_context", "barge_in", "transcript_segment", "suggest_decision", "agent_state", "health",
+            "speaker_segments_finalized", "speech_split_call_cpu", "speech_split_progress", "voice_ack", "speech_split_asr_output", "source",
+            "island_cue", "speak_back", "agent_wake", "source_removed", "source_readded", "gap", "speech_split_admission", "speech_split_completed",
+            "capture_discontinuity", "capture_gap", "speech_split_pending", "voice_ack_playback", "island_report", "hotkey", "speech_held",
+            "tts_model_output", "invariant_violation", "agent_look", "echo_guard", "settings_applied", "command_cue", "notch_drop", "speech_stopped",
+            "notch_drop_delivery", "capture_diagnostic", "health_cue", "speaker_embeddings", "command_decision", "microphone_cue", "heimdall_off",
+            "speaker_name", "listening_ready", "heimdall_on", "agent_catchup", "agent_process_ownership", "listening_changed", "screenshot",
+            "timeline_settings", "vella_dictation", "command_action", "command_execution", "screen_command", "speech_skipped"];
+        assert_eq!(day.len(), 70);
+        for kind in day {
+            // An empty payload: kinds with their own arm may need fields (and say nothing without them); quiet kinds never write.
+            let quiet = QUIET.contains(&kind);
+            if quiet {
+                assert!(evidence(&record(kind, json!({"text":"x","outcome":"send"}))).is_none(), "{kind} is quiet");
+            } else if !["drama3", "agent_state", "health", "invariant_violation", "send_decision", "barge_in", "settings_applied", "timeline_settings",
+                "command_action", "island_cue", "listening_ready", "agent_transport_sent", "agent_transport_reply"].contains(&kind) {
+                assert!(evidence(&record(kind, json!({}))).is_some(), "{kind}: a line even with an empty payload");
+            }
+        }
+        // A kind nobody has seen yet still gets a line (its kind and state), never its text.
+        let l = line_of("brand_new_event", json!({"state":"started","text":"private words","prompt":"secret prompt","nested":{"error":"x"}}));
+        assert_eq!(l, "heimdall: brand_new_event (heimdall:voice): state: started");
+        // Problems keep their full line; a problem of a quiet kind is still written.
+        assert_eq!(line_of("agent_reply", json!({"error":"stream ended"})), "agent: agent_reply (heimdall:voice): error: stream ended");
+        assert_eq!(line_of("agent_reply", json!({"event":{"type":"text_delta"}})), "");
+        // Stats polls and streamed message parts: no line.
+        assert_eq!(line_of("agent_transport_sent", json!({"wire":{"id":"control-7c5f","type":"get_session_stats"}})), "");
+        assert_eq!(line_of("agent_transport_reply", json!({"wire":{"message":{"content":"private words"},"type":"message_end"}})), "");
+        assert_eq!(line_of("agent_transport_reply", json!({"wire":{"command":"get_session_stats","id":"c","success":true,"type":"response"}})), "");
+        assert_eq!(line_of("speak_back", json!({"text":"a b","language":"en","error":"Speak Replies is off"})),
+            "speech: the agent asked to speak 2 words (en); error: Speak Replies is off", "an event line keeps its error");
+    }
+    /// The new lines carry no secret, no typed secret, no spoken or heard words and no message body.
+    #[test]
+    fn event_lines_never_carry_secrets_or_bodies() {
+        let body = "Tell Dave the password is hunter22";
+        for (kind, payload) in [
+            ("speak_back", json!({"text":body,"language":"en","enabled":true})),
+            ("echo_guard", json!({"outcome":"heimdalls_own_voice","heard":body,"kept":body,"reference":body})),
+            ("agent_steer", json!({"delivered":true,"text":body})),
+            ("unknown_kind", json!({"text":body,"message":body,"detail":body,"state":"ok"})),
+            ("agent_delivery", json!({"message_id":"m","transport_accepted":true,"text":body})),
+        ] {
+            let l = line_of(kind, payload);
+            assert!(!l.is_empty() && !l.contains("hunter22") && !l.contains("Dave"), "{kind}: {l}");
+        }
+        // Settings: every changed setting is named; a credential's value, a list or a long text never shown.
+        let before = json!({"speak_replies":true,"paused":true,"anthropic_api_key":"sk-ant-api03-AAAAAAAAAAAAAAAAAA","voice_speed_percent":100,"api_models":[1]});
+        let now = json!({"speak_replies":true,"anthropic_api_key":"sk-ant-api03-BBBBBBBBBBBBBBBBBB","voice_speed_percent":120,"api_models":[1,2],
+            "agent_speed":"fast","first_run_said":"x".repeat(80)});
+        let changed = diff_settings(before.as_object().unwrap(), now.as_object().unwrap()).join(", ");
+        assert_eq!(changed, "agent_speed=fast, anthropic_api_key, api_models, first_run_said, paused=false, voice_speed_percent=120");
+        assert!(diff_settings(now.as_object().unwrap(), now.as_object().unwrap()).is_empty(), "nothing changed: nothing named");
+        // On the line, after the switches and before the source.
+        let s = json!({"settings":{"speak_replies":true}, "from":"settings.json"});
+        let l = line_of("settings_applied", s);
+        assert!(l.starts_with("settings: Listening on") && l.ends_with("(from settings.json)") && !l.contains("AAAA") && !l.contains("BBBB"), "{l}");
+        // Actions: typed text, secrets and keys are withheld; switches show their value.
+        assert_eq!(action("menu", "SetListening(false)").unwrap(), "action: menu: SetListening(false)");
+        assert_eq!(action("phone", "SetSpeakReplies(true)").unwrap(), "action: phone: SetSpeakReplies(true)");
+        let typed = format!("AgentWindow(Send {{ text: \"{body}\", steer: false }})");
+        assert_eq!(action("menu", &typed).unwrap(), "action: menu: AgentWindow Send (details withheld)");
+        let key = "ConnectProviderKey { provider: \"anthropic\", key: \"sk-ant-api03-CCCCCCCCCCCCCCCCCCCC\" }";
+        assert_eq!(action("agent tool", key).unwrap(), "action: agent tool: ConnectProviderKey (details withheld)");
+        assert_eq!(action("menu", &format!("{:?}", ui::UiAction::Secret(ui::SecretText::new("hunter22")))).unwrap(), "action: menu: Secret(<secret>)");
+        assert_eq!(action("menu", "Island(Shown { id: None, phase: \"x\" })"), None, "island telemetry has its own line");
+    }
+    // ---- end every event ----
     /// 20 Oct 19:20–19:24 the log showed only the provider's 400 four times; each repair step is now its own line.
     #[test]
     fn a_conversation_repair_is_one_plain_agent_line() {

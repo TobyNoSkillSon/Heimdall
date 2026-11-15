@@ -40,12 +40,11 @@ fn edition_blank_start_is_public_only() {
     let s = crate::settings::Settings::default();
     if super::PUBLIC {
         assert_eq!(s.agent_model, AgentModel::Unchosen);
-        assert!(s.api_models.is_empty() && s.anthropic_credit_usd == 0 && s.background_model.is_none());
+        assert!(s.api_models.is_empty() && s.background_model.is_none());
     } else {
         assert_eq!(s.agent_model, AgentModel::Api { provider: "opencode-go".into(), id: "claude-haiku-5-5".into() });
         assert_eq!(s.api_models.len(), 4);
         assert_eq!(s.api_models[0], ApiModel::haiku());
-        assert_eq!(s.anthropic_credit_usd, 100);
         assert_eq!((s.background_model.provider.as_str(), s.background_model.id.as_str()), ("anthropic", "claude-haiku-5-5"));
     }
     // A fresh public profile stays blank through a save and load (no Anthropic rows come back, nothing is chosen).

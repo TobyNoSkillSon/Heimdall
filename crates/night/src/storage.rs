@@ -1,17 +1,9 @@
 //! Night writes must leave the live archive reserve untouched.
 use anyhow::{ensure, Context, Result};
-use std::{
-    io::{Read, Write},
-    path::Path,
-};
+use std::path::Path;
 pub const MARGIN: u64 = 32 * 1024 * 1024;
+/// Free space night writes leave for the live archive.
 pub const DEFAULT_FLOOR: u64 = 10 * 1024 * 1024 * 1024;
-pub fn floor() -> Result<u64> {
-    match std::env::var_os("HEIMDALL_NIGHT_FLOOR_FILE") {
-        Some(path) => Ok(std::fs::read_to_string(path)?.trim().parse()?),
-        None => Ok(DEFAULT_FLOOR),
-    }
-}
 pub fn free_bytes(path: &Path) -> Result<u64> {
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(path.as_os_str().as_bytes())?;
@@ -34,32 +26,26 @@ fn require_available(available: u64, bytes: u64, floor: u64) -> Result<()> {
     Ok(())
 }
 pub fn require(path: &Path, bytes: u64) -> Result<()> {
-    require_at(path, bytes, floor()?)
+    require_at(path, bytes, DEFAULT_FLOOR)
 }
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    atomic_write_at(path, bytes, DEFAULT_FLOOR)
+}
+/// `atomic_write` keeping `floor` free (tests prove the refusal with a floor at the disk's free space).
+pub fn atomic_write_at(path: &Path, bytes: &[u8], floor: u64) -> Result<()> {
     let parent = path.parent().context("night write parent")?;
     heimdall_archive::private_dir(parent)?;
-    require(parent, bytes.len() as u64)?;
+    require_at(parent, bytes.len() as u64, floor)?;
     heimdall_archive::atomic_write(path, bytes)
-}
-pub fn copy_bounded(mut input: impl Read, path: &Path) -> Result<()> {
-    let parent = path.parent().context("night copy parent")?;
-    let mut out = std::fs::File::create(path)?;
-    let mut block = [0; 65536];
-    loop {
-        let n = input.read(&mut block)?;
-        if n == 0 {
-            break;
-        }
-        require(parent, n as u64)?;
-        out.write_all(&block[..n])?;
-    }
-    Ok(())
 }
 /// Set a hard SQLite size ceiling before each transaction. Temporary views stay
 /// in RAM; the safety margin covers small WAL/metadata writes between checks.
 pub fn limit_db(db: &rusqlite::Connection, root: &Path) -> Result<()> {
-    require(root, 1024 * 1024)?;
+    limit_db_at(db, root, DEFAULT_FLOOR)
+}
+/// `limit_db` keeping `floor` free.
+pub fn limit_db_at(db: &rusqlite::Connection, root: &Path, floor: u64) -> Result<()> {
+    require_at(root, 1024 * 1024, floor)?;
     let page: u64 = db.query_row("PRAGMA page_size", [], |r| {
         r.get::<_, i64>(0).map(|n| n as u64)
     })?;
@@ -67,7 +53,7 @@ pub fn limit_db(db: &rusqlite::Connection, root: &Path) -> Result<()> {
         r.get::<_, i64>(0).map(|n| n as u64)
     })?;
     let extra =
-        free_bytes(root)?.saturating_sub(floor()?.saturating_add(MARGIN)) / page.saturating_mul(2);
+        free_bytes(root)?.saturating_sub(floor.saturating_add(MARGIN)) / page.saturating_mul(2);
     db.pragma_update(
         None,
         "max_page_count",
@@ -188,44 +174,21 @@ pub fn scratch_lock(output: &Path) -> Result<std::fs::File> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    /// Review 14 Nov should-fix 6 (restores live_floor_file_stops_temp_writes without the env override): with the
+    /// floor at the disk's free space, night writes and the SQLite ceiling refuse and leave nothing behind; with no
+    /// floor they go through.
     #[test]
-    #[ignore = "subprocess helper for live_floor_file_stops_temp_writes"]
-    fn floor_writer_helper() {
-        let root = PathBuf::from(std::env::var_os("HEIMDALL_NIGHT_FLOOR_TEST").unwrap());
-        require(&root, 1).unwrap();
-        let floor_file = PathBuf::from(std::env::var_os("HEIMDALL_NIGHT_FLOOR_FILE").unwrap());
-        std::fs::write(floor_file, free_bytes(&root).unwrap().to_string()).unwrap();
-        assert!(copy_bounded(
-            std::io::Cursor::new(vec![1; 131072]),
-            &root.join("denied.sqlite")
-        )
-        .is_err());
-        assert_eq!(
-            std::fs::metadata(root.join("denied.sqlite")).unwrap().len(),
-            0
-        );
-        assert!(atomic_write(&root.join("denied.wav"), &[0; 4096]).is_err());
+    fn writes_below_the_free_space_floor_are_refused() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path();
+        let floor = free_bytes(root).unwrap();
+        assert!(atomic_write_at(&root.join("denied.wav"), &[0; 4096], floor).is_err());
         assert!(!root.join("denied.wav").exists());
         let db = rusqlite::Connection::open_in_memory().unwrap();
-        assert!(limit_db(&db, &root).is_err());
-    }
-    #[test]
-    fn live_floor_file_stops_temp_writes() {
-        let t = tempfile::tempdir().unwrap();
-        let path = t.path().join("floor");
-        std::fs::write(&path, "0").unwrap();
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "storage::tests::floor_writer_helper",
-                "--ignored",
-            ])
-            .env("HEIMDALL_NIGHT_FLOOR_FILE", path)
-            .env("HEIMDALL_NIGHT_FLOOR_TEST", t.path())
-            .status()
-            .unwrap();
-        assert!(status.success());
+        assert!(limit_db_at(&db, root, floor).is_err());
+        atomic_write_at(&root.join("allowed.wav"), &[0; 4096], 0).unwrap();
+        assert_eq!(std::fs::metadata(root.join("allowed.wav")).unwrap().len(), 4096);
+        limit_db_at(&db, root, 0).unwrap();
     }
     #[test]
     fn cleanup_reclaims_pending_parts_but_retains_immutable_receipts() {

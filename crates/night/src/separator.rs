@@ -21,12 +21,25 @@ pub fn file_hash(path: &Path) -> Result<String> {
     std::fs::File::open(path)?.read_to_end(&mut bytes)?;
     Ok(heimdall_archive::hash(&bytes))
 }
+/// Checks `path` hashes to `expected`, once per helper process: the speech-split helper loads the separator for
+/// every request, and re-reading and hashing its 90.9 MB took 0.57-0.76 s a request (test build, 13 Nov). A file
+/// whose path, inode, length or modification time changed is hashed again.
+fn verify(path: &Path, expected: &str) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    type Key = (std::path::PathBuf, u64, u64, std::time::SystemTime, String);
+    static VERIFIED: std::sync::Mutex<Option<Key>> = std::sync::Mutex::new(None);
+    let meta = std::fs::metadata(path)?;
+    let key = (path.to_path_buf(), meta.ino(), meta.len(), meta.modified()?, expected.to_owned());
+    if VERIFIED.lock().unwrap().as_ref() == Some(&key) {
+        return Ok(());
+    }
+    ensure!(file_hash(path)? == expected, "separator checksum mismatch");
+    *VERIFIED.lock().unwrap() = Some(key);
+    Ok(())
+}
 impl Separator {
     pub fn load(path: &Path) -> Result<Self> {
-        ensure!(
-            file_hash(path)? == MODEL_SHA256,
-            "separator checksum mismatch"
-        );
+        verify(path, MODEL_SHA256)?;
         let session = Session::builder()?
             .with_intra_threads(2)
             .map_err(|e| anyhow::anyhow!(e.to_string()))?
@@ -88,6 +101,18 @@ impl Separator {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_verified_file_is_hashed_again_once_it_changes() {
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join("model.onnx");
+        std::fs::write(&path, b"weights").unwrap();
+        let expected = super::file_hash(&path).unwrap();
+        super::verify(&path, &expected).unwrap();
+        super::verify(&path, &expected).unwrap();
+        std::fs::write(&path, b"other weights").unwrap();
+        assert!(super::verify(&path, &expected).is_err(), "a changed file is checked again");
+        assert!(super::verify(&t.path().join("absent"), &expected).is_err());
+    }
     #[test]
     fn unaligned_pcm_returns_every_original_sample_on_both_tracks() {
         let path=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/night/model.int8.onnx");

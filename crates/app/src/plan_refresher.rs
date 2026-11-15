@@ -1,6 +1,6 @@
-//! The plan refresher (night 1022, amended 01:36; its own job since 30 Oct): a background Claude Haiku 5.5 pass keeps
-//! the plan islands Scheduled and Settled in step with what the user and Heimdall said and did, so Heimdall carries no
-//! bookkeeping. To do moved to Goals (`docs/goals.md`): another job keeps what needs the user and his goals,
+//! The plan refresher (night 1022, amended 01:36; its own job since 30 Oct): a background model pass keeps the plan
+//! island Scheduled in step with what the user and Heimdall said and did, so Heimdall carries no bookkeeping (Settled is
+//! the Goals shadow's since 2 Nov: never read or written here). To do moved to Goals (`docs/goals.md`): another job keeps what needs the user and his goals,
 //! and this one never reads or writes `todo.json` or `goals.json`. It runs every 5 minutes, skipped when nothing new
 //! happened, and when the agent calls the non-blocking `refresh_plan` tool (requests during a pass coalesce into one
 //! follow-up pass). Model passes are at
@@ -18,14 +18,13 @@
 //! "Something new" ignores the refresher's own notices (`plan-refresh-…`, context: they never wake the agent),
 //! session bookkeeping and a bound island's own churn (only its title and state count); the session file is read only
 //! when its size or mtime changed.
-//! The user's old-shape plan islands (no `preset`/`list`, plain-string items) are migrated in place on first contact,
-//! after a one-time backup of the islands folder (`islands::plan::migrate_all`).
+//! A plain-string item still reads as an item (`islands::plan::items`).
 //!
 //! Input (read-only): the agent's whole current Pi session, as Pi builds the model's context (the latest compaction
-//! summary, whole, and every entry since:, not a trimmed tail), the two lists (`islands::files`), the unbound job
+//! summary, whole, and every entry since:, not a trimmed tail), Scheduled (`islands::files`), the unbound job
 //! islands whole and the bound ones as lines, and the newest `Assistant/night-pass-*.md` in the home folder (personal
 //! edition).
-//! Model: Background Tasks ▸ Model (`background_model`; `claude-haiku-5-5` by default; Background Tasks ▸ Plan Lists
+//! Model: Background Tasks ▸ Plan Lists' own model, else Background Tasks ▸ Model (`background_model`; Plan Lists
 //! turns the passes off), adaptive
 //! thinking at effort high, structured JSON output, through the shared background call path (`background_call`: the
 //! system prompt, schema and conversation cached for an hour, the clock and live state last, the model's whole output,
@@ -35,7 +34,7 @@
 //! `islands::files` (only `items` on the lists; on unbound job islands only the keys above, every one checked:
 //! style-doc lengths, a picture only when it is a real image file the conversation named, never over an open
 //! question), then one notice to the agent with a short diff, only when the plan changed.
-//! Contract: `docs/archive/briefs/night-1022-islands.md` ([refresher]); the job model: `docs/background-jobs.md`.
+//! Contract: `docs/archive/briefs/night-1022-islands.md` ([refresher]); the job model: `docs/background-call.md`.
 
 use crate::islands::{digest::{one_line, pictures_in}, files::Root, plan as lists};
 use crate::pi_session::{active_context, render_entry};
@@ -48,6 +47,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+/// The replay eval's and the tests' model (live passes use `live_endpoint`).
+#[cfg(test)]
 pub const MODEL: &str = agent::provider::HAIKU;
 pub const EFFORT: &str = "high";
 pub const PERIOD: Duration = Duration::from_secs(5 * 60);
@@ -66,13 +67,11 @@ pub const TIMEOUT: Duration = crate::background_call::TIMEOUT;
 /// The log and ledger label.
 pub const JOB: &str = "plan refresher";
 
-/// The plan islands this job keeps, in dock order: (island id, title). To do left for Goals (31 Oct): never here.
-pub const LISTS: [(&str, &str); 2] = [("scheduled", "Scheduled"), ("settled", "Settled")];
-/// Settled is the Goals shadow's since 2 Nov (the user: "the shadow job that runs Goals should also write Settled"): the
-/// refresher reads it, never shows it to the model and never writes it.
-pub const SETTLED: usize = 1;
+/// The plan island this job keeps: (island id, title). To do left for Goals (31 Oct), and Settled is the Goals
+/// shadow's since 2 Nov (the user: "the shadow job that runs Goals should also write Settled"): never here.
+pub const LISTS: [(&str, &str); 1] = [("scheduled", "Scheduled")];
 /// Caps on what one answer may write.
-pub const LIST_CAP: [usize; 2] = [30, 40];
+pub const LIST_CAP: [usize; 1] = [30];
 pub const TITLE_CHARS: usize = 120;
 pub const WHEN_CHARS: usize = 40;
 pub const DETAIL_CHARS: usize = 600;
@@ -335,12 +334,11 @@ impl Refresher {
 pub fn live_endpoint() -> Endpoint { crate::background_model::task_endpoint(crate::background_model::Task::Plan) }
 
 /// The installed loop: the agent's own outbox for the notice, the islands host's folder (a lab Heimdall's own, never
-/// the user's). No islands host: nothing runs. (`_workers`: bound threads are the binding's and the island agent's now.)
+/// The user's). No islands host: nothing runs.
 pub fn spawn_live(
     refresher: &Refresher,
     data: &Path,
     actions: Arc<agent::actions::Actions>,
-    _workers: Arc<t3::Workers>,
     gate: Arc<agent::delivery::DeliveryGate>,
     stop: tokio::sync::watch::Receiver<bool>,
 ) -> Option<tokio::task::JoinHandle<()>> {
@@ -457,7 +455,7 @@ async fn pass(cfg: &Config, shared: &Shared) -> Result<Option<String>> {
 }
 
 /// A plan item as stored (the full object, unknown keys kept), by list (`LISTS` order).
-type Lists = [Vec<Map<String, Value>>; 2];
+type Lists = [Vec<Map<String, Value>>; 1];
 
 /// A job island as on disk (every key), and the thread it follows.
 #[derive(Clone, Debug, PartialEq)]
@@ -486,11 +484,8 @@ struct Gathered {
 /// What a pass reads. `None` when the session file (by size and mtime), the night note and the islands are as `last`
 /// saw them: the session is not read then.
 fn gather(cfg: &Config, last: Option<&Seen>) -> Result<Option<Gathered>> {
-    // First contact with the user's old-shape lists: backed up once, then migrated in place (ids for string items).
-    let migrated = lists::migrate_all(&cfg.islands)?;
     let reopened = lists::reopen_closed(&cfg.islands)?;
     if !reopened.is_empty() { eprintln!("Plan refresher: showed the closed lists {reopened:?} again"); }
-    if !migrated.is_empty() { eprintln!("Plan refresher: migrated the plan lists {migrated:?} to the night-1022 shape"); }
     let session = session_path(&cfg.data);
     let meta = std::fs::metadata(&session).ok();
     let session_len = meta.as_ref().map_or(0, |m| m.len());
@@ -562,7 +557,7 @@ fn newest_note(dir: &Path) -> Option<PathBuf> {
         .max()
 }
 
-/// The two lists and the job islands from what is on disk, bound ones first. Plan islands are known by id; their
+/// Scheduled and the job islands from what is on disk, bound ones first. Plan islands are known by id; their
 /// items are read like everywhere else (`islands::plan::items`: a plain string is an item, every item has an id).
 /// A job island is any other island that is not a viewer, a note, a list or hidden (`todo` and `goals` are lists,
 /// `preset: "todo"`, not this job's: skipped, as in `islands_hash`).
@@ -574,6 +569,8 @@ fn plan_of(all: &[(String, Map<String, Value>)]) -> (Lists, Vec<Job>) {
             lists[i] = lists::items(o);
             continue;
         }
+        // Settled is the Goals shadow's: a list, never a job.
+        if id == "settled" { continue }
         if !is_job(o) { continue }
         let thread = match o.get("thread") {
             Some(Value::Object(t)) => t.get("id").and_then(Value::as_str).map(str::to_owned),
@@ -598,6 +595,8 @@ fn bound(o: &Map<String, Value>) -> bool {
 fn is_job(o: &Map<String, Value>) -> bool {
     let preset = o.get("preset").and_then(Value::as_str).unwrap_or("task");
     matches!(preset, "task" | "waiting" | "result") && !o.contains_key("path") && o.get("hidden") != Some(&Value::Bool(true))
+        // Lane R: a closed job's report island is the user's to open or close, not a job to refresh.
+        && !crate::islands::kept_report::is_report(o)
 }
 
 /// What a job island shows that the refresher reads and writes.
@@ -608,7 +607,7 @@ const JOB_KEYS: [&str; 11] = ["thread", "title", "state", "stage", "summary", "s
 fn islands_hash(all: &[(String, Map<String, Value>)]) -> u64 {
     let mut h = DefaultHasher::new();
     for (id, o) in all {
-        if LISTS[..SETTLED].iter().any(|(l, _)| l == id) {
+        if LISTS.iter().any(|(l, _)| l == id) {
             id.hash(&mut h);
             o.get("items").map(|v| v.to_string()).hash(&mut h);
         } else if is_job(o) && bound(o) {
@@ -756,12 +755,14 @@ pub fn call<'a>(model: &str, system: &'a str, prompt: crate::background_call::Pr
     crate::background_call::Call { job: JOB, model: model.to_owned(), system, schema: schema(), effort: EFFORT, prompt, history: Vec::new(), session: None }
 }
 
-/// The Messages API body a pass sends (tests, the replay eval).
+/// The Messages API body a pass sends (tests).
+#[cfg(test)]
 pub fn request_body(prompt: impl Into<crate::background_call::Prompt>) -> Value {
     request_body_for(&crate::background_model::anthropic_model(), SYSTEM, prompt)
 }
 
-/// `request_body` naming `model` (the endpoint's snapshot) and the system prompt (the replay eval compares prompts).
+/// `request_body` naming `model` (the endpoint's snapshot) and the system prompt.
+#[cfg(test)]
 pub fn request_body_for(model: &str, system: &str, prompt: impl Into<crate::background_call::Prompt>) -> Value {
     crate::background_call::prepare(&call(model, system, prompt.into())).map(|p| p.body).unwrap_or(Value::Null)
 }
@@ -877,8 +878,8 @@ pub struct JobUpdate {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plan {
-    /// Scheduled and Settled (`LISTS` order).
-    pub lists: [Vec<Item>; 2],
+    /// Scheduled (`LISTS` order).
+    pub lists: [Vec<Item>; 1],
     pub jobs: Vec<JobUpdate>,
     /// Items the model dropped that stay where they are (`hold_young`): not the model's to remove this pass.
     pub keep: Vec<String>,
@@ -892,11 +893,10 @@ fn validate(answer: &str, current: &Lists, jobs: &[Job], pictures: &[String], co
     let v: Value = serde_json::from_str(answer.trim()).context("not JSON")?;
     let o = v.as_object().context("not a JSON object")?;
     // Settled's ids are not the model's (review 2 Nov: one returned under scheduled was copied out of Settled).
-    let known: HashSet<&str> = current[..SETTLED].iter().flatten().filter_map(|o| o.get("id").and_then(Value::as_str)).collect();
+    let known: HashSet<&str> = current.iter().flatten().filter_map(|o| o.get("id").and_then(Value::as_str)).collect();
     let mut seen = HashSet::new();
-    let mut lists: [Vec<Item>; 2] = Default::default();
+    let mut lists: [Vec<Item>; 1] = Default::default();
     for (i, (name, _)) in LISTS.iter().enumerate() {
-        if i == SETTLED { continue }
         let arr = o.get(*name).and_then(Value::as_array).with_context(|| format!("{name}: missing list"))?;
         for (n, raw) in arr.iter().enumerate() {
             let it = raw.as_object().with_context(|| format!("{name}[{n}]: not an object"))?;
@@ -940,8 +940,8 @@ fn validate(answer: &str, current: &Lists, jobs: &[Job], pictures: &[String], co
         if out_jobs.iter().any(|u| u.island == island) { continue }
         out_jobs.push(job_update(j, job, pictures, conversation));
     }
-    let before: usize = current[..SETTLED].iter().map(Vec::len).sum();
-    let after: usize = lists[..SETTLED].iter().map(Vec::len).sum();
+    let before: usize = current.iter().map(Vec::len).sum();
+    let after: usize = lists.iter().map(Vec::len).sum();
     ensure!(!(before >= 3 && after == 0), "the answer would empty Scheduled ({before} items now)");
     Ok(Plan { lists, jobs: out_jobs, keep: Vec::new() })
 }
@@ -1013,7 +1013,7 @@ fn number(v: f64) -> String {
     t.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 
-/// One display part from the answer, checked, in the app's shape (`islands/Sources/FloatingIslands/Parts.swift`),
+/// One display part from the answer, checked, in the app's shape (`crates/islands/src/mac/parts.rs`),
 /// marked as the refresher's own. `None` when it shows nothing real.
 fn display_part(p: &Value) -> Option<Value> {
     let unit = clip(p["unit"].as_str().unwrap_or("").trim(), 12);
@@ -1180,7 +1180,7 @@ pub struct Diff {
 /// unchanged since `before` (same list, same object); an item the user or the agent changed meanwhile (a tick, a
 /// `plan_edit` move or edit) stays exactly as they left it, one they removed stays removed, and one they added stays.
 /// `todo.json` and `goals.json` are never touched (Goals' since 31 Oct). Unknown keys on items and islands survive; a
-/// missing list island is created; an old-shape island is migrated on the way. Then the rebuilt job islands, each in
+/// missing list island is created. Then the rebuilt job islands, each in
 /// one locked read-modify-write against the island as it is then (a removed island stays removed). Returns what the
 /// refresher itself changed in the lists.
 fn apply(root: &Root, _before: &Lists, plan: &Plan, jobs: &[Job]) -> Result<Diff> {
@@ -1238,8 +1238,8 @@ pub fn diff_text(d: &Diff) -> Option<String> {
     let q = |t: &String| format!("\u{201c}{t}\u{201d}");
     let mut parts: Vec<String> = Vec::new();
     if !d.added.is_empty() {
-        parts.push(format!("proposed {} for Scheduled, waiting for User's yes{}", d.added.iter().map(q).collect::<Vec<_>>().join(", "),
-            if d.shown.is_some() { " (one is on screen: say it in one short line; his yes is plan_edit accept, his no decline)" } else { "" }));
+        parts.push(format!("proposed {} for Scheduled, waiting for {}'s yes{}", d.added.iter().map(q).collect::<Vec<_>>().join(", "), crate::islands::user(),
+            if d.shown.is_some() { " (one is on screen: say it in one short line; their yes is plan_edit accept, their no decline)" } else { "" }));
     }
     // Moves to one place read as one clause: moved "A", "B" to Settled.
     let mut places: Vec<&String> = Vec::new();

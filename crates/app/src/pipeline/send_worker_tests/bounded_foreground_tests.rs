@@ -2,6 +2,7 @@
     use crate::pipeline::plumbing_tests::rig;
     use std::time::Duration;
     #[test]
+    #[ignore = "model: loads the real decider (models/decide); run with --run-ignored"]
     fn command_wait_behind_the_largest_fitted_foreground_question() {
         let (_temp, mut app, _) = rig(false);
         app.models = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models");

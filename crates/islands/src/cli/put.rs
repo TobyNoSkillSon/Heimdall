@@ -23,7 +23,7 @@ pub(crate) fn style_problem(o: &Json, over: &Json, id: &str, new: bool) -> Optio
         }
         let norm = |s: &str| s.to_lowercase().replace('_', "-").replace(' ', "-");
         if t == t.to_lowercase() && norm(t) == norm(id) {
-            return Some(format!("--title names the thing for User, not an id: \"{t}\""));
+            return Some(format!("--title names the thing for the user, not an id: \"{t}\""));
         }
     }
     if let Some(s) = j::str(over.get("stage")) {
@@ -228,6 +228,15 @@ pub fn run(mut args: Vec<String>) {
         }
         i += 1;
     }
+    // Lane T (night 1111): a title over three words is shortened to its first three and the output says so.
+    let mut shortened = None;
+    if let Some(t) = j::str(over.get("title")).map(str::to_owned) {
+        if text::words(&t) > 3 {
+            let short = text::first_words(&t, 3);
+            over.insert("title".into(), Value::from(short.clone()));
+            shortened = Some(short);
+        }
+    }
     let url = Paths::file(&id);
     let out = IslandFile::locked(|| {
         let old = IslandFile::read(&url);
@@ -249,4 +258,5 @@ pub fn run(mut args: Vec<String>) {
         out
     });
     println!("put {}", summary(&out, &id));
+    if let Some(t) = shortened { println!("title shortened to \"{t}\" (1-3 words); set it again to name it otherwise") }
 }

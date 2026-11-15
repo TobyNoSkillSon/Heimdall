@@ -193,11 +193,6 @@ pub enum Event {
         error: bool,
         text: String,
     },
-    Limit {
-        rejected: bool,
-        reset: Option<u64>,
-        status: String,
-    },
     Deferred {
         id: String,
         reason: String,

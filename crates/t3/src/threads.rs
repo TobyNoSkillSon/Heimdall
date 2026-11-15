@@ -22,6 +22,12 @@ pub(crate) const ACTIVE: [&str; 5] = ["preparing", "queued", "starting", "runnin
 pub fn live_requests(t: &Value) -> u64 {
     if ACTIVE.contains(&t["status"].as_str().unwrap_or("")) { t["pendingRequestCount"].as_u64().unwrap_or(0) } else { 0 }
 }
+/// Bug note 2026-11-06T11-57-54: whether a thread row says nothing about its requests although it may hold one. T3's
+/// `t3_thread_list` rows carry no `pendingRequestCount` (live key list, 6 Nov: only `t3_thread_read`'s shell has it),
+/// and a run waiting on an approval still reads "running"; so a live row without the count must be read to know.
+pub fn count_unknown(row: &Value) -> bool {
+    row.get("pendingRequestCount").is_none() && ACTIVE.contains(&row["status"].as_str().unwrap_or("")) && row["status"] != "waiting"
+}
 /// The run a thread is on and its state, from its read shell `t` and its `recentRuns`. T3's thread status is its
 /// latest run's, so a run T3 queued and cancelled before it started (its own hand-over turn for a sub-agent that
 /// finished while a turn ran) made the thread read "cancelled" while that turn still worked, and after it (bug note
@@ -367,7 +373,7 @@ fn list_line(t: &Value, now: u64) -> String {
 /// Who wrote a message: the user, an agent through MCP (Heimdall or another), the thread's assistant, a plan.
 fn label(item: &Value) -> String {
     let who = match item["type"].as_str().unwrap_or("") {
-        "user_message" if item["createdBy"] == "user" => "User".to_owned(),
+        "user_message" if item["createdBy"] == "user" => agent::identity::user_start(),
         "user_message" => "Sent by an agent".to_owned(),
         "assistant_message" => "Assistant".to_owned(),
         "proposed_plan" => "Plan".to_owned(),
@@ -434,6 +440,8 @@ fn details_lines(t: &Value, runs: &Value) -> String {
 
 /// The compact form of a T3 result passed through `t3_call`, for the tools whose raw results are walls of metadata
 /// (bug note 18-17-04: a `t3_thread_read` carried ten runs and eighteen thread fields per call). None: the generic
+/// The send's promise (`compact`); said once per session (lane S, proposal 10: `Workers::once`).
+pub const REPLY_PROMISE: &str = ". Its reply arrives as a notice when this run ends.";
 /// plain rendering.
 pub fn compact(tool: &str, args: &Value, r: &Value) -> Option<String> {
     Some(match tool {
@@ -500,7 +508,7 @@ pub fn compact(tool: &str, args: &Value, r: &Value) -> Option<String> {
             out.push_str(match (r["runId"].as_str(), r["delivery"].as_str()) {
                 (None, _) => ". T3 returned no run to follow; read the reply later with t3_thread_read.",
                 (Some(_), Some("queued")) => ". It waits behind the thread's current turn; its reply arrives as a notice when that queued turn ends.",
-                (Some(_), _) => ". Its reply arrives as a notice when this run ends.",
+                (Some(_), _) => REPLY_PROMISE,
             });
             // Bug note 2026-10-26T23-42: stacked steers could not be taken back, the reply hid the queued run's id.
             if let (Some(run), Some("queued")) = (r["runId"].as_str(), r["delivery"].as_str()) {
@@ -597,7 +605,7 @@ mod tests {
     }
     #[test]
     fn labels_and_activity_lines() {
-        assert!(label(&json!({"type":"user_message","createdBy":"user"})).starts_with("User"));
+        assert!(label(&json!({"type":"user_message","createdBy":"user"})).starts_with("The user"));
         assert!(label(&json!({"type":"user_message","createdBy":"agent","creationSource":"mcp"})).starts_with("Sent by an agent"));
         assert_eq!(label(&json!({"type":"assistant_message"})), "Assistant");
         let failed = json!({"position":19,"itemId":"turn-item:x:toolu_015","type":"command_execution","status":"failed","text":"$ ps -o pid -p 38738; ls ~/.cache\nNo such process"});

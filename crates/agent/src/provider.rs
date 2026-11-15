@@ -4,7 +4,6 @@
 use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
 
 pub const OPENCODE_GO: &str = "opencode-go";
 pub const ANTHROPIC: &str = "anthropic";
@@ -726,82 +725,32 @@ impl AgentModel {
 // ---------------------------------------------------------------------------------------------------------
 // Credentials.
 
-/// Only the installed, stably signed app touches the Keychain. Every other binary (tests, lab builds,
-/// worktrees) has a different signature, so a Keychain query could raise a system prompt.
+/// Only the installed, stably signed app touches the Keychain (`keychain::installed_app`). Every other binary (tests,
+/// lab builds, worktrees) has a different signature, so a Keychain query could raise a system prompt.
 pub fn is_installed_app() -> bool {
-    installed_app()
+    keychain::installed_app()
 }
-fn installed_app() -> bool {
-    std::env::current_exe().is_ok_and(|p| installed_at(&p, std::env::var_os("HOME").map(std::path::PathBuf::from).as_deref()))
-}
-/// The installed app's bundle: Heimdall.app (personal) or Heimdall Alpha.app (public, `scripts/bundle.sh`).
-const APP_BUNDLE: &str = if cfg!(feature = "public") { "Heimdall Alpha.app" } else { "Heimdall.app" };
+#[cfg(test)]
+use keychain::{installed_at, APP_BUNDLE};
 
-/// The installed app runs from `~/Applications` (the user's install, the night pass) or `/Applications` (another user's
-/// install of the public edition); a build, test or lab copy runs from anywhere else.
-fn installed_at(exe: &std::path::Path, home: Option<&std::path::Path>) -> bool {
-    let macos = std::path::Path::new(APP_BUNDLE).join("Contents/MacOS");
-    exe.starts_with(std::path::Path::new("/Applications").join(&macos))
-        || home.is_some_and(|h| exe.starts_with(h.join("Applications").join(&macos)))
-}
-
-/// Lab binaries keep connected credentials in memory for the process lifetime only: (provider, account) → bytes.
-static LAB_ITEMS: std::sync::Mutex<BTreeMap<(&'static str, String), Vec<u8>>> = std::sync::Mutex::new(BTreeMap::new());
-
-/// Tests that write lab credentials share this one store; each takes the lock first.
+/// Tests that write lab credentials share this one store (the test harness's in-memory one, `keychain::choose`); each
+/// takes the lock first.
 #[cfg(test)]
 pub(crate) static LAB_ITEMS_TEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// errSecItemNotFound.
-const ITEM_NOT_FOUND: i32 = -25300;
-
+/// Every provider secret goes through `keychain`: the installed app's Keychain without a prompt or a wait on the
+/// caller, a test's or lab run's isolated store, or nothing at all for a bare build. A blocked or refused item reads as
+/// not connected (that provider waits; `keychain` logs and reports it once) and is never overwritten because of it.
 fn item_read(p: &ProviderInfo, account: &str) -> Option<Vec<u8>> {
-    if !installed_app() {
-        return LAB_ITEMS.lock().unwrap().get(&(p.id, account.to_owned())).cloned();
-    }
-    use security_framework::item::{ItemClass, ItemSearchOptions, SearchResult};
-    // Items that would need interaction are skipped: a lookup can never show a system prompt.
-    let items = ItemSearchOptions::new()
-        .class(ItemClass::generic_password())
-        .service(p.keychain_service)
-        .account(account)
-        .load_data(true)
-        .skip_authenticated_items(true)
-        .search()
-        .ok()?;
-    items.into_iter().find_map(|i| match i { SearchResult::Data(bytes) => Some(bytes), _ => None })
+    keychain::read(p.keychain_service, account).ok().flatten()
 }
 
 fn item_write(p: &ProviderInfo, account: &str, bytes: &[u8]) -> Result<()> {
-    if !installed_app() {
-        LAB_ITEMS.lock().unwrap().insert((p.id, account.to_owned()), bytes.to_vec());
-        return Ok(());
-    }
-    // Replace by delete + add: both run without interaction for items this app created.
-    item_delete(p, account)?;
-    let mut options = security_framework::passwords::PasswordOptions::new_generic_password(p.keychain_service, account);
-    options.set_label(p.keychain_service);
-    security_framework::passwords::set_generic_password_options(bytes, options)
-        .map_err(|_| anyhow::anyhow!("Could not save the sign-in in the Keychain"))
+    keychain::write(p.keychain_service, account, p.keychain_service, bytes).map_err(|e| anyhow::anyhow!("Could not save the sign-in: {e}"))
 }
 
 fn item_delete(p: &ProviderInfo, account: &str) -> Result<()> {
-    if !installed_app() {
-        LAB_ITEMS.lock().unwrap().remove(&(p.id, account.to_owned()));
-        return Ok(());
-    }
-    use security_framework::item::{ItemClass, ItemSearchOptions};
-    match ItemSearchOptions::new()
-        .class(ItemClass::generic_password())
-        .service(p.keychain_service)
-        .account(account)
-        .skip_authenticated_items(true)
-        .delete()
-    {
-        Ok(()) => Ok(()),
-        Err(e) if e.code() == ITEM_NOT_FOUND => Ok(()),
-        Err(_) => bail!("Could not remove the sign-in from the Keychain"),
-    }
+    keychain::delete(p.keychain_service, account).map_err(|e| anyhow::anyhow!("Could not remove the sign-in: {e}"))
 }
 
 fn console_account(p: &ProviderInfo) -> String {
@@ -816,11 +765,6 @@ pub fn normalize_key(key: &str) -> Result<String> {
     Ok(key.to_owned())
 }
 
-/// Clipboard text worth pre-filling into the paste field: one token shaped like an OpenCode key.
-pub fn looks_like_key(text: &str) -> bool {
-    let t = text.trim();
-    t.starts_with("sk-") && (24..=512).contains(&t.len()) && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyMissing(pub &'static str);
@@ -962,12 +906,17 @@ pub fn says_credits_exhausted(text: &str) -> bool {
 }
 
 fn client() -> reqwest::Client {
-    reqwest::Client::builder()
+    http_client(true)
+}
+/// Heimdall's client for sign-in and provider calls: its user agent, a 20 s timeout and 10 s to connect; sign-in
+/// flows (`chatgpt`, `console`) follow no redirects.
+pub(crate) fn http_client(redirects: bool) -> reqwest::Client {
+    let builder = reqwest::Client::builder()
         .user_agent(concat!("heimdall/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(20))
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .build()
-        .expect("HTTP client")
+        .connect_timeout(std::time::Duration::from_secs(10));
+    let builder = if redirects { builder } else { builder.redirect(reqwest::redirect::Policy::none()) };
+    builder.build().expect("HTTP client")
 }
 
 /// A provider request with the key in the provider's header and, for a key that needs one, the workspace it names.
@@ -1468,5 +1417,77 @@ mod installed_tests {
         // The other edition's bundle is never this one's.
         let other = if super::APP_BUNDLE == "Heimdall.app" { "Heimdall Alpha.app" } else { "Heimdall.app" };
         assert!(!super::installed_at(&Path::new("/Applications").join(other).join("Contents/MacOS/Heimdall"), Some(owner)));
+    }
+}
+
+#[cfg(test)]
+mod keychain_tests {
+    use std::{
+        sync::{atomic::{AtomicU64, Ordering}, Arc},
+        time::{Duration, Instant},
+    };
+    /// 13 Nov's stall: the live loop asked `has_credential` (remote_settings::model_options), which read the Console
+    /// sign-in from a Keychain held by another process's password dialog, and never came back.
+    struct Never;
+    impl keychain::Backend for Never {
+        fn read(&self, _: &str, _: &str) -> Result<Option<Vec<u8>>, keychain::Error> {
+            std::thread::sleep(Duration::from_secs(3600));
+            Ok(None)
+        }
+        fn write(&self, _: &str, _: &str, _: &str, _: &[u8]) -> Result<(), keychain::Error> {
+            std::thread::sleep(Duration::from_secs(3600));
+            Ok(())
+        }
+        fn delete(&self, _: &str, _: &str) -> Result<(), keychain::Error> {
+            std::thread::sleep(Duration::from_secs(3600));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_keychain_that_never_answers_keeps_the_live_loop_beating_and_reports_the_provider() {
+        // The real waits: the first read of each item waits a second at most, every later one not at all.
+        // A blocked item is reported after a grace (keychain::REPORT_AFTER); short here so the reports land in the run.
+        let store = keychain::Store::custom(Arc::new(Never)).with_report_after(Duration::from_millis(100));
+        let reported = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let r = reported.clone();
+        store.on_event(move |e| r.lock().unwrap().push(e.clone()));
+        let beats = Arc::new(AtomicU64::new(0));
+        let (b, s) = (beats.clone(), store.clone());
+        let started = Instant::now();
+        let live = std::thread::spawn(move || {
+            keychain::scoped(&s, || {
+                let mut connected = Vec::new();
+                for _ in 0..40 {
+                    for p in super::PROVIDERS {
+                        connected.push(super::has_credential(p));
+                    }
+                    b.fetch_add(1, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                connected
+            })
+        });
+        // The first turn waits once (keychain::READ_WAIT, under the hang report's 2.2 s); then the heartbeat keeps
+        // coming while the Keychain never answers.
+        std::thread::sleep(Duration::from_millis(1800));
+        let mut last = beats.load(Ordering::SeqCst);
+        assert!(last >= 1, "the first turn took longer than the hang report allows");
+        for _ in 0..4 {
+            std::thread::sleep(Duration::from_millis(250));
+            let now = beats.load(Ordering::SeqCst);
+            assert!(now > last || now == 40, "the loop stalled at beat {now}");
+            last = now;
+        }
+        let connected = live.join().unwrap();
+        assert_eq!(beats.load(Ordering::SeqCst), 40);
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        // Degraded, not crashed: every provider reads as not connected, and the blocked one is named.
+        assert!(connected.iter().all(|c| !c));
+        let degraded = store.degraded();
+        assert!(degraded.iter().any(|s| s == super::PROVIDERS[0].keychain_service), "{degraded:?}");
+        let events = reported.lock().unwrap();
+        assert!(events.iter().all(|e| matches!(e, keychain::Event::Degraded { .. })));
+        assert_eq!(events.len(), degraded.len(), "one report per service, not per read");
     }
 }

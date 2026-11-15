@@ -23,8 +23,6 @@ pub fn free_bytes(path: &Path) -> Result<u64> {
 /// Capture stops at the free-space floor (plus a 16 MiB margin), so battery compaction
 /// starts this far above it, before recording would stop.
 pub const COMPACT_DISK_MARGIN: u64 = 2 * 1024 * 1024 * 1024;
-/// Cold-archive compaction runs on AC power; on battery only when free disk is near the
-/// floor, because a full disk stops the archive. Unknown power counts as battery.
 /// Compaction runs while the Mac is idle on AC power (no input for `heimdall_night::gate::IDLE_SECONDS`), or when the
 /// disk nears its floor. `idle_on_ac`: power and input state, failing closed.
 pub fn compaction_allowed(idle_on_ac: Result<bool>, free: Result<u64>, floor: u64) -> bool {
@@ -76,10 +74,6 @@ impl DiskGuard {
         *self.status.lock().unwrap() = why;
         allowed
     }
-}
-/// Retention now means permanent cold storage. The shared Compactor owns age transitions.
-pub fn prune(_root: &Path, _days: u32, _active: Option<&Path>) -> Result<usize> {
-    Ok(0)
 }
 /// A new session's address in the archive store, `<archive>/session-<ms>-<uuid>`. It names a
 /// session inside the store and is never a directory.
@@ -252,13 +246,12 @@ impl ArchiveSink for RawArchive {
     }
 }
 pub fn mono_16k(samples: &[f32], f: NativeFormat) -> Result<Vec<f32>> {
-    crate::audio::mono_16k(samples, f.sample_rate, f.channels)
+    heimdall_archive::audio::mono_16k(samples, f.sample_rate, f.channels)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::ArchiveFormat;
     #[test]
     fn compaction_runs_on_ac_and_on_battery_only_near_the_disk_floor() {
         let gib = 1024 * 1024 * 1024u64;
@@ -308,16 +301,9 @@ mod tests {
     }
     #[test]
     fn all_choices_and_disabled_sources_retain_native_bits_disk_failure_stops() {
-        for format in [
-            ArchiveFormat::NativeLossless,
-            ArchiveFormat::Flac24,
-            ArchiveFormat::Flac16kMono,
-        ] {
+        {
             let t = tempfile::tempdir().unwrap();
-            let settings = Settings {
-                archive_format: format,
-                ..Settings::default()
-            };
+            let settings = Settings::default();
             let enabled = Arc::new(Mutex::new(HashMap::new()));
             let status = Arc::new(Mutex::new(None));
             let i = crate::fake_source("mic", 0, 1);
@@ -389,14 +375,6 @@ mod tests {
         floor.store(u64::MAX,Ordering::Release);assert!(raw.require_space(16).is_err());
         floor.store(1024*1024*1024,Ordering::Release);raw.require_space(16).unwrap();
         assert_eq!(raw.credit_floor,1024*1024*1024);
-    }
-    #[test]
-    fn retention_leaves_active_unknown_and_symlinks() {
-        let t = tempfile::tempdir().unwrap();
-        private_dir(&t.path().join("unowned")).unwrap();
-        private_dir(&t.path().join("session-open")).unwrap();
-        assert_eq!(prune(t.path(), 1, None).unwrap(), 0);
-        assert!(t.path().join("session-open").exists());
     }
     #[test]
     fn run_directories_are_archived_into_their_session_and_removed() {

@@ -2,9 +2,10 @@
 # Builds the Decider V5 engine (crates/decide/engine-v5, Rust on MLX) and places its runtime where the app loads it:
 #   models/decide/runtime-v5/libd1v5_engine.dylib   the C ABI Heimdall's d1 loader opens (crates/decide/src/d1.rs)
 #   models/decide/runtime-v5/mlx.metallib           MLX's Metal kernels; MLX looks for it beside the dylib first
-# Low priority (nice 19, two jobs) and offline: MLX v0.32.2 and its C++ dependencies come from
-# crates/decide/engine-v5/target/deps-src (build/fetch-deps.sh fills it, from a local MLX build when one exists), and the
-# Rust crates from the local cargo registry (~/.cargo/registry). Nothing vendored goes into git.
+# Low priority (nice 19, two jobs by default; HEIMDALL_JOBS overrides) and offline once its sources are here: MLX v0.32.2
+# and its C++ dependencies come from crates/decide/engine-v5/target/deps-src (build/fetch-deps.sh fills it, from a local
+# MLX build when one exists, else from the network), and the Rust crates from the local cargo registry
+# (~/.cargo/registry; `cargo fetch` fills it on a fresh machine). Nothing vendored goes into git.
 #
 #   scripts/build_decider_v5.sh          build and place the runtime; prints bytes and sha256 of both files
 #   scripts/build_decider_v5.sh --lock   the same, then rewrites crates/decide/scripts/runtime-v5.lock.json to match
@@ -19,9 +20,20 @@ cd $engine
 if [[ ! -d target/deps-src/mlx-src || ! -d target/deps-src/metal_cpp-src ]]; then
   build/fetch-deps.sh
 fi
-CARGO_BUILD_JOBS=2 CMAKE_BUILD_PARALLEL_LEVEL=2 nice -n 19 ${CARGO:-$HOME/.cargo/bin/cargo} build --release --offline
+# Build paths remapped like scripts/bundle.sh's, so the shipped dylib names no home folder (check_public_bundle.py).
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$HOME=/build --remap-path-prefix=$project=/build/heimdall"
+export CFLAGS="${CFLAGS:+$CFLAGS }-ffile-prefix-map=$project=/build/heimdall -ffile-prefix-map=$HOME=/build"
+export CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }-ffile-prefix-map=$project=/build/heimdall -ffile-prefix-map=$HOME=/build"
+# MLX bakes its metallib folder into the dylib as the fallback path (it loads the one beside the dylib first): a neutral
+# folder, as v0.1.0-alpha.1's build had, never a path under the builder's home.
+export MLX_RS_METAL_PATH=${MLX_RS_METAL_PATH:-/private/tmp/heimdall-d1v5-mlx-metal}
+cargo=${CARGO:-$HOME/.cargo/bin/cargo}
+jobs=${HEIMDALL_JOBS:-2}
+# A fresh registry lacks the engine's crates (mlx-rs and the rest): fetch them once; afterwards the build stays offline.
+$cargo fetch --locked --offline >/dev/null 2>&1 || $cargo fetch --locked
+CARGO_BUILD_JOBS=$jobs CMAKE_BUILD_PARALLEL_LEVEL=$jobs nice -n 19 $cargo build --release --offline
 dylib=target/release/libd1v5_engine.dylib
-metallib=target/mlx-metal/mlx.metallib
+metallib=$MLX_RS_METAL_PATH/mlx.metallib
 [[ -f $dylib && -f $metallib ]] || { echo "engine build produced no dylib or metallib" >&2; exit 1; }
 mkdir -p $runtime
 for f in $dylib $metallib; do

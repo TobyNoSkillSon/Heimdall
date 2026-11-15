@@ -245,6 +245,7 @@ pub(crate) fn run() -> Result<()> {
                 closed: false,
                 segments: vec![],
                 unlabelled: vec![],
+                heard_until: 0,
             },
         );
         p.speech_split

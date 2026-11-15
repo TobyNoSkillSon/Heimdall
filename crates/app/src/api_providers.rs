@@ -65,8 +65,6 @@ struct State {
     /// Connections whose default model the app has not taken yet (`offer_default`): asked again when the provider's
     /// catalog loads, so a model the catalog must describe is never lost to the race with the reload.
     offered: BTreeSet<&'static str>,
-    /// Anthropic's monthly credit and renewal day (settings), and the spend counted against it.
-    credit: (u32, u8),
     ledger: Option<Ledger>,
 }
 
@@ -127,14 +125,13 @@ impl Hub {
         *self.actions.lock().unwrap() = Some(tx);
     }
 
-    /// The selection, the added models or the credit changed (or the app started).
+    /// The selection or the added models changed (or the app started).
     pub fn set_settings(&self, s: &crate::settings::Settings) {
         {
             let mut st = self.state.lock().unwrap();
             st.selection = s.agent_model.clone();
             st.relay = s.agent_relay;
             st.models = s.api_models.clone();
-            st.credit = (s.anthropic_credit_usd, s.anthropic_credit_day);
         }
         self.publish();
     }
@@ -664,9 +661,6 @@ impl Hub {
                 auth: st.auth.get(p.id).cloned().unwrap_or(ui::ProviderAuth::Checking),
                 notice: st.login_errors.get(p.id).cloned(),
                 sign_in: p.sign_in,
-                // Anthropic is "just connect, replace key or disconnect", no monthly-credit choice.
-                credit: None,
-                spend: None,
                 custom_url: p.custom_url,
                 key_required: p.key_required,
                 endpoint: provider::base_url(p),
@@ -825,6 +819,7 @@ mod tests {
     use axum::{http::HeaderMap, routing::get, Json, Router};
     use serde_json::json;
 
+    #[cfg(not(feature = "public"))]
     async fn fake() -> (Urls, tokio::task::JoinHandle<()>) {
         let app = Router::new()
             .route("/v1/models", get(|h: HeaderMap| async move {
@@ -990,12 +985,11 @@ mod tests {
         assert!(row("claude-opus-5-5").added && !row("claude-fable-5-1").added);
         // Anthropic is connect / replace key / disconnect: no credit choice, no spend line.
         let anthropic = s.providers.iter().find(|p| p.id == "anthropic").unwrap();
-        assert_eq!((anthropic.sign_in, anthropic.credit, anthropic.spend.as_deref(), anthropic.custom_url), (false, None, None, false));
+        assert_eq!((anthropic.sign_in, anthropic.custom_url), (false, false));
         let opus = ApiModel::anthropic(provider::OPUS).unwrap();
         let u = Usage { input: 2_000, output: 500, cache_read: 40_000, cache_write: 3_000, cache_write_1h: 3_000 };
         hub.record_usage(&opus, &u, agent::now_ms());
         assert!(dir.path().join(SPEND_FILE).is_file());
-        assert!(hub.snapshot().providers.iter().all(|p| p.spend.is_none()));
         hub.disconnect("anthropic").unwrap();
         task.abort();
     }

@@ -34,6 +34,7 @@ mod hotkeys;
 mod listen_to;
 // Night pass 3 (delivery): one utterance heard on two microphones is one utterance.
 mod heard_twice;
+mod playback;
 // Drops onto the notch: held for the user's words or sent alone (24 Oct).
 pub(crate) mod drops;
 pub(crate) mod output_route;
@@ -84,6 +85,8 @@ struct Discord {
     closed: bool,
     segments: Vec<speakers::diar::SpeakerSegment>,
     unlabelled: Vec<(u64, u64, u64, String, String)>,
+    /// Host clock up to which the tracker has diarized this session's audio (its live `Stable` horizon; 0: none).
+    heard_until: u64,
 }
 #[derive(Default)]
 struct Utterance {
@@ -189,6 +192,9 @@ pub struct Pipeline {
     pub pending_reload: BTreeMap<String, String>,
     // (dry_run, paused) last written to or accepted from settings.json.
     persisted_stop: (bool, bool),
+    // [memline] The settings being applied came from a settings.json write, not a menu click or the settings tool: the
+    // settings line says so (bug note 2026-11-08T02-03-45, a Speaking off nobody could place).
+    applying_file: bool,
     // The last settings write failed; the settings tick retries it. Noted once per failure run.
     save_failed: bool,
     save_failure_noted: bool,
@@ -340,11 +346,11 @@ pub struct Pipeline {
     repeated_failure: Option<(String, std::time::Instant, usize)>,
     failure: Option<String>,
     speaker_names: BTreeMap<TrackId, String>,
+    /// Tracks labelled with a coded voice this session: whether the voice was new in this call, and the named person it
+    /// sounds near (`VoiceCoded`). Listening mode lets such a voice interrupt when it is new or near a listened guest
+    /// (bridge/call_interrupt.rs).
+    coded_tracks: BTreeMap<TrackId, (bool, Option<String>)>,
     source_cutoffs: HashMap<String, u64>,
-    /// When another call participant's line last ended (host ns): a call is going on (night review D3).
-    last_call_line_ns: Option<u64>,
-    /// When a goodbye in the call last ended (his or theirs): the call is over (`decide::send::call_active`).
-    call_farewell_ns: Option<u64>,
     quiet_since: HashMap<String, u64>,
     /// Decider v3: a wake sent before d1 answered, whose ack d1's verdict on the same words may still pick (ack.rs).
     late_ack: Option<ack::LateAck>,
@@ -365,6 +371,9 @@ pub struct Pipeline {
     pub(crate) capture_since: Option<Instant>,
     /// System Audio Recording read as denied from its silent taps (`live_loop::tap_playing`): Getting ready's grey row.
     pub(crate) system_audio_denied: bool,
+    /// macOS denies the microphone (`AVCaptureDevice`: denied or restricted), kept by the live loop: Getting ready's red
+    /// Microphone row with Allow… (`setup_ready::microphone_access`).
+    pub(crate) mic_denied: bool,
     capture_ladder: crate::health::Ladder,
     agent_ladder: crate::health::Ladder,
     /// The listen worker's finished-work count and since when it stood still with work waiting.
@@ -379,29 +388,14 @@ pub struct Pipeline {
     agent_preflight_pending: Option<u64>,
     internal: (crossbeam_channel::Sender<Internal>, crossbeam_channel::Receiver<Internal>),
 }
-fn is_discord_bundle(source: &capture::SourceInfo) -> bool {
-    match &source.kind {
-        capture::SourceKind::Process {
-            bundle_id, owner, ..
-        } => owner
-            .as_ref()
-            .and_then(|o| o.bundle_id.as_deref())
-            .or(bundle_id.as_deref())
-            .is_some_and(|b| {
-                matches!(
-                    b,
-                    "com.hnc.Discord" | "com.hnc.DiscordPTB" | "com.hnc.DiscordCanary"
-                )
-            }),
-        _ => false,
-    }
-}
 
 /// What the transcript calls a source: the device or app name, never ids, bundle ids or PIDs.
 pub fn display_name(i: &capture::SourceInfo) -> String {
     match &i.kind {
         capture::SourceKind::InputDevice { name, .. } => name.clone(),
         capture::SourceKind::Process { name, owner, .. } => owner.as_ref().map_or_else(|| name.clone(), |o| o.name.clone()),
+        // His phone's live microphone (phone_mic.rs): "[Phone · the user]", whichever input the phone uses.
+        capture::SourceKind::Phone { .. } => "Phone".into(),
     }
 }
 fn agent_source_name(i: &capture::SourceInfo) -> String {
@@ -411,7 +405,7 @@ fn agent_source_name(i: &capture::SourceInfo) -> String {
     }
 }
 fn display_name_from_id(id: &str) -> String {
-    if id.starts_with("mic:") { "Microphone".into() } else { "App audio".into() }
+    if id.starts_with("mic:") { "Microphone".into() } else if crate::phone_mic::is_phone_source(id) { "Phone".into() } else { "App audio".into() }
 }
 /// A gap reason worth a transcript line, in words; `None` keeps it archive-only (overflow, discontinuity,
 /// unverified digital silence, deliberate pauses).
@@ -449,6 +443,8 @@ impl Pipeline {
         replay: bool,
         tools: Arc<Tools>,
     ) -> Result<Self> {
+        // A replay is a lab run: T3 off and its Keychain pairing never read (`McpActions::lab`).
+        if replay { tools.mcp_actions.set_lab(); }
         tools.restore_send_context()?;
         tools.api.set_ui(ui);
         if ui.is_some() { crate::bridge::attach_speech_level(ui, Arc::downgrade(&tools)); }
@@ -466,13 +462,12 @@ impl Pipeline {
         // Startup settings may lag a callback that stopped the previous frozen process.
         settings.dry_run = tools.agent_enabled.stopped_for(agent::delivery::StopReason::Agent);
         settings.paused = tools.stopped_for(agent::delivery::StopReason::Heimdall);
-        settings.normalize_archive();
+        heimdall_archive::rerank::set_candidates(settings.memory_rerank);
         settings::private_dir(&data)?;
         let data_for_bugs = data.clone();
         let models_for_night = models.clone();
         let root = data.join("archive");
         settings::private_dir(&root)?;
-        archive::prune(&root, settings.retention_days, None)?;
         let session = archive::session_dir(&root)?;
         // A crashed launch's working files go into its session's logs before this one starts.
         if let Err(e) = archive::retire_stale_runs(&data, &root, &session) {
@@ -504,7 +499,7 @@ impl Pipeline {
             .enabled
             .store(settings.speak_replies, Ordering::Release);
         *tools.tts_backend.lock().unwrap() = settings.tts_backend.clone();
-        tools.screen_off.store(settings.screen_off, Ordering::Release);
+        tools.set_screen_off(settings.screen_off, true);
         tools.voice_speed.store(settings.voice_speed_percent, Ordering::Release);
         crate::background_model::publish(&settings.background_model, &settings.background_off); // read by every background job from launch
         crate::background_model::publish_efforts(&settings.background_efforts);
@@ -512,6 +507,7 @@ impl Pipeline {
         crate::background_model::publish_engine(settings.engine_on);
         crate::background_model::publish_fallback_paid(settings.background_fallback_paid);
         crate::islands::streams::set(settings.islands_on_streams); // Show Islands on Streams (main sets it before the helper starts)
+        crate::islands::display::set(settings.islands_display_lock()); // Islands Display (night 1107)
         if !replay {
             // Every background job's run counts in the spend ledger (they all run on Anthropic: `background_model`).
             let hub = tools.api.clone();
@@ -555,7 +551,7 @@ impl Pipeline {
         let (speaker_tx, speaker_events_rx) = crossbeam_channel::bounded(16);
         // Bug notes: Heimdall's `bug_note` tool writes to this inbox; the menu lists it (bugs.rs).
         let bug_inbox = crate::bugs::inbox_dir(&data_for_bugs,replay);
-        // The public edition has no bug notes (docs/bugs.md): no inbox for the tool and no scout.
+        // The public edition has no bug notes (docs/personal/bugs.md): no inbox for the tool and no scout.
         #[cfg(not(feature = "public"))]
         {
             crate::bugs::retire_spoken_note_checkpoints(&data_for_bugs);
@@ -569,6 +565,8 @@ impl Pipeline {
             *tools.mcp_actions.voice_names.lock().unwrap() = Some(internal.0.clone());
         }
         let listened = listen_to::listened_in(&data);
+        // Listening mode gates who on the call may stop Heimdall (bridge/call_interrupt.rs).
+        tools.speech_policy.set_listening_guests(!listened.is_empty());
         let speaker_cpu = Arc::new(crate::metrics::SpeakerCpu::default());
         // Heimdall's own voices as enrolled so far (none in an older file), and the encoder for the check.
         let own_voices = EnrollmentStore::load(&data.join("speakers.json")).map(|s| s.heimdall).unwrap_or_default();
@@ -579,6 +577,7 @@ impl Pipeline {
             listen_settings: Arc::new(Mutex::new(settings.clone())),
             pending_reload: BTreeMap::new(),
             persisted_stop,
+            applying_file: false,
             save_failed: false,
             save_failure_noted: false,
             settings,
@@ -682,9 +681,8 @@ impl Pipeline {
             repeated_failure: None,
             failure: None,
             speaker_names: BTreeMap::new(),
+            coded_tracks: BTreeMap::new(),
             source_cutoffs: HashMap::new(),
-            last_call_line_ns: None,
-            call_farewell_ns: None,
             quiet_since: HashMap::new(),
             late_ack: None,
             island_hold: None,
@@ -696,6 +694,7 @@ impl Pipeline {
             mic_audio: HashMap::new(),
             capture_since: None,
             system_audio_denied: false,
+            mic_denied: false,
             capture_ladder: crate::health::Ladder::new(std::time::Duration::from_secs(600)),
             agent_ladder: crate::health::Ladder::new(std::time::Duration::from_secs(600)),
             worker_watch: None,
@@ -750,6 +749,7 @@ impl Pipeline {
     }
     pub fn finish(&mut self) -> Result<()> {
         // Stop Splash before a potentially stalled archive/agent drain.
+        crate::watchdog::progress_step("the local engine");
         if let Some(manager) = &mut self.inference_engine { manager.shutdown(); }
         self.inference_engine_events();
         self.inference_engine.take();
@@ -761,6 +761,7 @@ impl Pipeline {
         }
         let ids: Vec<_> = self.sources.keys().cloned().collect();
         let mut failures = vec![];
+        crate::watchdog::progress_step("the sources' last commits");
         for id in ids {
             if let Err(e) = self.finish_source(&id) {
                 failures.push(format!("{id}: {e:#}"));
@@ -768,20 +769,23 @@ impl Pipeline {
             }
             crate::watchdog::progress();
         }
+        crate::watchdog::progress_step("the agent's drain");
         if let Some(a) = &self.agent {
             if let Err(e)=a.barrier() {failures.push(format!("agent drain: {e:#}"));}
         }
-        crate::watchdog::progress();
+        crate::watchdog::progress_step("the agent's stop");
         self.agent.take();
+        crate::watchdog::progress_step("the send worker");
         self.send_worker.take();
         send_worker::join_retired();
+        crate::watchdog::progress_step("Heimdall's tools");
         self.tools.shutdown();
-        crate::watchdog::progress();
+        crate::watchdog::progress_step("the evidence log");
         if !failures.is_empty() {
             self.record_teardown_error(&format!("source teardown errors: {}", failures.join("; ")));
         }
         self.evidence.flush()?;
-        crate::watchdog::progress();
+        crate::watchdog::progress_step("closing the archive session");
         ensure!(failures.is_empty(), "source teardown errors: {}", failures.join("; "));
         heimdall_archive::store::mark_complete(&self.session)?;
         archive::retire_run(&archive::run_dir(&self.data, &self.session), &self.session)?;
@@ -1069,8 +1073,7 @@ mod hotkeys_tests;
 #[cfg(test)]
 #[path = "tests/mic_voice_tests.rs"]
 mod mic_voice_tests;
-
-/// The monthly credits the menu offers for Anthropic: Max 5x and Max 20x.
-fn ui_credit_choice(usd: u32) -> bool {
-    matches!(usd, 100 | 200)
-}
+#[cfg(test)]
+#[cfg(feature = "phone")]
+#[path = "tests/phone_mic_tests.rs"]
+mod phone_mic_tests;

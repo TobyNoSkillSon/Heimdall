@@ -172,6 +172,7 @@ mod live {
             let name = display_name(data.parent().map(|p| p.join("settings.json")).as_deref());
             let mut cfg = NodeConfig::new(data, downloads, identity, guest);
             cfg.display_name = name;
+            cfg.owner = Arc::new(crate::remote_presence::user_name);
             cfg.network = Network::Public;
             let waits = Waits::of(&cfg);
             let (node, mut events) = match Node::start(cfg).await {

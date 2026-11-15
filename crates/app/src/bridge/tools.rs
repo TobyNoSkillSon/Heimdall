@@ -46,6 +46,10 @@ pub(crate) struct OpenQuestion {
 pub(crate) struct StopPress {
     pub(crate) playing: bool,
     pub(crate) run: Option<super::speech_policy::RunTag>,
+    /// The reply text the press cut (what was playing and queued), and whether the user was in a call: the `speak` label a
+    /// press leaves when no decider line woke the run (pipeline/hotkeys.rs `stop_press`).
+    pub(crate) spoken: Vec<String>,
+    pub(crate) in_call: bool,
 }
 pub struct Tools {
     pub(crate) send_context: Mutex<decide::send::Conversation>,
@@ -93,7 +97,6 @@ pub struct Tools {
     pub(super) speech_status: Mutex<Option<String>>,
     /// Spoken lines failed in a row since the last one played, and when the last failed (`speech_failed`).
     pub(super) speech_failures: Mutex<(u32, Option<std::time::Instant>)>,
-    pub(super) screenshot_status: Mutex<Option<String>>,
     pub archive_floor: Arc<AtomicU64>,
     pub agent_enabled: Arc<agent::delivery::DeliveryGate>,
     /// Listening's own ordered on/off intent (`StopReason::Heimdall`), persisted like Agent's but never part of
@@ -112,12 +115,14 @@ pub struct Tools {
     pub speech_voices: Arc<crate::speech_voice::Voices>,
     /// The loaded speech model, shared by replies and the bank fill; `shutdown` releases it.
     pub(super) tts_model: Arc<Mutex<Option<speak::Supertonic>>>,
-    /// Seeing ▸ off: screenshot tools fail plainly (`SCREEN_OFF`), never naming the switch.
+    /// Seeing ▸ off: `look` and the screenshot tool fail with `SEEING_OFF` (bug note 2026-11-10T15-35-42). Set it
+    /// through `set_screen_off`, which also keeps when it went off.
     pub screen_off: AtomicBool,
+    /// When Seeing last went off ("17:30"), or "launch" when Heimdall started with it off: said in `seeing_off_error`.
+    pub(crate) seeing_off_at: Mutex<Option<String>>,
     pub(super) voices: Mutex<HashSet<String>>,
     pub(super) models: PathBuf,
     pub buffer: Mutex<Option<Arc<Mutex<screen::ScreenBuffer>>>>,
-    pub(super) shots: PathBuf,
     pub archive_session: Mutex<Option<PathBuf>>,
     /// Pre-generated reply lines and the store of every generated voice clip.
     pub voice_bank: Arc<crate::voice_bank::Bank>,
@@ -181,6 +186,9 @@ pub struct Tools {
     /// Tests replace the native full-resolution grab, which would ask for Screen Recording.
     #[cfg(test)]
     pub(crate) test_grabber: Mutex<Option<screen::Grabber>>,
+    /// Tests: what `screen::capture_blocker` would say (None: nothing blocks), never the real TCC or display state.
+    #[cfg(test)]
+    pub(crate) test_blocker: Mutex<Option<String>>,
     /// The pull-down's updates (`reply_to_island`), as tests see them.
     #[cfg(test)]
     pub(crate) test_island: Mutex<Vec<ui::UiUpdate>>,
@@ -244,7 +252,11 @@ impl Tools {
     pub(super) fn typed_context(&self,text:&str,through:u64,at:u64)->Result<()> {
         let snapshot={
             let mut context=self.send_context.lock().unwrap();
-            context.append_at("User (typed)",text,false,at);
+            // A push-to-talk turn from the phone (remote.rs) is his words said there, not typed.
+            match crate::remote::said_on_phone(text) {
+                Some(said)=>context.append_at(&crate::remote::phone_speaker(),said,false,at),
+                None=>context.append_at("User (typed)",text,false,at),
+            };
             context.sent(through);
             self.persist_send_context(&context)?;
             context.snapshot()
@@ -270,18 +282,24 @@ impl Tools {
     /// His typed message shows at once, in the Agent window and the pulled-down notch, before the supervisor takes it
     /// (bug note 2026-11-01T00-20-27); a send refused here or later marks it not sent.
     pub fn window_action(&self,action:ui::AgentWindowAction)->Result<()> {
-        let permit=self.agent_enabled.permit()?;
-        let (command,echo)=match action {
-            ui::AgentWindowAction::Send{text,steer} if validate_message(&text).is_ok() => {
-                let echo=uuid::Uuid::new_v4().to_string();
-                self.window_update(typed_echo(&echo,&text,Echo::Pending));
-                crate::chat_history::typed_pending(&echo,&text);
-                (Command::Typed{text:text.clone(),steer,echo:echo.clone()},Some((echo,text)))
+        match action {
+            // Typed at the Mac: a phone turn still open is over (remote.rs `mac_turn_started`).
+            ui::AgentWindowAction::Send{text,steer} if validate_message(&text).is_ok() => { let echo=uuid::Uuid::new_v4().to_string(); crate::remote::mac_turn_started_via(crate::remote::MacVia::Typed); crate::remote::mac_turn_delivery(&echo); self.send_typed(text,steer,echo) },
+            action=>{
+                let permit=self.agent_enabled.permit()?;
+                self.enqueue_agent_action(Command::Scoped{command:Box::new(window_command(action)),permit})
             }
-            action=>(window_command(action),None),
-        };
-        let queued=self.enqueue_agent_action(Command::Scoped{command:Box::new(command),permit});
-        if let (Err(_),Some((echo,text)))=(&queued,&echo) {self.window_update(typed_echo(echo,text,Echo::Failed));crate::chat_history::typed_failed(echo);}
+        }
+    }
+    /// The user's typed message under delivery id `echo` (the bubble's id, and the agent's delivery key): the phone
+    /// endpoint names it first, so it can follow that delivery to the agent (remote.rs `phone_turn_delivery`).
+    pub(crate) fn send_typed(&self,text:String,steer:bool,echo:String)->Result<()> {
+        let permit=self.agent_enabled.permit()?;
+        validate_message(&text)?;
+        self.window_update(typed_echo(&echo,&text,Echo::Pending));
+        crate::chat_history::typed_pending(&echo,&text);
+        let queued=self.enqueue_agent_action(Command::Scoped{command:Box::new(Command::Typed{text:text.clone(),steer,echo:echo.clone()}),permit});
+        if queued.is_err() {self.window_update(typed_echo(&echo,&text,Echo::Failed));crate::chat_history::typed_failed(&echo);}
         queued
     }
     /// An Agent window update from outside the supervisor (the UI's own thread).
@@ -392,13 +410,24 @@ impl Tools {
         let intent_path = data.join("stop-intent.json");
         let intent_writer = IntentWriter::new(intent_path.clone(), agent_enabled.clone(), listen_latch.clone()).map_err(|e| format!("{e:#}"));
         let drama3=speak::drama3::Service::new(models.join("drama3"));
-        // The memory line (bug note 2026-11-03T22-38-44): over 95 GB in use with a job's declared need, Jarvis gives
+        // The memory line (bug note 2026-11-03T22-38-44): over 105 GB in use with a job's declared need, Jarvis gives
         // way to Phonon S; tests never read this Mac's memory.
         if !cfg!(test) { drama3.set_memory_gate(speak::memory_line::Gate::native(data)); }
+        // arsenal-yield (bug note 2026-11-09T12-43-19): red for Arsenal while Jarvis generates (docs/personal/arsenal-yield.md).
+        if !cfg!(test) { speak::compute_flag::install(speak::compute_flag::Flag::start(data)); }
         // Jarvis's Rust scheduler counts its lead in the user's listening time (review 1 Nov: 160 % read as 1x).
         let voice_speed=Arc::new(AtomicU16::new(crate::settings::DEFAULT_VOICE_SPEED_PERCENT));
         drama3.set_pace(voice_speed.clone());
         if let Err(error)=crate::drama3_verify::install(&drama3,models.join("parakeet-ultra")) {eprintln!("Speech verifier unavailable: {error:#}");}
+        // arsenal-yield: the indexer's model, shared with the yield watcher, which unloads it when Arsenal asks for room.
+        let embeddings=Arc::new(heimdall_archive::embedding::Service::with_state(models, Some(data.join("embedding"))));
+        if !cfg!(test) { crate::arsenal_yield::start(data, drama3.clone(), embeddings.clone()); }
+        // Memory search: the reranker starts on the first search that needs it; the vector copy loads in the background
+        // (from its side file in well under a second, or about 5 s the first time it is built; docs/chunk-index.md).
+        if !cfg!(test) {
+            heimdall_archive::rerank::install(models);
+            crate::index::warm_vector_copy(data.join("archive"));
+        }
         Self {
             engine_signal: Arc::new(AtomicU8::new(0)),
             engine_loading: AtomicBool::new(false),
@@ -428,7 +457,6 @@ impl Tools {
             enabled: AtomicBool::new(true),
             speech_status: Mutex::new(None),
             speech_failures: Mutex::new((0, None)),
-            screenshot_status: Mutex::new(None),
             archive_floor: Arc::new(AtomicU64::new(10 * 1024 * 1024 * 1024)),
             agent_enabled,
             listen_latch,
@@ -440,13 +468,13 @@ impl Tools {
             drama3,
             tts_model: Arc::new(Mutex::new(None)),
             screen_off: AtomicBool::new(false),
+            seeing_off_at: Mutex::new(None),
             voices: Mutex::new(HashSet::new()),
             models: models.join("supertonic-3"),
             buffer: Mutex::new(None),
-            shots: data.join("shots"),
             archive_session: Mutex::new(None),
             voice_bank: Arc::new(crate::voice_bank::Bank::new(&data.join("archive"), &models.join("decide"))),
-            embeddings: Arc::new(heimdall_archive::embedding::Service::with_state(models, Some(data.join("embedding")))),
+            embeddings: embeddings.clone(),
             fast_reads: crate::fast_read::Reads::new(data),
             voice_changed: Mutex::new(std::time::Instant::now()),
             spoken: Mutex::new(VecDeque::new()),
@@ -472,6 +500,8 @@ impl Tools {
             relay_catalog: Default::default(),
             #[cfg(test)]
             test_grabber: Mutex::new(None),
+            #[cfg(test)]
+            test_blocker: Mutex::new(None),
             #[cfg(test)]
             test_island: Mutex::new(Vec::new()),
         }
@@ -636,6 +666,22 @@ impl Tools {
         cards.sort_by_key(|c| c.shown_ns);
         cards
     }
+    /// Whether card `id` can no longer take an answer: the agent's card closed, answered, cancelled, expired or unknown
+    /// to the ledger; a thread's card whose request is no longer its island's. A card that is still open is not gone,
+    /// whatever a single answer's failure was.
+    pub(crate) fn question_gone(&self, id: &str) -> bool {
+        if let Some((island, _)) = crate::islands::binding::parse_card_id(id) {
+            let Some(host) = crate::islands::host() else { return false };
+            return !host.bindings.get(&island).and_then(|b| b.question).is_some_and(|q| crate::islands::binding::card_id(&island, &q.request) == id);
+        }
+        let Ok(actions) = self.mcp_actions.actions.as_ref() else { return false };
+        let expired = self.pending_questions.lock().unwrap().get(id).is_some_and(|q| q.expires_ms <= agent::now_ms());
+        match actions.state(id) {
+            Ok(state) => expired || !matches!(state.as_str(), "pending" | "shown"),
+            // No receipt: never asked, or gone from the ledger. Any other error (a held lock) is temporary.
+            Err(e) => matches!(e.downcast_ref::<rusqlite::Error>(), Some(rusqlite::Error::QueryReturnedNoRows)),
+        }
+    }
     /// The cards on screen as the user's utterance (`start_ns`..`end_ns`, host clock) sees them: whether one is up and
     /// whether the utterance falls in its answer window (questions.rs).
     pub(crate) fn card_state(&self, start_ns: u64, end_ns: u64) -> super::questions::CardState {
@@ -657,6 +703,7 @@ impl Tools {
         self.test_open_card_with(question, vec![agent::actions::AskItem::one(question, &["Yes", "No"])], shown_ns)
     }
     /// A shown `ask` card of `items` at `shown_ns` without the island; returns its id.
+    #[cfg(test)]
     pub(crate) fn test_open_card_with(&self, question: &str, items: Vec<agent::actions::AskItem>, shown_ns: u64) -> String {
         let permit = self.agent_enabled.permit().unwrap();
         let actions = self.mcp_actions.actions.as_ref().unwrap();
@@ -686,7 +733,7 @@ impl Tools {
             let context = self.send_context.lock().unwrap();
             context.snapshot().pending.into_iter()
                 .filter(|t| through.is_none_or(|n| t.seq <= n) && t.speaker == "User" && counted.contains(&t.seq) && !super::questions::filler_only(&t.text))
-                .map(|t| Spoken { start_ns: t.observation.as_ref().and_then(|o| o["start_ns"].as_u64()).unwrap_or(t.at_ns).min(t.at_ns), end_ns: t.at_ns, text: t.text })
+                .map(|t| Spoken { end_ns: t.at_ns, text: t.text })
                 .collect()
         };
         if spoken.is_empty() { return vec![]; }
@@ -856,6 +903,7 @@ impl Tools {
         self.latch(reason).stopped_for(reason)
     }
     /// The generations of both latches: any explicit intent changes one of them.
+    #[cfg(test)]
     pub fn intent_generation(&self) -> IntentGeneration {
         IntentGeneration { agent: self.agent_enabled.generation(), listen: self.listen_latch.generation() }
     }
@@ -867,6 +915,8 @@ impl Tools {
     /// The UI callback's Agent/Heimdall intent. It stays pending until the pipeline
     /// processes its queued action, so no older settings-file value can override it.
     pub fn menu_intent(&self, reason: agent::delivery::StopReason, on: bool) {
+        // Agent Off cancels what is queued: a phone turn waiting on it is over (remote.rs).
+        if matches!(reason, agent::delivery::StopReason::Agent) && !on { crate::remote::phone_turn_failed(); }
         if matches!(reason, agent::delivery::StopReason::Quit) {
             self.agent_enabled.intent(reason, false);
             return;
@@ -876,18 +926,6 @@ impl Tools {
         if let Some(pending) = Self::pending(&self.menu_pending, reason) { pending.fetch_add(1, Ordering::AcqRel); }
         self.latch(reason).intent(reason, on);
         self.persist_intent(&mut acceptance);
-    }
-    /// Sign-in completion carries its starting generation; it is never a new user On authority.
-    pub fn resume_agent_intent(&self, generation: u64) -> bool {
-        let mut acceptance = self.intent_acceptance.lock().unwrap();
-        if acceptance.closed { return false; }
-        use agent::delivery::StopReason;
-        if self.agent_enabled.intent_if_current(StopReason::Agent, true, generation).is_none() {
-            return false;
-        }
-        self.menu_pending[0].fetch_add(1, Ordering::AcqRel);
-        self.persist_intent(&mut acceptance);
-        true
     }
     pub(super) fn persist_intent(&self, acceptance: &mut IntentAcceptance) {
         // Late Off stays asynchronous on the UI thread. Exit must observe its
@@ -1002,8 +1040,8 @@ impl Tools {
         eprintln!("Speech: User pressed Stop; Heimdall stopped talking (training signal: this moment wasn't for Heimdall)");
         self.record_diagnostic("speech_stopped",json!({"reason":"stop_button","label":"not_for_heimdall","in_call":self.speech_policy.in_conversation(now),
             "words":self.speech_policy.run_words(),"spoken":spoken}));
-        self.context_note("unheard-speech:stopped","User pressed Stop while you were talking: this moment was not for you. Do not say it again unless he asks; keep any result on the island.".into());
-        StopPress {playing,run}
+        let _=self.context_note("unheard-speech:stopped","User pressed Stop while you were talking: this moment was not for you. Do not say it again unless he asks; keep any result on the island.".into());
+        StopPress {playing,run,in_call:self.speech_policy.in_conversation(now),spoken}
     }
     /// The call state now sets how Heimdall sounds (bug note 2026-11-05T00-10-37): in a call his voice is quieter
     /// (`speech_policy::voice_gain`) and queued lines wait for a gap (`hold`, `set_patient`); out of one, full level at
@@ -1039,6 +1077,7 @@ impl Tools {
         // It ended (a click, a cough, a blip of echo) or a newer voice opened since.
         if self.speech_policy.voice_open_since(source)!=Some(at_ns) {return;}
         if !self.speech_policy.in_conversation(capture::host_now_ns()) || !self.heimdall_audible() {return;}
+        if self.answer_playing() {self.answer_kept(source,None);return;}
         eprintln!("A guest on the call spoke while Heimdall talked: stopped (guest_voice, {source})");
         self.record_diagnostic("speech_stopped",json!({"reason":"guest_voice","source":source}));
         self.speech_status();
@@ -1046,6 +1085,60 @@ impl Tools {
         if !jobs.is_empty() {self.cut_by_guest.store(true,Ordering::Release);}
         self.cut_by_owner.lock().unwrap().extend(jobs);
         self.stop_speech();
+    }
+    // His answer plays on over guests.
+    /// The line playing now (the oldest job left, as `stop_pressed` reads it) is an answer in a run the user started by name
+    /// or his key (`addressed_jobs`). Bug note 2026-11-13T15-32-42 (the user: "the reply is spoken even on a call, waiting
+    /// only for the user's own pause, not for silence from the mixed call audio"): such an answer is not stopped by guest
+    /// voices, only by his own talk-over (`talked_over`) or Stop. Unprompted speech keeps the 5 Nov rule.
+    pub(crate) fn answer_playing(&self)->bool {
+        let oldest=self.speech_text.lock().unwrap().keys().copied().min();
+        oldest.is_some_and(|job|self.addressed_jobs.lock().unwrap().contains(&job))
+    }
+    /// A guest's voice that would have cut Heimdall left his answer playing: noted, not spoken.
+    fn answer_kept(&self,source:&str,who:Option<&str>) {
+        eprintln!("A guest on the call spoke while Heimdall gave User the answer he asked for: kept playing ({source})");
+        self.record_diagnostic("speech_kept",json!({"reason":"his_answer","source":source,"speaker":who}));
+    }
+    /// Listening mode (bridge/call_interrupt.rs, Only he and the listened guest may interrupt): one look
+    /// at the voice that began at `at_ns` on call source `source`, `GUEST_CUT_AFTER` or more after it began. Returns
+    /// whether to look again after `call_interrupt::POLL`. It cuts only when the tracker puts a listened guest's or an
+    /// unlabelled track in the voice, or gave no verdict by `call_interrupt::PENDING_MAX`; another guest's voice or
+    /// noise is noted once (`speech_kept`) and leaves Heimdall talking. Listening turned off meanwhile: today's rule.
+    pub(crate) fn listened_guest_tick(&self,source:&str,at_ns:u64,now_ns:u64,kept_noted:&mut bool)->bool {
+        use super::call_interrupt::{CallVoiceWho, PENDING_MAX};
+        if self.speech_policy.voice_open_since(source)!=Some(at_ns) {return false;}
+        if !self.speech_policy.listening_guests() {self.guest_talked_over(source,at_ns);return false;}
+        // Nothing left to say. A line waiting at its start (`hold`) still counts: it may play while this voice lasts.
+        if !self.heimdall_speaking() && !self.heimdall_audible() && self.speech_text.lock().unwrap().is_empty() {return false;}
+        let open_ns=now_ns.saturating_sub(at_ns);
+        if open_ns>super::speech_policy::OPEN_VOICE_MAX.as_nanos() as u64 {return false;}
+        let who=match self.speech_policy.voice_who(source,at_ns) {
+            CallVoiceWho::MayInterrupt(who) => who,
+            CallVoiceWho::Pending if open_ns>=PENDING_MAX.as_nanos() as u64 => "no tracker verdict in time".to_owned(),
+            CallVoiceWho::Pending => return true,
+            CallVoiceWho::Bystander(who) => {
+                if !*kept_noted {
+                    *kept_noted=true;
+                    self.record_diagnostic("speech_kept",json!({"reason":"not_listened","source":source,"speaker":who,"after_ms":open_ns/1_000_000}));
+                }
+                return true;
+            }
+        };
+        // Between two sentences: look again when the next one is audible.
+        if !self.speech_policy.in_conversation(now_ns) || !self.heimdall_audible() {return true;}
+        if self.answer_playing() {
+            if !*kept_noted {*kept_noted=true;self.answer_kept(source,Some(&who));}
+            return true;
+        }
+        eprintln!("A listened-to or unlabelled voice on the call spoke while Heimdall talked: stopped (guest_voice, {source}, {who})");
+        self.record_diagnostic("speech_stopped",json!({"reason":"guest_voice","source":source,"listening":true,"speaker":who,"after_ms":open_ns/1_000_000}));
+        self.speech_status();
+        let jobs:Vec<u64>=self.speech_text.lock().unwrap().keys().copied().collect();
+        if !jobs.is_empty() {self.cut_by_guest.store(true,Ordering::Release);}
+        self.cut_by_owner.lock().unwrap().extend(jobs);
+        self.stop_speech();
+        false
     }
     /// Heimdall's voice is reaching the speaker now (agent speech or a bank line), not merely queued.
     fn heimdall_audible(&self)->bool {
@@ -1122,15 +1215,20 @@ impl Tools {
     pub fn sample_holds_jarvis(&self) -> bool {
         self.sample_hold.lock().unwrap().is_some_and(|until| std::time::Instant::now() < until)
     }
-    pub fn screenshot_status(&self) -> Option<String> { self.screenshot_status.lock().unwrap().clone() }
     pub(super) fn speech_event(&self,event:speak::SpeechEvent) {
         match event {
             speak::SpeechEvent::Failed {job,error}=>{
-                let addressed=self.addressed_jobs.lock().unwrap().remove(&job);
+                let addressed=self.forget_addressed(job);
                 self.unheard_by_mode.lock().unwrap().remove(&job);
                 self.cut_by_owner.lock().unwrap().remove(&job);
                 let unheard=self.speech_text.lock().unwrap().remove(&job);
-                if error==super::hold::HOLD_SKIPPED {
+                // ---- quiet hold (lane S, night 1113): a notice's line skipped while the user talked waits for his silence ----
+                let notice=self.speech_policy.forget_job(job);
+                if error==super::hold::hold_skipped() && notice.is_some() {
+                    if let (Some(text),Some(notice))=(unheard,notice) {self.hold_for_quiet(&text,notice);}
+                } else
+                // ---- end quiet hold ----
+                if error==super::hold::hold_skipped() {
                     // The user was talking when it would have played (night pass 1022): not said; the reply stays in the
                     // pull-down, its lines show as one island line and the agent is told once for the reply, when it
                     // is over (`settle_notes`, bug note 2026-10-26T18-35-49). Speech itself is fine.
@@ -1145,7 +1243,8 @@ impl Tools {
                 }
             },
             speak::SpeechEvent::Cancelled {job,heard}=>{
-                self.addressed_jobs.lock().unwrap().remove(&job);
+                self.forget_addressed(job);
+                self.speech_policy.forget_job(job); // quiet hold (lane S)
                 let unheard=self.speech_text.lock().unwrap().remove(&job);
                 // Speaking switched off mid-line: the agent was told it was queued, so the user reads it instead.
                 // The user talking over it (barge-in) stops it on purpose and shows nothing; if he heard its start, the
@@ -1165,7 +1264,8 @@ impl Tools {
             speak::SpeechEvent::Complete {job,completed_at,..}=>{
                 // A line reached the user: a later skipped reply may wake the agent once again.
                 self.skip_retry.lock().unwrap().spent=false;
-                self.addressed_jobs.lock().unwrap().remove(&job);
+                self.forget_addressed(job);
+                self.speech_policy.forget_job(job); // quiet hold (lane S)
                 self.unheard_by_mode.lock().unwrap().remove(&job);
                 self.cut_by_owner.lock().unwrap().remove(&job);
                 if let Some(text)=self.speech_text.lock().unwrap().remove(&job) {
@@ -1179,12 +1279,24 @@ impl Tools {
         }
         self.settle_notes(false);
     }
+    /// Job `job` settled: it no longer marks his answer in the queue or the hold (`hold::OwnerVoice::set_addressed`).
+    /// Whether it was his answer.
+    fn forget_addressed(&self,job:u64)->bool {
+        self.owner.set_addressed(job,false);
+        self.addressed_jobs.lock().unwrap().remove(&job)
+    }
     /// Sends the batched speech notes once their jobs have settled: the talked-over lines when every cut job has; the
     /// skipped lines once the skipped reply is over (the agent's turn has ended and no line is left), which also
     /// releases the skip (`hold::OwnerVoice::resume`). `idle`: the speech queue had nothing left, read before its last
     /// events were drained; jobs it never reported (a retired queue) then hold nothing back.
     fn settle_notes(&self,idle:bool) {
         let cut_settled={let mut cut=self.cut_by_owner.lock().unwrap();if idle {cut.clear();}cut.is_empty()};
+        // Nothing queued: no answer of his is waiting (a retired queue never reports its jobs). Read again: a line
+        // queued since `idle` was read keeps its mark.
+        if idle && !self.agent_speech_busy() {
+            let jobs:Vec<u64>=self.addressed_jobs.lock().unwrap().drain().collect();
+            for job in jobs {self.owner.set_addressed(job,false);}
+        }
         if cut_settled {
             let missed=std::mem::take(&mut *self.missed.lock().unwrap());
             if !missed.is_empty() {self.missed_lines(&missed);}
@@ -1212,7 +1324,7 @@ impl Tools {
         self.show_skipped(&lines);
         let mut retry=self.skip_retry.lock().unwrap();
         if let Some(pending)=retry.pending.as_mut() {pending.extend(lines);retry.addressed|=addressed;return;}
-        if retry.spent {drop(retry);self.context_note("unheard-speech:skipped",skipped_note(&lines));return;}
+        if retry.spent {drop(retry);let _=self.context_note("unheard-speech:skipped",skipped_note(&lines));return;}
         retry.spent=true;
         retry.pending=Some(lines);
         retry.addressed=addressed;
@@ -1237,6 +1349,17 @@ impl Tools {
             if tx.send(Command::Notice{id:format!("{SKIPPED_RETRY}:{}",uuid::Uuid::new_v4()),text:skipped_note(&lines),permit,ack}).is_err() {eprintln!("Skipped reply not told to the agent: supervisor stopped");}
         });
     }
+    // ---- quiet hold (lane S, night 1113) ----
+    /// A notice run's line the user talked over before it started: shown on the island at once as quiet text, and held to
+    /// be said once he has been quiet a moment (`speech_policy::SpeechPolicy::hold_quiet`, `replay_held`).
+    pub(crate) fn hold_for_quiet(&self,text:&str,notice:super::speech_policy::NoticeJob) {
+        let replay=notice.first_held.is_some();
+        self.speech_policy.hold_quiet(text,notice,capture::host_now_ns());
+        eprintln!("Hold: a notice's line would have played while User talked; held for his silence (up to {} s)",super::speech_policy::HELD_FOR.as_secs());
+        // A replayed line skipped again was shown when it was first held.
+        if !replay {self.unheard_line(text);}
+    }
+    // ---- end quiet hold ----
     /// A skipped reply's lines, never said, as one island line (bug note 2026-10-26T18-35-49: "I didn't hear anything
     /// and you didn't say it"): the path a line takes with Speaking off, so it also joins the decider's conversation.
     /// Its lines were shown as they were skipped (`show_skipped_live`): that island line gets the reply's whole text
@@ -1257,7 +1380,10 @@ impl Tools {
         let text=self.skipped.lock().unwrap().join(" ");
         if text.trim().is_empty() {return;}
         let id=self.skipped_notice.lock().unwrap().as_ref().map(|(id,_)|id.clone());
+        let new=id.is_none();
         if let Some(id)=self.show_notice(&text,id.as_deref()) {*self.skipped_notice.lock().unwrap()=Some((id,text));}
+        // A skipped reply shown as text makes the held-reply cue once, so it never vanishes silently (night 1115).
+        if new {self.speech_policy.held_cue(capture::host_now_ns());}
     }
     /// An island line of `text`, or `update` of one already shown; its id.
     fn show_notice(&self,text:&str,update:Option<&str>)->Option<String> {
@@ -1282,6 +1408,8 @@ impl Tools {
     fn reply_to_island(&self,update:ui::UiUpdate) {
         #[cfg(test)]
         self.test_island.lock().unwrap().push(update.clone());
+        // ---- phone endpoint (remote.rs): the pull-down's reply as shown ----
+        if let ui::UiUpdate::LastReply(text)=&update {crate::remote::publish("reply",json!({"text":text}));}
         if let Some(ui)=*self.notice_ui.lock().unwrap() {ui.send(update);}
     }
     /// A new run started while a skip latch from an earlier one was still up (its lines not yet settled): the
@@ -1301,6 +1429,12 @@ impl Tools {
         self.owner.resume();
         // The skipped reply stays in the pull-down and its lines are shown (`after_skip`).
         dropped.sort_by_key(|(job,_)|*job);
+        // ---- quiet hold (lane S, night 1113): a notice run's queued lines wait for his silence too ----
+        dropped.retain(|(job,text)| match self.speech_policy.forget_job(*job) {
+            Some(notice)=>{self.hold_for_quiet(text,notice);false}
+            None=>true,
+        });
+        // ---- end quiet hold ----
         let mut skipped=std::mem::take(&mut *self.skipped.lock().unwrap());
         skipped.extend(dropped.into_iter().map(|(_,text)|text));
         eprintln!("Hold: a new run started; the earlier skipped reply is released ({} line(s))",skipped.len());
@@ -1352,6 +1486,11 @@ impl Tools {
         let unshown=std::mem::take(&mut *self.skipped.lock().unwrap());
         self.show_skipped(&unshown);
         skipped.extend(unshown);
+        // ---- quiet hold (lane S, night 1113): notices held for his silence join his wake (shown when held) ----
+        let quiet=self.speech_policy.take_quiet();
+        if !quiet.is_empty() {eprintln!("Hold: User's words carry {} notice line(s) held for his silence",quiet.len());}
+        skipped.splice(0..0,quiet);
+        // ---- end quiet hold ----
         let dropped:Vec<String>=dropped.into_iter().map(|(_,text)|text).collect();
         if !skipped.is_empty() {eprintln!("Hold: User's words carry the note for {} skipped line(s) to the agent",skipped.len());}
         let notes:Vec<String>=[(!skipped.is_empty()).then(||skipped_note(&skipped)),(!dropped.is_empty()).then(||dropped_note(&dropped))].into_iter().flatten().collect();
@@ -1375,7 +1514,7 @@ impl Tools {
         // shows those first and this one last, and the agent learns, as context, which one he probably missed.
         let arrival=reply.shown.as_deref().map(|shown|self.unread.lock().unwrap().arrive(shown,std::time::Instant::now()));
         if let Some(arrival)=&arrival {
-            if let Some(note)=super::unread::note(&arrival.missed) {self.context_note(super::unread::UNREAD_NOTE,note);}
+            if let Some(note)=super::unread::note(&arrival.missed) {let _=self.context_note(super::unread::UNREAD_NOTE,note);}
             self.reply_to_island(ui::UiUpdate::LastReply(arrival.pull_down.clone()));
         }
         *self.final_shown.lock().unwrap()=None;
@@ -1457,14 +1596,19 @@ impl Tools {
             (false,false)=>format!("{who}; he heard only the start of: {} He did not hear: {}",started.join(" "),unheard.join(" ")),
             (true,true)=>return,
         };
-        self.context_note("unheard-speech:cut",note);
+        let _=self.context_note("unheard-speech:cut",note);
     }
-    /// A context note for the agent (no turn). Sent without waiting: the supervisor may be the caller.
-    pub(crate) fn context_note(&self,kind:&str,text:String) {
-        let Ok(permit)=self.agent_enabled.permit() else {return};
-        let Some(tx)=self.agent_commands.lock().unwrap().clone() else {return};
+    /// A context note for the agent (no turn). Sent without waiting: the supervisor may be the caller. An error when it
+    /// was not handed to the supervisor (Agent off, no supervisor, the supervisor stopped): the note is not delivered.
+    pub(crate) fn context_note(&self,kind:&str,text:String)->Result<()> {
+        let permit=self.agent_enabled.permit().map_err(|e|anyhow::anyhow!("Agent is off ({e:#})"))?;
+        let tx=self.agent_commands.lock().unwrap().clone().ok_or_else(||anyhow::anyhow!("the agent's supervisor is not running"))?;
         let (ack,_)=std::sync::mpsc::channel();
-        if tx.send(Command::Notice{id:format!("{kind}:{}",uuid::Uuid::new_v4()),text,permit,ack}).is_err() {eprintln!("Speech note not told to the agent: supervisor stopped");}
+        if tx.send(Command::Notice{id:format!("{kind}:{}",uuid::Uuid::new_v4()),text,permit,ack}).is_err() {
+            eprintln!("Speech note not told to the agent: supervisor stopped");
+            anyhow::bail!("the agent's supervisor stopped");
+        }
+        Ok(())
     }
     /// Queued speech that was never heard (synthesis failed, or Speaking went off mid-line): shown once as the
     /// island line, and entered as a Heimdall turn.
@@ -1527,6 +1671,11 @@ impl Tools {
     pub(crate) fn test_guarded_speech_queue(&self, synth: impl speak::Synthesizer, output: impl speak::AudioOutput) {
         *self.queue.lock().unwrap() = Some(Speech::new(synth, output, self.agent_enabled.permit().unwrap()));
     }
+    /// A test speech queue behind the real hold (bridge/hold.rs), as the app builds it.
+    #[cfg(test)]
+    pub(crate) fn test_held_speech_queue(&self, synth: impl speak::Synthesizer, output: impl speak::AudioOutput) {
+        self.test_guarded_speech_queue(super::hold::HeldSynth { inner: synth, owner: self.owner.clone() }, super::hold::HeldOutput { inner: output, owner: self.owner.clone() });
+    }
     #[cfg(test)]
     pub(crate) fn test_finish_speech(&self) -> Result<()> {
         loop {
@@ -1543,11 +1692,6 @@ impl Tools {
     #[cfg(test)]
     pub(crate) fn test_sample_says(&self, text: &str) -> Result<()> {
         self.sample_queue.lock().unwrap().as_ref().context("no sample queue")?.speak(text, "en").map(drop)
-    }
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn test_speech_queue(&self, queue: speak::SpeechQueue) {
-        *self.queue.lock().unwrap() = Some(Speech { queue, permit: self.agent_enabled.permit().unwrap() });
     }
     /// The watchdog cannot wait for a mutex held by the frozen live loop. Clone the
     /// session address and release it before opening a separate journal connection.
@@ -1594,6 +1738,7 @@ impl Tools {
 #[async_trait]
 impl agent::mcp::ToolHost for Tools {
     fn speak_replay(&self,text:&str,language:&str,id:&str,p:&agent::delivery::DeliveryPermit)->Result<String>{self.mcp_actions.speak(self,text,language,id,p)}
+    fn speak_replay_now(&self,text:&str,language:&str,id:&str,p:&agent::delivery::DeliveryPermit,now:bool)->Result<String>{self.mcp_actions.speak_now(self,text,language,id,p,now)}
     async fn screen_frames(&self,args:Value,p:&agent::delivery::DeliveryPermit)->Result<Value>{crate::mcp_frames::frames(self,args,p).await}
     async fn action(&self,name:&str,args:Value,id:&str,p:&agent::delivery::DeliveryPermit)->Result<String>{self.mcp_actions.action(self,name,args,id,p).await}
     async fn look(&self,app:Option<&str>,p:&agent::delivery::DeliveryPermit)->Result<Value>{crate::drawing::look(self,app,p).await}
@@ -1615,17 +1760,7 @@ impl agent::mcp::ToolHost for Tools {
         let result = (|| -> Result<u64> {
         if queue.is_none() {
             *queue = Some(Speech::new(
-                super::hold::HeldSynth { owner: self.owner.clone(), inner: LazySynth {
-                    drama3: Some(self.drama3.clone()),
-                    session: self.archive_session.lock().unwrap().clone().context("speech archive session missing")?,
-                    models: self.models.clone(),
-                    model: self.tts_model.clone(),
-                    backend: self.tts_backend.lock().unwrap().clone(),
-                    record: Some((self.voice_bank.clone(), voicebank::Origin::Agent)),
-                    speed: self.voice_speed.clone(),
-                    sample: None,
-                    voices: Some(self.speech_voices.clone()),
-                } },
+                super::hold::HeldSynth { owner: self.owner.clone(), inner: self.reply_synth()? },
                 // One voice at a time: agent speech and bank lines share the playback lock. Nothing starts while the user
                 // is talking (`hold`).
                 super::hold::HeldOutput { inner: self.voice_bank.exclusive(speak::CoreAudioOutput), owner: self.owner.clone() },
@@ -1636,8 +1771,13 @@ impl agent::mcp::ToolHost for Tools {
         // here then; they wait for a gap instead of being skipped while anyone talks (`hold`), and play quieter.
         self.apply_call_level();
         let addressed = self.speech_policy.addressed_now();
+        // The agent's `now` (night 1115): said as soon as he pauses, over the others on a call (`hold::OwnerVoice::set_urgent`).
+        let urgent = super::speech_policy::NEXT_URGENT.with(|n| n.take());
         let id = permit.with(|| queue.as_ref().unwrap().speak(text, lang))?;
-        if addressed { self.addressed_jobs.lock().unwrap().insert(id); }
+        if addressed || urgent { self.addressed_jobs.lock().unwrap().insert(id); self.owner.set_addressed(id, true); }
+        if urgent { self.owner.set_urgent(id); }
+        // Quiet hold (lane S): a notice run's line, recorded before any skip of it can be drained.
+        if let Some(first_held) = super::speech_policy::NEXT_NOTICE.with(|n| n.take()) { self.speech_policy.notice_job(id, lang, permit, first_held); }
         crate::latency::speak_queued(); // Latency map (lab/latency).
         self.note_spoken(text);
         self.speech_text.lock().unwrap().insert(id,text.into());
@@ -1653,83 +1793,44 @@ impl agent::mcp::ToolHost for Tools {
         if result.is_err() { if self.enabled.load(Ordering::Acquire) { self.speech_failed(); } else { *self.speech_status.lock().unwrap() = Some("Speech replies off".into()); } }
         result
     }
-    async fn screenshot_now(&self, permit: &agent::delivery::DeliveryPermit) -> Result<agent::mcp::ScreenshotResult> {
-        permit.check()?;
-        if self.screen_off.load(Ordering::Acquire) {
-            *self.screenshot_status.lock().unwrap() = None;
-            return Ok(agent::mcp::ScreenshotResult { images: vec![], warnings: vec![], notes: vec![SCREEN_OFF.into()] });
-        }
-        let work_permit = permit.clone();
-        let result = permit.run(async {
-        let guard = crate::archive::DiskGuard {
-            live_floor: None,
-            dir: self.shots.parent().context("screenshot root")?.into(),
-            floor: self.archive_floor.load(Ordering::Acquire),
-            status: Arc::new(Mutex::new(None)),
-        };
-        anyhow::ensure!(
-            guard.allows(256 * 1024 * 1024),
-            "screenshot archival paused below disk free-space floor"
-        );
-        let b = self
-            .buffer
-            .lock()
-            .unwrap()
-            .clone()
-            .context("screen capture is unavailable")?;
-        let shots = self.shots.clone();
-        let session = self.archive_session.lock().unwrap().clone();
-        #[cfg(test)]
-        let grab = self.test_grabber.lock().unwrap().clone();
-        tokio::task::spawn_blocking(move || -> Result<agent::mcp::ScreenshotResult> {
-            work_permit.check()?;
-            let now = capture::host_now_ns();
-            let m = screen::PhraseMatch {
-                source: "agent".into(),
-                phrase: "screenshot_now".into(),
-                start_ns: now,
-                trigger_ns: now,
-            };
-            #[cfg(test)]
-            let a = match grab {
-                Some(g) => screen::attach_command_with_grabber(&b, &m, now, &shots, |id| g(id))?,
-                None => screen::attach_command_screenshot(&b, &m, now, &shots)?,
-            };
-            #[cfg(not(test))]
-            let a = screen::attach_command_screenshot(&b, &m, now, &shots)?;
-            // While drawing mode is up, the screenshot carries the user's strokes.
-            crate::drawing::mark_shots(&a);
-            if let Err(e) = work_permit.check() {
-                for shot in &a.shots { let _ = std::fs::remove_file(&shot.path); }
-                return Err(e);
-            }
-            let warnings = a.full_resolution_errors.clone();
-            for warning in &warnings { eprintln!("Full-resolution screenshot unavailable: {warning}"); }
-            let images = if let Some(session) = session {
-                let journal = heimdall_archive::Journal::open(&session)?;
-                let (images, captured) = archive_screenshot_action(&journal, &a, "agent", &[], now)?;
-                journal.event("agent_screenshot", "agent", &[], now, json!({"command":m,"action":a,"shots":captured}))?;
-                images
-            } else {
-                a.shots.iter().map(|shot| context_attachment(std::fs::read(&shot.path)?)).collect::<Result<Vec<_>>>()?
-            };
-            Ok(agent::mcp::ScreenshotResult { images, warnings, notes: vec![] })
-        })
-        .await?
-        }).await;
-        *self.screenshot_status.lock().unwrap() = match &result {
-            Err(_) => Some("Screenshot unavailable".into()),
-            Ok(shots) if !shots.warnings.is_empty() => Some("Full-resolution screenshot unavailable".into()),
-            Ok(_) => None,
-        };
-        result
-    }
 
 }
 pub(super) const SPOKEN_MEMORY: std::time::Duration = std::time::Duration::from_secs(120);
-/// What the agent hears when it asks for a screenshot while Seeing is off: a plain failure. The agent is never told
-/// which switch is off ("you shouldn't know").
-pub const SCREEN_OFF: &str = "No screenshot was taken: screen capture is unavailable.";
+/// The error `look` and the screenshot tool return while Seeing is off (`Tools::seeing_off_error` adds since when).
+/// Bug notes 2026-11-10T15-35-42 and 2026-11-10T17-55-57: the old "screen capture is unavailable", returned as a
+/// success, sent the agent and the user hunting a capture fault three times on 10 Nov while Seeing had simply been
+/// switched off at 09:48 and 17:30. It is an error now, and it says why. (22 Oct's rule kept the switch unnamed; the
+/// agent could read it with `settings get seeing` anyway.)
+pub const SCREEN_OFF: &str = "SEEING_OFF: no screenshot was taken because Seeing is switched off in Heimdall";
+
+impl Tools {
+    /// Seeing on or off, from the settings in force: off also keeps when (a launch with it off says "launch").
+    pub(crate) fn set_screen_off(&self, off: bool, at_launch: bool) {
+        let was = self.screen_off.swap(off, Ordering::AcqRel);
+        let mut at = self.seeing_off_at.lock().unwrap();
+        if !off { *at = None; }
+        else if at_launch { *at = Some("launch".into()); }
+        else if !was || at.is_none() { *at = Some(chrono::Local::now().format("%H:%M").to_string()); }
+    }
+    /// The user's last 30 lines in the transcript (turns and pending), oldest first: what a `owner_asked` quote must be in
+    /// (the `settings` tool, the `computer` tool).
+    pub(crate) fn recent_user_lines(&self) -> Vec<String> {
+        let snapshot = self.send_context.lock().unwrap().snapshot();
+        let lines = snapshot.turns.iter().chain(&snapshot.pending).filter(|t| t.speaker.starts_with(decide::names::USER_LABEL));
+        let mut lines: Vec<String> = lines.map(|t| t.text.clone()).collect();
+        lines.drain(..lines.len().saturating_sub(30));
+        lines
+    }
+    /// What the agent gets when it asks for the screen while Seeing is off.
+    pub(crate) fn seeing_off_error(&self) -> String {
+        let since = match self.seeing_off_at.lock().unwrap().as_deref() {
+            Some("launch") => " (off since Heimdall started)".to_string(),
+            Some(t) => format!(" (off since {t})"),
+            None => String::new(),
+        };
+        format!("{SCREEN_OFF}{since}. Tell User Seeing is off; turn it on with settings only if he asks.")
+    }
+}
 
 /// The longest edge of a screenshot the agent receives (18 Oct: a 3456×2234 PNG went into its session as a 7.9 MB
 /// line). The archive keeps the capture at full resolution.

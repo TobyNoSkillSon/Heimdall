@@ -35,7 +35,7 @@ fn main() -> Result<()> {
             "question" => {
                 let input:decide::DecisionInput=serde_json::from_value(req["input"].clone())?;
                 let clock=Instant::now();
-                let (answers,tokens)=model.answer(&input,0.)?;
+                let (answers,tokens)=model.answer(&input)?;
                 json!({"answers":answers,"tokens":tokens,"request":model.last_question_request().cloned(),"ms":clock.elapsed().as_secs_f64()*1000.})
             }
             "reset" => {

@@ -265,7 +265,7 @@ pub fn display(row: &Row) -> Option<Display> {
         AgentLiveKind::Prompt => {
             let typed = typed(e);
             let (heading, body, tone) = match typed {
-                Some(text) => (crate::identity::USER_HEADING.to_string(), text, Tone::Primary),
+                Some(text) => (crate::identity::user_heading(), text, Tone::Primary),
                 None => (if e.sent || e.queued { "Sent" } else { "Would send" }.to_string(), clean_prompt(&e.text), Tone::Secondary),
             };
             // A typed bubble shows before it is sent (bug note 2026-11-01T00-20-27): queued, or not sent at all.
@@ -416,7 +416,7 @@ pub fn typed(e: &AgentLiveEntry) -> Option<String> {
     if e.kind != AgentLiveKind::Prompt {
         return None;
     }
-    if let Some(t) = &e.owner_text {
+    if let Some(t) = &e.user_text {
         return Some(t.clone());
     }
     let text = strip_delivery(&e.text);
@@ -672,7 +672,7 @@ pub fn demo_live_entries() -> Vec<AgentLiveEntry> {
         error: false,
         sent: true,
         queued: false,
-        owner_text: None,
+        user_text: None,
         usage: None,
     };
     let mut wake = e(
@@ -696,7 +696,7 @@ pub fn demo_live_entries() -> Vec<AgentLiveEntry> {
     );
     let mut typed = e("m1", 80, AgentLiveKind::Prompt, "[Heimdall delivery: m1]\n[Heimdall typed message]\nCan you check out the resampler branch and run its tests?");
     typed.editable = true;
-    typed.owner_text = Some("Can you check out the resampler branch and run its tests?".into());
+    typed.user_text = Some("Can you check out the resampler branch and run its tests?".into());
     let mut call2 = e("c2-call", 83, AgentLiveKind::ToolCall, "{\"command\":\"git -C ~/Code/Heimdall switch resampler && cargo test -p capture\"}");
     call2.tool_name = Some("bash".into());
     let mut result2 = e("c2-result", 95, AgentLiveKind::ToolResult, "test result: ok. 41 passed; 0 failed; 2 ignored");
@@ -750,7 +750,7 @@ mod tests {
             error: false,
             sent: true,
             queued: false,
-            owner_text: None,
+            user_text: None,
             usage: None,
         }
     }
@@ -913,13 +913,13 @@ mod tests {
         let mut typed_entry = entry("m", AgentLiveKind::Prompt, "[Heimdall delivery: m]\n[Heimdall typed message]\nhello there");
         assert_eq!(typed(&typed_entry).as_deref(), Some("hello there"));
         let d = display(&Row::Live(typed_entry.clone())).unwrap();
-        assert_eq!((d.heading.as_str(), d.body.as_str()), (crate::identity::USER_HEADING, "hello there"));
+        assert_eq!((d.heading.as_str(), d.body.as_str()), (crate::identity::user_heading().as_str(), "hello there"));
         typed_entry.sent = false;
         typed_entry.queued = true;
-        assert_eq!(display(&Row::Live(typed_entry.clone())).unwrap().heading, format!("{} · queued", crate::identity::USER_HEADING));
+        assert_eq!(display(&Row::Live(typed_entry.clone())).unwrap().heading, format!("{} · queued", crate::identity::user_heading()));
         typed_entry.queued = false;
         typed_entry.error = true;
-        assert_eq!(display(&Row::Live(typed_entry)).unwrap().heading, format!("{} · not sent", crate::identity::USER_HEADING), "a typed bubble whose send failed");
+        assert_eq!(display(&Row::Live(typed_entry)).unwrap().heading, format!("{} · not sent", crate::identity::user_heading()), "a typed bubble whose send failed");
         let wake = entry(
             "d",
             AgentLiveKind::Prompt,

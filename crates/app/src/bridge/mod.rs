@@ -24,9 +24,10 @@ use tokio::sync::{mpsc, oneshot};
 
 mod adapters;
 mod hold;
-mod speech;
+pub(crate) mod speech;
 /// When Heimdall makes a sound and when it keeps quiet: the wake sound, conversations (night pass 3).
 pub(crate) mod speech_policy;
+pub(crate) mod call_interrupt;
 pub(crate) mod echo_cancel;
 mod intent;
 mod tools;
@@ -52,6 +53,7 @@ pub(crate) use self::speech::attach_speech_level;
 pub use self::speech::VOICE_SAMPLE;
 pub use self::tools::Tools;
 pub use self::intent::IntentGeneration;
+#[cfg(test)]
 pub use self::tools::SCREEN_OFF;
 pub(crate) use self::tools::archive_screenshot_action;
 pub(crate) use self::tools::{context_attachment, CONTEXT_EDGE_PX};

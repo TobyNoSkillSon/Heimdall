@@ -30,6 +30,8 @@ use crate::islands::{binding, digest, files::Root, stages};
 /// here exactly as the app will clean it before drawing.
 #[path = "../../islands/src/model/html_charts.rs"]
 mod html_charts;
+// The drawing half (the page around a fragment, its cache key, the height cap) serves the islands app.
+#[allow(dead_code)]
 #[path = "../../islands/src/model/html.rs"]
 pub mod island_html;
 use anyhow::{Context, Result};
@@ -74,9 +76,10 @@ pub const OWN_PART: &str = "islandAgent";
 /// The plan refresher's mark: on a bound island its old parts give way to this job's.
 const REFRESHER_PART: &str = "refresher";
 
-/// The final instructions (Assistant/Plans/island-design/agent-prompt.md, copied as they are). The public edition has
-/// its own copy without the user's quotes and paths (docs/editions.md).
-/// The HTML body (3 Nov) is its own addendum after it, so the frozen copy stays as it is.
+/// The instructions, then the design guide for the HTML body (6 Nov 12:03, the user: "I don't want a fixed visual
+/// skeleton. I want to add some structured guidance."): one document in two files, replacing the 30 Oct prompt and
+/// its 4 Nov addendum, which contradicted each other. The public edition has its own copy without the user's quotes and
+/// paths (docs/editions.md).
 #[cfg(not(feature = "public"))]
 pub const SYSTEM: &str = concat!(include_str!("../prompt/island-agent.md"), "\n", include_str!("../prompt/island-agent-html.md"));
 #[cfg(feature = "public")]
@@ -279,7 +282,9 @@ pub fn schema() -> Value {
                 "required": ["type"], "additionalProperties": false}},
             "helpers": {"type": "array", "items": {"type": "object", "properties": {"title": {"type": "string"}, "state": {"type": "string", "enum": ["now", "done"]}}, "required": ["title", "state"], "additionalProperties": false}},
             "open": {"type": "string"},
-            "progress": {"type": "number"},
+            // Night 8 Nov log sweep, finding 2: "only when the signals give a count" reads as null to the model, and a
+            // null rejected the whole answer; code owns progress, so null is accepted as absent.
+            "progress": {"type": ["number", "null"]},
             "html": {"type": "string"},
             "sent": {"type": "string"}
         },
@@ -302,12 +307,13 @@ pub fn signals(snap: &Snapshot, island: &Map<String, Value>, previous: Option<&V
     let shown = match snap.state.as_str() { "done" | "failed" => stages::Shown::Ended, "waiting" => stages::Shown::Asking, _ => stages::Shown::Running };
     let task = snap.raw.read["thread"]["title"].as_str().map(digest::without_tag).map(str::to_owned)
         .or_else(|| island.get("title").and_then(Value::as_str).map(str::to_owned)).unwrap_or_default();
-    let open: Vec<&String> = s.subs_open.iter().collect();
-    let finished: Vec<&String> = s.subs_names.iter().filter(|t| !s.subs_open.contains(t)).collect();
     let picture_min_ago = snap.image.as_ref().and(s.picture_at).map(|t| ((s.now - t) / 60.0).round().max(0.0));
     let mut v = json!({
         "task": task,
-        "brief": s.brief,
+        // The island's name now. The island agent names the thing and corrects it when the work changes (bug note
+        // 2026-11-10T17-13-24); a name Heimdall gave (`title_fixed`) is copied exactly.
+        "title": island.get("title").and_then(Value::as_str).unwrap_or(""),
+        "goal": s.brief.as_deref().map(goal),
         "now": hhmm(s.now),
         "elapsed_min": ((s.now - s.started) / 60.0).round(),
         "state_hint": snap.state,
@@ -317,9 +323,8 @@ pub fn signals(snap: &Snapshot, island: &Map<String, Value>, previous: Option<&V
             .unwrap_or(if shown == stages::Shown::Asking { "Your answer" } else if s.stage == "Starting" { "Reading" } else { s.stage.as_str() }),
         "history": s.history_minutes(shown, &snap.state),
         "recent": s.recent.iter().map(|(t, l)| format!("{} {l}", hhmm(*t))).collect::<Vec<_>>(),
-        "helpers": {"working": open, "finished": finished},
-        "counters": {"files": s.files, "commits": s.commits, "tests_passed": s.passed, "sources": s.sources,
-                     "latest_picture": snap.image, "picture_min_ago": picture_min_ago},
+        "subagents": subagents(snap),
+        "counters": counters(snap, picture_min_ago),
     });
     if let Some(q) = &snap.question {
         let first = q.items.first();
@@ -329,7 +334,7 @@ pub fn signals(snap: &Snapshot, island: &Map<String, Value>, previous: Option<&V
         let mut l = a.lines();
         v["question"] = json!({"kind": "command", "prompt": l.next().unwrap_or(""), "reason": l.next().unwrap_or(""), "options": ["Decline", "Approve"]});
     }
-    if let Some(t) = &s.owner { v["owner"] = json!(t) }
+    if let Some(t) = &s.owner { v["user"] = json!(t) } // the prompt's `user` signal (was `the user` before 14 Nov)
     if let Some(t) = &s.train {
         let evals: Map<String, Value> = t.evals.last().map(|(_, e)| e.iter().map(|(k, x)| (k.clone(), if (0.0..=1.0).contains(x) { json!((x * 1000.0).round() / 10.0) } else { json!(x) })).collect()).unwrap_or_default();
         v["metrics"] = json!({"run": t.run, "status": t.status, "step": t.step, "total_steps": t.total, "loss": t.loss,
@@ -337,9 +342,72 @@ pub fn signals(snap: &Snapshot, island: &Map<String, Value>, previous: Option<&V
     }
     if !s.merged.is_empty() { v["merged"] = json!(s.merged) }
     if let Some(st) = s.status.as_deref().and_then(read_status) { v["status"] = st }
-    if let Some(p) = previous { v["previous_island"] = p.clone() }
+    if let Some(p) = previous { v["previous_island"] = carried(p) }
     v["sent"] = json!(island.get("sent").and_then(Value::as_str).map(digest::one_line).unwrap_or_default());
+    if !crate::islands::names::worker_may_name(island, &task) { v["title_fixed"] = json!(true) }
     v
+}
+
+// The smart input ("the whole thread is wasteful, and only the last message is too little"): the
+// brief's goal, a compact window of the agent's recent lines and signals, each sub-agent's state, and the previous
+// island as the carried history ("this was happening"); no running notes beside it.
+
+/// The goal the island serves: the brief's opening, at most `GOAL_CHARS`, on one line.
+pub const GOAL_CHARS: usize = 600;
+/// The most sub-agents the input names (working first, then the newest finished).
+pub const SUBAGENTS_CAP: usize = 8;
+
+fn goal(brief: &str) -> String { digest::clip(&digest::one_line(brief), GOAL_CHARS) }
+
+/// Each sub-agent as the island should show it: its name, its model when it is not the parent's kind (a judge on
+/// GPT), whether it works now, finished or failed, and how long ago it last moved. From the pass's thread list, so no
+/// extra T3 read; the helper names the reducer saw stand in when the list is not there.
+pub fn subagents(snap: &Snapshot) -> Vec<Value> {
+    let now = chrono::Utc::now();
+    let s = &snap.signals;
+    let mut out: Vec<(u8, f64, Value)> = snap.raw.children.iter().map(|k| {
+        let name = digest::without_tag(k["title"].as_str().unwrap_or("sub-agent")).to_owned();
+        let status = k["status"].as_str().unwrap_or("");
+        let state = if binding::child_working(k, now) { "working" } else if matches!(status, "failed" | "cancelled" | "interrupted" | "rolled_back") { "failed" } else { "done" };
+        let min = k["updatedAt"].as_str().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+            .map(|t| ((now - t.with_timezone(&chrono::Utc)).num_seconds().max(0) as f64 / 60.0).round()).unwrap_or(0.0);
+        let mut v = json!({"name": name, "state": state, "min_ago": min});
+        if let Some(m) = k["model"].as_str().filter(|m| !m.is_empty()) { v["model"] = json!(m) }
+        (if state == "working" { 0 } else { 1 }, min, v)
+    }).collect();
+    if out.is_empty() {
+        out = s.subs_names.iter().map(|n| (if s.subs_open.contains(n) { 0 } else { 1 }, 0.0,
+            json!({"name": n, "state": if s.subs_open.contains(n) { "working" } else { "done" }}))).collect();
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    out.into_iter().take(SUBAGENTS_CAP).map(|x| x.2).collect()
+}
+
+/// The counters that say something: only those that are there (no zeros, no empty lists).
+fn counters(snap: &Snapshot, picture_min_ago: Option<f64>) -> Value {
+    let s = &snap.signals;
+    let mut m = Map::new();
+    if let Some(p) = s.passed.filter(|p| *p > 0) { m.insert("tests_passed".into(), json!(p)); }
+    if !s.sources.is_empty() { m.insert("sources".into(), json!(s.sources)); }
+    if let Some(p) = &snap.image {
+        m.insert("latest_picture".into(), json!(p));
+        if let Some(a) = picture_min_ago { m.insert("picture_min_ago".into(), json!(a)); }
+    }
+    Value::Object(m)
+}
+
+/// The previous island as the history it carries: what it said and drew, without the fallback parts and helper rows
+/// that repeat it.
+pub fn carried(previous: &Value) -> Value {
+    let mut p = previous.clone();
+    if let Some(o) = p.as_object_mut() { for k in ["parts", "helpers", "sent", "open", "progress"] { o.remove(k); } }
+    p
+}
+
+/// A title that names nothing yet ("Task", "Task 2": `binding::task_island` found no words): the agent may name it.
+pub fn placeholder_title(t: &str) -> bool {
+    let t = t.trim();
+    t.is_empty() || t == "Task" || t.strip_prefix("Task ").is_some_and(|n| n.chars().all(|c| c.is_ascii_digit()))
 }
 
 fn status_path(p: &str) -> std::path::PathBuf {
@@ -418,6 +486,44 @@ fn numbers(text: &str) -> Vec<f64> {
     out
 }
 
+/// The small counts the signals spell out ("Heimdall's three fixes", "two local commits"): the agent writes them as
+/// digits, so they count as numbers the signals carry (night review H3, 6 Nov: since the input lost the brief's
+/// digits and the files and commits counts, 3 and 2 taken from those words failed on most wakes of the sleep pass).
+fn word_numbers(text: &str) -> Vec<f64> {
+    const WORDS: [&str; 20] = ["one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve",
+        "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty"];
+    let lower = text.to_lowercase();
+    let mut out: Vec<f64> = lower.split(|c: char| !c.is_ascii_alphabetic()).filter_map(|w| WORDS.iter().position(|n| *n == w)).map(|i| (i + 1) as f64).collect();
+    out.sort_by(f64::total_cmp);
+    out.dedup();
+    out
+}
+
+/// The counts the signals carry as lists rather than digits: each list's length, and the sub-agents working, done
+/// and failed (F7, 10 Nov: "4 sub-agents" and "3 done" drawn from the `subagents` list failed as numbers "not in the
+/// signals", a repair turn each). Only lists: an object's key count is no count the user reads.
+fn implied_counts(signals: &Value) -> Vec<f64> {
+    fn walk(v: &Value, out: &mut Vec<f64>) {
+        match v {
+            Value::Array(a) => {
+                if !a.is_empty() { out.push(a.len() as f64) }
+                a.iter().for_each(|x| walk(x, out));
+            }
+            Value::Object(o) => o.values().for_each(|x| walk(x, out)),
+            _ => {}
+        }
+    }
+    let mut out = vec![];
+    walk(signals, &mut out);
+    for state in ["working", "done", "failed"] {
+        let n = signals["subagents"].as_array().into_iter().flatten().filter(|a| a["state"] == state).count();
+        if n > 0 { out.push(n as f64) }
+    }
+    out.sort_by(f64::total_cmp);
+    out.dedup();
+    out
+}
+
 /// A number the signals carry (to its shown precision, or as a percentage of a share).
 fn grounded(v: f64, known: &[f64]) -> bool {
     known.iter().any(|n| (n - v).abs() <= (0.01 * n.abs()).max(0.005) || (n * 100.0 - v).abs() <= 0.5)
@@ -469,10 +575,17 @@ pub fn check(answer: &str, signals: &Value, snap: &Snapshot) -> Checked {
     let mut c = Checked::default();
     let o = match parse(answer) { Ok(o) => o, Err(e) => { c.failures.push(format!("{e}")); return c } };
     c.drew = Value::Object(o.clone());
-    let known = numbers(&signals.to_string());
+    let text = signals.to_string();
+    let mut known = numbers(&text);
+    known.extend(word_numbers(&text));
+    known.extend(implied_counts(signals));
     let s = |k: &str| o.get(k).and_then(Value::as_str).map(str::trim).unwrap_or("").to_owned();
     let title = s("title");
-    if title.split_whitespace().count() > TITLE_WORDS || title.chars().count() > TITLE_CHARS { c.failures.push(format!("title \"{title}\" over {TITLE_WORDS} words or {TITLE_CHARS} characters")) }
+    // The title is code's and the answer copies it: only a name the agent gives a placeholder island is held to the
+    // limits (review: a code title over them must not cost a repair turn on every wake).
+    let copied = signals["title"].as_str().is_some_and(|t| t == title && !placeholder_title(t));
+    if signals["title_fixed"] == true && !copied { c.failures.push(format!("title is Heimdall's name \"{}\": copy it exactly", signals["title"].as_str().unwrap_or(""))) }
+    if !copied && (title.split_whitespace().count() > TITLE_WORDS || title.chars().count() > TITLE_CHARS) { c.failures.push(format!("title \"{title}\" over {TITLE_WORDS} words or {TITLE_CHARS} characters")) }
     else if !title.is_empty() && crate::islands::tools::style_problem(&snap.island, json!({"title": title}).as_object().unwrap(), false).is_none() { c.title = Some(title) }
     let stage = s("stage");
     if stage.split_whitespace().count() > STAGE_WORDS { c.failures.push(format!("stage \"{stage}\" over {STAGE_WORDS} words")) }
@@ -670,9 +783,11 @@ fn number(v: f64) -> String {
 /// clears its graphic (each moment's graphic is drawn anew). The now line marks the run as the agent's
 /// (`summaryRun`, `summaryStage`: code's first-sentence fallback steps back while the moment lasts). Title, icon, helpers' names and the open target are
 /// written as checked; state only `failed` or `waiting` over a done run. Returns whether anything changed.
-pub fn apply(root: &Root, island: &str, run: &str, moment: &str, c: &Checked) -> Result<bool> {
-    root.locked(|| {
-        let Some(mut o) = root.read(island) else { return Ok(false) };
+pub fn apply(root: &Root, island: &str, run: &str, moment: &str, task: &str, c: &Checked) -> Result<bool> {
+    let named = std::cell::RefCell::new(None);
+    let out = root.locked(|| {
+        // Lane R: nor written over once it became its report island during the call.
+        let Some(mut o) = root.read(island).filter(|o| !crate::islands::kept_report::is_report(o)) else { return Ok(false) };
         let mut patch = Map::new();
         let others: Vec<Value> = o.get("parts").and_then(Value::as_array).into_iter().flatten()
             .filter(|p| p.get(OWN_PART).is_none() && p.get(REFRESHER_PART).is_none()).cloned().collect();
@@ -687,9 +802,15 @@ pub fn apply(root: &Root, island: &str, run: &str, moment: &str, c: &Checked) ->
             patch.insert("summaryRun".into(), json!(run));
             patch.insert("summaryStage".into(), json!(moment));
         }
-        if let Some(t) = &c.title {
-            patch.insert("title".into(), json!(t));
-            if let Some(Value::Object(th)) = o.get("thread") { let mut th = th.clone(); th.insert("title".into(), json!(t)); patch.insert("thread".into(), Value::Object(th)); }
+        // The island agent names the thing (bug note 2026-11-10T17-13-24): over code's placeholder and its own earlier
+        // name, never over one Heimdall gave (`names::worker_may_name`), and never a name another island shows (bug
+        // note 2026-11-06T12-02-01: three islands said "Feedback inbox").
+        let taken = |t: &str| root.all().iter().any(|(id, x)| id != island && x.get("title").and_then(Value::as_str).is_some_and(|y| y.trim().eq_ignore_ascii_case(t.trim())));
+        if let Some(t) = c.title.as_ref().filter(|t| crate::islands::names::worker_may_name(&o, task) && !taken(t)) {
+            if o.get("title").and_then(Value::as_str) != Some(t.as_str()) {
+                patch.insert("title".into(), json!(t));
+                patch.insert("titleBy".into(), json!(crate::islands::names::BY_WORKER));
+            }
         }
         if let Some(i) = &c.icon { patch.insert("icon".into(), json!(i)); }
         if let Some(h) = &c.helpers { patch.insert("helpers".into(), if h.is_empty() { Value::Null } else { Value::Array(h.clone()) }); }
@@ -701,9 +822,15 @@ pub fn apply(root: &Root, island: &str, run: &str, moment: &str, c: &Checked) ->
         if patch.is_empty() { return Ok(false) }
         crate::islands::files::merge(&mut o, &patch);
         crate::islands::tools::stamp_now(&mut o, &patch);
-        crate::islands::files::write_atomic(&root.file(island), &Value::Object(o))?;
+        crate::islands::files::write_atomic(&root.file(island), &Value::Object(o.clone()))?;
+        if let (Some(t), Some(th)) = (patch.get("title").and_then(Value::as_str), crate::islands::names::thread_of(&o)) {
+            *named.borrow_mut() = Some((th.to_owned(), t.to_owned()));
+        }
         Ok(true)
-    })
+    });
+    // Kept for the thread, so a re-made island comes back under it (bug note 2026-11-10T18-32-39).
+    if let Some((th, t)) = named.into_inner() { crate::islands::names::remember(root, &th, &t, crate::islands::names::BY_WORKER) }
+    out
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -736,17 +863,63 @@ pub struct Config {
 
 fn now_s() -> f64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs_f64() }
 
+// ---- Out of every account: one visible line (night 1111, lane I) ----
+// The islands worker follows a usable account through `background_fallback::route` (the same Claude model on another
+// Claude Code account, the spent one skipped). When nothing is usable its calls stop: that is no longer silent. One
+// line on Scheduled's guarantee ("Not sure") says so until a call goes through again (`islands::guarantee::write`).
+
+fn out_path(root: &Root) -> std::path::PathBuf { root.0.join("island-agent-out.json") }
+
+/// The line Scheduled shows while the islands worker cannot run, if it cannot.
+pub fn out_line(root: &Root) -> Option<String> {
+    crate::islands::files::read_object(&out_path(root))?.get("line").and_then(Value::as_str).map(str::to_owned)
+}
+
+/// Records that the worker cannot run (`Some(line)`) or runs again (`None`); logs each change once.
+pub fn note_out(root: &Root, line: Option<&str>) {
+    let was = out_line(root);
+    if was.as_deref() == line { return }
+    match line {
+        Some(l) => {
+            eprintln!("Island agent: {l}");
+            if let Err(e) = crate::islands::files::write_atomic(&out_path(root), &json!({"line": l, "since": now_s() as i64})) { eprintln!("Island agent: out line not written: {e:#}") }
+        }
+        None => {
+            let _ = std::fs::remove_file(out_path(root));
+            if was.is_some() { eprintln!("Island agent: island updates run again") }
+        }
+    }
+}
+
+/// Why a task endpoint without a credential cannot run: every account spent (until when), or nothing connected.
+pub fn out_reason(e: &crate::plan_refresher::Endpoint, now_ms: u64) -> String {
+    match crate::background_gate::spent_until(e.provider, now_ms) {
+        Some(u) if u != u64::MAX => {
+            let at = chrono::DateTime::from_timestamp_millis(u as i64).map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string()).unwrap_or_default();
+            format!("Island updates paused: every account is out of quota until {at}")
+        }
+        Some(_) => "Island updates paused: every account is out of quota".into(),
+        None => "Island updates paused: no model account is usable".into(),
+    }
+}
+
 /// One due island's call, start to finish. `Ok(None)`: skipped (off, paused, no key).
 pub async fn run_one(cfg: &Config, triggers: &mut Triggers, island: &str, reason: Reason, now: f64) -> Result<Option<bool>> {
-    if !(cfg.enabled)() || crate::background_gate::emergency_paused().is_some() { triggers.defer(island, now); return Ok(None) }
-    let resolve = cfg.endpoint.clone();
-    let endpoint = tokio::task::spawn_blocking(move || resolve()).await?;
-    if endpoint.key.is_none() { triggers.defer(island, now); return Ok(None) }
+    if !(cfg.enabled)() { note_out(&cfg.root, None); triggers.defer(island, now); return Ok(None) }
+    if crate::background_gate::emergency_paused().is_some() { triggers.defer(island, now); return Ok(None) }
+    let endpoint = crate::background_fallback::resolve_off_runtime(cfg.endpoint.clone()).await?;
+    if endpoint.key.is_none() { note_out(&cfg.root, Some(&out_reason(&endpoint, agent::now_ms()))); triggers.defer(island, now); return Ok(None) }
     let Some(snap) = triggers.begin(island, now) else { return Ok(None) };
-    let Some(on_disk) = cfg.root.read(island) else { triggers.forget(island); return Ok(None) };
+    // Lane R: a job island that became its report island is no longer the agent's to draw.
+    let Some(on_disk) = cfg.root.read(island).filter(|o| !crate::islands::kept_report::is_report(o)) else { triggers.forget(island); return Ok(None) };
     let sig = signals(&snap, &on_disk, triggers.previous(island));
     let msg = message(&sig);
-    let answer = cfg.model.ask(&endpoint, msg.clone()).await?;
+    // Bug note 2026-11-08T02-03-51: a call that meets a spent account goes once more where the task routes now.
+    let (answer, endpoint) = crate::background_fallback::once_more(endpoint, cfg.endpoint.clone(), |e| {
+        let msg = msg.clone();
+        async move { cfg.model.ask(&e, msg).await }
+    }).await?;
+    note_out(&cfg.root, None);
     let mut c = check(&answer, &sig, &snap);
     let mut repaired = false;
     if !c.failures.is_empty() {
@@ -758,7 +931,7 @@ pub async fn run_one(cfg: &Config, triggers: &mut Triggers, island: &str, reason
     }
     if c.drew.is_object() { triggers.drew(island, c.drew.clone()) }
     let shown = match snap.state.as_str() { "done" | "failed" => stages::Shown::Ended, "waiting" => stages::Shown::Asking, _ => stages::Shown::Running };
-    let changed = apply(&cfg.root, island, &snap.signals.run, binding::summary_key(shown, &snap.signals.stage), &c)?;
+    let changed = apply(&cfg.root, island, &snap.signals.run, binding::summary_key(shown, &snap.signals.stage), sig["task"].as_str().unwrap_or(""), &c)?;
     eprintln!("Island agent: '{island}' (thread {}) for {}: {} part(s){}{}{}{}", snap.thread, reason.says(), c.parts.len(),
         if c.summary.is_some() { ", a now line" } else { "" }, if repaired { ", after a repair turn" } else { "" },
         if c.failures.is_empty() { String::new() } else { format!(", left out: {}", c.failures.join("; ")) }, if changed { "" } else { ", unchanged" });

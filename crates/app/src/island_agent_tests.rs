@@ -133,7 +133,7 @@ fn the_signals_carry_the_contracts_fields_and_the_pictures_age() {
     s.image = Some("/x/pictures/d-1.png".into());
     let island = json!({"title": "Decider V5", "sent": "Train Decider V5 on the new data"}).as_object().unwrap().clone();
     let v = signals(&s, &island, Some(&json!({"title": "Decider V5", "icon": "brain"})));
-    for k in ["task", "brief", "now", "elapsed_min", "state_hint", "stage", "history", "recent", "helpers", "counters", "metrics", "previous_island", "sent"] {
+    for k in ["task", "goal", "now", "elapsed_min", "state_hint", "stage", "history", "recent", "subagents", "counters", "metrics", "previous_island", "sent"] {
         assert!(v.get(k).is_some(), "{k} in {v}");
     }
     assert_eq!(v["counters"]["latest_picture"], "/x/pictures/d-1.png");
@@ -207,20 +207,131 @@ fn applying_writes_the_checked_island_and_hands_the_now_line_to_the_agent() {
         {"type": "band", "code": true, "segments": []}]}).as_object().unwrap()).unwrap();
     let c = Checked { title: Some("Decider V5".into()), icon: Some("brain".into()), summary: Some("Training; step 400 is the new best".into()),
         parts: vec![json!({"type": "line", "points": [1.0, 0.5], "unit": "loss", OWN_PART: true})], helpers: Some(vec![json!({"title": "Fresh review", "state": "now"})]), ..Default::default() };
-    assert!(apply(&root, "d", "run-1", "Training", &c).unwrap());
+    assert!(apply(&root, "d", "run-1", "Training", "", &c).unwrap());
     let o = root.read("d").unwrap();
     let types: Vec<&str> = o["parts"].as_array().unwrap().iter().map(|p| p["type"].as_str().unwrap()).collect();
     assert_eq!(types, ["line", "text", "band"], "its graphic first, the question, the band last; the refresher's and its old part go");
-    assert_eq!((o["title"].as_str(), o["thread"]["title"].as_str(), o["icon"].as_str()), (Some("Decider V5"), Some("Decider V5"), Some("brain")));
+    assert_eq!((o["title"].as_str(), o["icon"].as_str()), (Some("Decider V5"), Some("brain")), "an island still called Task takes the agent's title");
     assert_eq!((o["summary"].as_str(), o["summaryRun"].as_str(), o["summaryStage"].as_str()), (Some("Training; step 400 is the new best"), Some("run-1"), Some("Training")));
     assert_eq!(o["helpers"][0]["title"], "Fresh review");
     assert_eq!(o["state"], "running", "state is code's");
-    assert!(!apply(&root, "d", "run-1", "Training", &c).unwrap(), "unchanged: not rewritten");
+    assert!(!apply(&root, "d", "run-1", "Training", "", &c).unwrap(), "unchanged: not rewritten");
     // A failed run code reads as done: the agent's reading stands.
     root.patch("d", |o| { o.insert("state".into(), json!("done")); }).unwrap();
-    apply(&root, "d", "run-1", "end", &Checked { state: Some("failed".into()), ..c.clone() }).unwrap();
+    apply(&root, "d", "run-1", "end", "", &Checked { state: Some("failed".into()), ..c.clone() }).unwrap();
     assert_eq!(root.read("d").unwrap()["state"], "failed");
-    assert!(!apply(&root, "gone", "run-1", "Training", &c).unwrap(), "a removed island stays removed");
+    assert!(!apply(&root, "gone", "run-1", "Training", "", &c).unwrap(), "a removed island stays removed");
+    // Bug note 2026-11-06T12-02-01: the title is code's, from the task; an agent naming it after its latest lines
+    // ("Acme CVs" on a four-CV task) changes nothing.
+    root.put("cvs", json!({"title": "CVs", "state": "running", "thread": {"id": "t2", "title": "CVs"}}).as_object().unwrap()).unwrap();
+    apply(&root, "cvs", "run-1", "Editing", "", &Checked { title: Some("Acme CVs".into()), ..c.clone() }).unwrap();
+    assert_eq!(root.read("cvs").unwrap()["title"], "CVs");
+}
+
+/// Bug notes 2026-11-10T17-12-35, 17-13-24, 18-32-39: the island agent names the thing and corrects it as the work
+/// changes; Heimdall's own name (islands_put) sticks; a name never repeats another island's; and a name given to a
+/// thread's island comes back when a new run re-makes the island after it retired.
+#[test]
+fn the_island_agent_names_the_island_and_heimdalls_name_sticks_through_new_runs() {
+    let d = tempfile::tempdir().unwrap();
+    let h = crate::islands::Host::new(Root(d.path().to_path_buf()), None);
+    let root = h.root.clone();
+    let task = "Rebuild the office AI hardware page (Opus 5.5, same brief)";
+    crate::islands::binding::task_island(&h, "th-office", task, "").unwrap();
+    let id = "task-office-ai-hardware";
+    let o = root.read(id).unwrap();
+    assert_eq!((o["title"].as_str(), o["titleBy"].as_str()), (Some("Office AI hardware"), Some("task")), "the placeholder, marked as code's");
+    // Review 1111 S2: Heimdall re-sending the placeholder with an update is not a naming; the worker may still rename.
+    crate::islands::tools::put(&h, &json!({"id": id, "title": " Office AI hardware", "stage": "Reading"})).unwrap();
+    let o = root.read(id).unwrap();
+    assert_eq!((o["title"].as_str(), o["titleBy"].as_str(), o["stage"].as_str()), (Some("Office AI hardware"), Some("task"), Some("Reading")));
+    assert!(crate::islands::names::named(&root, "th-office").is_none());
+    let named = |t: &str| Checked { title: Some(t.into()), ..Default::default() };
+    // The worker's first update names it; a later one corrects it when the work changed.
+    assert!(apply(&root, id, "run-1", "Building", task, &named("Hardware page")).unwrap());
+    assert_eq!((root.read(id).unwrap()["title"].as_str(), root.read(id).unwrap()["titleBy"].as_str()), (Some("Hardware page"), Some("worker")));
+    apply(&root, id, "run-1", "Building", task, &named("Hardware bench")).unwrap();
+    assert_eq!(root.read(id).unwrap()["title"], "Hardware bench");
+    // Never a name another island shows.
+    root.put("other", json!({"title": "Heimdall bench", "state": "running"}).as_object().unwrap()).unwrap();
+    apply(&root, id, "run-1", "Building", task, &named("heimdall bench")).unwrap();
+    assert_eq!(root.read(id).unwrap()["title"], "Hardware bench");
+    // Heimdall renames it: the worker copies that from now on and cannot overwrite it.
+    crate::islands::tools::put(&h, &json!({"id": id, "title": "AI hardware website"})).unwrap();
+    assert_eq!(root.read(id).unwrap()["titleBy"], "agent");
+    apply(&root, id, "run-2", "Building", task, &named("Hardware page")).unwrap();
+    assert_eq!(root.read(id).unwrap()["title"], "AI hardware website");
+    let mut sn = snap(id, "Building", "running");
+    sn.island = id.into();
+    let sig = signals(&sn, &root.read(id).unwrap(), None);
+    assert_eq!(sig["title_fixed"], true);
+    let c = check(&answer(json!({"title": "Hardware page"})), &sig, &sn);
+    assert!(c.failures.iter().any(|f| f.contains("copy it exactly")), "{:?}", c.failures);
+    // The island retires after the user saw it done; a message starts a new run and the island is made again: Heimdall's
+    // name comes back, not the task title's.
+    root.remove(id).unwrap();
+    h.bindings.unbind(id);
+    crate::islands::binding::task_island(&h, "th-office", task, "").unwrap();
+    let back: Vec<_> = root.all().into_iter().filter(|(_, o)| crate::islands::names::thread_of(o) == Some("th-office")).collect();
+    assert_eq!(back.len(), 1);
+    assert_eq!((back[0].1["title"].as_str(), back[0].1["titleBy"].as_str()), (Some("AI hardware website"), Some("agent")));
+    // The same for a name the worker gave.
+    crate::islands::binding::task_island(&h, "th-bench", "Report: how to build a Heimdall benchmark", "").unwrap();
+    let bench = root.all().into_iter().find(|(_, o)| crate::islands::names::thread_of(o) == Some("th-bench")).unwrap();
+    assert_eq!(bench.1["title"], "Heimdall benchmark");
+    apply(&root, &bench.0, "run-1", "Running", "Report: how to build a Heimdall benchmark", &named("Bench run")).unwrap();
+    root.remove(&bench.0).unwrap();
+    h.bindings.unbind(&bench.0);
+    crate::islands::binding::task_island(&h, "th-bench", "Report: how to build a Heimdall benchmark", "").unwrap();
+    let again = root.all().into_iter().find(|(_, o)| crate::islands::names::thread_of(o) == Some("th-bench")).unwrap();
+    assert_eq!((again.1["title"].as_str(), again.1["titleBy"].as_str()), (Some("Bench run"), Some("worker")));
+}
+
+#[test]
+fn the_input_is_the_goal_a_recent_window_each_sub_agent_and_the_previous_island() {
+    let mut s = snap("p", "Sub-agents", "running");
+    s.signals.brief = Some(format!("Prepare the Arsenal promo for X.\n\nRun a beauty climb with two judges. {}", "x".repeat(2000)));
+    let now = chrono::Utc::now();
+    let at = |min: i64| (now - chrono::Duration::minutes(min)).to_rfc3339();
+    s.raw.children = vec![
+        json!({"title": "Opus judge round 1", "status": "completed", "settled": true, "updatedAt": at(20), "model": "claude-opus-5-5"}),
+        json!({"title": "Sol judge round 2 [heimdall:abc]", "status": "running", "updatedAt": at(1), "model": "gpt-6.1-sol"}),
+        json!({"title": "Opus judge round 2", "status": "failed", "updatedAt": at(3)}),
+    ];
+    let prev = json!({"title": "Arsenal promo", "summary": "Judging round 1", "html": "<x-line series=\"6.1\"></x-line>", "parts": [{"type": "stat", "value": "6"}], "helpers": [], "sent": "x"});
+    let v = signals(&s, &Map::new(), Some(&prev));
+    let goal = v["goal"].as_str().unwrap();
+    assert!(goal.starts_with("Prepare the Arsenal promo for X. Run a beauty climb") && goal.chars().count() <= GOAL_CHARS, "{goal}");
+    let subs = v["subagents"].as_array().unwrap();
+    assert_eq!(subs.iter().map(|x| (x["name"].as_str().unwrap(), x["state"].as_str().unwrap())).collect::<Vec<_>>(),
+        [("Sol judge round 2", "working"), ("Opus judge round 2", "failed"), ("Opus judge round 1", "done")], "working first, then the newest");
+    assert_eq!(subs[0]["model"], "gpt-6.1-sol");
+    assert_eq!(v["previous_island"], json!({"title": "Arsenal promo", "summary": "Judging round 1", "html": "<x-line series=\"6.1\"></x-line>"}), "the history it carries, without its fallback");
+    assert_eq!(v["counters"], json!({}), "no zero counters");
+}
+
+/// F7 (10 Nov): "4 sub-agents, 3 done" counts the `subagents` list; the signals carry those counts as a list, not as
+/// digits, and the html failed as "the html's 4 is not in the signals" (a repair turn each). A number no list or
+/// field carries still fails.
+#[test]
+fn counts_of_the_signals_lists_are_grounded_and_invented_numbers_still_fail() {
+    let mut s = snap("p", "Sub-agents", "running");
+    let now = chrono::Utc::now().to_rfc3339();
+    s.raw.children = vec![
+        json!({"title": "Port parser", "status": "completed", "settled": true, "updatedAt": now}),
+        json!({"title": "Port solver", "status": "completed", "settled": true, "updatedAt": now}),
+        json!({"title": "Port tests", "status": "completed", "settled": true, "updatedAt": now}),
+        json!({"title": "Fresh review", "status": "running", "updatedAt": now}),
+    ];
+    let sig = signals(&s, &Map::new(), None);
+    let digits = numbers(&sig.to_string());
+    assert!(!digits.contains(&4.0) && !digits.contains(&3.0), "the counts are not written as digits: {sig}");
+    let c = check(&answer(json!({"summary": "Reviewing the solver port", "html": "<p>4 sub-agents, 3 done</p>",
+        "parts": [{"type": "stat", "value": "4", "unit": "sub-agents"}]})), &sig, &s);
+    assert!(c.failures.is_empty(), "{:?}", c.failures);
+    assert!(c.html.is_some() && c.parts.len() == 1);
+    let c = check(&answer(json!({"summary": "Reviewing the solver port", "html": "<p>57 sub-agents</p>"})), &sig, &s);
+    assert_eq!(c.failures, vec!["the html's 57 is not in the signals".to_string()]);
 }
 
 struct FakeModel { answers: Mutex<Vec<String>>, messages: Mutex<Vec<String>> }
@@ -260,10 +371,17 @@ async fn one_call_carries_the_signals_a_failed_check_gets_one_repair_turn_and_no
     // Islands off, then no credential: no call, looked at later.
     assert_eq!(run_one(&cfg, &mut t, "d", Reason::Stage, 100.0).await.unwrap(), None);
     on.store(true, std::sync::atomic::Ordering::Release);
+    assert_eq!(out_line(&root), None, "Islands off is User's choice, not an outage");
     assert_eq!(run_one(&cfg, &mut t, "d", Reason::Stage, 100.0).await.unwrap(), None);
     assert!(model.messages.lock().unwrap().is_empty());
+    // Night 1111 lane I: no usable account is said once, on Scheduled's guarantee, not left silent.
+    assert_eq!(out_line(&root).as_deref(), Some("Island updates paused: no model account is usable"));
+    crate::islands::guarantee::write(&root, 1000).unwrap();
+    let g = crate::goals::ops::current(&root, "scheduled").unwrap()["guarantee"].clone();
+    assert_eq!((g["unsure"][0]["id"].as_str(), g["unsure"][0]["line"].as_str()), (Some("island-agent"), Some("Island updates paused: no model account is usable")));
     *key.lock().unwrap() = Some("k".into());
     assert_eq!(run_one(&cfg, &mut t, "d", Reason::Eval, 1000.0).await.unwrap(), Some(true));
+    assert_eq!(out_line(&root), None, "a call that goes through clears the line");
     let msgs = model.messages.lock().unwrap().clone();
     assert_eq!(msgs.len(), 2, "one call and one repair turn, never more");
     assert!(msgs[0].starts_with("<signals>") && msgs[0].contains("\"stage\": \"Training\""));
@@ -285,6 +403,62 @@ async fn one_call_carries_the_signals_a_failed_check_gets_one_repair_turn_and_no
     assert!(model.messages.lock().unwrap()[0].contains("\"previous_island\""), "the next call sees what it drew");
 }
 
+/// Bug note 2026-11-08T02-03-51 (00:49:10, 01:08:34): right after a restart the island agent's call was the first to
+/// reach the main Claude account, spent since 6 Nov, and its update was lost on the weekly limit while Goals ran on
+/// Claude code 2. Now the call that meets the limit goes once more on the route Goals uses (`background_fallback`),
+/// at once, and the island is written; the next call starts on account 2 directly.
+#[tokio::test]
+async fn a_call_that_meets_a_spent_account_runs_once_more_on_the_other_account() {
+    use crate::background_call::t3 as bt3;
+    use crate::background_model::{self as bm, BackgroundModel, Task};
+    const ACCT1: &str = "t3:claudeAgent";
+    const HAIKU: &str = "claude-haiku-5-5";
+    struct Quiet;
+    #[async_trait::async_trait]
+    impl bt3::Calls for Quiet {
+        async fn call(&self, name: &str, _: Value, _: std::time::Duration) -> anyhow::Result<Value> { anyhow::bail!("{name}: not expected") }
+    }
+    bt3::set_calls(Arc::new(Quiet), std::env::temp_dir().join("heimdall-island-failover-test"), bt3::Limits::default());
+    bm::publish(&BackgroundModel { provider: "openai".into(), id: "gpt-6-luna".into() }, &[]);
+    bm::publish_tasks(&bm::with_task_model(&[], Task::Islands, Some(BackgroundModel { provider: ACCT1.into(), id: HAIKU.into() })));
+    // The model as the shared call path behaves: account 1 fails on its weekly limit and is marked spent.
+    struct Accounts { asked: Mutex<Vec<String>>, good: String }
+    #[async_trait::async_trait]
+    impl Model for Accounts {
+        async fn ask(&self, e: &crate::plan_refresher::Endpoint, _: String) -> Result<String> {
+            self.asked.lock().unwrap().push(e.provider.to_owned());
+            if e.provider == ACCT1 {
+                crate::background_gate::quota_spent(e.provider, Some(agent::now_ms() + 36 * 3_600_000), agent::now_ms());
+                anyhow::bail!("the T3 run on claudeAgent ended failed: You've hit your weekly limit · resets Nov 9 at 1pm (Europe/Warsaw)");
+            }
+            Ok(self.good.clone())
+        }
+    }
+    let d = tempfile::tempdir().unwrap();
+    let root = Root(d.path().to_path_buf());
+    root.put("p", json!({"title": "Task", "state": "running", "stage": "Writing", "thread": {"id": "t-p"}}).as_object().unwrap()).unwrap();
+    let model = Arc::new(Accounts { asked: Mutex::new(vec![]), good: answer(json!({})) });
+    let cfg = Config {
+        root: root.clone(),
+        endpoint: Arc::new(|| bm::task_endpoint(Task::Islands)),
+        enabled: Arc::new(|| true),
+        model: model.clone(),
+    };
+    let mut t = Triggers::default();
+    t.observe(snap("p", "Writing", "running"), 0.0);
+    assert_eq!(run_one(&cfg, &mut t, "p", Reason::Stage, 100.0).await.unwrap(), Some(true), "the island is written");
+    let other = "t3:claudeAgent_2";
+    let asked = model.asked.lock().unwrap().clone();
+    assert_eq!(asked[..2], [ACCT1, other], "account 1 once, then account 2 at once");
+    assert!(asked[2..].iter().all(|p| p == other), "the repair turn stays on account 2: {asked:?}");
+    assert_eq!(bm::task_endpoint(Task::Islands).provider, other, "the next call starts on account 2");
+    // A job's own failure (no backend marked) is not tried again.
+    model.asked.lock().unwrap().clear();
+    let e = bm::task_endpoint(Task::Islands);
+    let r = crate::background_fallback::once_more(e, cfg.endpoint.clone(), |_| async { anyhow::bail!("bad answer") as Result<()> }).await;
+    assert!(r.is_err());
+}
+
 #[test]
 fn the_schema_is_the_prompts_output_contract() {
     let s = schema();
@@ -294,11 +468,25 @@ fn the_schema_is_the_prompts_output_contract() {
     for banned in ["minLength", "maxLength", "minItems", "maxItems", "minimum", "maximum"] { assert!(!text.contains(banned), "{banned}") }
 }
 
-/// The final instructions are copied as they are; the public copy carries nothing of his.
+/// Night 8 Nov log sweep, finding 2: an answer with `"progress": null` (the prompt says progress only when the
+/// signals give a count) was rejected whole by the shape check; null is accepted as absent, a string still is not.
+#[test]
+fn a_null_progress_passes_the_shape_check() {
+    let answer = json!({"title": "Job search", "icon": "briefcase", "state": "running", "stage": "Searching", "summary": "Reading new listings", "progress": null});
+    assert_eq!(crate::background_call::t3::check_shape(&answer, &schema()), Ok(()));
+    let mut counted = answer.clone();
+    counted["progress"] = json!(0.4);
+    assert_eq!(crate::background_call::t3::check_shape(&counted, &schema()), Ok(()));
+    counted["progress"] = json!("half");
+    assert!(crate::background_call::t3::check_shape(&counted, &schema()).is_err());
+}
+
+/// The prompt's reference islands parse; the public copy carries nothing of the user's. (The frozen copy of the 30 Oct
+/// agent prompt ended 6 Nov 12:03, when the user asked for structured design guidance in its place.)
 #[test]
 fn the_prompt_is_the_final_agent_prompt_and_its_reference_islands_parse() {
     let public = include_str!("../prompt/public/island-agent.md");
-    for private in ["Vault", "Arsenal", "Allegro", "iPad", "zł", "night pass", "B-29", "DDColor", "TrainingLab"] {
+    for private in ["Vault", "Arsenal", "Allegro", "iPad", "zł", "night pass", "B-29", "DDColor", "ModelLab"] {
         assert!(!public.contains(private), "public island agent prompt carries {private:?}");
     }
     for text in [SYSTEM, public] {
@@ -427,7 +615,7 @@ fn an_island_without_its_errand_gets_one_sent_line_once_and_keeps_it() {
     let c = check(&answer(json!({"sent": "Train Decider V5 on the new data", "summary": "Training the decider"})), &v, &s);
     assert!(c.failures.is_empty(), "{:?}", c.failures);
     assert_eq!(c.sent.as_deref(), Some("Train Decider V5 on the new data"));
-    assert!(apply(&root, "d", "run-1", "Training", &c).unwrap());
+    assert!(apply(&root, "d", "run-1", "Training", "", &c).unwrap());
     let o = root.read("d").unwrap();
     assert_eq!((o["sent"].as_str(), o["summary"].as_str()), (Some("Train Decider V5 on the new data"), Some("Training the decider")), "apart from the now line");
     // Once it has one: not asked, an answer's other line is ignored, and nothing rewrites it.
@@ -436,7 +624,7 @@ fn an_island_without_its_errand_gets_one_sent_line_once_and_keeps_it() {
     assert!(!message(&v).contains("`sent`"));
     let c = check(&answer(json!({"sent": "Report the test score", "summary": "Training the decider"})), &v, &s);
     assert!(c.sent.is_none() && c.failures.is_empty());
-    apply(&root, "d", "run-1", "Testing", &Checked { sent: Some("Report the test score".into()), ..c }).unwrap();
+    apply(&root, "d", "run-1", "Testing", "", &Checked { sent: Some("Report the test score".into()), ..c }).unwrap();
     assert_eq!(root.read("d").unwrap()["sent"], "Train Decider V5 on the new data", "written once");
 }
 
@@ -446,7 +634,7 @@ fn an_island_without_its_errand_gets_one_sent_line_once_and_keeps_it() {
 fn a_status_file_reaches_the_signals_and_wakes_the_island() {
     let d = tempfile::tempdir().unwrap();
     let path = d.path().join("island-status.json");
-    std::fs::write(&path, json!({"kind": "climb", "progress": {"done": 11, "total": 16, "unit": "rounds"}, "target": {"value": 8.5},
+    std::fs::write(&path, json!({"kind": "climb", "progress": {"done": 12, "total": 16, "unit": "rounds"}, "target": {"value": 8.6},
         "series": [{"name": "Opus", "points": [5.79, 6.38]}], "values": [{"label": "mean, round 11", "value": 6.09}]}).to_string()).unwrap();
     let text = format!("$ mv /tmp/s.json {}", path.display());
     assert_eq!(stages::status_in(&text).as_deref(), Some(path.to_str().unwrap()));
@@ -500,20 +688,20 @@ fn html_is_written_first_with_the_parts_as_its_fallback() {
     let root = Root(d.path().to_path_buf());
     root.put("c", json!({"title": "Climb", "state": "running", "parts": [{"type": "band", "code": true, "segments": []}]}).as_object().unwrap()).unwrap();
     let c = Checked { html: Some("<p>6.09</p>".into()), parts: vec![json!({"type": "stat", "value": "6.09", OWN_PART: true})], ..Default::default() };
-    assert!(apply(&root, "c", "run-1", "Reviewing", &c).unwrap());
+    assert!(apply(&root, "c", "run-1", "Reviewing", "", &c).unwrap());
     let o = root.read("c").unwrap();
     assert_eq!(o["parts"][0]["type"], "html");
     assert_eq!(o["parts"][0]["fallback"][0]["value"], "6.09");
     assert_eq!(o["parts"][1]["type"], "band");
     // The next answer without HTML replaces it (it is this job's own part).
     let plain = Checked { parts: vec![json!({"type": "stat", "value": "7", OWN_PART: true})], ..Default::default() };
-    apply(&root, "c", "run-1", "Reviewing", &plain).unwrap();
+    apply(&root, "c", "run-1", "Reviewing", "", &plain).unwrap();
     let types: Vec<String> = root.read("c").unwrap()["parts"].as_array().unwrap().iter().map(|p| p["type"].as_str().unwrap().to_owned()).collect();
     assert_eq!(types, ["stat", "band"]);
 }
 
 #[test]
-fn the_html_addendum_follows_the_frozen_prompt_and_its_examples_pass_the_gate() {
+fn the_design_guide_follows_the_prompt_and_its_examples_pass_the_gate() {
     assert!(SYSTEM.starts_with(include_str!("../prompt/island-agent.md")));
     for text in [include_str!("../prompt/island-agent-html.md"), include_str!("../prompt/public/island-agent-html.md")] {
         let bodies: Vec<&str> = text.split("```html").skip(1).map(|b| b.split("```").next().unwrap()).collect();
@@ -525,4 +713,31 @@ fn the_html_addendum_follows_the_frozen_prompt_and_its_examples_pass_the_gate() 
     }
     let public = include_str!("../prompt/public/island-agent-html.md");
     for private in ["Vault", "Arsenal"] { assert!(!public.contains(private), "{private}") }
+    // Guidance, not a template; the 11-pt pill row was the unreadable island.
+    for text in [SYSTEM, public] {
+        for rule in ["One focal element", "Readability", "Colour", "Sub-agents", "History", "Bad and good"] { assert!(text.contains(rule), "{rule}") }
+        assert!(!text.contains("x-steps"), "no pill rows to copy");
+    }
+}
+
+/// Night review H3, 6 Nov: the sleep pass's island needed a repair turn on 5 of 7 wakes after the install ("stat \"3\"
+/// is not in the signals; the html's 3 is not in the signals", 20:41:26). The 3 was the task's own words, "Heimdall's
+/// three fixes" (its 20:15 line), which the check did not read as a number. Spelled-out counts in the signals are
+/// grounded; a count nobody said still fails.
+#[test]
+fn a_count_the_signals_spell_out_is_grounded() {
+    let mut s = snap("task-sleep-pass-6", "Sub-agents", "running");
+    s.signals.recent = vec![
+        (300.0, "The fix round is running: Vella's text and test fixes on its release branch, and Heimdall's three fixes followed by its full check.".into()),
+        (420.0, "The Vella fixes are done in two local commits.".into()),
+    ];
+    let sig = signals(&s, &Map::new(), None);
+    let three = json!({"summary": "Fix round running", "html": r#"<div class="row"><span class="big">3</span><span class="unit">Heimdall fixes</span></div>"#,
+        "parts": [{"type": "stat", "value": "3", "unit": "Heimdall fixes"}]});
+    let c = check(&answer(three), &sig, &s);
+    assert!(c.failures.is_empty(), "{:?}", c.failures);
+    assert!(c.html.is_some() && c.parts.len() == 1);
+    let c = check(&answer(json!({"summary": "Fix round running", "html": r#"<span class="big">17</span><span class="unit">fixes</span>"#})), &sig, &s);
+    assert!(c.failures.iter().any(|f| f == "the html's 17 is not in the signals"), "{:?}", c.failures);
+    assert_eq!(word_numbers("Three fixes, two commits; someone, often, twenty-one"), vec![1.0, 2.0, 3.0, 20.0]);
 }

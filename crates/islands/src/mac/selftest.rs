@@ -1,4 +1,4 @@
-//! Lab self-test (Swift `SelfTest.swift`): real islands, real windows, mouse events sent through each window's own
+//! Lab self-test: real islands, real windows, mouse events sent through each window's own
 //! event path (NSWindow.sendEvent → hit test → view). The pointer, keyboard and screen are never driven.
 //!   FLOATING_ISLANDS_DIR=<lab dir> FloatingIslands --selftest
 
@@ -853,6 +853,11 @@ fn goals_steps(k: Rc<Checks>, t0: f64, then: Box<dyn FnOnce(Rc<Checks>)>) {
                 );
                 click(&k, &g, |c| matches!(c, Control::Disclose { key } if key == "why:p-sign"));
                 k.check("a click on the ghost's title shows its why", g.body_texts().iter().any(|x| x == "User: sign it first"), "");
+                let (yes, no) = (
+                    g.control_centre(|c| matches!(c, Control::Yes { list, id } if list == "goals" && id == "p-sign")),
+                    g.control_centre(|c| matches!(c, Control::No { list, id } if list == "goals" && id == "p-sign")),
+                );
+                k.check("a proposal's ghost shows No beside its Yes", matches!((yes, no), (Some(y), Some(n)) if y.x < n.x && (y.y - n.y).abs() < 1.0), format!("{yes:?} {no:?}"));
                 click(&k, &g, |c| matches!(c, Control::Yes { list, id } if list == "goals" && id == "p-sign"));
                 let r = responses().into_iter().find(|r| j::str(r.get("kind")) == Some("approval") && j::str(r.get("island")) == Some("goals"));
                 k.check(
@@ -860,7 +865,7 @@ fn goals_steps(k: Rc<Checks>, t0: f64, then: Box<dyn FnOnce(Rc<Checks>)>) {
                     !g.is_confirming() && r.as_ref().is_some_and(|r| j::str(r.get("action")) == Some("yes") && j::str(r.get("value")) == Some("p-sign")),
                     format!("{r:?}"),
                 );
-                k.check("an answered ghost shows no Yes", g.control_centre(|c| matches!(c, Control::Yes { .. })).is_none(), "");
+                k.check("an answered ghost shows no Yes and no No", g.control_centre(|c| matches!(c, Control::Yes { .. } | Control::No { .. })).is_none(), "");
             }));
             let k1 = k.clone();
             sys::after(1.2, Box::new(move || {
@@ -876,6 +881,16 @@ fn goals_steps(k: Rc<Checks>, t0: f64, then: Box<dyn FnOnce(Rc<Checks>)>) {
                         matches!((before, after), (Some(b), Some(a)) if (a.min_y() - b.min_y()).abs() < 1.0),
                         format!("{before:?} {after:?}"),
                     );
+                    // The next front step answers No in one click: the `approval` "no" the app declines.
+                    let Some(g) = c("goals") else { return };
+                    click(&k, &g, |c| matches!(c, Control::No { list, id } if list == "goals" && id == "p-two"));
+                    let r = responses().into_iter().find(|r| j::str(r.get("kind")) == Some("approval") && j::str(r.get("value")) == Some("p-two"));
+                    k.check(
+                        "No answers a proposal in one click",
+                        !g.is_confirming() && r.as_ref().is_some_and(|r| j::str(r.get("action")) == Some("no") && j::str(r.get("island")) == Some("goals")),
+                        format!("{r:?}"),
+                    );
+                    k.check("a declined ghost shows no Yes and no No", g.control_centre(|c| matches!(c, Control::Yes { .. } | Control::No { .. })).is_none(), "");
                 }));
             }));
             let k1 = k.clone();

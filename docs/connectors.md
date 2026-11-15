@@ -1,24 +1,14 @@
 # Connecting accounts and MCP servers
 
-For the agent. Read this when someone asks you to connect an account or an MCP server, or whether you can reach one.
-Checked 24 Oct 2026 against Claude Code's MCP documentation, Pi's MCP documentation and the Codex CLI's help; providers
-checked 4 Nov 2026 against this build. Connector listings change, so check the one you name before you promise it.
+For the agent: how to connect the user's accounts (Gmail, Calendar, Slack and the rest) and MCP servers, and how to
+say whether one can be reached. The app bundles this page and the agent's prompt points to it.
 
-## Agent providers
+Read this when: someone asks you to connect an account or an MCP server, or whether you can reach one.
+Code: `crates/agent/src/harness.rs` (`connectors_doc`, the bundled path), `crates/agent/runtime/arsenal.mjs` (the
+Arsenal server).
 
-The agent runs on one provider, chosen in Agent ▸ Model (Add Provider adds one). The user needs one of them:
-
-- **Claude via T3 Code** ("Claude Code subscription"): the user's Claude Pro or Max plan, reached through a T3 Code
-  thread that acts as the agent (docs/claude-relay.md). Needs T3 Code and a signed-in Claude Code.
-- **Sign in with ChatGPT** ("Codex subscription"): the user's ChatGPT Plus or Pro plan, signed in through the browser
-  (docs/chatgpt.md). Beta: some requests fail with HTTP 400 because the provider rejects a prompt-cache breakpoint.
-- **OpenCode Go** ("OpenCode Go subscription"): signed in with a device code from opencode.ai.
-- **Anthropic API key** ("Anthropic API"): a key from the Anthropic Console, billed per use.
-- **OpenRouter** ("OpenRouter API"): an OpenRouter key, billed per use.
-- **Own Engine**: any OpenAI-compatible URL, key optional, such as a model server the user runs.
-
-Keys and sessions stay in the Keychain under the public app's own names. Never ask the user to paste a key into chat:
-they type it into the provider panel themselves.
+Written from Claude Code's MCP documentation, Pi's MCP documentation and the Codex CLI's help. Connector listings
+change, so check the one you name before you promise it.
 
 ## Which route
 
@@ -51,7 +41,7 @@ To switch connectors off: `"disableClaudeAiConnectors": true` in a settings file
 
 ## Route 2: Codex
 
-Codex keeps its own MCP server list in `~/.codex/config.toml`. The claude.ai connectors in route 1 belong to Claude Code,
+Codex keeps its own MCP server list in `$HOME/.codex/config.toml`. The claude.ai connectors in route 1 belong to Claude Code,
 not Codex. Manage the list with `codex mcp`:
 
 - `codex mcp add <name> -- <command> [args]` adds a local server. `--env KEY=VALUE` sets its environment.
@@ -67,7 +57,8 @@ Never type a token into a command or paste it into chat. Use an environment vari
 Arsenal, when the user chose it in Setup, is already one of your servers (`arsenal`, registered by Heimdall for each
 session; its tools are `mcp__arsenal__*`); an `arsenal` entry in `mcp.json` would replace it.
 
-Your Pi reads MCP servers from `mcp.json` in its agent folder: `~/Library/Application Support/Heimdall/agent/config/mcp.json`.
+Your Pi reads MCP servers from `mcp.json` in its agent folder: `$HEIMDALL_DATA/agent/config/mcp.json` (Heimdall's data
+folder, normally `<home>/.heimdall`).
 Heimdall never writes that file, so it is yours to edit. Heimdall's own tools are separate and keep working. Pi's own
 MCP guide is in the installed app's Resources, at `agent-runtime/node_modules/@earendil-works/pi-coding-agent/docs/mcp.md`.
 
@@ -120,3 +111,10 @@ it is not tested through Heimdall yet, so say so before you try it.
 - When the route works: say yes, then say the one click they need to make.
 - When a step is untested, such as an OAuth sign-in through route 3: say that before you try it.
 - Never say a connector or server works until a task or your own tool list has shown its tools.
+
+## See also
+
+- [mcp.md](mcp.md): Heimdall's own MCP server and its tools
+- [t3-orchestration.md](t3-orchestration.md): starting a Claude Code task
+- [chatgpt.md](chatgpt.md): the ChatGPT subscription the Codex provider uses
+- [home.md](home.md): where the data folder is

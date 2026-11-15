@@ -1,4 +1,4 @@
-//! The visual language (Swift `Look.swift`), taken from Heimdall's notch island: the notch's own black, radius
+//! The visual language, taken from Heimdall's notch island: the notch's own black, radius
 //! r = clamp(10 + (h − 32) × 0.4, 10, 24) with continuous corners, SF Pro, white text, colour only in icons; plus the
 //! Core Animation helpers every part uses (springs, fades, text and symbol layers).
 
@@ -150,9 +150,6 @@ pub fn small_font() -> Retained<NSFont> {
 /// A plan item's explanation, under its title once the row is open: smaller and quieter than the title.
 pub fn note_font() -> Retained<NSFont> {
     system(13.0, Weight::Regular)
-}
-pub fn group_header_font() -> Retained<NSFont> {
-    system(12.0, Weight::Bold)
 }
 pub fn small_mono() -> Retained<NSFont> {
     digits(13.0, Weight::Medium)

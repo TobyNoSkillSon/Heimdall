@@ -1,4 +1,4 @@
-//! Offscreen renders of the viewer (Swift `ViewerShots.swift`), one PNG per file kind, at real size (2×), on a dark
+//! Offscreen renders of the viewer, one PNG per file kind, at real size (2×), on a dark
 //! backdrop with the island's chrome (black continuous-corner shape, hairline, symbol, title, close button). No window
 //! is shown: the views live in a window that is never ordered in; WebKit content comes from its own snapshot, video
 //! from its first frame.
@@ -30,10 +30,17 @@ struct Case {
     file: &'static str,
     actions: Vec<ViewerAction>,
     click: Option<usize>,
+    /// A size the user gave it by its edges (night 1107, bug note 2026-11-07T01-40-23): the content reflows to it.
+    size: Option<Size>,
 }
 
 fn case(name: &'static str, title: &'static str, file: &'static str) -> Case {
-    Case { name, title, file, actions: vec![], click: None }
+    Case { name, title, file, actions: vec![], click: None, size: None }
+}
+
+/// The viewer of `file` at a size given by its edges, as `Ctl` lays it out after a resize.
+fn resized(name: &'static str, title: &'static str, file: &'static str, size: Size) -> Case {
+    Case { size: Some(size), ..case(name, title, file) }
 }
 
 fn plan_actions() -> Vec<ViewerAction> {
@@ -51,6 +58,15 @@ struct Run {
 }
 
 const SCREEN: Size = Size::new(1728.0, 1117.0);
+/// The MacBook's room for a viewer: under its row top (38 pt menu bar and notch, 6 pt under them), 8 pt in
+/// (`Ctl::viewer_room`).
+const ROOM: Size = Size::new(1712.0, 1117.0 - 38.0 - 6.0 - 8.0);
+
+/// The island the controller opens (`Ctl::viewer_size`): the content's, and a page that asks for a size fitted to the room.
+fn opened_size(v: &FileViewer) -> Size {
+    let min = Size::new(320.0, look::BODY_TOP + look::BOTTOM_PAD + v.actions_height() + 80.0);
+    crate::model::viewer_size::asked_island(v.island_size(SCREEN), v.page_ask(), min, ROOM)
+}
 
 pub fn run_viewer_shots(out: &str, fixtures: &str) -> ! {
     let mtm = MainThreadMarker::new().expect("main thread");
@@ -70,11 +86,24 @@ pub fn run_viewer_shots(out: &str, fixtures: &str) -> ! {
         case("missing", "Old notes", "gone.md"),
         Case { actions: plan_actions(), ..case("actions", "Cleanup plan", "plan.md") },
         Case { actions: plan_actions(), click: Some(1), ..case("actions-chosen", "Cleanup plan", "plan.md") },
+        // Resized by hand (night 1107): wide and short, narrow and tall; text rewraps, the page refits.
+        resized("markdown-resized-wide", "Cleanup plan", "plan.md", Size::new(1240.0, 520.0)),
+        resized("markdown-resized-narrow", "Cleanup plan", "plan.md", Size::new(360.0, 760.0)),
+        resized("html-resized-wide", "Latency", "page.html", Size::new(1300.0, 820.0)),
+        // A page that asks for its size (13 Nov): two documents side by side, 1500 × 1000 asked.
+        case("html-asks-wide", "Review", "wide.html"),
     ];
+    // `VIEWER_SHOTS_PAGE=/abs/page.html`: one more page, as the viewer would open it (lab: a real page at its size).
+    let mut cases = cases;
+    if let Ok(extra) = std::env::var("VIEWER_SHOTS_PAGE") {
+        if !extra.is_empty() {
+            cases.push(case("page", "Page", Box::leak(extra.into_boxed_str())));
+        }
+    }
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
-            cgr(Rect::new(-30000.0, -30000.0, 1200.0, 1000.0)),
+            cgr(Rect::new(-30000.0, -30000.0, 1800.0, 1200.0)),
             NSWindowStyleMask::Borderless,
             NSBackingStoreType::Buffered,
             false,
@@ -84,7 +113,7 @@ pub fn run_viewer_shots(out: &str, fixtures: &str) -> ! {
     if let Some(a) = objc2_app_kit::NSAppearance::appearanceNamed(unsafe { objc2_app_kit::NSAppearanceNameDarkAqua }) {
         window.setAppearance(Some(&a));
     }
-    let host = FlippedView::new(cgr(Rect::new(0.0, 0.0, 1200.0, 1000.0)));
+    let host = FlippedView::new(cgr(Rect::new(0.0, 0.0, 1800.0, 1200.0)));
     window.setContentView(Some(&host));
     let run = Rc::new(Run {
         out,
@@ -131,7 +160,8 @@ fn next(run: Rc<Run>) {
     let resized = Rc::new(Cell::new(false));
     let rz = resized.clone();
     v.set_on_resize(Box::new(move || rz.set(true)));
-    let size = v.island_size(SCREEN);
+    // A resized case opens at its content's size first, as the live viewer does, and is resized once loaded.
+    let size = opened_size(&v);
     let body = FileViewer::body_rect(size);
     for s in run.host.subviews().iter() {
         s.removeFromSuperview();
@@ -147,9 +177,13 @@ fn next(run: Rc<Run>) {
     let wait = if matches!(v.kind(), ViewerKind::Html | ViewerKind::Other | ViewerKind::Video | ViewerKind::Pdf) { 2.5 } else { 0.8 };
     sys::after(wait, move || {
         let c = &run.cases[i];
-        let size = if resized.get() { v.island_size(SCREEN) } else { size };
+        let size = if let Some(s) = c.size { s } else if resized.get() { opened_size(&v) } else { size };
         let body = FileViewer::body_rect(size);
-        if resized.get() {
+        if resized.get() || c.size.is_some() {
+            // Resized by its edges: the text is laid out again at the new width (`Ctl::apply_resize`).
+            if c.size.is_some() {
+                v.reflow();
+            }
             root.setFrame(cgr(Rect::new(20.0, 20.0, body.w, body.h)));
             v.layout(body.size());
         }

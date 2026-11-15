@@ -36,7 +36,7 @@ pub const TICK: Duration = Duration::from_secs(5);
 /// fallback (`background_fallback::route`).
 pub fn live_endpoint() -> crate::plan_refresher::Endpoint { crate::background_model::task_endpoint(crate::background_model::Task::Goals) }
 
-/// The call for one turn: the system prompt, the segment's turns as history, the new turn (its lines stable, then the
+/// The catlas turn: the system prompt, the segment's turns as history, the new turn (its lines stable, then the
 /// Goals now and the clock), the segment's key as the rolling session.
 pub fn call<'a>(model: &str, req: &Request) -> crate::background_call::Call<'a> {
     let mut prompt = crate::background_call::Prompt::default();

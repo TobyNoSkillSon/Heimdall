@@ -1,14 +1,11 @@
 //! The names the decider reads ("we artificially attach 'your name is Heimdall, the user's name is
 //! The user', and then we can swap it: your name is Ivy, the user's name is Evelyn"). The host labels its own lines
-//! `User`, `the user (typed)` and `Heimdall` whatever the user chose; the decider's context and questions say the configured
-//! names instead, after a header that names both, and the wake spotter (`send::explicit_trigger`, `addressed_by_name`)
+//! `the user`, `the user (typed)` and `Heimdall` whatever the user chose; the decider's context says the configured names
+//! instead, after a header that names both, and the wake spotter (`send::explicit_trigger`, `addressed_by_name`)
 //! listens for the assistant's name (no separate wake words; "Ivy, hello" wakes Ivy).
 //!
-//! Heimdall and the user are the names decider v4 was trained on: then the context, the
-//! questions and the spotter are byte for byte what they were before names existed (no header). Decider v5 is to be
-//! trained with the header on every example and the names swapped (docs/decider-v5-names.md); a v5+ model gets the
-//! header with the default names too (`header_always`).
-use serde_json::Value;
+//! Decider v5 (and V6) was trained with the header on every example and the names swapped
+//! (docs/personal/decider-v5-names.md); its questions keep Heimdall and the user in their words whatever the header says.
 use std::sync::{Arc, RwLock};
 
 pub const DEFAULT_ASSISTANT: &str = "Heimdall";
@@ -75,42 +72,6 @@ impl Names {
             other => other.into(),
         }
     }
-    /// A question's text with these names in place of Heimdall and the user (whole words; option keys stay).
-    pub fn question(&self, question: &Value) -> Value {
-        if self.default_names() {
-            return question.clone();
-        }
-        match question {
-            Value::String(s) => Value::String(self.text(s)),
-            Value::Array(a) => Value::Array(a.iter().map(|v| self.question(v)).collect()),
-            Value::Object(o) => Value::Object(o.iter().map(|(k, v)| (k.clone(), self.question(v))).collect()),
-            other => other.clone(),
-        }
-    }
-    /// Plain text with these names in place of Heimdall and the user (whole words).
-    pub fn text(&self, s: &str) -> String {
-        if self.default_names() {
-            return s.into();
-        }
-        let mut out = String::with_capacity(s.len());
-        let mut rest = s;
-        'scan: while let Some(c) = rest.chars().next() {
-            for (from, to) in [(DEFAULT_ASSISTANT, self.assistant.as_str()), (DEFAULT_USER, self.user.as_str())] {
-                if rest.starts_with(from) {
-                    let before = out.chars().next_back();
-                    let after = rest[from.len()..].chars().next();
-                    if !before.is_some_and(|b| b.is_alphanumeric() || b == '_') && !after.is_some_and(|a| a.is_alphanumeric() || a == '_') {
-                        out.push_str(to);
-                        rest = &rest[from.len()..];
-                        continue 'scan;
-                    }
-                }
-            }
-            out.push(c);
-            rest = &rest[c.len_utf8()..];
-        }
-        out
-    }
     /// Whether `token` (lower case, letters and digits) is one of the single-word wake names.
     pub fn exact(&self, token: &str) -> bool {
         self.wake.iter().any(|w| w.len() == 1 && w[0] == token)
@@ -143,13 +104,6 @@ pub fn set(names: Names) {
     *CURRENT.write().unwrap() = Some(Arc::new(names));
 }
 
-/// Whether the shipped decider was trained with the names header on every example: v5 and later
-/// (docs/decider-v5-names.md). Earlier models see the header only when the names are not Heimdall and the user. The v5
-/// request itself is `send::Snapshot::fit_v5` (header always, questions never renamed).
-pub fn header_always() -> bool {
-    crate::send_v3::version(std::path::Path::new(crate::d1::DEFAULT_MODEL)).is_some_and(|v| v >= 5)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,21 +118,14 @@ mod tests {
         assert!(d.is_default() && d.default_names());
         assert_eq!(Names::new("Heimdall", "User"), d);
         assert_eq!(d.label("User (typed)"), "User (typed)");
-        let q = crate::send::question();
-        assert_eq!(d.question(&q), q);
-        assert_eq!(d.text("Did User ask Heimdall?"), "Did User ask Heimdall?");
     }
 
     #[test]
-    fn other_names_relabel_and_rewrite_questions() {
+    fn other_names_relabel() {
         let n = ivy();
         assert_eq!(n.wake, [vec!["ivy".to_string()]]);
         assert_eq!(n.header(), "Assistant name: Ivy. User name: Evelyn.");
         assert_eq!((n.label("User"), n.label("User (typed)"), n.label("Heimdall"), n.label("Dave")), ("Evelyn".into(), "Evelyn (typed)".into(), "Ivy".into(), "Dave".into()));
-        assert_eq!(n.text("Did User, right now, ask Heimdall to look? not_for_heimdall Ownerx"), "Did Evelyn, right now, ask Ivy to look? not_for_heimdall Ownerx");
-        let q = n.question(&crate::send::question());
-        assert!(!q.to_string().contains("Heimdall") && !q.to_string().contains("User"), "{q}");
-        assert!(q["criteria"].get("not_for_heimdall").is_some(), "option keys stay");
         assert_eq!(Names::new("Hi Ivy", "Evelyn").wake, [vec!["ivy".to_string()]], "a leading greeting is not the name");
         let multi = Names::new("Mister Bean", "Evelyn");
         let w = words("ok mister bean open it");

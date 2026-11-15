@@ -71,7 +71,7 @@ fn scheduled_add_stores_due_as_epoch_seconds() {
     let o = lab.island("scheduled");
     assert_eq!(due_of(&o, 0), cal.local(2026, 10, 24, 10, 0, 0));
     assert!(items(&o)[0]["due"].is_i64(), "a whole number, no fraction");
-    assert!(lab.raw("scheduled").contains(&format!("\"due\" : {}", cal.local(2026, 10, 24, 10, 0, 0).unwrap() as i64)));
+    assert!(lab.raw("scheduled").contains(&format!("\"due\": {}", cal.local(2026, 10, 24, 10, 0, 0).unwrap() as i64)));
 
     let before = time::now();
     lab.run(&["plan", "scheduled", "add", "Soon", "--due", "+2h"]);

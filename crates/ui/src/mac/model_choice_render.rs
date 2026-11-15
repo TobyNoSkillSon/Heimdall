@@ -320,7 +320,7 @@ pub(crate) fn render_accounts(dir: &Path) -> Vec<String> {
 
     // The relay runs on Sonnet, Automatic; its disclosure open.
     let (mut state, sent) = open_state(mtm, false);
-    state.relay_accounts = [("claudeAgent", "Claude"), ("claudeAgent_claude_code_2", "Claude Code 2")].map(|(id, name)| RelayAccount { id: id.into(), name: name.into() }).to_vec();
+    state.relay_accounts = [("claudeAgent", "Claude"), ("claudeAgent_2", "Claude Code 2")].map(|(id, name)| RelayAccount { id: id.into(), name: name.into() }).to_vec();
     state.settings_value.agent_relay = true;
     state.settings_value.agent_relay_model = Some("claude-sonnet-5-5".into());
     state.api_expanded.insert(key.clone());
@@ -335,9 +335,9 @@ pub(crate) fn render_accounts(dir: &Path) -> Vec<String> {
     shot("relay-account-rest", &mut state, 0.0, &mut check);
 
     // A click on the second account: proposed, not sent; Confirm under the relay's rows; Sonnet stays checked.
-    state.choose(Choice::RelayAccount(Some("claudeAgent_claude_code_2".into())), key.clone());
+    state.choose(Choice::RelayAccount(Some("claudeAgent_2".into())), key.clone());
     check("click: nothing reaches the app", sent.borrow().is_empty(), format!("{:?}", sent.borrow()));
-    check("click: the account takes the check, the model stays", on_accounts(&state) == [Some("claudeAgent_claude_code_2".to_string())] && on_models(&state) == ["claude-sonnet-5-5"], format!("{:?}", on_accounts(&state)));
+    check("click: the account takes the check, the model stays", on_accounts(&state) == [Some("claudeAgent_2".to_string())] && on_models(&state) == ["claude-sonnet-5-5"], format!("{:?}", on_accounts(&state)));
     let menu = agent_menu(&state);
     let confirm_at = state.confirm_row.as_ref().map(|(i, _)| menu.indexOfItem(i));
     let last = state.relay_detail.1.last().map(|i| menu.indexOfItem(i));
@@ -346,12 +346,12 @@ pub(crate) fn render_accounts(dir: &Path) -> Vec<String> {
 
     // Confirm: the account is sent alone; the relay runs on it.
     state.confirm_choice();
-    check("confirm: sends the account", sent.borrow().as_slice() == [UiAction::SelectRelayAccount(Some("claudeAgent_claude_code_2".into()))], format!("{:?}", sent.borrow()));
-    check("confirm: Confirm leaves, the account stays checked", state.confirm_row.is_none() && on_accounts(&state) == [Some("claudeAgent_claude_code_2".to_string())], String::new());
+    check("confirm: sends the account", sent.borrow().as_slice() == [UiAction::SelectRelayAccount(Some("claudeAgent_2".into()))], format!("{:?}", sent.borrow()));
+    check("confirm: Confirm leaves, the account stays checked", state.confirm_row.is_none() && on_accounts(&state) == [Some("claudeAgent_2".to_string())], String::new());
     shot("relay-account-confirmed", &mut state, 0.0, &mut check);
     sent.borrow_mut().clear();
     // Clicking the account it runs on: nothing to confirm. Automatic again: back to `None`.
-    state.choose(Choice::RelayAccount(Some("claudeAgent_claude_code_2".into())), key.clone());
+    state.choose(Choice::RelayAccount(Some("claudeAgent_2".into())), key.clone());
     check("the running account: no Confirm", state.confirm_row.is_none() && sent.borrow().is_empty(), String::new());
     state.choose(Choice::RelayAccount(None), key);
     state.confirm_choice();

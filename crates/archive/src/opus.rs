@@ -39,15 +39,21 @@ fn check(n: i32) -> Result<usize> {
     );
     Ok(n as usize)
 }
-pub struct Encoder(NonNull<c_void>);
+/// Mono encoder; its frames are 20 ms (`rate / 50` samples).
+pub struct Encoder(NonNull<c_void>, usize);
 impl Encoder {
     pub fn configured(bitrate: i32, speech: bool) -> Result<Self> {
+        Self::at(16000, bitrate, speech)
+    }
+    /// `rate` is one of Opus's rates (8, 12, 16, 24 or 48 kHz).
+    pub fn at(rate: i32, bitrate: i32, speech: bool) -> Result<Self> {
+        ensure!([8000, 12000, 16000, 24000, 48000].contains(&rate), "Opus rate {rate}");
         let mut e = 0;
         let p = NonNull::new(unsafe {
-            opus_encoder_create(16000, 1, if speech { 2048 } else { 2049 }, &mut e)
+            opus_encoder_create(rate, 1, if speech { 2048 } else { 2049 }, &mut e)
         })
         .ok_or_else(|| anyhow::anyhow!("Opus allocation"))?;
-        let s = Self(p);
+        let s = Self(p, rate as usize / 50);
         check(e)?;
         check(unsafe { opus_encoder_ctl(p.as_ptr(), 4002, bitrate) })?;
         check(unsafe { opus_encoder_ctl(p.as_ptr(), 4010, 10) })?;
@@ -62,12 +68,17 @@ impl Encoder {
         check(unsafe { opus_encoder_ctl(self.0.as_ptr(), 4027, &mut n as *mut i32) })?;
         Ok(n)
     }
-    pub fn encode_float(&mut self, pcm: &[f32; 320], out: &mut [u8]) -> Result<usize> {
+    pub fn frame(&self) -> usize {
+        self.1
+    }
+    /// One 20 ms frame (`frame()` samples).
+    pub fn encode_float(&mut self, pcm: &[f32], out: &mut [u8]) -> Result<usize> {
+        ensure!(pcm.len() == self.1, "Opus frame length");
         check(unsafe {
             opus_encode_float(
                 self.0.as_ptr(),
                 pcm.as_ptr(),
-                320,
+                self.1 as i32,
                 out.as_mut_ptr(),
                 out.len() as i32,
             )
@@ -81,24 +92,30 @@ impl Drop for Encoder {
         }
     }
 }
-pub struct Decoder(NonNull<c_void>);
+pub struct Decoder(NonNull<c_void>, usize);
 impl Decoder {
     pub fn new() -> Result<Self> {
+        Self::at(16000)
+    }
+    pub fn at(rate: i32) -> Result<Self> {
+        ensure!([8000, 12000, 16000, 24000, 48000].contains(&rate), "Opus rate {rate}");
         let mut e = 0;
-        let p = NonNull::new(unsafe { opus_decoder_create(16000, 1, &mut e) })
+        let p = NonNull::new(unsafe { opus_decoder_create(rate, 1, &mut e) })
             .ok_or_else(|| anyhow::anyhow!("Opus decoder allocation"))?;
-        let s = Self(p);
+        let s = Self(p, rate as usize / 50);
         check(e)?;
         Ok(s)
     }
-    pub fn decode_float(&mut self, bytes: &[u8], out: &mut [f32; 320]) -> Result<usize> {
+    /// Decodes one packet into `out` (`frame` samples at this rate).
+    pub fn decode_float(&mut self, bytes: &[u8], out: &mut [f32]) -> Result<usize> {
+        ensure!(out.len() == self.1, "Opus frame length");
         check(unsafe {
             opus_decode_float(
                 self.0.as_ptr(),
                 bytes.as_ptr(),
                 bytes.len() as i32,
                 out.as_mut_ptr(),
-                320,
+                self.1 as i32,
                 0,
             )
         })

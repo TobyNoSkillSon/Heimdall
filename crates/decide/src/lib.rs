@@ -11,23 +11,21 @@ pub mod send_v3;
 pub mod suggest;
 /// Decider V5's precision (16-bit, 8-bit, 4-bit): the setting, folders, sizes and the missing-folder fallback.
 pub mod precision;
+// Shared with speak; its command-buffer helpers serve speak's own Metal encoders.
+#[allow(dead_code)]
 #[path = "../../speak/src/gpu_recovery.rs"]
 pub mod gpu_recovery;
-mod thought;
 mod timing;
 pub use timing::DecisionSource;
-pub mod reply;
-pub mod barge;
 use anyhow::{Context, Result, ensure};
 pub use archive::{ArchiveSink, TrainingArchive};
-pub use d1::{D1, DEFAULT_LIBRARY, DEFAULT_MODEL, LLAMA_LIBRARY};
+pub use d1::{D1, DEFAULT_LIBRARY, DEFAULT_MODEL};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
     time::Instant,
 };
-pub use thought::PendingThought;
 
 pub const SAMPLE_RATE: u32 = 16_000;
 /// Byte bounds `DecisionInput::validate` enforces on text state. Callers holding
@@ -57,10 +55,6 @@ impl std::fmt::Display for Refused {
     }
 }
 impl std::error::Error for Refused {}
-/// Whether `e` is a size refusal (`Refused`) rather than a runtime failure.
-pub fn is_refused(e: &anyhow::Error) -> bool {
-    e.chain().any(|c| c.downcast_ref::<Refused>().is_some())
-}
 pub const MAX_CONTEXT: usize = 20;
 pub const MAX_AUDIO: usize = 30 * SAMPLE_RATE as usize;
 
@@ -85,24 +79,6 @@ impl AudioClip {
         };
         clip.validate()?;
         Ok(clip)
-    }
-    pub fn from_wav(path: impl AsRef<Path>) -> Result<Self> {
-        let mut r = hound::WavReader::open(path)?;
-        let s = r.spec();
-        ensure!(
-            s.channels == 1 && s.sample_rate == SAMPLE_RATE,
-            "expected mono 16 kHz WAV"
-        );
-        let samples = if s.sample_format == hound::SampleFormat::Float {
-            r.samples::<f32>()
-                .collect::<std::result::Result<Vec<_>, _>>()?
-        } else {
-            let scale = 2_f32.powi(s.bits_per_sample as i32 - 1);
-            r.samples::<i32>()
-                .map(|v| v.map(|x| x as f32 / scale))
-                .collect::<std::result::Result<Vec<_>, _>>()?
-        };
-        Self::new(samples)
     }
     pub fn validate(&self) -> Result<()> {
         ensure!(self.sample_rate == SAMPLE_RATE, "audio must be 16 kHz");
@@ -141,102 +117,47 @@ pub enum DecisionMedia {
     Image(Image),
     Text,
 }
-/// Command set stays closed. Exact screenshot phrases should be handled in code first.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FixedCommand {
-    None,
-    TakeScreenshot,
-    LookAtThis,
-    OpenCandidate,
-    StopSpeaking,
-    CancelTask,
-}
-impl FixedCommand {
-    pub const ALL: [Self; 6] = [
-        Self::None,
-        Self::TakeScreenshot,
-        Self::LookAtThis,
-        Self::OpenCandidate,
-        Self::StopSpeaking,
-        Self::CancelTask,
-    ];
-    pub fn key(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::TakeScreenshot => "take_screenshot",
-            Self::LookAtThis => "look_at_this",
-            Self::OpenCandidate => "open_candidate",
-            Self::StopSpeaking => "stop_speaking",
-            Self::CancelTask => "cancel_task",
-        }
-    }
-    pub(crate) fn description(self) -> &'static str {
-        match self {
-            Self::None => "No fixed command is requested",
-            Self::TakeScreenshot => "Capture the current screen",
-            Self::LookAtThis => "Inspect the screen at the utterance timestamp",
-            Self::OpenCandidate => "Open one of the supplied links or items",
-            Self::StopSpeaking => "Stop the agent's spoken reply",
-            Self::CancelTask => "Cancel the current agent task",
-        }
-    }
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Candidate {
-    pub id: String,
-    pub description: String,
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// The one question the app asks through `DecisionInput` (the wake and suggest questions have their own requests,
+/// `send_v3::fit_v5` and `suggest::fit`).
+#[derive(Clone, Debug, Serialize)]
 #[serde(tag = "question", content = "candidates", rename_all = "snake_case")]
 pub enum Question {
-    SendNow,
-    /// The generic "is the user requesting an action?" (kept for archived records and parity checks).
-    CommandIntent,
     /// One command-specific question at the trigger: did the user, right now, ask for this command?
     CommandCheck(crate::CommandSelection),
-    CommandSelection,
-    FixedCommand,
-    PickCandidate(Vec<Candidate>),
-    /// End of the user's turn: which voice-bank line to say now, or `none`. See `reply`.
-    ReplyLine(Vec<Candidate>),
-    /// Heimdall is speaking and the user talked over it: stop or continue. See `barge`.
-    BargeIn,
+    /// Archived records only: the question kinds the 600M deciders were asked (send_now, command_intent,
+    /// command_selection, fixed_command, pick_candidate, reply_line, barge_in). Decider V5 never learned them and the
+    /// app has not asked them since 29 Oct; old records still parse to this, and it is never asked.
+    Legacy,
+}
+/// Tolerant of every archived question kind: `command_check` reads as itself, any other tag (with or without its
+/// candidates) as `Legacy`.
+impl<'de> Deserialize<'de> for Question {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Tagged {
+            question: String,
+            #[serde(default)]
+            candidates: serde_json::Value,
+        }
+        let t = Tagged::deserialize(d)?;
+        if t.question == "command_check" {
+            serde_json::from_value(t.candidates).map(Self::CommandCheck).map_err(serde::de::Error::custom)
+        } else {
+            Ok(Self::Legacy)
+        }
+    }
 }
 impl Question {
     pub fn key(&self) -> &'static str {
         match self {
-            Self::SendNow => "send_now",
-            Self::CommandIntent => "command_intent",
             Self::CommandCheck(_) => "command_check",
-            Self::CommandSelection => "command_selection",
-            Self::FixedCommand => "fixed_command",
-            Self::PickCandidate(_) => "pick_candidate",
-            Self::ReplyLine(_) => "reply_line",
-            Self::BargeIn => "barge_in",
+            Self::Legacy => "legacy",
         }
     }
     pub(crate) fn validate(&self) -> Result<()> {
-        if let Self::CommandCheck(c) = self {
-            ensure!(c.listed(), "a command check names a listed command");
-        }
-        if let Self::ReplyLine(c) = self {
-            ensure!(c.iter().any(|v| v.id == reply::NONE), "reply line choice needs a none option");
-        }
-        if let Self::PickCandidate(c) | Self::ReplyLine(c) = self {
-            ensure!(
-                (2..=255).contains(&c.len()),
-                "candidate choice requires 2..255 options"
-            );
-            let ids: BTreeSet<_> = c.iter().map(|v| &v.id).collect();
-            ensure!(
-                ids.len() == c.len()
-                    && c.iter().all(|v| !v.id.trim().is_empty()
-                        && v.id.len() <= 256
-                        && !v.description.trim().is_empty()
-                        && v.description.len() <= 2048),
-                "candidate IDs must be unique/nonempty and descriptions bounded"
-            );
+        match self {
+            Self::CommandCheck(c) => ensure!(c.listed(), "a command check names a listed command"),
+            Self::Legacy => anyhow::bail!("a legacy question kind is never asked"),
         }
         Ok(())
     }
@@ -303,28 +224,15 @@ impl DecisionInput {
         (self.state_text(0.).map_or(0, |s| s.len()) + D1::questions(self).to_string().len() + 128)
             .min(send::WINDOW)
     }
-    /// Fit every text question with the actual native tokenizer. Evict oldest
-    /// turns first, then old pending text and agent state. The complete current
-    /// utterance is retained or the request is explicitly refused.
+    /// The request for the question, its state in Decider V5's conversation layout (`conversation_text`, the layout
+    /// of its command-check training rows), fitted with the actual native tokenizer. Evict oldest turns first, then
+    /// old pending text and agent state. The complete current utterance is retained or the request is explicitly
+    /// refused.
     pub fn fit_text(
         &self,
-        p: f32,
-        tokens: impl FnMut(&str) -> Result<usize>,
-    ) -> Result<serde_json::Value> {
-        self.fit_text_as(StateLayout::Json, p, tokens)
-    }
-    /// `fit_text` with the state written in `layout`.
-    pub fn fit_text_as(
-        &self,
-        layout: StateLayout,
-        p: f32,
         mut tokens: impl FnMut(&str) -> Result<usize>,
     ) -> Result<serde_json::Value> {
         self.validate()?;
-        ensure!(
-            p.is_finite() && (0.0..=1.0).contains(&p),
-            "invalid addressedness"
-        );
         let questions = D1::questions(self);
         let overhead = tokens(&questions.to_string())? + 128;
         ensure!(
@@ -357,21 +265,21 @@ impl DecisionInput {
             media: DecisionMedia::Text,
             questions: self.questions.clone(),
         };
-        let mut state = fitted.state_as(layout, p)?;
+        let mut state = fitted.conversation_text();
         if tokens(&state)? > budget {
             let (mut lo, mut hi) = (0, fitted.context.len());
             while lo < hi {
                 let mid = (lo + hi) / 2;
                 let mut probe = fitted.clone();
                 probe.context.drain(..mid);
-                if tokens(&probe.state_as(layout, p)?)? > budget {
+                if tokens(&probe.conversation_text())? > budget {
                     lo = mid + 1;
                 } else {
                     hi = mid;
                 }
             }
             fitted.context.drain(..lo);
-            state = fitted.state_as(layout, p)?;
+            state = fitted.conversation_text();
         }
         // Preserve newest pending speech; serializing each suffix before counting
         // handles JSON escaping and Unicode exactly as inference sees them.
@@ -386,14 +294,14 @@ impl DecisionInput {
             while lo < hi {
                 let mid = (lo + hi) / 2;
                 fitted.pending_transcript = pending[boundaries[mid]..].into();
-                if tokens(&fitted.state_as(layout, p)?)? > budget {
+                if tokens(&fitted.conversation_text())? > budget {
                     lo = mid + 1;
                 } else {
                     hi = mid;
                 }
             }
             fitted.pending_transcript = pending[boundaries[lo]..].into();
-            state = fitted.state_as(layout, p)?;
+            state = fitted.conversation_text();
         }
         if tokens(&state)? > budget {
             let agent = std::mem::take(&mut fitted.agent_state);
@@ -406,27 +314,20 @@ impl DecisionInput {
             while lo < hi {
                 let mid = (lo + hi) / 2;
                 fitted.agent_state = agent[boundaries[mid]..].into();
-                if tokens(&fitted.state_as(layout, p)?)? > budget {
+                if tokens(&fitted.conversation_text())? > budget {
                     lo = mid + 1;
                 } else {
                     hi = mid;
                 }
             }
             fitted.agent_state = agent[boundaries[lo]..].into();
-            state = fitted.state_as(layout, p)?;
+            state = fitted.conversation_text();
         }
         ensure!(
             tokens(&state)? <= budget,
             Refused("Current utterance and question exceed d1 token budget; decision refused (2000-token window)")
         );
         Ok(serde_json::json!({"state":state,"questions":questions}))
-    }
-    /// The unfitted state in `layout`.
-    pub fn state_as(&self, layout: StateLayout, p: f32) -> Result<String> {
-        match layout {
-            StateLayout::Json => self.state_text(p),
-            StateLayout::V5 => Ok(self.conversation_text()),
-        }
     }
     /// Decider v5's state, the layout of its training rows (the dispatch state, `send::Snapshot::fit_v5`): the names
     /// header, the recent turns not still pending, the agent line, then the pending speech with the current
@@ -499,33 +400,14 @@ impl DecisionInput {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "question", rename_all = "snake_case")]
 pub enum Answer {
+    /// The command check's answer (yes / false_alarm / unsure); the tag keeps its historical name.
     CommandIntent {
         intent: CommandIntent,
         probabilities: BTreeMap<String, f32>,
     },
-    CommandSelection {
-        command: CommandSelection,
-        probabilities: BTreeMap<String, f32>,
-    },
-    SendNow {
-        probability: f32,
-    },
-    FixedCommand {
-        command: FixedCommand,
-        probabilities: BTreeMap<String, f32>,
-    },
-    PickCandidate {
-        id: String,
-        probabilities: BTreeMap<String, f32>,
-    },
-    ReplyLine {
-        id: String,
-        probabilities: BTreeMap<String, f32>,
-    },
-    BargeIn {
-        choice: String,
-        probabilities: BTreeMap<String, f32>,
-    },
+    /// Archived records only: answers to the legacy question kinds (`Question::Legacy`).
+    #[serde(other)]
+    Legacy,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Latency {
@@ -555,25 +437,6 @@ pub struct Decision {
 pub trait Decider {
     fn decide(&mut self, input: &DecisionInput) -> Result<Decision>;
 }
-/// How a question's state is written for the loaded decider.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StateLayout {
-    /// The JSON state (`DecisionInput::state_text`) the 600M deciders read for every question.
-    Json,
-    /// Decider v5's conversation text (`DecisionInput::conversation_text`), for the questions v5 learned on it.
-    V5,
-}
-impl StateLayout {
-    /// V5's layout for its command check (the look-at-this and screenshot questions of its training rows); the JSON
-    /// state for every other question and decider. v5 never learned the other questions (barge-in, reply line,
-    /// fixed command, candidates), so they keep the state they had.
-    pub fn for_question(generation: send_v3::Generation, input: &DecisionInput) -> Self {
-        match (generation, input.questions.as_slice()) {
-            (send_v3::Generation::V5, [Question::CommandCheck(_)]) => Self::V5,
-            _ => Self::Json,
-        }
-    }
-}
 pub struct LocalDecider {
     d1: D1,
     archive: TrainingArchive,
@@ -600,13 +463,9 @@ impl LocalDecider {
     pub fn send_decision_interruptible(&mut self,snapshot:&send::Snapshot,urgent:&std::sync::atomic::AtomicUsize)->Result<(send::Fitted,send::Prediction)> {
         self.d1.send_decision_interruptible(snapshot,urgent)
     }
-    /// Decider V5's suggest question (`suggest`); errors on deciders before V5.
+    /// Decider V5's suggest question (`suggest`).
     pub fn suggest_decision_interruptible(&mut self,snapshot:&send::Snapshot,urgent:&std::sync::atomic::AtomicUsize)->Result<(send::Fitted,suggest::Suggestion)> {
         self.d1.suggest_decision_interruptible(snapshot,urgent)
-    }
-    /// Whether the loaded decider learned the suggest question (V5 and later).
-    pub fn suggests(&self) -> bool {
-        self.d1.generation() == send_v3::Generation::V5
     }
     pub fn command_runtime(&self) -> &str {
         self.d1.version()
@@ -619,7 +478,7 @@ impl LocalDecider {
     ) -> CommandDecision {
         self.command_decision_at(candidate, input, CommandStage::Final)
     }
-    /// The same chain at `stage`: early (audio at detection, no transcript veto) or final.
+    /// The same chain at `stage`: early (at detection, from a side transcript) or final.
     pub fn command_decision_at(
         &mut self,
         candidate: CommandCandidate,
@@ -628,7 +487,7 @@ impl LocalDecider {
     ) -> CommandDecision {
         command_chain_at(candidate, input, stage, |next| self.command_answer(next))
     }
-    /// Command-chain stage (including supplied-item selection), with raw evidence and no send side effects.
+    /// The command check, with raw evidence and no send side effects.
     pub fn command_answer(
         &mut self,
         input: &DecisionInput,
@@ -639,17 +498,10 @@ impl LocalDecider {
                 "command decisions read text only"
             );
             ensure!(
-                input.questions.len() == 1
-                    && matches!(
-                        input.questions[0],
-                        Question::CommandIntent
-                            | Question::CommandCheck(_)
-                            | Question::CommandSelection
-                            | Question::PickCandidate(_)
-                    ),
-                "not a command-chain stage"
+                matches!(input.questions.as_slice(), [Question::CommandCheck(_)]),
+                "not a command check"
             );
-            self.d1.answer(input, 0.0)
+            self.d1.answer(input)
         })();
         (result, self.d1.last_output.clone())
     }
@@ -661,7 +513,7 @@ impl Decider for LocalDecider {
         let all=Instant::now();
         let result=(|| {
             let start=Instant::now();
-            let (answers,input_tokens)=self.d1.answer(input,0.)?;
+            let (answers,input_tokens)=self.d1.answer(input)?;
             Ok(Decision {utterance_id:input.current.id.clone(),addressed_probability:0.,answers,input_tokens,
                 addressedness_advisory:true,addressed_error:None,addressed_skip_reason:Some("removed".into()),
                 raw_send_probability:None,runtime:self.d1.version().into(),
@@ -695,6 +547,20 @@ impl Decider for LocalDecider {
         }
     }
 }
+/// A command check on `text`, the user's microphone line, with the agent state `agent` (tests).
+#[cfg(test)]
+pub(crate) fn check_input(id: &str, text: &str, agent: &str) -> DecisionInput {
+    DecisionInput {
+        source: DecisionSource::Microphone,
+        is_final: true,
+        current: Turn { id: id.into(), role: Role::Owner, transcript: text.into(), audio: AudioClip::default() },
+        context: vec![],
+        pending_transcript: String::new(),
+        agent_state: agent.into(),
+        media: DecisionMedia::Text,
+        questions: vec![Question::CommandCheck(CommandSelection::LookAtThis)],
+    }
+}
 #[cfg(test)]
 mod input_bound_tests {
     use super::*;
@@ -710,14 +576,50 @@ mod input_bound_tests {
     }
     #[test]
     fn size_refusals_are_typed_and_keep_their_text() {
-        let mut input = barge::input("bounded", "stop", "working").unwrap();
-        input.questions = vec![Question::FixedCommand];
+        let refused = |e: &anyhow::Error| e.chain().any(|c| c.downcast_ref::<Refused>().is_some());
+        let mut input = check_input("bounded", "look at this", "working");
         input.pending_transcript = "p".repeat(MAX_PENDING_BYTES + 1);
         let e = input.validate().unwrap_err();
         assert_eq!(e.to_string(), "state exceeds bounded input size");
-        assert!(is_refused(&e) && is_refused(&e.context("fixed command")));
+        assert!(refused(&e) && refused(&e.context("command check")));
         input.pending_transcript = newest_suffix(&input.pending_transcript, MAX_PENDING_BYTES).into();
         input.validate().unwrap();
-        assert!(!is_refused(&anyhow::anyhow!("decider not loaded")));
+        assert!(!refused(&anyhow::anyhow!("decider not loaded")));
+    }
+    /// Records archived before the legacy question kinds went (14 Nov) still parse: their questions and answers read
+    /// as `Legacy`, a command check reads as itself, and a legacy question is never asked.
+    #[test]
+    fn archived_legacy_questions_and_answers_still_parse() {
+        for q in [
+            r#"{"question":"send_now"}"#,
+            r#"{"question":"fixed_command"}"#,
+            r#"{"question":"command_intent"}"#,
+            r#"{"question":"command_selection"}"#,
+            r#"{"question":"barge_in"}"#,
+            r#"{"question":"pick_candidate","candidates":[{"id":"x","description":"first"},{"id":"y","description":"second"}]}"#,
+            r#"{"question":"reply_line","candidates":[{"id":"none","description":"Say nothing"},{"id":"a","description":"On it."}]}"#,
+        ] {
+            let parsed: Question = serde_json::from_str(q).unwrap_or_else(|e| panic!("{q}: {e}"));
+            assert!(matches!(parsed, Question::Legacy), "{q}");
+        }
+        let check: Question = serde_json::from_str(r#"{"question":"command_check","candidates":"look_at_this"}"#).unwrap();
+        assert!(matches!(check, Question::CommandCheck(CommandSelection::LookAtThis)));
+        assert_eq!(serde_json::to_string(&check).unwrap(), r#"{"question":"command_check","candidates":"look_at_this"}"#);
+        for a in [
+            r#"{"question":"send_now","probability":0.7}"#,
+            r#"{"question":"fixed_command","command":"none","probabilities":{"none":1.0}}"#,
+            r#"{"question":"barge_in","choice":"stop","probabilities":{"stop":0.9,"continue":0.1}}"#,
+            r#"{"question":"command_selection","command":"look_at_this","probabilities":{"look_at_this":1.0}}"#,
+        ] {
+            let parsed: Answer = serde_json::from_str(a).unwrap_or_else(|e| panic!("{a}: {e}"));
+            assert!(matches!(parsed, Answer::Legacy), "{a}");
+        }
+        let yes: Answer = serde_json::from_str(r#"{"question":"command_intent","intent":"yes","probabilities":{"yes":0.9,"false_alarm":0.05,"unsure":0.05}}"#).unwrap();
+        assert!(matches!(yes, Answer::CommandIntent { intent: CommandIntent::Yes, .. }));
+        // A whole archived input from before (25 Oct shape: barge-in question, legacy audio tag) parses, and is refused.
+        let old = r#"{"source":"microphone","is_final":false,"current":{"id":"u1","role":{"role":"owner"},"transcript":"wait stop","audio":{"samples":[],"sample_rate":0}},"context":[],"pending_transcript":"","agent_state":"Heimdall is saying: The build","media":{"kind":"audio"},"questions":[{"question":"barge_in"}]}"#;
+        let input: DecisionInput = serde_json::from_str(old).unwrap();
+        assert!(matches!(input.questions[..], [Question::Legacy]));
+        assert!(input.validate().unwrap_err().to_string().contains("legacy question"));
     }
 }

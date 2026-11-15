@@ -1,6 +1,6 @@
 //! One island: a borderless, non-activating panel holding one black shape. The shape and everything in it move on
 //! Core Animation springs in the render server; the main thread only sets targets. At rest nothing runs: no loops, no
-//! breathing; things move only when they change, are carried, open or close (Swift `IslandController.swift`).
+//! breathing; things move only when they change, are carried, open or close.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -38,6 +38,7 @@ thread_local! {
     /// Lab renders: windows are built but never ordered on screen.
     pub static OFFSCREEN: Cell<bool> = const { Cell::new(false) };
     /// Lab: called right after each attention pulse starts.
+    #[cfg(feature = "lab")]
     pub static LAB_PULSE: RefCell<Option<Box<dyn Fn(&Rc<Ctl>)>>> = const { RefCell::new(None) };
 }
 
@@ -59,6 +60,7 @@ pub fn offscreen() -> bool {
 }
 
 /// Where an island's window is on screen now (lab checks: at rest it is exactly the shape).
+#[cfg(feature = "lab")]
 pub fn rect_of_window(c: &Ctl) -> Rect {
     rect_from(c.panel.frame())
 }
@@ -129,6 +131,7 @@ pub struct St {
     /// The ghost is a clicked row's snapshot, not a picture of the content.
     row_ghost: bool,
     /// Lab (FI_LAB_SCRUB): the media time the opening motion was frozen at, so a render can draw any moment of it.
+    #[cfg(feature = "lab")]
     lab_t0: Option<f64>,
     pub from_notch: bool,
     pub height_cap: f64,
@@ -138,6 +141,16 @@ pub struct St {
     scroll_end_work: Option<Work1>,
     indicator_work: Option<Work1>,
     momentum_spent: bool,
+    // ---- viewer resize (night 1107, bug note 2026-11-07T01-40-23) ----
+    /// The open viewer's size the user gave it (this file's, remembered in `viewer-size.json`); `None`: its content's.
+    viewer_size: Option<Size>,
+    /// A drag on the viewer's edges: the edges, the island's rect and the pointer (screen) when it began.
+    resizing: Option<(crate::model::viewer_size::Edges, Rect, Point)>,
+    /// The pointer over an edge shows a resize cursor (the arrow comes back when it leaves the edge).
+    resize_cursor: bool,
+    /// Pointer moves over an open viewer, for the resize cursor.
+    resize_tracking: Option<Retained<objc2_app_kit::NSTrackingArea>>,
+    // ---- end viewer resize ----
     /// Counts rewrites: an update held for its HTML bitmaps applies only if no newer one came meanwhile.
     html_gen: u64,
     confirming: Option<(Control, confirm::Row, Work1)>,
@@ -255,6 +268,7 @@ impl Ctl {
             born_island: None,
             ghost: None,
             from_radius: None,
+            #[cfg(feature = "lab")]
             lab_t0: None,
             row_ghost: false,
             height_cap: f64::MAX,
@@ -264,6 +278,10 @@ impl Ctl {
             scroll_end_work: None,
             indicator_work: None,
             momentum_spent: false,
+            viewer_size: None,
+            resizing: None,
+            resize_cursor: false,
+            resize_tracking: None,
             html_gen: 0,
             confirming: None,
             press_layer: None,
@@ -472,7 +490,9 @@ impl Ctl {
                     );
                 }
             }
-            return Rect::new((sf.mid_x() - size.w / 2.0).round(), (sf.mid_y() - size.h / 2.0 + 20.0).round(), size.w, size.h);
+            // Centred a little high; a big one (a page that asked for most of the screen) stays under the menu bar.
+            let (x, y) = crate::model::viewer_size::centred_origin(size, sf, row_top);
+            return Rect::new(x, y, size.w, size.h);
         }
         let mut r = Rect::new(anchor.x - size.w / 2.0, anchor.y - size.h, size.w, size.h);
         if !sf.is_empty() {
@@ -505,7 +525,7 @@ impl Ctl {
             || previous.map(|p| p.icon()) != Some(island.icon())
             || prog_kind_same == Some(false)
             || (look == "list" && previous.is_some_and(parts_changed))
-            || (look == "todo" && previous.map(|p| p.waits_on_owner()) != Some(island.waits_on_owner()))
+            || (look == "todo" && previous.map(|p| p.waits_on_user()) != Some(island.waits_on_user()))
             || icon_attention != attention_shown
         {
             if let Some(old) = self.st.borrow().icon.clone() {
@@ -535,7 +555,7 @@ impl Ctl {
                     && (p.progress().is_none() == island.progress().is_none())
                     && icon_attention != attention_shown
                     && !(look == "list" && parts_changed(p))
-                    && !(look == "todo" && p.waits_on_owner() != island.waits_on_owner())
+                    && !(look == "todo" && p.waits_on_user() != island.waits_on_user())
             });
             let l = self.make_icon(&look, s);
             if attention_only {
@@ -636,7 +656,7 @@ impl Ctl {
             if let Some(list) = island.list() {
                 let color = if list == "settled" {
                     green()
-                } else if island.waits_on_owner() {
+                } else if island.waits_on_user() {
                     orange()
                 } else {
                     white(1.0)
@@ -718,7 +738,7 @@ impl Ctl {
                 c
             }
             "result" => sym("checkmark.circle.fill", ICON_SIZE + 1.0, &[white(1.0), green()], s),
-            "todo" => sym("checklist", ICON_SIZE, &[if island.waits_on_owner() { orange() } else { white(1.0) }], s),
+            "todo" => sym("checklist", ICON_SIZE, &[if island.waits_on_user() { orange() } else { white(1.0) }], s),
             "failed" => sym("xmark.circle.fill", ICON_SIZE + 1.0, &[white(1.0), red()], s),
             "viewer" => {
                 let kind = self
@@ -1191,6 +1211,7 @@ impl Ctl {
             if let Some(fo) = frame {
                 // Opened by a click on an island: it grows out of the clicked element, showing its picture first.
                 from = fo.rect;
+                #[cfg(feature = "lab")]
                 if offscreen() && std::env::var("FI_LAB_SCRUB").is_ok() {
                     // Lab: freeze the motion's clock so the render can draw it moment by moment.
                     let t0 = sys::media_time();
@@ -1961,8 +1982,8 @@ impl Ctl {
                 add(&icon, &r, "attnRing");
             }
         }
-        let me = self.me();
-        if let Some(c) = me.upgrade() {
+        #[cfg(feature = "lab")]
+        if let Some(c) = self.me().upgrade() {
             LAB_PULSE.with(|f| {
                 if let Some(f) = f.borrow().as_ref() {
                     f(&c);
@@ -2174,9 +2195,11 @@ impl Ctl {
         }
     }
 
-    /// Whether its window belongs on screen (`App::on_screen`): all shown, or up for news while hidden.
+    /// Whether its window can be seen (`model::toggle::seen`): on screen (`App::on_screen`: all shown, or up for news
+    /// while hidden) while the displays are awake and the session active. Only the repeating timers ask.
     fn on_screen(&self) -> bool {
-        app().on_screen(&self.id)
+        let a = app();
+        crate::model::toggle::seen(a.on_screen(&self.id), a.screens_awake.get(), a.session_active.get())
     }
 
     /// The repeating timers follow whether it is on screen (`model::toggle::timers`): at rest nothing draws.
@@ -2187,6 +2210,7 @@ impl Ctl {
     }
 
     /// Lab: which repeating timers are armed now (`model::toggle::Timers`).
+    #[cfg(feature = "lab")]
     pub fn timers_armed(&self) -> crate::model::toggle::Timers {
         let s = self.st.borrow();
         crate::model::toggle::Timers { work: s.work_timer.is_some(), clock: s.clock_timer.is_some(), attention: s.attention_timer.is_some() }
@@ -2455,6 +2479,15 @@ impl Ctl {
                 return;
             }
         }
+        // An open viewer's edges and corners resize it (night 1107).
+        if let Some(edges) = self.viewer_edges(p) {
+            let start = self.shape_rect();
+            let sp = self.screen_point(e);
+            let mut s = self.st.borrow_mut();
+            s.down_screen = None;
+            s.resizing = Some((edges, start, sp));
+            return;
+        }
         if self.is_viewer() && self.expanded() && p.y - sf.origin.y > PILL_H + 8.0 {
             self.st.borrow_mut().down_screen = None;
             return;
@@ -2482,6 +2515,16 @@ impl Ctl {
 
     pub fn mouse_dragged(self: &Rc<Self>, e: &NSEvent) {
         if self.leaving() {
+            return;
+        }
+        let resizing = self.st.borrow().resizing;
+        if let Some((edges, start, from)) = resizing {
+            let p = self.screen_point(e);
+            let Some(v) = self.file_viewer() else { return };
+            let r = crate::model::viewer_size::resize(start, edges, p.x - from.x, p.y - from.y, self.viewer_min(&v), self.viewer_bounds());
+            if r != self.st.borrow().shape_rect {
+                self.apply_resize(r);
+            }
             return;
         }
         let share = self.st.borrow().share.clone().filter(|h| h.pressed());
@@ -2555,6 +2598,14 @@ impl Ctl {
     }
 
     pub fn mouse_up(self: &Rc<Self>, e: &NSEvent) {
+        let resizing = self.st.borrow_mut().resizing.take();
+        if let Some((_, start, _)) = resizing {
+            // A press on an edge that never moved it keeps nothing (the viewer still follows its content).
+            if self.st.borrow().shape_rect != start {
+                self.finish_resize();
+            }
+            return;
+        }
         let share = self.st.borrow().share.clone();
         if share.is_some_and(|h| h.released()) {
             return;
@@ -2844,6 +2895,7 @@ impl Ctl {
     pub fn is_confirming(&self) -> bool {
         self.st.borrow().confirming.is_some()
     }
+    #[cfg(feature = "lab")]
     pub fn lab_confirm(self: &Rc<Self>, yes: bool) {
         if yes {
             self.finish_confirm();
@@ -2853,6 +2905,7 @@ impl Ctl {
     }
     /// Lab: where the Sure? row's Cancel or Confirm is (window coordinates).
     /// Lab: show the frozen opening motion `t` seconds in (`FI_LAB_SCRUB`). False when it was not frozen.
+    #[cfg(feature = "lab")]
     pub fn lab_scrub(&self, t: f64) -> bool {
         let Some(t0) = self.st.borrow().lab_t0 else { return false };
         self.root.setTimeOffset(t0 + t);
@@ -2861,6 +2914,7 @@ impl Ctl {
     }
 
     /// Lab: let a frozen opening motion run on (its animations are over by now).
+    #[cfg(feature = "lab")]
     pub fn lab_unfreeze(&self) {
         if self.st.borrow_mut().lab_t0.take().is_some() {
             // Offscreen the render server plays nothing: the motion's end state is the layers' own values.
@@ -2881,11 +2935,14 @@ impl Ctl {
 
     /// Lab: click the first picture on the open island, as a pointer click would (its frame, its image). False when
     /// there is none.
+    #[cfg(feature = "lab")]
     pub fn lab_click_picture(self: &Rc<Self>) -> bool { self.lab_click_open(true) }
 
     /// Lab: click the island's open chip (a row with no picture).
+    #[cfg(feature = "lab")]
     pub fn lab_click_chip(self: &Rc<Self>) -> bool { self.lab_click_open(false) }
 
+    #[cfg(feature = "lab")]
     fn lab_click_open(self: &Rc<Self>, picture: bool) -> bool {
         let c = {
             let s = self.st.borrow();
@@ -2897,6 +2954,7 @@ impl Ctl {
         }
     }
 
+    #[cfg(feature = "lab")]
     pub fn lab_confirm_centre(&self, cancel: bool) -> Option<CGPoint> {
         let s = self.st.borrow();
         let (_, row, _) = s.confirming.as_ref()?;
@@ -3034,6 +3092,20 @@ impl Ctl {
                     if c.st.borrow_mut().open_items.remove(&mark) { c.rebuild_plan(); }
                 });
             }
+            Control::No { list, id: pid } => {
+                // One click, no Sure?, as Yes: the same `approval` response with action "no", which the app's
+                // responses handler turns into a decline (recorded, never proposed again; the phone's No goes the
+                // same way). The ghost leaves when Heimdall writes the list; until then only a checked No shows.
+                IslandFile::respond_object(&Responses::approval(&list, &pid, "no"));
+                let mark = format!("no:{pid}");
+                self.st.borrow_mut().open_items.insert(mark.clone());
+                self.rebuild_plan();
+                let me = self.me();
+                sys::after(4.0, move || {
+                    let Some(c) = me.upgrade() else { return };
+                    if c.st.borrow_mut().open_items.remove(&mark) { c.rebuild_plan(); }
+                });
+            }
             Control::Waiting { id: wid, action, label } => {
                 IslandFile::respond_object(&crate::jobj! {"island": "scheduled", "kind": "waiting", "action": action.clone(), "value": wid.clone(), "label": label});
                 self.st.borrow_mut().open_items.insert(format!("chose:{wid}:{action}"));
@@ -3101,6 +3173,7 @@ impl Ctl {
     // MARK: Lab hooks
 
     /// The close button's centre in window coordinates (`None` while it is hidden).
+    #[cfg(feature = "lab")]
     pub fn close_centre(&self) -> Option<CGPoint> {
         if !self.expanded() {
             return None;
@@ -3114,6 +3187,7 @@ impl Ctl {
     }
 
     /// The strings the open body shows.
+    #[cfg(feature = "lab")]
     pub fn body_texts(&self) -> Vec<String> {
         fn walk(l: &CALayer, out: &mut Vec<String>) {
             if is_text_layer(l) {
@@ -3136,6 +3210,7 @@ impl Ctl {
     }
 
     /// Layers with an animation still running or looping (empty at rest).
+    #[cfg(feature = "lab")]
     pub fn animated_layers(&self) -> Vec<String> {
         fn walk(l: &CALayer, out: &mut Vec<String>) {
             let now = l.convertTime_fromLayer(sys::media_time(), None);
@@ -3166,6 +3241,7 @@ impl Ctl {
     }
 
     /// Lab: what the open body looks like now (render debugging).
+    #[cfg(feature = "lab")]
     pub fn debug_state(&self) -> String {
         let bl = self.body_layer();
         let subs = bl.as_ref().and_then(|b| unsafe { b.sublayers() }).map(|s| s.iter().map(|l| format!("{:.2}/{:.2}", l.opacity(), shown(&l).opacity())).collect::<Vec<_>>().join(" ")).unwrap_or_default();
@@ -3181,19 +3257,19 @@ impl Ctl {
         )
     }
 
+    #[cfg(feature = "lab")]
     pub fn lab_perform(self: &Rc<Self>, c: Control) {
         self.commit(c);
     }
-    pub fn lab_click(self: &Rc<Self>, c: Control) {
-        self.perform(c);
-    }
 
     /// A plan row's place in the body by key (`row:<key>`, `hdr:<group>`, `prop:<key>`).
+    #[cfg(feature = "lab")]
     pub fn row_frame(&self, key: &str) -> Option<Rect> {
         self.st.borrow().body.as_ref()?.rows.get(key).map(|r| rect_of(r.0.frame()))
     }
 
     /// Keys of the open body's plan rows, top to bottom.
+    #[cfg(feature = "lab")]
     pub fn row_order(&self) -> Vec<String> {
         let s = self.st.borrow();
         let Some(b) = &s.body else { return vec![] };
@@ -3204,6 +3280,7 @@ impl Ctl {
     }
 
     /// A control's centre in window coordinates.
+    #[cfg(feature = "lab")]
     pub fn control_centre(&self, m: impl Fn(&Control) -> bool) -> Option<CGPoint> {
         let s = self.st.borrow();
         let r = s.body.as_ref()?.regions.iter().find(|r| m(&r.control))?.rect;
@@ -3245,7 +3322,14 @@ impl Ctl {
             let r = c.rect_for(c.size());
             c.morph(r, Spring::GROW, None, None);
         }));
-        self.st.borrow_mut().file_viewer = Some(v.clone());
+        // The size the user last gave this file's viewer (night 1107), unless its page now asks for another (13 Nov).
+        let kept = crate::model::viewer_size::remembered_kept(&crate::model::viewer_size::Memory::default_path(), v.path());
+        let kept = crate::model::viewer_size::hand_size_stands(kept.as_ref(), v.page_ask());
+        {
+            let mut s = self.st.borrow_mut();
+            s.file_viewer = Some(v.clone());
+            s.viewer_size = kept;
+        }
         v
     }
 
@@ -3253,11 +3337,133 @@ impl Ctl {
         self.st.borrow().file_viewer.clone()
     }
 
+    /// The open viewer's size: the one the user gave this file by its edges (fitted to this display), else its content's
+    /// (a page that asks for a size: that, fitted under the menu bar).
     pub fn viewer_size(&self) -> Size {
         let me = self.me().upgrade().expect("live controller");
         let sf = self.st.borrow().screen_frame;
-        me.load_viewer().island_size(if sf.is_empty() { Size::new(1728.0, 1117.0) } else { sf.size() })
+        let v = me.load_viewer();
+        let natural = v.island_size(if sf.is_empty() { Size::new(1728.0, 1117.0) } else { sf.size() });
+        let kept = self.st.borrow().viewer_size;
+        match kept {
+            Some(s) => crate::model::viewer_size::fit(s, self.viewer_min(&v), self.viewer_room()),
+            None => crate::model::viewer_size::asked_island(natural, v.page_ask(), self.viewer_min(&v), self.viewer_room()),
+        }
     }
+
+    // ---- viewer resize (night 1107, bug note 2026-11-07T01-40-23) ----
+    /// The smallest a viewer gets by its edges: its title row, its action rows and some content.
+    fn viewer_min(&self, v: &FileViewer) -> Size {
+        Size::new(320.0, BODY_TOP + BOTTOM_PAD + v.actions_height() + 80.0)
+    }
+
+    /// The most a viewer takes on its display: its width and the height under the menu bar, 8 pt in.
+    fn viewer_room(&self) -> Size {
+        let (sf, row_top) = {
+            let s = self.st.borrow();
+            (s.screen_frame, s.row_top)
+        };
+        if sf.is_empty() {
+            return Size::new(1712.0, 1040.0);
+        }
+        Size::new(sf.w - 16.0, sf.max_y().min(row_top) - sf.min_y() - 8.0)
+    }
+
+    /// The area a viewer's edges move in (screen points, y up).
+    fn viewer_bounds(&self) -> Rect {
+        let (sf, row_top) = {
+            let s = self.st.borrow();
+            (s.screen_frame, s.row_top)
+        };
+        let top = sf.max_y().min(row_top);
+        Rect::new(sf.min_x() + 8.0, sf.min_y() + 8.0, sf.w - 16.0, top - sf.min_y() - 8.0)
+    }
+
+    /// The edges of an open viewer under the window point `p`, if any.
+    fn viewer_edges(&self, p: CGPoint) -> Option<crate::model::viewer_size::Edges> {
+        if !self.is_viewer() || !self.expanded() || self.leaving() {
+            return None;
+        }
+        let sf = self.shape.frame();
+        crate::model::viewer_size::edges_at(Point::new(p.x - sf.origin.x, p.y - sf.origin.y), Size::new(sf.size.width, sf.size.height))
+    }
+
+    /// The viewer at `r` at once (a drag on its edges): its window and shape, its title row and close button, and the
+    /// live content laid out again at the new size (text rewraps, pictures and pages refit).
+    fn apply_resize(self: &Rc<Self>, r: Rect) {
+        {
+            let mut s = self.st.borrow_mut();
+            s.viewer_size = Some(r.size());
+            s.shape_rect = r;
+            s.generation += 1;
+        }
+        self.shape.removeAllAnimations();
+        quiet(|| {
+            self.panel.setFrame_display(ns_rect(r), false);
+            self.view.setFrame(ns_rect(Rect::new(0.0, 0.0, r.w, r.h)));
+            self.shape.setBounds(cgr(Rect::new(0.0, 0.0, r.w, r.h)));
+            self.shape.setPosition(pt(r.w / 2.0, r.h / 2.0));
+            self.shape.setCornerRadius(radius(r.h));
+            self.layout_content(false, Spring::GROW);
+        });
+        if let Some(v) = self.file_viewer() {
+            v.reflow();
+        }
+        self.show_scroll();
+        self.track_resize(true);
+    }
+
+    /// The drag on the edges ended: the size is kept for this file and the place for this island.
+    fn finish_resize(self: &Rc<Self>) {
+        let sr = self.st.borrow().shape_rect;
+        if let Some(v) = self.file_viewer() {
+            if let Err(e) = crate::model::viewer_size::remember_asked(&crate::model::viewer_size::Memory::default_path(), v.path(), sr.size(), v.page_ask()) {
+                debug(&format!("viewer size not kept: {e}"));
+            }
+        }
+        let scr = screen_rects().into_iter().find(|f| f.intersects(&sr)).unwrap_or(self.st.borrow().screen_frame);
+        let pos = crate::jobj! {"x": sr.mid_x() - scr.mid_x(), "y": scr.max_y() - sr.max_y()};
+        if let Some(o) = IslandFile::patch(&self.id, |o| {
+            o.insert("openPosition".into(), Value::Object(pos.clone()));
+        }) {
+            self.update(Island::new(&self.id, o));
+        }
+        app().state_changed();
+    }
+
+    /// Pointer moves over an open viewer reach `mouse_moved` (for the resize cursor) while it is open.
+    fn track_resize(&self, on: bool) {
+        if let Some(t) = self.st.borrow_mut().resize_tracking.take() {
+            self.view.removeTrackingArea(&t);
+        }
+        if !on || offscreen() {
+            return;
+        }
+        use objc2::AnyThread;
+        use objc2_app_kit::{NSTrackingArea, NSTrackingAreaOptions};
+        let opts = NSTrackingAreaOptions::MouseMoved | NSTrackingAreaOptions::ActiveAlways | NSTrackingAreaOptions::InVisibleRect;
+        // SAFETY: the view owns the area; it is removed when the viewer closes.
+        let t = unsafe { NSTrackingArea::initWithRect_options_owner_userInfo(NSTrackingArea::alloc(), self.view.bounds(), opts, Some(&self.view), None) };
+        self.view.addTrackingArea(&t);
+        self.st.borrow_mut().resize_tracking = Some(t);
+    }
+
+    /// The pointer moved over an open viewer: a resize cursor over its edges, the arrow again once it leaves them.
+    pub fn mouse_moved(&self, e: &NSEvent) {
+        if self.st.borrow().resizing.is_some() {
+            return;
+        }
+        let edges = self.viewer_edges(self.view_point(e));
+        match edges {
+            Some(edges) => {
+                resize_cursor(edges).set();
+                self.st.borrow_mut().resize_cursor = true;
+            }
+            None if std::mem::take(&mut self.st.borrow_mut().resize_cursor) => objc2_app_kit::NSCursor::arrowCursor().set(),
+            None => {}
+        }
+    }
+    // ---- end viewer resize ----
 
     /// The file changed under an open viewer: rebuild it from the file, keeping the scroll position.
     pub fn reload_viewer(self: &Rc<Self>) {
@@ -3353,7 +3559,12 @@ impl Ctl {
                 self.st.borrow_mut().outside_monitor = m;
             }
             self.panel.ivars().accepts_key.set(true);
+            self.track_resize(true);
         } else {
+            self.track_resize(false);
+            if std::mem::take(&mut self.st.borrow_mut().resize_cursor) {
+                objc2_app_kit::NSCursor::arrowCursor().set();
+            }
             self.hide_scroll();
             if let Some(m) = self.st.borrow_mut().outside_monitor.take() {
                 // SAFETY: a monitor we added.
@@ -3685,3 +3896,21 @@ pub fn notch_rect(screen: Option<&NSScreen>) -> Rect {
 
 #[allow(dead_code)]
 fn _unused(_: &App, _: NSWindowOrderingMode, _: &NSString, _: CGRect, _: CGSize, _: &Presets) {}
+
+// ---- viewer resize (night 1107, bug note 2026-11-07T01-40-23) ----
+/// The system's resize cursor for the grabbed edges.
+fn resize_cursor(e: crate::model::viewer_size::Edges) -> Retained<objc2_app_kit::NSCursor> {
+    use objc2_app_kit::{NSCursor, NSCursorFrameResizeDirections, NSCursorFrameResizePosition as P};
+    let position = match (e.top, e.bottom, e.left, e.right) {
+        (true, _, true, _) => P::TopLeft,
+        (true, _, _, true) => P::TopRight,
+        (_, true, true, _) => P::BottomLeft,
+        (_, true, _, true) => P::BottomRight,
+        (true, ..) => P::Top,
+        (_, true, ..) => P::Bottom,
+        (_, _, true, _) => P::Left,
+        _ => P::Right,
+    };
+    NSCursor::frameResizeCursorFromPosition_inDirections(position, NSCursorFrameResizeDirections::All)
+}
+// ---- end viewer resize ----

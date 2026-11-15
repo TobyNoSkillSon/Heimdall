@@ -128,6 +128,7 @@ const HELP: &str = "heimdall-ui-demo: Heimdall's UI with fake data, offscreen un
   --drop <dir>          the drop target at the notch, in process, offscreen
   --drop-live [secs]    the real drop target over the notch for real drags (default 60 s); drops printed only
   --drawing-over-menu <other|own> [secs]   live: drawing mode over an open menu (default 3 s); each change printed
+  --islands-display <dir>   Islands Display ▸: following, locked to a display, locked to one not connected
   --streams <dir>       Show Islands on Streams: the island windows' sharing, and a stand-in captured by screencapture
   --submenus-left <dir> LIVE: the real menu on screen ~1 s per scenario, submenus opened left (no events)
   --menu-sections-live <dir>  LIVE: the whole menu a few seconds, sections opened and folded by code, each change on real frames
@@ -233,6 +234,7 @@ fn main() {
                 ui::drawing_over_menu(own, secs)
             }
             "--streams" => finish(ui::render_streams(&dir(&mut args, "--streams"))),
+            "--islands-display" => finish(ui::render_islands_display(&dir(&mut args, "--islands-display"))),
             "--menu-live" => finish(ui::render_menu_live(&dir(&mut args, "--menu-live"))),
             "--menu-sections-live" => finish(ui::render_menu_sections_live(&dir(&mut args, "--menu-sections-live"))),
             "--submenus-left" => finish(ui::render_submenus_left(&dir(&mut args, "--submenus-left"))),

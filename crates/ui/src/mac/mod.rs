@@ -3,14 +3,17 @@
 
 mod agent;
 // The island domain's renderer lives in src/island/mac/ (one folder per domain); module paths stay crate::mac::*.
+#[cfg(feature = "lab")]
 pub(crate) mod agent_render;
 pub(crate) mod bugs;
 /// Background Tasks greyed under one warning triangle in emergency mode (docs/claude-relay.md).
 pub(crate) mod background_paused;
 /// Background Tasks ▸ Model: providers opening in place to their models and thinking levels, and its renders.
 pub(crate) mod background_picker;
+#[cfg(feature = "lab")]
 pub(crate) mod background_picker_render;
 /// `--claude-relay`: the relay's menu renders and checks.
+#[cfg(feature = "lab")]
 pub(crate) mod relay_render;
 mod controls;
 #[path = "../island/mac/draw/mod.rs"]
@@ -20,6 +23,7 @@ pub(crate) mod drop_target;
 #[path = "../island/mac/gallery.rs"]
 pub(crate) mod gallery;
 mod helmet;
+#[cfg(feature = "lab")]
 pub(crate) mod offscreen;
 #[path = "../island/mac/island/mod.rs"]
 pub(crate) mod island;
@@ -31,7 +35,9 @@ pub(crate) mod menu;
 /// [chrome] Support the Developer's resting lighter row.
 pub(crate) mod prominent;
 /// [chrome] `--chrome`: the chrome's offscreen renders and checks.
+#[cfg(feature = "lab")]
 pub(crate) mod chrome_render;
+#[cfg(feature = "lab")]
 pub(crate) mod menu_rows;
 pub mod permissions;
 pub(crate) mod provider_key;
@@ -40,19 +46,25 @@ pub(crate) mod model_choice;
 /// Agent ▸ Model ▸ On This Mac's precision rows.
 pub(crate) mod engine_rows;
 /// `--engine-models`: the Engine section's models and precisions, rendered and checked.
+#[cfg(feature = "lab")]
 pub(crate) mod engine_render;
 /// The menu's Engine section: the engine's live state, the models on this Mac, Add Model ▸.
 pub(crate) mod engine_section;
 /// `--engine-section`: the Engine section's states, the Engine tile and the foldable sections, rendered and checked.
+#[cfg(feature = "lab")]
 pub(crate) mod engine_section_render;
 /// The menu's Decider section: the decider's version and its precision, click-then-Confirm, hot-swapped.
 pub(crate) mod decider_section;
 /// `--decider-section`: the Decider section's states and Setup's Decider step, rendered and checked.
+#[cfg(feature = "lab")]
 pub(crate) mod decider_section_render;
 /// `--model-choice`: Agent ▸ Model's click-then-confirm renders and checks.
+#[cfg(feature = "lab")]
 pub(crate) mod model_choice_render;
 /// `--menu-climb`: the whole menu in every state the UX climb judges (lab/climb/menu-ux).
+#[cfg(feature = "lab")]
 pub(crate) mod menu_climb_render;
+#[cfg(feature = "lab")]
 mod render;
 pub(crate) mod setup;
 // Global shortcuts (24 Oct): Carbon registration, the menu's suspension, macOS's own shortcuts.
@@ -66,6 +78,7 @@ pub(crate) mod personalise;
 #[path = "../island/mac/streams.rs"]
 pub(crate) mod streams;
 pub(crate) mod submenus_left;
+#[cfg(feature = "lab")]
 pub(crate) mod menu_live;
 pub(crate) mod menu_motion;
 pub(crate) mod menu_group;
@@ -166,12 +179,21 @@ pub(crate) struct State {
     /// The glowing Confirm row under the pending choice.
     confirm_row: Option<(Retained<NSMenuItem>, Retained<model_choice::ConfirmView>)>,
     islands_shown_row: Option<Retained<controls::CheckRow>>,
+    // ---- islands display (night 1107) ----
+    /// Islands Display ▸ and the displays its rows name (a row's tag is the index).
+    islands_display_item: Option<Retained<NSMenuItem>>,
+    islands_display_names: Vec<String>,
+    /// What its rows show now (the displays, the lock): refilled only when that changes.
+    islands_display_shown: Option<(Vec<String>, Option<String>)>,
+    // ---- end islands display ----
     /// Listening and Seeing as last told to the island (`sync_switches`), and whether the app has said how Listening is.
     switches_told: Option<(bool, bool)>,
     listen_known: bool,
     /// Shortcuts ▸ its items, for their checks (`menu::sync_shortcuts`).
     shortcut_items: Vec<(crate::shortcuts::Shortcut, Retained<NSMenuItem>)>,
     islands_on_streams_row: Option<Retained<controls::CheckRow>>,
+    /// Agent ▸ Control Apps (night1111 computer control).
+    computer_control_row: Option<Retained<controls::CheckRow>>,
     speed_row: Option<Retained<controls::SpeedRow>>,
     /// The Speed row's note while its sample waits for Jarvis (`UiUpdate::VoiceSample`), kept across menu rebuilds.
     voice_sample_note: Option<String>,
@@ -399,6 +421,7 @@ pub(crate) fn run(options: Options, on_action: Box<dyn Fn(UiAction)>) -> ! {
     }
 
     let render_dir = options.render_dir.clone();
+    #[cfg(feature = "lab")]
     let checks_only = options.render_checks_only;
     let center = objc2_app_kit::NSWorkspace::sharedWorkspace().notificationCenter();
     let callback = block2::RcBlock::new(|note: std::ptr::NonNull<objc2_foundation::NSNotification>| {
@@ -456,6 +479,7 @@ pub(crate) fn run(options: Options, on_action: Box<dyn Fn(UiAction)>) -> ! {
         shortcuts::install(mtm);
     }
 
+    #[cfg(feature = "lab")]
     if let Some(dir) = render_dir {
         render::start(dir, checks_only);
     }
@@ -518,10 +542,14 @@ impl State {
             relay_detail: (None, Vec::new()),
             confirm_row: None,
             islands_shown_row: None,
+            islands_display_item: None,
+            islands_display_names: vec![],
+            islands_display_shown: None,
             switches_told: None,
             listen_known: false,
             shortcut_items: Vec::new(),
             islands_on_streams_row: None,
+            computer_control_row: None, // night1111 computer control
             speed_row: None,
             voice_sample_note: None,
             speech_voice: Default::default(),
@@ -823,6 +851,7 @@ impl State {
                 settings.collapsed = menu::echoed_sections(&mut self.sections_sent, settings.collapsed, &self.settings_value.collapsed, std::time::Instant::now());
                 if self.settings_value == settings { return; }
                 streams::set(settings.islands_on_streams);
+                island::lock_display(settings.islands_display.clone()); // Islands Display (night 1107)
                 // The relay added or removed (or on or off) moves it between Add Provider and the picker: Agent ▸ Model is
                 // laid again whole. A section opened elsewhere shows its rows again.
                 let relay_moved = (self.settings_value.agent_relay, self.settings_value.relay_added) != (settings.agent_relay, settings.relay_added);
@@ -899,7 +928,6 @@ impl State {
                 island::apply(Event::Health(cue.named()));
                 self.update_status_button();
             }
-            UiUpdate::ShowAgent => self.show_agent(),
             UiUpdate::ShowTranscript => self.show_transcript(),
             UiUpdate::ShowSetup => self.show_setup(),
             UiUpdate::ShowSetupAt(step) => self.show_setup_at(Some(step)),
@@ -1113,6 +1141,31 @@ impl State {
         self.settings_value.islands_shown = !self.settings_value.islands_shown;
         self.emit(UiAction::SetIslandsShown(self.settings_value.islands_shown));
         island::apply(Event::Switch { switch: Switch::Islands, on: self.settings_value.islands_shown, moment: true });
+        self.refresh_menu();
+    }
+
+    // ---- islands display (night 1107, bug note 2026-11-07T02-02-35) ----
+    /// Islands Display ▸ a row: Follow Cursor (`menu::FOLLOW_TAG`) or a connected display (its index). The notch island
+    /// moves at once; the app saves it and tells the floating islands.
+    fn select_islands_display(&mut self, tag: isize) {
+        let display = if tag == menu::FOLLOW_TAG {
+            None
+        } else {
+            let Some(name) = usize::try_from(tag).ok().and_then(|i| self.islands_display_names.get(i)).cloned() else { return };
+            Some(name)
+        };
+        self.settings_value.islands_display = display.clone();
+        island::lock_display(display.clone());
+        self.emit(UiAction::SetIslandsDisplay(display));
+        self.refresh_menu();
+    }
+    // ---- end islands display ----
+
+    /// Agent ▸ Control Apps: the app saves it, gates the `computer` tool with it and, turned on without
+    /// Accessibility, asks macOS for it.
+    pub(crate) fn toggle_computer_control(&mut self) {
+        self.settings_value.computer_control = !self.settings_value.computer_control;
+        self.emit(UiAction::SetComputerControl(self.settings_value.computer_control));
         self.refresh_menu();
     }
 
@@ -1404,7 +1457,7 @@ impl State {
     pub(crate) fn agent_reload(&mut self) {
         if self.agent_window.as_ref().is_some_and(|w| w.can_reload()) {
             self.emit(UiAction::AgentWindow(AgentWindowAction::Reload {
-                reason: format!("{} reloaded the agent from the Agent window at {}", crate::identity::USER_SUBJECT, clock_now()),
+                reason: format!("{} reloaded the agent from the Agent window at {}", crate::identity::user_subject(), clock_now()),
                 abort: false,
             }));
         }
@@ -1415,7 +1468,7 @@ impl State {
         let pending = self.agent_view.state.as_ref().is_some_and(|s| s.can_reload && s.reload.is_some());
         if pending {
             self.emit(UiAction::AgentWindow(AgentWindowAction::Reload {
-                reason: format!("{} reloaded the agent now from the Debug Agent window at {}", crate::identity::USER_SUBJECT, clock_now()),
+                reason: format!("{} reloaded the agent now from the Debug Agent window at {}", crate::identity::user_subject(), clock_now()),
                 abort: true,
             }));
         }
@@ -2049,12 +2102,14 @@ define_class!(
         /// `heimdall-ui-demo --submenus-left`: the next step inside the open menu.
         #[unsafe(method(submenusLeftStep:))]
         fn submenus_left_step(&self, _timer: &NSTimer) {
+            #[cfg(feature = "lab")]
             submenus_left::check::step();
         }
 
         /// `heimdall-ui-demo --menu-live`: the next step inside the open menu.
         #[unsafe(method(menuLiveStep:))]
         fn menu_live_step(&self, _timer: &NSTimer) {
+            #[cfg(feature = "lab")]
             menu_live::step();
         }
 
@@ -2261,11 +2316,6 @@ define_class!(
             with_state(|s| { if !s.runtime_settings.pending_reload.is_empty() { s.emit(UiAction::Reload); } });
         }
 
-        #[unsafe(method(restartSession:))]
-        fn restart_session(&self, _sender: &AnyObject) {
-            with_state(|s| s.emit(UiAction::RestartSession));
-        }
-
         #[unsafe(method(openAgent:))]
         fn open_agent(&self, _sender: &AnyObject) {
             with_state(|s| s.show_agent());
@@ -2315,6 +2365,12 @@ define_class!(
             with_state(|s| s.toggle_islands_on_streams());
         }
 
+        /// Agent ▸ Control Apps' item action (night1111 computer control); a click goes through `check_row_clicked`.
+        #[unsafe(method(toggleComputerControl:))]
+        fn toggle_computer_control(&self, _sender: &AnyObject) {
+            with_state(|s| s.toggle_computer_control());
+        }
+
         /// Speaking ▸ Wake Sound's item action; a click goes through `check_row_clicked`.
         /// Shortcuts ▸ an action (its tag is the shortcut's id): the same as its key.
         #[unsafe(method(runShortcut:))]
@@ -2333,6 +2389,13 @@ define_class!(
             with_state(|s| s.toggle_islands_shown());
         }
 
+        /// Islands Display ▸ a row (night 1107).
+        #[unsafe(method(selectIslandsDisplay:))]
+        fn select_islands_display(&self, sender: &NSMenuItem) {
+            let tag = sender.tag();
+            with_state(move |s| s.select_islands_display(tag));
+        }
+
         #[unsafe(method(toggleWakeSound:))]
         fn toggle_wake_sound(&self, _sender: &AnyObject) {
             with_state(|s| s.toggle_wake_sound());
@@ -2343,11 +2406,6 @@ define_class!(
         fn toggle_background_task(&self, sender: &NSMenuItem) {
             let Some(task) = menu::background_task_from_row(sender.tag() as usize) else { return };
             with_state(move |s| s.toggle_background_task(task));
-        }
-
-        #[unsafe(method(openSetup:))]
-        fn open_setup(&self, _sender: &AnyObject) {
-            with_state(|s| s.show_setup());
         }
 
         #[unsafe(method(quit:))]
@@ -2811,12 +2869,6 @@ define_class!(
             });
         }
 
-        /// Getting ready ▸ Retry: the failed downloads again, from where they stopped.
-        #[unsafe(method(setupRetryDownloads:))]
-        fn setup_retry_downloads(&self, _sender: &AnyObject) {
-            with_state(|s| s.emit(UiAction::RetryModelDownloads));
-        }
-
         /// Vella's tiles: Add Vella (the default) or Not now; Continue acts on the choice.
         #[unsafe(method(setupVella:))]
         fn setup_vella(&self, sender: &NSButton) {
@@ -2869,6 +2921,7 @@ define_class!(
 
         #[unsafe(method(renderStep:))]
         fn render_step(&self, _timer: &NSTimer) {
+            #[cfg(feature = "lab")]
             render::step();
         }
     }
@@ -2941,6 +2994,8 @@ pub(crate) fn check_row_clicked(row: usize) {
         with_state(|s| s.toggle_islands_shown());
     } else if row == menu::ISLANDS_ON_STREAMS_ROW {
         with_state(|s| s.toggle_islands_on_streams());
+    } else if row == menu::COMPUTER_CONTROL_ROW {
+        with_state(|s| s.toggle_computer_control()); // night1111 computer control
     } else if let Some(section) = menu::section_from_row(row) {
         with_state(move |s| s.toggle_section(section));
     } else if let Some(picker) = menu::Picker::from_row(row) {

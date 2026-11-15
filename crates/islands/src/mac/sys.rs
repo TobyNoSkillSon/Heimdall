@@ -130,9 +130,6 @@ impl Work1 {
     pub fn cancel(&self) {
         self.live.set(false);
     }
-    pub fn is_live(&self) -> bool {
-        self.live.get()
-    }
 }
 
 /// `after`, cancellable.
@@ -211,7 +208,6 @@ pub const VNODE_WRITE: usize = 0x2;
 pub const VNODE_EXTEND: usize = 0x4;
 pub const VNODE_ATTRIB: usize = 0x8;
 pub const VNODE_RENAME: usize = 0x20;
-pub const VNODE_REVOKE: usize = 0x40;
 const PROC_EXIT: usize = 0x8000_0000;
 
 impl Source {

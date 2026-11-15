@@ -3,7 +3,7 @@ use crate::background_call::{self as call, Call, Prompt, Tool};
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-const T3: &str = "t3:claudeAgent_claude_code_2";
+const T3: &str = "t3:claudeAgent_2";
 
 /// A scripted T3: every call logged; the thread's timeline (`items`), the waits' answers in turn (the last repeats).
 struct Fake {
@@ -31,12 +31,18 @@ struct Fake {
     list_archived: bool,
     /// Each `t3_thread_organize` takes this long.
     organize_sleep: Duration,
+    /// What a list over every project returns (the stale sweep's), by status.
+    all_rows: Mutex<Vec<Value>>,
+    /// The list over every project fails (T3 not answering the sweep).
+    deny_list_all: std::sync::atomic::AtomicBool,
+    /// `t3_thread_launch` is refused by T3's argument validation (the message over its cap).
+    reject_launch: bool,
 }
 
 impl Fake {
     fn new(items: Vec<Value>, waits: Vec<Value>) -> Arc<Fake> {
         Arc::new(Fake { log: Mutex::new(vec![]), items: Mutex::new(items), waits: Mutex::new(waits.into()), status: Mutex::new("idle"), projects: Mutex::new(vec![]), sleep: Duration::ZERO, deny_create: false,
-            lose_launch: None, deadlines: Mutex::new(vec![]), titles: Mutex::new(vec![]), waited: Default::default(), deny_send: false, send_no_run: false, list_archived: false, organize_sleep: Duration::ZERO })
+            lose_launch: None, deadlines: Mutex::new(vec![]), titles: Mutex::new(vec![]), waited: Default::default(), deny_send: false, send_no_run: false, list_archived: false, organize_sleep: Duration::ZERO, all_rows: Mutex::new(vec![]), deny_list_all: Default::default(), reject_launch: false })
     }
     fn names(&self) -> Vec<String> { self.log.lock().unwrap().iter().map(|(n, _)| n.clone()).collect() }
     fn args(&self, name: &str) -> Vec<Value> { self.log.lock().unwrap().iter().filter(|(n, _)| n == name).map(|(_, a)| a.clone()).collect() }
@@ -54,6 +60,7 @@ impl Calls for Fake {
                 self.projects.lock().unwrap().push(json!({"id": "p-bg", "workspaceRoot": args["workspaceRoot"]}));
                 json!({"projectId": "p-bg"})
             }
+            "t3_thread_launch" if self.reject_launch => anyhow::bail!("T3_RPC_ERROR: request rejected (Invalid parameters for tool 't3_thread_launch': Expected a value with a length of at most 120000, but received one with a length of 133337)"),
             "t3_thread_launch" => {
                 self.titles.lock().unwrap().push(args["title"].as_str().unwrap().to_owned());
                 match self.lose_launch {
@@ -62,6 +69,12 @@ impl Calls for Fake {
                     // Threads are numbered by launch: th-1, th-2, …
                     None => { let n = self.titles.lock().unwrap().len(); json!({"threadId": format!("th-{n}"), "runId": format!("run-{n}"), "status": "running"}) }
                 }
+            }
+            "t3_thread_list" if args["allProjects"] == true && self.deny_list_all.load(std::sync::atomic::Ordering::SeqCst) => anyhow::bail!("{}: no answer within 20000 ms", ::t3::client::TIMEOUT),
+            "t3_thread_list" if args["allProjects"] == true => {
+                let statuses = args["statuses"].as_array().cloned().unwrap_or_default();
+                let rows: Vec<Value> = self.all_rows.lock().unwrap().iter().filter(|t| statuses.is_empty() || statuses.contains(&t["status"])).cloned().collect();
+                json!({"threads": rows})
             }
             "t3_thread_list" => {
                 // Launched threads (th-1, th-2, … by launch; a lost launch's "th-lost"), archived ones left out.
@@ -147,7 +160,7 @@ fn a_call_launches_one_thread_reads_its_json_and_archives_it() {
     assert_eq!((a.usd, a.usage), (0.0, Usage::default()));
     let launch = &fake.args("t3_thread_launch")[0];
     assert_eq!(launch["projectId"], "p-bg");
-    assert_eq!(launch["modelSelection"], json!({"instanceId": "claudeAgent_claude_code_2", "model": "claude-haiku-5-5", "options": {"effort": "low"}}));
+    assert_eq!(launch["modelSelection"], json!({"instanceId": "claudeAgent_2", "model": "claude-haiku-5-5", "options": {"effort": "low"}}));
     assert_eq!((launch["runtimeMode"].as_str(), launch["workspaceStrategy"]["type"].as_str()), (Some("approval-required"), Some("root")));
     assert!(launch["title"].as_str().unwrap().starts_with("[heimdall-bg] test job"));
     let m = launch["message"].as_str().unwrap();
@@ -159,7 +172,7 @@ fn a_call_launches_one_thread_reads_its_json_and_archives_it() {
     assert!(dir.path().join(PROJECT_DIR).is_dir());
     let r = runs.lock().unwrap().clone();
     assert_eq!(r.len(), 1);
-    assert_eq!((r[0].outcome, r[0].usd, r[0].model.as_str()), ("answered", 0.0, "t3:claudeAgent_claude_code_2/claude-haiku-5-5"));
+    assert_eq!((r[0].outcome, r[0].usd, r[0].model.as_str()), ("answered", 0.0, "t3:claudeAgent_2/claude-haiku-5-5"));
     // The next call finds the project already made.
     let before = fake.names().len();
     rt().block_on(call::ask(&e, &job())).unwrap();
@@ -178,6 +191,43 @@ fn without_project_rights_the_threads_go_to_the_home_project() {
     let (e, _) = lab(&fake, dir.path());
     rt().block_on(call::ask(&e, &job())).unwrap();
     assert_eq!(fake.args("t3_thread_launch")[0]["projectId"], "p-root");
+}
+
+/// A message over T3's launch cap is never sent: the call is settled, so the job does not retry the same input (8 Nov:
+/// Goals was refused 18 times).
+#[test]
+fn a_message_over_t3s_cap_is_settled_without_a_launch() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = Fake::new(vec![item(1, "assistant_message", "{\"ok\": true, \"word\": \"x\"}")], vec![done()]);
+    let (e, _) = lab(&fake, dir.path());
+    let mut c = job();
+    c.prompt.push(&"y".repeat(LAUNCH_MAX_CHARS));
+    let err = rt().block_on(call::ask(&e, &c)).unwrap_err();
+    assert!(call::settled(&err) && err.to_string().contains("over T3's 120000"), "{err:#}");
+    assert!(fake.args("t3_thread_launch").is_empty(), "not launched");
+}
+
+/// Bug note 2026-11-08T02-03-41: T3 counts a message in UTF-16 units, so 70,000 emoji (70,000 characters, 140,000
+/// units) are over its cap and never launched; a launch T3 refuses for its arguments (the 8 Nov error, word for word)
+/// is settled, not retried, and marks no backend.
+#[test]
+fn t3s_own_measure_and_its_argument_refusal_settle_the_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = Fake::new(vec![item(1, "assistant_message", "{\"ok\": true, \"word\": \"x\"}")], vec![done()]);
+    let (e, _) = lab(&fake, dir.path());
+    let mut c = job();
+    c.prompt.push(&"😀".repeat(70_000));
+    let err = rt().block_on(call::ask(&e, &c)).unwrap_err();
+    assert!(call::settled(&err) && err.to_string().contains("over T3's 120000"), "{err:#}");
+    assert!(fake.args("t3_thread_launch").is_empty(), "not launched");
+    let mut fake = Fake::new(vec![], vec![done()]);
+    Arc::get_mut(&mut fake).unwrap().reject_launch = true;
+    let (e, runs) = lab(&fake, dir.path());
+    let err = rt().block_on(call::ask(&e, &job())).unwrap_err();
+    assert!(call::settled(&err) && err.to_string().contains("refused the arguments"), "{err:#}");
+    assert_eq!(runs.lock().unwrap().last().map(|r| r.outcome), Some("rejected"));
+    assert!(crate::background_gate::usable(T3, agent::now_ms()), "the job's own failure marks no backend");
+    assert!(!rejected_arguments("T3_UNAVAILABLE: T3 is not running"));
 }
 
 /// A reply longer than T3 sends at once is read whole.
@@ -457,18 +507,18 @@ fn agent_off_and_emergency_mode_stop_t3_calls_too() {
 fn the_instances_come_from_t3s_capabilities() {
     let catalog: Value = serde_json::from_str(include_str!("background_t3_capabilities.json")).unwrap();
     let (personal, _) = parse(&catalog, false);
-    assert_eq!(personal.iter().map(|i| i.instance.as_str()).collect::<Vec<_>>(), ["claudeAgent", "claudeAgent_claude_code_2"], "no Codex, nothing disabled");
+    assert_eq!(personal.iter().map(|i| i.instance.as_str()).collect::<Vec<_>>(), ["claudeAgent", "claudeAgent_2"], "no Codex, nothing disabled");
     let two = &personal[1];
     assert_eq!((two.name.as_str(), two.driver.as_str(), two.models.len()), ("Claude code 2", "claudeAgent", 4));
     let haiku = two.models.iter().find(|m| m.id == "claude-haiku-5-5").unwrap();
     assert_eq!((haiku.name.as_str(), haiku.efforts.join(" "), haiku.default_effort.as_deref()), ("Claude Haiku 5.5", "low medium high xhigh max ultrathink".into(), Some("medium")));
     let (public, flat) = parse(&catalog, true);
-    assert_eq!(public.iter().map(|i| i.instance.as_str()).collect::<Vec<_>>(), ["codex", "claudeAgent", "claudeAgent_claude_code_2", "grok"]);
+    assert_eq!(public.iter().map(|i| i.instance.as_str()).collect::<Vec<_>>(), ["codex", "claudeAgent", "claudeAgent_2", "grok"]);
     let sol = flat.iter().find(|k| k.model.id == "gpt-6.1-sol").unwrap();
     assert_eq!((sol.option.as_deref(), sol.model.name.as_str(), sol.model.default_effort.as_deref()), (Some("reasoningEffort"), "gpt-6.1-sol", Some("low")));
     // Published: the choices check against it.
     publish_catalog(&catalog);
-    assert!(choice_ok("claudeAgent_claude_code_2") && !choice_ok("cursor") && !choice_ok("nowhere"));
+    assert!(choice_ok("claudeAgent_2") && !choice_ok("cursor") && !choice_ok("nowhere"));
     assert_eq!(choice_ok("codex"), crate::edition::PUBLIC);
 }
 
@@ -520,7 +570,7 @@ fn the_models_level_replaces_the_jobs_effort_on_every_format() {
 }
 
 /// Live, opt-in (`cargo test -p app background_t3::tests::live -- --ignored`): one tiny Claude Haiku 5.5 call on
-/// claudeAgent_claude_code_2 through the real T3 client, on the app's own path. It never touches the running app's
+/// claudeAgent_2 through the real T3 client, on the app's own path. It never touches the running app's
 /// T3 connection: the lab client pairs a connection of its own (the app's pairing, full access, in a memory store),
 /// and that session is revoked at the end (`t3 auth session revoke`, the sessions that were not there before it).
 /// The project folder is a temporary one, and its T3 project is deleted at the end. A session T3's CLI issues cannot
@@ -586,7 +636,7 @@ fn live_one_tiny_haiku_call_on_claude_code_2() {
 }
 
 /// Live, opt-in, like the one above (Goals, 1 Nov: "make sure the Goals also runs"): a rolling session of two turns on
-/// claudeAgent_claude_code_2: the first launches the session's thread, the second is sent into the same thread (one
+/// claudeAgent_2: the first launches the session's thread, the second is sent into the same thread (one
 /// thread in the lab project), then the session ends. Same lab pairing, revoked; same temporary project, deleted.
 #[test]
 #[ignore]
@@ -921,4 +971,56 @@ fn the_sweep_skips_archived_threads_and_keeps_to_its_budget() {
     let t = std::time::Instant::now();
     assert_eq!(word(&rt().block_on(call::ask(&e4, &rolling("goals-s1", 0, "x"))).unwrap()), "still");
     assert!(t.elapsed() < limits().cleanup + Duration::from_millis(300), "{:?}", t.elapsed());
+}
+
+/// Bug note 2026-11-06T02-06-02: an island agent's one-call thread sat "preparing" for 55 hours (3 Nov 18:43: its launch
+/// timed out while T3 hung, T3 made the thread anyway, and nothing ever reaped a one-call thread). The app's sweep
+/// interrupts and archives every `[heimdall-bg]` thread still active past every call's deadline, whatever project and
+/// process it came from; a call still in time, a session's own thread, an archived one and anyone else's are left.
+#[test]
+fn a_background_thread_left_active_past_its_deadline_is_interrupted_and_archived() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = Fake::new(vec![], vec![done()]);
+    let (_e, _) = lab(&fake, dir.path());
+    let ago = |s: i64| (chrono::Utc::now() - chrono::Duration::seconds(s)).to_rfc3339();
+    let row = |id: &str, title: &str, status: &str, at: String| json!({"threadId": id, "title": title, "status": status, "createdAt": at, "updatedAt": at});
+    let mut archived_row = row("t-archived", "[heimdall-bg] goals 111111111111", "preparing", ago(55 * 3600));
+    archived_row["archived"] = json!(true);
+    *fake.all_rows.lock().unwrap() = vec![
+        // The thread of the note: launched 3 Nov 18:43, still "preparing".
+        row("mcp:launch:1dc099e7", "[heimdall-bg] island agent 0cd0385ffb2f", "preparing", ago(55 * 3600)),
+        // A call still in its time.
+        row("t-live", "[heimdall-bg] island agent aaaaaaaaaaaa", "running", ago(30)),
+        // Just inside the deadline.
+        row("t-edge", "[heimdall-bg] goals bbbbbbbbbbbb", "running", ago(STALE_AFTER.as_secs() as i64 - 30)),
+        // A session's own thread this process holds.
+        row("t-held", "[heimdall-bg] goals goals-s1 cccccccccccc", "running", ago(2 * 3600)),
+        // A resumed session's thread mid-turn: out of the session list, but a call works on it (night review, 6 Nov).
+        row("t-turn", "[heimdall-bg] goals goals-s2 eeeeeeeeeeee", "running", ago(2 * 3600)),
+        archived_row,
+        // The user's own thread that only mentions the prefix, and a finished one T3 lists anyway.
+        row("t-owner", "Fix the [heimdall-bg] sweep", "running", ago(55 * 3600)),
+        row("t-done", "[heimdall-bg] goals dddddddddddd", "completed", ago(55 * 3600)),
+    ];
+    sessions(|all| all.push(Session { key: "goals-s1".into(), job: "goals", thread: "t-held".into(), turns: 1, after: None, run: None, on: Default::default() }));
+    let mut turn = InFlight(None);
+    turn.hold("t-turn");
+    let r = registered().unwrap();
+    assert_eq!(rt().block_on(sweep_stale(&r)).unwrap(), 1);
+    assert_eq!(fake.args("t3_thread_interrupt"), [json!({"threadId": "mcp:launch:1dc099e7"})]);
+    assert_eq!(fake.args("t3_thread_organize"), [json!({"threadId": "mcp:launch:1dc099e7", "action": "archive"})]);
+    let list = &fake.args("t3_thread_list")[0];
+    assert_eq!((list["allProjects"].as_bool(), list["titleContains"].as_str()), (Some(true), Some(TITLE)));
+    // T3 may still list it as it was: never archived twice by this process.
+    assert_eq!(rt().block_on(sweep_stale(&r)).unwrap(), 0);
+    assert_eq!(fake.args("t3_thread_organize").len(), 1);
+    // A list call that fails is the sweep's error, for the periodic sweep's log line (night review H5, 6 Nov).
+    fake.deny_list_all.store(true, std::sync::atomic::Ordering::SeqCst);
+    let e = format!("{:#}", rt().block_on(sweep_stale(&r)).unwrap_err());
+    assert!(e.starts_with("the stale-thread sweep could not list T3's threads: ") && e.contains("no answer"), "{e}");
+    fake.deny_list_all.store(false, std::sync::atomic::Ordering::SeqCst);
+    // Once the turn is over the hold goes with it.
+    drop(turn);
+    assert!(!in_flight(|s| s.contains("t-turn")));
+    sessions(|all| all.clear());
 }

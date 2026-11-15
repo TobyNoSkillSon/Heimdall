@@ -54,7 +54,7 @@
             speaker: 2,
         };
         // A new voice on a call: a code label, counted, and nothing for the user to answer.
-        a.speaker_events(vec![SpeakerEvent::VoiceCoded { track: track.clone(), code: "Speaker Fri 23 Oct 21h #1".into(), new: true }])
+        a.speaker_events(vec![SpeakerEvent::VoiceCoded { track: track.clone(), code: "Speaker Fri 23 Oct 21h #1".into(), new: true, near: None }])
             .unwrap();
         assert_eq!((a.coded_voices, a.speaker_prompts), (1, 0));
         assert_eq!(a.speaker_names[&track], "Speaker Fri 23 Oct 21h #1");
@@ -92,6 +92,8 @@
         }])
         .unwrap();
         assert_eq!(a.labels[&id].0.label.as_ref().unwrap().speaker, "Sam");
+        // The relabel is handed to the archive's writer without waiting (night 8 Nov log sweep, finding 4).
+        assert!(a.index.settle_for_test());
         let c = heimdall_archive::store::open(&crate::archive::store_root(&a.session)).unwrap();
         let name: String = c
             .query_row("SELECT speaker FROM utterances", [], |r| r.get(0))

@@ -11,7 +11,6 @@ use std::{
 
 pub fn worker(data: &Path, models: &Path, wav: &Path) -> Result<()> {
     heimdall_night::gate::background()?;
-    std::env::set_var("HEIMDALL_SPEAKERS_METAL", "0");
     let parent = unsafe { libc::getppid() };
     std::thread::spawn(move || {
         let start = Instant::now();

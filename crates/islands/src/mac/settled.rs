@@ -232,12 +232,12 @@ pub fn label_sig(raw: &crate::model::Json, now: f64, cal: &Cal) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::jobj;
 
-    #[test]
-    fn today_shows_three_rows_then_earlier_and_claims_are_not_counted() {
+    /// Run by `mac::tests::appkit_renders`, in one process with the other AppKit renders (TST-11).
+    pub(crate) fn today_shows_three_rows_then_earlier_and_claims_are_not_counted() {
         let cal = Cal::current();
         let now = crate::model::time::now();
         let day0 = cal.start_of_day(now);

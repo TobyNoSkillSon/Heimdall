@@ -134,6 +134,7 @@ impl Pipeline {
         }
         self.voice_namer_tick();
         self.heimdall_voice_tick();
+        self.hold_verify_tick();
         self.suggest_tick();
         self.inference_engine_events();
         let now = Instant::now();

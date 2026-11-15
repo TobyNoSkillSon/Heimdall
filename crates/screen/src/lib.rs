@@ -14,7 +14,7 @@ pub use commands::*;
 pub use fullres::*;
 pub use hold::*;
 #[cfg(target_os = "macos")]
-pub use macos::{grab_still, screen_permission_granted, ScreenCapture, ScreenEvent};
+pub use macos::{capture_blocker, grab_still, screen_permission_granted, ScreenCapture, ScreenEvent};
 
 /// A still of one display (drawing mode holds it under its overlay while a menu is open): packed BGRA8, opaque, in
 /// Display P3, without the pointer.

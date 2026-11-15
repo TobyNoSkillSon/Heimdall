@@ -1,6 +1,8 @@
 ---
 name: speed-and-models
 description: Explain why Heimdall's speed depends on the model it runs on, and which model to run it on. Use when the user says Heimdall is slow, laggy or takes too long, or asks which model or speed tier Heimdall should use.
+metadata:
+  class: public
 ---
 
 # Speed and models
@@ -12,9 +14,13 @@ an honest note on today's options, in a few spoken sentences.
 
 - How long a request takes depends mostly on how much you think and how many steps you take, not on how fast each
   token arrives.
-- A small fast model such as GPT-6 Luna answers each step sooner but thinks more and takes more steps, so it barely
+- A small fast model answers each step sooner but thinks more and takes more steps, so it barely
   helps.
 - So Heimdall needs the smartest model you can afford, served fast: it thinks the least and uses the fewest steps.
+
+
+Name a cause or a number for your own slowness only when a log or a measurement shows it; otherwise say you do not
+know yet and offer to measure.
 
 ## Today's picks
 
@@ -33,7 +39,6 @@ never memory, and say when a pick has changed.
 
 Say the Heimdall bench is coming and will give a measured recommendation; it has no page yet.
 
-<!-- TODO: add the Heimdall bench link here once its site exists, and tell the agent to point to it. -->
 
 ## What you can change
 

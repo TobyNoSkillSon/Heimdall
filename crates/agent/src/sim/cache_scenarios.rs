@@ -3,7 +3,7 @@
 //! answers `NO_REPLY`, which nobody hears or reads. Pings stop 3 hours after the last real request, and none goes out
 //! with the Agent off or on a provider without the hour cache.
 use super::*;
-use crate::maintenance::{CompactionPolicy, PING_TEXT, PING_TEXT_AFTER_START};
+use crate::maintenance::{ping_text_after_start, CompactionPolicy, PING_TEXT};
 use crate::provider::Limits;
 
 fn opus(sim: &mut Sim, hour_cache: bool) {
@@ -129,7 +129,7 @@ fn p6_after_a_start_pings_stop_three_hours_after_the_last_real_request() {
     minutes(&mut sim, 6 * 60);
     let sent: Vec<u64> = pings(&sim).iter().map(|t| (t - request) / MIN).collect();
     assert_eq!(sent.len(), 3, "pings at {sent:?} minutes");
-    assert!(sim.wakes().iter().filter(|i| i.text.contains("[Heimdall cache refresh]")).all(|i| i.text.contains(PING_TEXT_AFTER_START)), "NO_REPLY only until User talks");
+    assert!(sim.wakes().iter().filter(|i| i.text.contains("[Heimdall cache refresh]")).all(|i| i.text.contains(&ping_text_after_start())), "NO_REPLY only until User talks");
     assert!(sim.heard_texts().is_empty() || sim.heard_texts().iter().all(|h| !h.contains("NO_REPLY")));
     sim.check_global();
 }

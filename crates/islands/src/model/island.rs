@@ -517,7 +517,7 @@ impl Island {
 
     /// A To do item still open and waiting on the user: the island's symbol turns orange. On Goals, an ask that waits on
     /// him (not done, not answered, nobody else next); a goal never does.
-    pub fn waits_on_owner(&self) -> bool {
+    pub fn waits_on_user(&self) -> bool {
         if self.list().as_deref() == Some("goals") {
             return !super::goals::Goals::waiting(&self.plan_items()).is_empty();
         }

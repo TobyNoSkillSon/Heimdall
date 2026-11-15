@@ -76,7 +76,7 @@ pub(crate) fn owner(dir: &Path) -> Result<Option<File>> {
     Ok(flock(&file, libc::LOCK_EX | libc::LOCK_NB).then_some(file))
 }
 /// Removes queued blobs, `store::COLLECT_KEYS` per writer job, while `more()` allows. Returns blobs removed.
-fn collect_all(queue: &crate::live::Queue, root: &Path, more: &mut dyn FnMut() -> bool) -> Result<usize> {
+pub(crate) fn collect_all(queue: &crate::live::Queue, root: &Path, more: &mut dyn FnMut() -> bool) -> Result<usize> {
     let mut removed = 0;
     loop {
         let r = root.to_path_buf();
@@ -119,17 +119,39 @@ pub fn collect_now(root: &Path) -> Result<Option<usize>> {
     reclaim_index(&queue, u32::MAX, &mut || true)?;
     Ok(Some(n))
 }
-pub struct ReaderLock(File);
+pub struct ReaderLock(File, u64);
 /// Shared archive lock: nothing a reader sees is deleted while it holds it. Waits at most one collection job.
 pub fn reader_lock(root: &Path) -> Result<ReaderLock> {
     let file = lock_file(root, ".compact.lock")?;
     ensure!(flock(&file, libc::LOCK_SH), "archive read lock");
-    Ok(ReaderLock(file))
+    let token = NEXT_READER.fetch_add(1, Ordering::Relaxed);
+    let thread = std::thread::current().name().unwrap_or("an unnamed thread").to_owned();
+    readers().lock().unwrap().push((token, thread, std::time::Instant::now()));
+    Ok(ReaderLock(file, token))
 }
 impl Drop for ReaderLock {
     fn drop(&mut self) {
+        readers().lock().unwrap().retain(|(t, ..)| *t != self.1);
         flock(&self.0, libc::LOCK_UN);
     }
+}
+static NEXT_READER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// The reader locks this process holds: the thread that took each one and since when (`readers_held`).
+fn readers() -> &'static Mutex<Vec<(u64, String, std::time::Instant)>> {
+    static READERS: Mutex<Vec<(u64, String, std::time::Instant)>> = Mutex::new(Vec::new());
+    &READERS
+}
+/// Who holds the archive's reader lock in this process, longest first ("heimdall-embeddings for 4.2 s"), or "another
+/// process" when no thread here does: the stall lines name the reader instead of leaving it to be guessed (13 Nov:
+/// tiering stalled all day behind a reader nobody could name).
+pub(crate) fn readers_held() -> String {
+    let mut held: Vec<(String, std::time::Duration)> =
+        readers().lock().unwrap().iter().map(|(_, thread, since)| (thread.clone(), since.elapsed())).collect();
+    if held.is_empty() {
+        return "another process".into();
+    }
+    held.sort_by(|a, b| b.1.cmp(&a.1));
+    held.iter().map(|(thread, age)| format!("{thread} for {:.1} s", age.as_secs_f64())).collect::<Vec<_>>().join(", ")
 }
 /// Audio groups one pass may publish before metadata packing and the caller's gate get a turn.
 pub const PASS_AUDIO_GROUPS: usize = 32;
@@ -292,6 +314,8 @@ fn prepare_group(
         signal_fingerprint(&mono)
     };
     let quality = source_quality(db, segment, source, rate)?;
+    let voice = voice_source(db, segment, source)?;
+    let target_rate = if !voice { 16000 } else if low { audio::opus_rate(rate) } else { rate };
     let matches: Vec<(String, i64)> = db
         .prepare_cached("SELECT object_id,quality FROM audio_spans WHERE fingerprint=?1 AND abs(start_ns-?2)<=62500 AND abs(end_ns-?3)<=62500 LIMIT 8")?
         .query_map(params![fingerprint, start as i64, expected as i64], |r| Ok((r.get(0)?, r.get(1)?)))?
@@ -308,39 +332,43 @@ fn prepare_group(
         let Some(prior_codec) = prior_codec else { continue };
         // Speech/unknown coverage cannot inherit a lower non-speech codec
         // merely because another source's VAD classified the same span low.
-        if !low && prior_codec == "opus-har1" {
+        if !low && (prior_codec == "opus-har1" || prior_codec == audio::OPUS_NATIVE) {
             continue;
         }
         let old = audio::read_object(db, &object)?;
-        if let Some(gain) = same_signal(&mono, &old.samples) {
+        // Nor a voice source's capture-rate audio a lower rate or fewer channels stored for another source.
+        if voice && (old.rate < target_rate || (!low && old.channels < cold_channels(&pcm, channels))) {
+            continue;
+        }
+        // The group's blocks must fit inside the shared object at its rate (the read path maps frames by rate ratio).
+        let old_frames = old.samples.len() / old.channels as usize;
+        if (frames as u64 * old.rate as u64).div_ceil(rate as u64) > old_frames as u64 {
+            continue;
+        }
+        // Resampled objects are padded to the rounded-up length (`fit`); compare the common length.
+        let mut old_mono = audio::mono_16k(&old.samples, old.rate, old.channels)?;
+        if (mono.len()..=mono.len() + 2).contains(&old_mono.len()) {
+            old_mono.truncate(mono.len());
+        }
+        if let Some(gain) = same_signal(&mono, &old_mono) {
             let packed: bool = db
                 .prepare_cached("SELECT EXISTS(SELECT 1 FROM packed_audio_refs WHERE object_id=?1)")?
                 .query_row([&object], |r| r.get(0))?;
-            equivalent = Some((object, if packed { i64::MAX } else { prior_quality }, gain));
+            // A signal already stored at a higher rate (a voice source's) is kept, never replaced by a 16 kHz copy.
+            // Nor may this group replace another source's richer object (more channels, FLAC under its Opus).
+            let richer = old.rate > target_rate
+                || old.channels > if voice && !low { cold_channels(&pcm, channels) } else { 1 }
+                || (low && !prior_codec.starts_with("opus"));
+            equivalent = Some((object, if packed || richer { i64::MAX } else { prior_quality }, gain));
             break;
         }
     }
-    // Quantized *speech* key also merges different native rates/channel layouts.
-    // Audio outside [-1,1] cannot be quantized without clipping; retain it losslessly.
-    let encoded_samples = if native_fallback { &pcm } else { &mono };
-    let encoded_rate = if native_fallback { rate } else { 16000 };
-    let encoded_channels = if native_fallback { channels } else { 1 };
-    let use_flac = !native_fallback && mono.iter().all(|x| (-1.0..=1.0).contains(x));
-    let use_opus = use_flac && low;
-    let bytes = if use_opus {
-        audio::encode_opus(&mono, 12_000)?
-    } else if use_flac {
-        audio::encode_flac(&mono)?
+    let cold = if native_fallback {
+        Cold { codec: "f32-zstd", rate, channels, bytes: zstd::bulk::compress(&audio::pcm_bytes(&pcm), 19)?, samples: pcm.len() }
     } else {
-        zstd::bulk::compress(&audio::pcm_bytes(encoded_samples), 19)?
+        encode_cold(&pcm, rate, channels, &mono, voice, low)?
     };
-    let codec = if use_opus {
-        "opus-har1"
-    } else if use_flac {
-        COLD_CODEC
-    } else {
-        "f32-zstd"
-    };
+    let Cold { codec, rate: encoded_rate, channels: encoded_channels, bytes, samples: encoded_len } = cold;
     let stored_sha = hash(&bytes);
     let mut identity = encoded_rate.to_le_bytes().to_vec();
     identity.extend(encoded_channels.to_le_bytes());
@@ -350,24 +378,19 @@ fn prepare_group(
     let key = store::audio_key(&id);
     store::put(root, &pack, &[(key.clone(), &bytes)])?;
     let stored = store::get(root, &pack, &key)?.context("cold object vanished after commit")?;
-    let checked = if use_opus {
-        audio::decode_opus(&stored)?
-    } else if use_flac {
-        audio::decode_flac(&stored, mono.len())?
-    } else {
-        audio::pcm_from_bytes(&zstd::bulk::decompress(&stored, encoded_samples.len() * 4)?)?
-    };
+    let frames = encoded_len / encoded_channels as usize;
+    let checked = audio::decode_object(encoded_rate, encoded_channels, frames, codec, &stored)?;
+    // Read back byte for byte and decoded independently. Float objects decode deterministically from those bytes; they
+    // hold the policy's samples (16 kHz mono for an app), not always `pcm` (13 Nov: comparing with `pcm` failed every
+    // app group with a sample outside ±1 on a real day).
     ensure!(
-        checked.len() == encoded_samples.len()
-            && if use_flac {
-                checked.iter().all(|x| x.is_finite())
-            } else {
-                audio::pcm_bytes(&checked) == audio::pcm_bytes(encoded_samples)
-            },
+        stored == bytes
+            && checked.samples.len() == encoded_len
+            && (codec == "f32-zstd" || checked.samples.iter().all(|x| x.is_finite())),
         "cold verification failed"
     );
     crash_point("verified");
-    let frames = (encoded_samples.len() / encoded_channels as usize) as i64;
+    let frames = frames as i64;
     Ok(Group {
         session,
         source: source.to_owned(),
@@ -446,6 +469,86 @@ fn publish_group(db: &Connection, root: &Path, g: &Group) -> Result<usize> {
         }
     }
     Ok(reclaimed)
+}
+/// Non-speech of a voice source: mono Opus at the capture rate (48 kHz when Opus does not take it), fullband.
+pub const VOICE_NON_SPEECH_BITRATE: i32 = 32_000;
+/// One cold encoding of a group: codec, catalogued geometry, bytes, decoded sample count.
+pub struct Cold {
+    pub codec: &'static str,
+    pub rate: u32,
+    pub channels: u16,
+    pub bytes: Vec<u8>,
+    pub samples: usize,
+}
+/// Channels a voice source's speech keeps: one when every frame's channels are equal (a mono microphone presented as
+/// stereo, the Shure MV7i), else up to two; more than two are mixed to one.
+pub fn cold_channels(pcm: &[f32], channels: u16) -> u16 {
+    let c = channels as usize;
+    if c == 2 && !pcm.chunks_exact(2).all(|f| f[0] == f[1]) { 2 } else { 1 }
+}
+/// The cold codec policy (13 Nov; "can you store a proper high quality audio? I never said to store low
+/// quality audio."). `pcm` is the group's native interleaved audio, `mono` its mono 16 kHz copy, `low` whether VAD
+/// covers it as non-speech.
+/// - Voice sources (microphones, the phone's mic, calls, Heimdall's voice): speech and unknown coverage as FLAC 16-bit at
+///   the capture rate, mono unless the channels differ (≤2); non-speech as mono Opus at the capture rate, 32 kb/s.
+/// - Other sources (apps, media): unchanged since 11 Oct, FLAC 16 kHz mono for speech, Opus 12 kb/s 16 kHz for the rest.
+/// - Values outside [-1, 1] are never clipped: they stay float (zstd) in the geometry the policy chose.
+pub fn encode_cold(pcm: &[f32], rate: u32, channels: u16, mono: &[f32], voice: bool, low: bool) -> Result<Cold> {
+    let original_rate = rate;
+    // The native frame count must use the native channel count: the binding below shadows `channels` with the cold
+    // copy's (review B1, 13 Nov: stereo app audio went cold at twice its length).
+    let native_frames = (pcm.len() / channels.max(1) as usize) as u64;
+    let (samples, rate, channels): (std::borrow::Cow<[f32]>, u32, u16) = if !voice {
+        (mono.into(), 16000, 1)
+    } else if low {
+        (audio::mono_at(pcm, rate, channels, audio::opus_rate(rate))?.into(), audio::opus_rate(rate), 1)
+    } else {
+        match cold_channels(pcm, channels) {
+            c if c == channels => (pcm.into(), rate, c),
+            1 if channels == 2 => (pcm.iter().step_by(2).copied().collect::<Vec<_>>().into(), rate, 1),
+            _ => (audio::mono_at(pcm, rate, channels, rate)?.into(), rate, 1),
+        }
+    };
+    // A resampled object holds the rounded-up length, so the last callback of a group (whose end the clip reader rounds
+    // up) always fits: 16 kHz objects of 48 kHz callbacks lost up to 0.3 s per 5 minutes in clips to "callback exceeds
+    // its audio object" (10 Nov), and 44.1 kHz voice non-speech stored at 48 kHz would have too (review, 13 Nov).
+    let samples = fit(samples, native_frames, original_rate, rate);
+    let n = samples.len();
+    if !samples.iter().all(|x| (-1.0..=1.0).contains(x)) {
+        return Ok(Cold { codec: "f32-zstd", rate, channels, bytes: zstd::bulk::compress(&audio::pcm_bytes(&samples), 19)?, samples: n });
+    }
+    Ok(match (voice, low) {
+        (false, true) => Cold { codec: "opus-har1", rate, channels, bytes: audio::encode_opus(&samples, 12_000)?, samples: n },
+        (true, true) => Cold { codec: audio::OPUS_NATIVE, rate, channels, bytes: audio::encode_opus_native(&samples, rate, VOICE_NON_SPEECH_BITRATE)?, samples: n },
+        (_, false) => Cold { codec: COLD_CODEC, rate, channels, bytes: audio::encode_flac_as(&samples, rate, channels)?, samples: n },
+    })
+}
+/// Pads a mono resampled copy of `frames` native frames to ceil(frames × out / native) with its last value.
+fn fit(samples: std::borrow::Cow<'_, [f32]>, frames: u64, native: u32, out: u32) -> std::borrow::Cow<'_, [f32]> {
+    let want = (frames * out as u64).div_ceil(native as u64) as usize;
+    if native == out || samples.len() >= want || samples.is_empty() {
+        return samples;
+    }
+    let mut v = samples.into_owned();
+    let last = *v.last().unwrap();
+    v.resize(want, last);
+    v.into()
+}
+/// Microphones (the Mac's and the phone's), calls and Heimdall's own voice; a source without a catalogue entry counts
+/// by its ID (`mic:…`).
+fn voice_source(db: &Connection, segment: i64, source: &str) -> Result<bool> {
+    let metadata: Option<String> = db
+        .prepare_cached("SELECT metadata_json FROM sources WHERE segment=?1 AND id=?2")?
+        .query_row(params![segment, source], |r| r.get(0))
+        .optional()?;
+    Ok(match metadata {
+        Some(m) => match crate::clip::describe_source(source, &m).0.as_str() {
+            "mic" | "call" | "heimdall" => true,
+            "audio" => source.starts_with("mic"),
+            _ => false,
+        },
+        None => source.starts_with("mic"),
+    })
 }
 fn source_quality(db: &Connection, segment: i64, source: &str, rate: u32) -> Result<i64> {
     let metadata: Option<String> = db
@@ -682,8 +785,11 @@ pub fn compact_pass(root: &Path, now: u64, more: &mut dyn FnMut() -> bool) -> Re
     }
     #[cfg(target_os = "macos")]
     if maintenance_allowed() {
-        match compact_video_while(root, now, more, &mut maintenance_allowed) {
-            Ok(n) => result.video_segments += n,
+        match crate::video::tier_while(root, now, crate::video::PASS_EPOCHS, &mut || more() && maintenance_allowed()) {
+            Ok(t) => {
+                result.video_segments += t.tiered + t.retired;
+                result.errors.extend(t.errors);
+            }
             Err(e) => result.errors.push(format!("video: {e:#}")),
         }
     }
@@ -713,10 +819,6 @@ fn maintenance_allowed()->bool {
     #[cfg(not(target_os="macos"))]
     {false}
 }
-#[cfg(target_os="macos")]
-pub fn compact_video_while(root:&Path,now:u64,more:&mut dyn FnMut()->bool,maintenance:&mut impl FnMut()->bool)->Result<usize> {
-    crate::video::compact_while(root,now,&mut || more() && maintenance())
-}
 /// Recheck AC + idle at every cancellation boundary, including before decoding
 /// and committing a recording projection. The audio gate remains separate.
 pub fn backfill_chunks_while(root:&Path,more:&mut impl FnMut()->bool,maintenance:&mut impl FnMut()->bool)->Result<usize> {
@@ -740,7 +842,7 @@ fn running() -> &'static Mutex<Vec<Weak<AtomicBool>>> {
     RUNNING.get_or_init(|| Mutex::new(vec![]))
 }
 /// SQLite's "interrupted" (code 9): what a step stopped by `preempt` fails with.
-fn interrupted(error: &str) -> bool {
+pub(crate) fn interrupted(error: &str) -> bool {
     error.contains("(Error code 9)") || error.contains("sqlite3_interrupt") || error.trim_end().ends_with("interrupted")
 }
 /// A pass's health status and log line from its errors (none: none). A step interrupted because the compactor was
@@ -922,6 +1024,31 @@ pub fn compact_metadata_while(root: &Path, now: u64, audio: bool, more: &mut dyn
     Ok(n)
 }
 
+#[cfg(test)]
+mod reader_tests {
+    /// A stall line names the thread holding the archive, and forgets it once the lock is dropped.
+    #[test]
+    fn readers_held_names_the_holding_thread() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path().to_path_buf();
+        let (held, release) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
+        let (held_tx, held_rx) = held;
+        let (release_tx, release_rx) = release;
+        let thread = std::thread::Builder::new()
+            .name("test-archive-reader".into())
+            .spawn(move || {
+                let _lock = super::reader_lock(&r).unwrap();
+                held_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            })
+            .unwrap();
+        held_rx.recv().unwrap();
+        assert!(super::readers_held().contains("test-archive-reader for "), "{}", super::readers_held());
+        release_tx.send(()).unwrap();
+        thread.join().unwrap();
+        assert!(!super::readers_held().contains("test-archive-reader"), "{}", super::readers_held());
+    }
+}
 #[cfg(test)]
 mod outcome_tests {
     #[test]

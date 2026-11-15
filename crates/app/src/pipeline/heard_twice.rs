@@ -13,6 +13,9 @@ const KEEP: usize = 16;
 
 struct MicFinal {
     source: String,
+    /// Archived by the phone turn's microphone gate (`phone_holds_mic`): another Mac microphone's copy still matches
+    /// it, the phone's own line never does (it must reach the agent).
+    gated: bool,
     id: String,
     start: u64,
     end: u64,
@@ -46,27 +49,38 @@ fn same_speech(a: &MicFinal, start: u64, end: u64, words: &[String]) -> bool {
 
 impl HeardTwice {
     /// The id of the earlier final from another microphone this one repeats; otherwise it is remembered and `None`.
+    #[cfg(test)]
     pub(crate) fn check(&mut self, source: &str, id: &str, start: u64, end: u64, text: &str) -> Option<String> {
+        self.check_gated(source, id, start, end, text, false)
+    }
+    /// `check`, for a final the phone turn's gate archives (`gated`). One that is not gated (the phone's own line, a
+    /// dictated one, a Mac final after the gate opened) never matches a gated one.
+    pub(crate) fn check_gated(&mut self, source: &str, id: &str, start: u64, end: u64, text: &str, gated: bool) -> Option<String> {
         while self.recent.front().is_some_and(|f| f.end.saturating_add(KEEP_NS) < start) || self.recent.len() >= KEEP {
             self.recent.pop_front();
         }
         let heard = words(text);
-        if let Some(first) = self.recent.iter().find(|f| f.source != source && same_speech(f, start, end, &heard)) {
+        // night1113 phone-mic follow-up (build 12 review: "during a phone turn a line dictated at the Mac could be
+        // dropped as a duplicate"): a gated final never reached the agent, so it is no first that won. Only another
+        // gated final repeats it; a line that goes on (the phone's own, a line dictated to Vella, a Mac final after the
+        // gate opened) never matches it.
+        if let Some(first) = self.recent.iter().find(|f| f.source != source && (gated || !f.gated) && same_speech(f, start, end, &heard)) {
             self.copies.insert(id.to_owned());
             return Some(first.id.clone());
         }
-        self.recent.push_back(MicFinal { source: source.into(), id: id.into(), start, end, words: heard });
+        self.recent.push_back(MicFinal { source: source.into(), gated, id: id.into(), start, end, words: heard });
         None
     }
 }
 
 impl Pipeline {
     /// Archives a microphone final that repeats another microphone's (`HeardTwice`) and reports whether it did.
-    pub(super) fn archive_heard_twice(&mut self, final_: &AgentFinal) -> Result<bool> {
-        if !self.owner(&final_.source) {
+    /// `gated`: the phone turn's microphone gate archives this final if it is not a copy.
+    pub(super) fn archive_heard_twice(&mut self, final_: &AgentFinal, gated: bool) -> Result<bool> {
+        if !self.user_source(&final_.source) {
             return Ok(false);
         }
-        let Some(first) = self.heard_twice.check(&final_.source, &final_.observation.id, final_.start, final_.end, &final_.observation.text) else {
+        let Some(first) = self.heard_twice.check_gated(&final_.source, &final_.observation.id, final_.start, final_.end, &final_.observation.text, gated) else {
             return Ok(false);
         };
         let mut record = serde_json::json!({"status":"heard_on_another_microphone","same_as":first,"given_to_agent":false,"would_wake":false});
@@ -122,6 +136,31 @@ mod tests {
         assert!(h.copies.is_empty());
     }
 
+    /// Re-review finding 5: a final the phone turn's gate archived still dedupes the Mac's other microphones, but the
+    /// phone's own copy never matches it (it must reach the agent).
+    #[test]
+    fn a_gated_mac_final_dedupes_mac_copies_but_never_the_phone() {
+        let mut h = HeardTwice::default();
+        assert_eq!(h.check_gated("mic:shure:1", "1", 10 * S, 12 * S, "and the weekend", true), None);
+        assert_eq!(h.check_gated("mic:airpods:1", "2", 10 * S, 12 * S, "and the weekend", true).as_deref(), Some("1"), "another Mac mic");
+        assert_eq!(h.check_gated("phone:iphone:1", "3", 10 * S, 12 * S, "and the weekend", false), None, "the phone goes on");
+        assert_eq!(h.check_gated("mic:shure:1", "4", 10 * S, 12 * S, "and the weekend", true).as_deref(), Some("3"), "a later Mac copy of the phone's line");
+    }
+    /// night1113 follow-up (build 12 review): during a phone turn the gate archives the Shure's copy of a line the user
+    /// dictates to Vella at the Mac; the dictated line itself (ungated, from the AirPods) still goes on, and so does a
+    /// Mac final that ends after the gate opened. A second gated copy is still one utterance.
+    #[test]
+    fn a_line_dictated_at_the_mac_is_never_a_copy_of_a_gated_final() {
+        let mut h = HeardTwice::default();
+        assert_eq!(h.check_gated("mic:shure:1", "1", 10 * S, 14 * S, "dear Anna thanks for the invite", true), None);
+        assert_eq!(h.check_gated("mic:airpods:1", "2", 10 * S, 14 * S, "dear Anna thanks for the invite", false), None, "dictated: goes on");
+        assert_eq!(h.check_gated("mic:built-in", "3", 10 * S, 14 * S, "dear Anna thanks for the invite", true).as_deref(), Some("1"), "a gated copy");
+        assert!(!h.copies.contains("2"));
+        // The gate opened between the two microphones' finals: the later one is heard.
+        let mut h = HeardTwice::default();
+        assert_eq!(h.check_gated("mic:shure:1", "4", 30 * S, 33 * S, "Heimdall what time is it", true), None);
+        assert_eq!(h.check_gated("mic:airpods:1", "5", 30 * S, 33 * S + S / 2, "Heimdall what time is it", false), None);
+    }
     /// The comparison window is bounded: old finals leave it, and it never holds more than `KEEP`.
     #[test]
     fn old_finals_leave_the_window() {

@@ -50,7 +50,7 @@ fn offline_enrolment_of_heimdalls_voices() {
         .and_then(|v| v["voice_speed_percent"].as_f64())
         .unwrap_or(100.) as f32 / 100.;
     let mut lines: BTreeMap<String, Vec<Vec<f32>>> = BTreeMap::new();
-    let to16 = |a: speak::Audio| crate::audio::mono_16k(&a.samples, a.sample_rate, 1).unwrap();
+    let to16 = |a: speak::Audio| heimdall_archive::audio::mono_16k(&a.samples, a.sample_rate, 1).unwrap();
     let started = Instant::now();
     {
         let mut supertonic = speak::Supertonic::load_with_backend(models.join("supertonic-3"), speak::TtsBackend::Cpu).expect("Supertonic");

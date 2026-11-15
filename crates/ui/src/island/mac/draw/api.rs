@@ -20,7 +20,7 @@ pub fn open() -> Result<String, String> {
     Ok(if was_open {
         format!("Drawing mode is already open on display {index}.")
     } else {
-        format!("Drawing mode is open on display {index}: User draws, Return attaches the marked screenshot to his next message, Esc closes.")
+        format!("Drawing mode is open on display {index}: {} draws, Return attaches the marked screenshot to his next message, Esc closes.", crate::identity::user_subject())
     })
 }
 

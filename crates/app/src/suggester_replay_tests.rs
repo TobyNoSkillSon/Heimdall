@@ -23,8 +23,8 @@ fn silent() -> sg::Verdict {
 #[test]
 fn an_archive_line_is_a_line_of_talk_and_a_wordless_one_is_not() {
     let l = parse_line(&utterance(NOW, "User", "I remember there was a CAD file")).unwrap();
-    assert_eq!(l, sg::Line { at_ms: NOW, speaker: "User".into(), text: "I remember there was a CAD file".into(), owner: true });
-    assert!(!parse_line(&utterance(NOW, "Sam", "hi")).unwrap().owner);
+    assert_eq!(l, sg::Line { at_ms: NOW, speaker: "User".into(), text: "I remember there was a CAD file".into(), user: true });
+    assert!(!parse_line(&utterance(NOW, "Sam", "hi")).unwrap().user);
     assert!(parse_line(&utterance(NOW, "Sam", "   ")).is_none());
     assert!(parse_line("{\"kind\": \"model_output\"}").is_none());
     assert!(parse_line(&utterance(NOW, "Heimdall", "Yes, I can do that.")).is_none(), "Heimdall's own speech is not talk");
@@ -41,8 +41,8 @@ fn the_talk_is_read_in_time_order() {
 /// The talk that makes the stub fire on the user's line at `at`: Sam spoke just before, the user asks about a file.
 fn cue(at: u64) -> Vec<sg::Line> {
     vec![
-        sg::Line { at_ms: at - 30_000, speaker: "Sam".into(), text: "what did we build".into(), owner: false },
-        sg::Line { at_ms: at, speaker: "User".into(), text: "I remember there was a CAD file like this".into(), owner: true },
+        sg::Line { at_ms: at - 30_000, speaker: "Sam".into(), text: "what did we build".into(), user: false },
+        sg::Line { at_ms: at, speaker: "User".into(), text: "I remember there was a CAD file like this".into(), user: true },
     ]
 }
 
@@ -69,9 +69,9 @@ fn a_silent_answer_costs_its_call_and_shows_nothing() {
 fn a_card_holds_the_pacer_for_its_life_and_the_gap_then_allows_the_next() {
     let mut lines = cue(NOW);
     // A second cue inside the card's life: no call (a card is up). After it, another cue on a new topic: shown.
-    lines.push(sg::Line { at_ms: NOW + 60_000, speaker: "Sam".into(), text: "ok".into(), owner: false });
-    lines.push(sg::Line { at_ms: NOW + 90_000, speaker: "User".into(), text: "who was that about the photos".into(), owner: true });
-    lines.push(sg::Line { at_ms: NOW + sg::CARD_MS + 60_000, speaker: "User".into(), text: "I remember there was a photo from the trip".into(), owner: true });
+    lines.push(sg::Line { at_ms: NOW + 60_000, speaker: "Sam".into(), text: "ok".into(), user: false });
+    lines.push(sg::Line { at_ms: NOW + 90_000, speaker: "User".into(), text: "who was that about the photos".into(), user: true });
+    lines.push(sg::Line { at_ms: NOW + sg::CARD_MS + 60_000, speaker: "User".into(), text: "I remember there was a photo from the trip".into(), user: true });
     let mut topics = vec!["CAD file".to_owned(), "Sam's photos".to_owned()].into_iter();
     let out = run(&lines, Some(&mut |_| (Ok(card(&topics.next().unwrap_or_default())), 0.02)), &mut Budget::default());
     let outcomes: Vec<(&str, bool)> = out.iter().map(|d| (d.outcome.as_str(), d.called)).collect();
@@ -84,8 +84,8 @@ fn a_card_holds_the_pacer_for_its_life_and_the_gap_then_allows_the_next() {
 fn a_card_on_a_topic_already_offered_is_not_shown_again() {
     let mut lines = cue(NOW);
     // Someone else talks again inside the five minutes before the user's next line (the stub's "someone talked" rule).
-    lines.push(sg::Line { at_ms: NOW + sg::CARD_MS, speaker: "Sam".into(), text: "so".into(), owner: false });
-    lines.push(sg::Line { at_ms: NOW + sg::CARD_MS + 60_000, speaker: "User".into(), text: "I remember there was the CAD file again".into(), owner: true });
+    lines.push(sg::Line { at_ms: NOW + sg::CARD_MS, speaker: "Sam".into(), text: "so".into(), user: false });
+    lines.push(sg::Line { at_ms: NOW + sg::CARD_MS + 60_000, speaker: "User".into(), text: "I remember there was the CAD file again".into(), user: true });
     let out = run(&lines, Some(&mut |_| (Ok(card("CAD file")), 0.02)), &mut Budget::default());
     assert_eq!(out[0].outcome, "card");
     assert_eq!(out[1].outcome, "pacing", "the same topic within two hours: called, not shown");
@@ -97,8 +97,8 @@ fn spend_stops_the_calls_at_the_budget() {
     // Each call costs $1.00 and the calls are a minute apart: the third would start past the budget.
     let mut lines = vec![];
     for i in 0..6u64 {
-        lines.push(sg::Line { at_ms: NOW + i * 120_000, speaker: "Sam".into(), text: "hi".into(), owner: false });
-        lines.push(sg::Line { at_ms: NOW + i * 120_000 + 1_000, speaker: "User".into(), text: "I remember there was this".into(), owner: true });
+        lines.push(sg::Line { at_ms: NOW + i * 120_000, speaker: "Sam".into(), text: "hi".into(), user: false });
+        lines.push(sg::Line { at_ms: NOW + i * 120_000 + 1_000, speaker: "User".into(), text: "I remember there was this".into(), user: true });
     }
     let mut calls = 0;
     let out = run(
@@ -118,8 +118,8 @@ fn spend_stops_the_calls_at_the_budget() {
 fn the_call_count_is_capped_too() {
     let mut lines = vec![];
     for i in 0..(MAX_CALLS as u64 + 4) {
-        lines.push(sg::Line { at_ms: NOW + i * 120_000, speaker: "Sam".into(), text: "hi".into(), owner: false });
-        lines.push(sg::Line { at_ms: NOW + i * 120_000 + 1_000, speaker: "User".into(), text: "I remember there was this".into(), owner: true });
+        lines.push(sg::Line { at_ms: NOW + i * 120_000, speaker: "Sam".into(), text: "hi".into(), user: false });
+        lines.push(sg::Line { at_ms: NOW + i * 120_000 + 1_000, speaker: "User".into(), text: "I remember there was this".into(), user: true });
     }
     let mut calls = 0;
     run(
@@ -159,8 +159,8 @@ fn the_page_answers_first_and_escapes_the_talk() {
 #[test]
 fn triggers_only_lists_every_stub_moment_and_makes_no_call_or_pacing() {
     let mut lines = cue(NOW);
-    lines.push(sg::Line { at_ms: NOW + 10_000, speaker: "Sam".into(), text: "yes".into(), owner: false });
-    lines.push(sg::Line { at_ms: NOW + 20_000, speaker: "User".into(), text: "I remember there was a photo from the trip".into(), owner: true });
+    lines.push(sg::Line { at_ms: NOW + 10_000, speaker: "Sam".into(), text: "yes".into(), user: false });
+    lines.push(sg::Line { at_ms: NOW + 20_000, speaker: "User".into(), text: "I remember there was a photo from the trip".into(), user: true });
     let mut budget = Budget::default();
     let out = run(&lines, None, &mut budget);
     assert_eq!(out.len(), 2, "both cues fire: nothing is paced without a call");

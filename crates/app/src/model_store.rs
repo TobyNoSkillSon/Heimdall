@@ -1,5 +1,6 @@
 //! First-run model downloads (public edition; docs/models.md, "First-run downloads"). The public app bundles only the
-//! small models; Parakeet, the speaker models, the decider at the precision chosen in Setup and EmbeddingGemma 2 come
+//! small models; Parakeet, the speaker models, the decider at the precision chosen in Setup, EmbeddingGemma 2 and the
+//! memory-search reranker (Qwen3-Reranker-0.6B) come
 //! from their official Hugging Face repositories at pinned revisions (`model_downloads.lock.json`, written by
 //! `scripts/downloads_lock.py`) into `<data>/models`.
 //!
@@ -27,8 +28,12 @@ pub const MANIFEST: &str = "downloads.json";
 pub const PARAKEET: &str = "parakeet";
 pub const SPEAKERS: &str = "speakers";
 pub const EMBEDDING: &str = "embedding";
-/// MossFormer2, the night pass's and speech split's separator (docs/night-pass.md).
+/// MossFormer2, the night pass's and speech split's separator (docs/personal/night-pass.md).
 pub const NIGHT: &str = "night";
+/// Qwen3-Reranker-0.6B, memory search's reranker (heimdall_archive::rerank): without it search keeps embedding order.
+pub const RERANKER: &str = "reranker";
+/// The reranker's row in Setup: what it does, not the model's name (VM run 14 Nov showed "Qwen3-Reranker-0.6B").
+pub const RERANKER_TITLE: &str = "Memory ranking";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct FileRow {
@@ -77,11 +82,12 @@ pub fn listening_groups(p: decide::precision::Precision) -> Vec<String> {
 }
 
 /// Everything the public edition downloads for a precision, in the order it downloads: listening first (Parakeet,
-/// the speakers, the decider), then the separator and memory search.
+/// the speakers, the decider), then the separator and memory search (the embedding model, then its reranker).
 pub fn first_run_groups(p: decide::precision::Precision) -> Vec<String> {
     let mut groups = listening_groups(p);
     groups.push(NIGHT.into());
     groups.push(EMBEDDING.into());
+    groups.push(RERANKER.into());
     groups
 }
 
@@ -442,10 +448,6 @@ impl Downloads {
         Arc::new(Self { models, lock, options, inner: Mutex::new(Inner { rows: vec![], running: false, failed: Default::default() }), changed: Box::new(changed), stop: Default::default() })
     }
 
-    pub fn models(&self) -> &Path {
-        &self.models
-    }
-
     pub fn lock(&self) -> &Lock {
         &self.lock
     }
@@ -698,29 +700,31 @@ pub fn global() -> Option<Arc<Downloads>> {
 
 /// What Setup's Getting ready shows: a row per group asked for, in download order.
 pub fn view(d: &Downloads) -> ui::ModelDownloads {
-    ui::ModelDownloads {
-        rows: d.rows().into_iter().map(|r| {
-            let precision = r.id.strip_prefix("decider-").and_then(decide::precision::Precision::from_key);
-            ui::ModelDownload {
-                symbol: match r.id.as_str() {
-                    PARAKEET => "waveform",
-                    SPEAKERS => "person.2.wave.2",
-                    EMBEDDING => "magnifyingglass",
-                    NIGHT => "arrow.triangle.branch",
-                    _ => "target",
-                }.into(),
-                title: r.title,
-                detail: precision.map(|p| p.label().to_string()),
-                done: r.done,
-                total: r.total,
-                state: match r.state {
-                    State::Waiting => ui::DownloadState::Waiting,
-                    State::Downloading => ui::DownloadState::Downloading,
-                    State::Done => ui::DownloadState::Done,
-                    State::Failed(why) => ui::DownloadState::Failed(short(&why)),
-                },
-            }
-        }).collect(),
+    ui::ModelDownloads { rows: d.rows().into_iter().map(view_row).collect() }
+}
+
+/// One group's row as Setup draws it.
+pub(crate) fn view_row(r: Row) -> ui::ModelDownload {
+    let precision = r.id.strip_prefix("decider-").and_then(decide::precision::Precision::from_key);
+    ui::ModelDownload {
+        symbol: match r.id.as_str() {
+            PARAKEET => "waveform",
+            SPEAKERS => "person.2.wave.2",
+            EMBEDDING => "magnifyingglass",
+            NIGHT => "arrow.triangle.branch",
+            RERANKER => "list.number",
+            _ => "target",
+        }.into(),
+        title: if r.id == RERANKER { RERANKER_TITLE.into() } else { r.title },
+        detail: precision.map(|p| p.label().to_string()),
+        done: r.done,
+        total: r.total,
+        state: match r.state {
+            State::Waiting => ui::DownloadState::Waiting,
+            State::Downloading => ui::DownloadState::Downloading,
+            State::Done => ui::DownloadState::Done,
+            State::Failed(why) => ui::DownloadState::Failed(short(&why)),
+        },
     }
 }
 

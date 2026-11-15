@@ -23,7 +23,7 @@ use crate::model::*;
 
 type Sent = Rc<RefCell<Vec<UiAction>>>;
 
-const CLAUDE_CODE_2: &str = "t3:claudeAgent_claude_code_2";
+const CLAUDE_CODE_2: &str = "t3:claudeAgent_2";
 
 /// The user's setup on 30 Oct: Anthropic's API (Opus, Sonnet, Haiku added), OpenCode Go, the built-in engine ready, and
 /// T3's Claude code 2 and Codex instances.

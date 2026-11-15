@@ -96,18 +96,10 @@ impl Budget {
 }
 
 fn client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .user_agent(concat!("heimdall/", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(20))
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .expect("HTTP client")
+    crate::provider::http_client(false)
 }
 
-fn now_ms() -> u64 {
-    crate::now_ms()
-}
+use crate::now_ms;
 
 /// What the user approves in the browser.
 #[derive(Clone, Debug, PartialEq)]
@@ -483,5 +475,56 @@ mod tests {
         let p = crate::provider::provider(crate::provider::OPENCODE_GO).unwrap();
         let c = token_command(p, Path::new("/tmp/it's data")).unwrap();
         assert!(c.starts_with("!'") && c.contains(" --provider-token opencode-go --data '/tmp/it'\\''s data/agent'"), "{c}");
+    }
+
+    /// The login Keychain as two builds see it: a build cannot read another's item, can update its data in place
+    /// (keeping the owner), and here cannot delete it.
+    #[derive(Default)]
+    struct Login(Mutex<std::collections::HashMap<(String, String), (u32, Vec<u8>)>>);
+    struct Build(Arc<Login>, u32);
+    impl keychain::Backend for Build {
+        fn read(&self, s: &str, a: &str) -> Result<Option<Vec<u8>>, keychain::Error> {
+            match self.0 .0.lock().unwrap().get(&(s.into(), a.into())) {
+                None => Ok(None),
+                Some((o, _)) if *o != self.1 => Err(keychain::Error::Refused { service: s.into(), code: -25293 }),
+                Some((_, v)) => Ok(Some(v.clone())),
+            }
+        }
+        fn write(&self, s: &str, a: &str, _: &str, b: &[u8]) -> Result<(), keychain::Error> {
+            let mut items = self.0 .0.lock().unwrap();
+            let owner = items.get(&(s.into(), a.into())).map_or(self.1, |(o, _)| *o);
+            items.insert((s.into(), a.into()), (owner, b.to_vec()));
+            Ok(())
+        }
+        fn delete(&self, s: &str, a: &str) -> Result<(), keychain::Error> {
+            let mut items = self.0 .0.lock().unwrap();
+            if items.get(&(s.into(), a.into())).is_some_and(|(o, _)| *o != self.1) {
+                return Err(keychain::Error::Refused { service: s.into(), code: -25293 });
+            }
+            items.remove(&(s.into(), a.into()));
+            Ok(())
+        }
+        fn accounts(&self, s: &str) -> Result<Vec<String>, keychain::Error> {
+            Ok(self.0 .0.lock().unwrap().keys().filter(|k| k.0 == s).map(|k| k.1.clone()).collect())
+        }
+    }
+
+    /// VM run 14 Nov (b): the key alpha.1 saved, re-entered after the upgrade, must be what `--provider-token` (a
+    /// fresh process with its own store) prints, not a refusal.
+    #[test]
+    fn the_token_command_reads_a_key_reentered_after_an_upgrade() {
+        let p = crate::provider::provider(crate::provider::CUSTOM).unwrap();
+        let login = Arc::new(Login::default());
+        let store = |build| keychain::Store::custom(Arc::new(Build(login.clone(), build)));
+        keychain::scoped(&store(1), || crate::provider::save_key(p, "sk-alpha1", None)).unwrap();
+        let app = store(2);
+        keychain::scoped(&app, || {
+            assert!(crate::provider::api_key(p).is_err(), "alpha.1's key is unreadable to the new build");
+            crate::provider::save_key(p, "sk-reentered", None).unwrap();
+            assert_eq!(crate::provider::api_key(p).unwrap(), "sk-reentered");
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let child = keychain::scoped(&store(2), || command_token(p, dir.path()));
+        assert_eq!(child.unwrap(), "sk-reentered");
     }
 }

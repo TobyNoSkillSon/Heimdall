@@ -75,8 +75,10 @@ quickly whether anything stalled (a task or worker with no progress, a notice or
 only if something needs it. Otherwise answer only NO_REPLY.";
 
 /// The ping after a start, before the user has talked: the agent does nothing on its own then (the restart message).
-pub const PING_TEXT_AFTER_START: &str = "[Heimdall cache refresh]\nNo request: this message keeps the prompt cache warm. \
-User has not talked since the restart, so answer only NO_REPLY.";
+pub fn ping_text_after_start() -> String {
+    format!("[Heimdall cache refresh]\nNo request: this message keeps the prompt cache warm. \
+{} has not talked since the restart, so answer only NO_REPLY.", crate::identity::user_start())
+}
 
 /// When to send a cache-refresh ping.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

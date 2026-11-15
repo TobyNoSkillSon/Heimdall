@@ -1,7 +1,7 @@
 //! Agent-owned offline real-time-paced helper check; no microphone or permissions.
 use anyhow::{ensure, Result};
 use speakers::{
-    call::CallScopedSpeakers, identity::EnrollmentStore, live::LiveStrategy, naming::NamingFlow,
+    call::CallScopedSpeakers, identity::EnrollmentStore, naming::NamingFlow,
 };
 use std::{
     path::PathBuf,
@@ -55,7 +55,7 @@ fn main() -> Result<()> {
         0,
         NamingFlow::new(EnrollmentStore::default()),
     );
-    call.set_strategy(LiveStrategy::parse(&a[3])?)?;
+    ensure!(a[3] == "nemotron", "unknown live diarization strategy: {} (nemotron)", a[3]);
     call.activate("paced".into(), 1, 0., Instant::now())?;
     let pid = call.worker_pid().unwrap();
     let (child_before, _) = child_usage(pid)?;
@@ -142,7 +142,7 @@ fn main() -> Result<()> {
     std::fs::write(
         &a[4],
         serde_json::to_vec_pretty(
-            &serde_json::json!({"build_profile":if cfg!(debug_assertions) { "debug" } else { "release" },"strategy":call.strategy(),"audio_seconds":fed as f64/16000.,"wall_seconds":elapsed,"parent_cpu_seconds":parent_cpu,"combined_cpu_percent_of_one_core":100.*(parent_cpu+child_after-child_before)/elapsed,"idle_cpu_seconds":idle_cpu,"idle_wall_seconds":idle_wall,"idle_cpu_percent_of_one_core":100.*idle_cpu/idle_wall,"child_cpu_seconds":child_after-child_before,"child_current_rss_bytes":child_rss,"push_work_seconds":work,"push_rtf":work/(fed as f64/16000.),"max_feed_lateness_seconds":max_late,"first_output_wall_seconds":first_output_wall,"stable_label_wall_p95_seconds":stable_p95,"latency_definition":"real-time-paced last sampled active-set change minus frame start; 0.48s resolution; includes compute and revisions, wrong final labels also count stable","segments":segments,"child_pid":pid,"child_reaped":reaped,"power_watts":null,"scope":"real-time-paced offline file via actual helper; parent CPU measured, child ps CPU delta excludes loading (0.01s resolution); no installed capture or power probe"}),
+            &serde_json::json!({"build_profile":if cfg!(debug_assertions) { "debug" } else { "release" },"strategy":a[3],"audio_seconds":fed as f64/16000.,"wall_seconds":elapsed,"parent_cpu_seconds":parent_cpu,"combined_cpu_percent_of_one_core":100.*(parent_cpu+child_after-child_before)/elapsed,"idle_cpu_seconds":idle_cpu,"idle_wall_seconds":idle_wall,"idle_cpu_percent_of_one_core":100.*idle_cpu/idle_wall,"child_cpu_seconds":child_after-child_before,"child_current_rss_bytes":child_rss,"push_work_seconds":work,"push_rtf":work/(fed as f64/16000.),"max_feed_lateness_seconds":max_late,"first_output_wall_seconds":first_output_wall,"stable_label_wall_p95_seconds":stable_p95,"latency_definition":"real-time-paced last sampled active-set change minus frame start; 0.48s resolution; includes compute and revisions, wrong final labels also count stable","segments":segments,"child_pid":pid,"child_reaped":reaped,"power_watts":null,"scope":"real-time-paced offline file via actual helper; parent CPU measured, child ps CPU delta excludes loading (0.01s resolution); no installed capture or power probe"}),
         )?,
     )?;
     ensure!(reaped, "helper not reaped");

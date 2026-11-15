@@ -27,7 +27,6 @@ fn v6_loads_and_answers_through_the_app_path() -> Result<()> {
     let mut d = LocalDecider::load_pick(&m, archive.path(), resolved.used)?;
     println!("decider: {} loaded in {:.1} s", resolved.used.describe(), started.elapsed().as_secs_f64());
     assert!(d.command_runtime().starts_with("d1v5-engine@"), "{}", d.command_runtime());
-    assert!(d.suggests(), "V6 asks V5's questions (suggest too)");
     let mut c = send::Conversation::default();
     for text in ["Okay.", "Heimdall, what's the weather in Poznań tomorrow?", "So the defaults are fine, I think.",
                  "Heimdall, otwórz proszę kalendarz.", "Yeah, I'll call you back in five minutes."] {
@@ -39,5 +38,8 @@ fn v6_loads_and_answers_through_the_app_path() -> Result<()> {
         println!("{text:?} -> {} {:.2} (ack {:?})", p.choice.key(), p.probabilities.get(p.choice.key()).copied().unwrap_or_default(), p.ack);
         if p.choice == send::Choice::Send { c.sent(snapshot.through); }
     }
+    // V6 asks V5's questions, suggest too.
+    let (_, s) = d.suggest_decision_interruptible(&c.snapshot(), &std::sync::atomic::AtomicUsize::new(0))?;
+    println!("suggest -> {s:?}");
     Ok(())
 }

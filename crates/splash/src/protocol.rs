@@ -890,16 +890,6 @@ pub fn serialize_message(message: &ClientMessage) -> Result<Vec<u8>, ProtocolErr
     }
 }
 
-/// Serialize a low-level frame whose payload length is within its type's bounds.
-pub fn serialize_frame(frame: &Frame) -> Result<Vec<u8>, ProtocolError> {
-    if let Some(found) = payload_length_issue(frame.frame_type, frame.payload.len() as u64) {
-        return Err(ProtocolError { issue: found });
-    }
-    let mut f = frame_buffer(frame.frame_type, frame.payload.len());
-    f.extend_from_slice(&frame.payload);
-    Ok(f)
-}
-
 /// Re-stamp a REQUEST frame's absolute deadline as `now` plus its budget, leaving every other byte (and every other
 /// frame) as it is. Only the integer head is touched, so a signalling NaN keeps its bits; no validator runs.
 pub fn refresh_request_deadline(frame: &[u8], now_unix_micros: u64) -> Vec<u8> {

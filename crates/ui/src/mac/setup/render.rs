@@ -24,6 +24,9 @@ pub(crate) fn demo_decider() -> DeciderStatus {
     }
 }
 
+/// Memory search's ranking model's row, as the app titles it (`model_store::view`).
+const RANKING_TITLE: &str = "Memory ranking";
+
 fn statuses(f: impl Fn(ProviderChoice) -> ProviderStatus) -> Vec<(ProviderChoice, ProviderStatus)> {
     ProviderChoice::ALL.iter().map(|c| (*c, f(*c))).collect()
 }
@@ -422,12 +425,19 @@ pub(crate) fn render(dir: &std::path::Path, mtm: MainThreadMarker) -> Vec<String
     let row = |title: &str, detail: Option<&str>, symbol: &str, done: u64, total: u64, state: DownloadState| ModelDownload {
         title: title.into(), detail: detail.map(Into::into), symbol: symbol.into(), done, total, state,
     };
-    let rows = |p: DownloadState, s: DownloadState, d: DownloadState, e: DownloadState, done: u64| ModelDownloads { rows: vec![
-        row("Parakeet", None, "waveform", if p == DownloadState::Done { 632_165_613 } else { 0 }, 632_165_613, p),
-        row("Speakers", None, "person.2.wave.2", if s == DownloadState::Done { 158_235_581 } else { 0 }, 158_235_581, s),
-        row("Decider", Some("4-bit"), "target", done, 1_367_819_482, d),
-        row("EmbeddingGemma 2", None, "magnifyingglass", 0, 1_525_787_092, e),
-    ] };
+    // The public edition's groups as the app sends them (VM run 14 Nov: ten rows once all were in, the phrase card
+    // pushed under the fold): the separator and memory search's ranking model with them.
+    let rows = |p: DownloadState, s: DownloadState, d: DownloadState, e: DownloadState, done: u64| {
+        let (moss, ranking) = (s.clone(), e.clone());
+        ModelDownloads { rows: vec![
+            row("Parakeet", None, "waveform", if p == DownloadState::Done { 632_165_613 } else { 0 }, 632_165_613, p),
+            row("Speakers", None, "person.2.wave.2", if s == DownloadState::Done { 158_235_581 } else { 0 }, 158_235_581, s),
+            row("Decider", Some("4-bit"), "target", done, 1_367_819_482, d),
+            row("MossFormer2", None, "arrow.triangle.branch", if moss == DownloadState::Done { 91_300_000 } else { 0 }, 91_300_000, moss),
+            row(downloads::MEMORY_MODEL, None, "magnifyingglass", 0, 1_525_787_092, e),
+            row(RANKING_TITLE, None, "list.number", 0, 1_203_021_367, ranking),
+        ] }
+    };
     use DownloadState::{Done, Downloading, Failed, Waiting};
     let ready_row = |key: &str, title: &str, detail: &str, symbol: &str, state: ReadyState| ReadyRow { key: key.into(), title: title.into(), detail: (!detail.is_empty()).then(|| detail.into()), symbol: symbol.into(), state };
     // As the app sends them: no input names none; listening waits while a listening model downloads, then for sound
@@ -446,7 +456,12 @@ pub(crate) fn render(dir: &std::path::Path, mtm: MainThreadMarker) -> Vec<String
             ready_row("agent", "Agent", "Claude Haiku 5.5 · OpenCode Go", "sparkles", agent),
         ] }
     };
-    let readiness = |agent: ReadyState, voice: ReadyState| readiness_with(ReadyState::Ready, ReadyState::Ready, agent, voice);
+    // Memory search's own row once its model is in (it stands for its download row).
+    let with_memory = |mut r: SetupReadiness| {
+        r.rows.insert(4, ready_row("memory", "Memory search", "EmbeddingGemma 2", "magnifyingglass", ReadyState::Ready));
+        r
+    };
+    let readiness = |agent: ReadyState, voice: ReadyState| with_memory(readiness_with(ReadyState::Ready, ReadyState::Ready, agent, voice));
     let downloading = ReadyState::Working { words: "Downloading".into(), progress: Some((612_000_000, 1_367_819_482)) };
     let decider_failed = ReadyState::Problem { why: "No connection to Hugging Face".into(), fix: Some(ReadyFix::Action { title: "Retry".into(), action: Box::new(UiAction::RetryModelDownloads) }) };
     let no_mic = ReadyState::Problem { why: "No microphone found".into(), fix: Some(ReadyFix::Step { title: "Choose…".into(), step: SetupStep::Microphone }) };
@@ -457,9 +472,18 @@ pub(crate) fn render(dir: &std::path::Path, mtm: MainThreadMarker) -> Vec<String
     let ready_states = [
         ("12-ready-downloading", rows(Done, Done, Downloading, Waiting, 612_000_000), readiness_with(ReadyState::Blocked { words: "Waits for listening".into() }, downloading, asking.clone(), learning.clone()), false),
         ("12-ready-failed", rows(Done, Done, Failed("No connection to Hugging Face".into()), Waiting, 612_000_000), readiness_with(ReadyState::Ready, decider_failed, asking.clone(), learning), false),
-        ("12-ready-no-mic", all_done.clone(), readiness_with(no_mic, ReadyState::Ready, ReadyState::Ready, ReadyState::Ready), false),
+        ("12-ready-no-mic", all_done.clone(), with_memory(readiness_with(no_mic, ReadyState::Ready, ReadyState::Ready, ReadyState::Ready)), false),
         ("12-ready-no-agent", all_done.clone(), readiness(choose, ReadyState::Ready), false),
         ("12-ready-all-green", all_done.clone(), readiness(ReadyState::Ready, ReadyState::Ready), true),
+        // The most rows the app sends: System Audio not allowed yet and This Mac's model as the agent. The page scrolls
+        // so the card is in view.
+        ("12-ready-most-rows", all_done.clone(), {
+            let mut r = readiness(ReadyState::Ready, ReadyState::Ready);
+            let allow = ReadyFix::Action { title: "Allow…".into(), action: Box::new(UiAction::AskSystemAudio) };
+            r.rows.insert(5, ready_row("system-audio", "System audio", "", "waveform.circle", ReadyState::Optional { why: "Off".into(), fix: Some(allow) }));
+            r.rows.insert(6, ready_row("engine", "This Mac", "Qwen3.8 27B · 4-bit", "desktopcomputer", ReadyState::Ready));
+            r
+        }, true),
     ];
     for (name, state, ready, start) in ready_states {
         w.set_downloads(&state);
@@ -468,21 +492,34 @@ pub(crate) fn render(dir: &std::path::Path, mtm: MainThreadMarker) -> Vec<String
         let shown = p.rows.iter().filter(|r| !r.row.isHidden()).count();
         let bars = p.rows.iter().filter(|r| !r.row.isHidden() && !r.bar.track.isHidden()).count();
         let fixes: Vec<String> = p.rows.iter().filter(|r| !r.row.isHidden() && !r.retry.isHidden()).map(|r| r.retry.label()).collect();
-        // Rows: Parakeet, Speakers, EmbeddingGemma 2, then Microphone, Voice, Listening, Decider (its download, then
-        // loaded), Agent.
-        let words = p.rows[6].state.stringValue().to_string();
+        // Rows by their title, as `lines` lists them.
+        let listed = downloads::lines(&state, &ready);
+        let at = |title: &str| listed.iter().position(|(l, _)| l.title == title).unwrap_or(usize::MAX);
+        let slot = |title: &str| p.rows.get(at(title));
+        let words = slot("Decider").map(|r| r.state.stringValue().to_string()).unwrap_or_default();
         // Every row green, or every row but a failed microphone's: the phrase card stands in for Start.
         let card = !w.phrase_card.band.isHidden();
-        let ok = w.current() == PageKind::Builtin(SetupStep::Models) && shown == 8
+        // VM run 14 Nov: with ten rows the card sat under the fold. At the default size it is in view, whole.
+        if card && !w.phrase_card_in_view() {
+            failures.push(format!("{name}: the phrase card is out of view"));
+        }
+        // No model's internal name for memory search's ranking (VM run 14 Nov: "Qwen3-Reranker-0.6B").
+        if listed.iter().any(|(l, _)| l.title.contains("Qwen")) {
+            failures.push(format!("{name}: a row shows an internal model name"));
+        }
+        let ok = w.current() == PageKind::Builtin(SetupStep::Models) && shown == listed.len()
             && (if card { w.next.isHidden() } else { w.next.label() == "Start Selene" && w.next.isEnabled() == start })
             && match name {
-                "12-ready-downloading" => bars == 1 && words == "612 MB of 1.4 GB" && fixes.is_empty() && !p.rows[7].spinner.isHidden() && p.rows[3].spinner.isHidden() && p.rows[5].spinner.isHidden(),
-                "12-ready-failed" => fixes == ["Retry"] && w.fix_at(6) == Some(ReadyFix::Action { title: "Retry".into(), action: Box::new(UiAction::RetryModelDownloads) }),
+                "12-ready-downloading" => bars == 1 && words == "612 MB of 1.4 GB" && fixes.is_empty() && slot("Agent").is_some_and(|r| !r.spinner.isHidden())
+                    && slot("Microphone").is_some_and(|r| r.spinner.isHidden()) && slot("Listening").is_some_and(|r| r.spinner.isHidden()),
+                "12-ready-failed" => fixes == ["Retry"] && w.fix_at(at("Decider")) == Some(ReadyFix::Action { title: "Retry".into(), action: Box::new(UiAction::RetryModelDownloads) }),
                 // No microphone at all: the card says so, with Choose… and Start without speaking.
-                "12-ready-no-mic" => fixes == ["Choose…"] && matches!(w.fix_at(3), Some(ReadyFix::Step { step: SetupStep::Microphone, .. })) && p.rows[5].check.isHidden() && p.rows[5].spinner.isHidden()
+                "12-ready-no-mic" => fixes == ["Choose…"] && matches!(w.fix_at(at("Microphone")), Some(ReadyFix::Step { step: SetupStep::Microphone, .. }))
+                    && slot("Listening").is_some_and(|r| r.check.isHidden() && r.spinner.isHidden())
                     && card && !w.phrase_card.silent.isHidden() && w.phrase_card.fix.label() == "Choose…" && w.phrase_fix_offered(),
-                "12-ready-no-agent" => fixes == ["Choose…"] && matches!(w.fix_at(7), Some(ReadyFix::Step { step: SetupStep::Providers, .. })),
-                _ => p.rows.iter().take(8).all(|r| !r.check.isHidden()) && card && w.phrase_card.state == Some(phrase::CardState::Waiting)
+                "12-ready-most-rows" => fixes == ["Allow…"] && card && w.phrase_card.state == Some(phrase::CardState::Waiting),
+                "12-ready-no-agent" => fixes == ["Choose…"] && matches!(w.fix_at(at("Agent")), Some(ReadyFix::Step { step: SetupStep::Providers, .. })),
+                _ => p.rows.iter().take(listed.len()).all(|r| !r.check.isHidden()) && card && w.phrase_card.state == Some(phrase::CardState::Waiting)
                     && w.phrase_card.words.stringValue().to_string() == "\u{201c}Selene, show me what you can do\u{201d}" && w.phrase_card.silent.isHidden(),
             };
         shot(&w, name, ok, &mut failures);
@@ -503,7 +540,7 @@ pub(crate) fn render(dir: &std::path::Path, mtm: MainThreadMarker) -> Vec<String
     shot(&w, "12-phrase-hint", ok, &mut failures);
     let retry = ReadyFix::Action { title: "Retry".into(), action: Box::new(UiAction::RetrySystemAudio) };
     let failed_capture = ReadyState::Problem { why: "Couldn't start listening: the audio system did not answer".into(), fix: Some(retry.clone()) };
-    w.set_readiness(&readiness_with(failed_capture, ReadyState::Ready, ReadyState::Ready, ReadyState::Ready));
+    w.set_readiness(&with_memory(readiness_with(failed_capture, ReadyState::Ready, ReadyState::Ready, ReadyState::Ready)));
     let ok = matches!(&w.phrase_card.state, Some(phrase::CardState::Failed { .. })) && w.phrase_fix() == Some(retry) && !w.phrase_card.silent.isHidden()
         && w.phrase_card.fix.label() == "Retry" && w.next.isHidden() && w.phrase_card.bars.iter().all(|b| b.isHidden());
     shot(&w, "12-phrase-mic-failed", ok, &mut failures);

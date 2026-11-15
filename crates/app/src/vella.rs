@@ -230,6 +230,7 @@ impl Link {
     }
 
     /// When the open dictation times out unless heard from again (host ns).
+    #[cfg(test)]
     pub fn deadline(&self) -> Option<u64> {
         self.open.as_ref().map(|_| self.last_seen.saturating_add(TIMEOUT_NS + 1))
     }

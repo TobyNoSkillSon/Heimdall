@@ -16,6 +16,8 @@ Decider V6 (heimdall-d1-v6, https://huggingface.co/Toby-NoSkillSon/heimdall-d1-v
 
 EmbeddingGemma 2 memory-search embedding model, Apache-2.0. Google (google/embeddinggemma-2). Licence: licenses/EmbeddingGemma-Apache-2.0.txt. The model card asks deployments to adhere to Google's Gemma Prohibited Use Policy: https://ai.google.dev/gemma/prohibited_use_policy
 
+Qwen3-Reranker-0.6B memory-search reranker, Apache-2.0. Copyright 2024 Alibaba Cloud (Qwen/Qwen3-Reranker-0.6B, https://huggingface.co/Qwen/Qwen3-Reranker-0.6B). Downloaded at first run; not in this repository. Licence: licenses/Qwen3-Reranker-Apache-2.0.txt.
+
 Qwen3.8 27B (unsloth/Qwen3.8-27B-GGUF, quantised from Qwen/Qwen3.8-27B), Apache-2.0, Copyright 2026 Alibaba Cloud. Downloaded by the Splash engine when used; not bundled. Licence: licenses/Qwen3.8-Apache-2.0.txt.
 
 Phonon 31m English model and voice presets, Apache-2.0, Gradium (gradium/phonon-31m-en and gradium/phonon-voices). Licence: licenses/Apache-2.0.txt.
@@ -34,7 +36,7 @@ FluidAudio streaming-cache algorithm, Apache-2.0, FluidInference. The algorithm 
 
 ONNX Runtime, MIT, Copyright (c) Microsoft Corporation, statically linked through the ort crate (MIT OR Apache-2.0). Licences: licenses/ONNX-Runtime-MIT.txt and licenses/Apache-2.0.txt.
 
-llama.cpp and ggml, MIT, Copyright (c) 2023-2026 The ggml authors. Compiled into libheimdall_decide.dylib and the speaker worker. Licence: licenses/llama.cpp-ggml-MIT.txt.
+llama.cpp and ggml, MIT, Copyright (c) 2023-2026 The ggml authors. Compiled into the speaker worker. Licence: licenses/llama.cpp-ggml-MIT.txt.
 
 MLX (mlx-swift 0.32.3, mlx, mlx-swift-lm), MIT, Copyright ml-explore and Apple Inc. Used by the native embedding worker. Licences: licenses/MLX-Swift-MIT.txt, licenses/MLX-MIT.txt and licenses/MLX-Swift-LM-MIT.txt.
 

@@ -64,9 +64,27 @@ pub fn timers(on_screen: bool, removing: bool, running_task: bool, attention: bo
     Timers { work: live && running_task && !attention, clock: live && open_clock, attention: live && attention }
 }
 
+/// Whether an island's window can be seen: on screen (all shown, or up for news) while the displays are awake and this
+/// user's session is the active one. Audit ISL-4 (14 Nov): with the screens asleep, a running task's breath and an
+/// unanswered question's pulse kept waking the helper every 4 and 6 s all night.
+pub fn seen(on_screen: bool, screens_awake: bool, session_active: bool) -> bool {
+    on_screen && screens_awake && session_active
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sleeping_screens_or_a_switched_out_session_arm_no_timers() {
+        let none = Timers::default();
+        for (awake, active) in [(false, true), (true, false), (false, false)] {
+            assert_eq!(timers(seen(true, awake, active), false, true, true, true), none, "awake {awake}, active {active}");
+            assert_eq!(timers(seen(true, awake, active), false, true, false, true), none, "awake {awake}, active {active}");
+        }
+        assert_eq!(timers(seen(true, true, true), false, true, false, true), Timers { work: true, clock: true, attention: false });
+        assert!(!seen(false, true, true), "hidden stays unseen");
+    }
 
     #[test]
     fn hidden_islands_arm_no_timers() {

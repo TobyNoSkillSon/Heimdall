@@ -372,7 +372,7 @@ fn a_whole_turn_morphs_vertically_and_ends_by_retracting() {
     i.apply(line("w", "On it", NoticeKind::Working), 1.2);
     settle(&mut i, 1.6);
     assert_eq!(i.class(), Class::Working);
-    assert_eq!(i.target_size(), (185.0, 94.0), "dots over \"On it\": the notch's width, only deeper");
+    assert_eq!(i.target_size(), (185.0, layout::ROW_H), "dots beside \"On it\" on one row: the notch's width, only deeper (islands climb, 11 Nov)");
     i.apply(Event::Speaking(true), 5.0);
     i.apply(Event::SpokenText(Some("The build is green.".into())), 5.1);
     settle(&mut i, 5.5);
@@ -861,7 +861,7 @@ fn the_pull_down_never_passes_the_bitmap_limit() {
     let d = Display::MBP16;
     let notes: Vec<NoteView> = ["old", "mid", "new"].iter().map(|id| NoteView { id: id.to_string(), rev: 1, icon: Glyph::new("tablecells"), title: "Jobs".into(), body: (600.0, 3000.0) }).collect();
     let paragraphs = vec!["Sentence after sentence. ".repeat(60); 30];
-    let l = layout::layout(&Scene::Reply { copied: false, paragraphs, notes, chat: Default::default(), follow: false, tail: false, ask: None, status: None, level: 0, flat: true, scroll: 0.0, hot: false, composer_empty: true, attached: vec![], working: false }, &d, &Approx);
+    let l = layout::layout(&Scene::Reply { copied: false, secret: false, secret_empty_said: false, paragraphs, notes, chat: Default::default(), follow: false, tail: false, ask: None, status: None, level: 0, flat: true, scroll: 0.0, hot: false, composer_empty: true, attached: vec![], working: false }, &d, &Approx);
     let mut kept = vec![];
     for (_, c) in l.items.iter().filter(|i| i.id.starts_with("reply.")).map(|i| (i.id.clone(), (*i.content).clone())) {
         if let Content::Body { notes, .. } = &c {
@@ -1385,7 +1385,7 @@ fn timing_table() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "debug aid: prints one random island run (ISLAND_SEED, ISLAND_FROM, ISLAND_TO); asserts nothing"]
 fn debug_random_steps() {
     let seed: u64 = std::env::var("ISLAND_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
     let from: f64 = std::env::var("ISLAND_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
@@ -1403,7 +1403,7 @@ fn debug_random_steps() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "debug aid: traces one gallery card (ISLAND_CARD, ISLAND_FROM, ISLAND_TO); asserts nothing"]
 fn trace_a_card() {
     let name = std::env::var("ISLAND_CARD").unwrap_or_default();
     let from: f64 = std::env::var("ISLAND_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
@@ -1882,8 +1882,9 @@ fn text_and_ears_size_the_shape() {
     let short = layout::layout(&Scene::Stack { icon: Glyph::new("eye"), words: "Looking".into(), button: None }, &d, &m);
     let long = layout::layout(&Scene::Stack { icon: Glyph::new("eye"), words: "Screen Recording is off for Heimdall".into(), button: None }, &d, &m);
     assert_eq!(short.w, 185.0);
-    let words = m.width("Screen Recording is off for Heimdall", Font::Label).min(360.0);
-    assert_eq!(long.w, (words + 2.0 * layout::PAD).ceil().max(185.0), "longer words: their width + 22 either side");
+    // One row (islands climb, 11 Nov): the symbol's box (18 pt × 1.15), an 8 pt gap, the words, and 22 pt either side.
+    let words = m.width("Screen Recording is off for Heimdall", Font::Label);
+    assert_eq!(long.w, (18.0 * 1.15 + 8.0 + words + 2.0 * layout::PAD).ceil().max(185.0), "longer words: symbol, gap and words + 22 either side");
     assert!(long.w > short.w);
     let ears = layout::layout(&Scene::Ears { left: Ear::Glyph(Glyph::new("eye")), right: Ear::Glyph(Glyph::new("hourglass")), target: None }, &d, &m);
     assert_eq!((ears.w, ears.h), (285.0, 32.0), "the ear pair: the notch and two ears, inside the menu bar");
@@ -1893,7 +1894,7 @@ fn text_and_ears_size_the_shape() {
     // up to the screen-bound maximum, never past it.
     let turn = |bw: f64, title: &str| {
         let notes = vec![NoteView { id: "n".into(), rev: 1, icon: Glyph::new("photo"), title: title.into(), body: (bw, 80.0) }];
-        layout::layout(&Scene::Reply { copied: false, paragraphs: vec![], notes, chat: Default::default(), follow: false, tail: false, ask: None, status: None, level: 0, flat: true, scroll: 0.0, hot: false, composer_empty: true, attached: vec![], working: false }, &d, &m)
+        layout::layout(&Scene::Reply { copied: false, secret: false, secret_empty_said: false, paragraphs: vec![], notes, chat: Default::default(), follow: false, tail: false, ask: None, status: None, level: 0, flat: true, scroll: 0.0, hot: false, composer_empty: true, attached: vec![], working: false }, &d, &m)
     };
     assert_eq!(turn(344.0, "Disk").w, 344.0 + 2.0 * layout::PAD_MAX);
     assert!(turn(120.0, "Disk").w < 344.0 && turn(120.0, "Disk").w >= 285.0, "{}", turn(120.0, "Disk").w);

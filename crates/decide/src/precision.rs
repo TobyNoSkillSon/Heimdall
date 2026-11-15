@@ -27,10 +27,9 @@ pub enum Precision {
 /// V6's calibration.json is 110 bytes longer; the weights are the same size (same architecture). V6 8-bit's
 /// config.json has no Python `auto_map` (110 bytes shorter), so that folder matches V5 8-bit.
 const DISK: [[u64; 3]; 2] = [[3_854_334_716, 2_100_954_734, 1_367_819_592], [3_854_334_606, 2_100_954_734, 1_367_819_482]];
-// Measured in the Rust engine (30 Oct, crates/decide/engine-v5/README.md) on V5: MLX active memory of one instance after
-// load, and its peak during a ~1,850-token decision. V6 has V5's architecture and tensor sizes (its night pass measured
+// Measured in the Rust engine (30 Oct, crates/decide/engine-v5/README.md) on V5: the MLX peak of one instance during a
+// ~1,850-token decision (resident after load: 3.46 / 2.08 / 1.35 GB). V6 has V5's architecture and tensor sizes (its night pass measured
 // the same peaks for both in Python, runs/v6/report.json), so the same figures hold.
-const RESIDENT: [u64; 3] = [3_460_000_000, 2_080_000_000, 1_350_000_000];
 const PEAK: [u64; 3] = [4_160_000_000, 3_080_000_000, 2_350_000_000];
 
 impl Precision {
@@ -51,10 +50,6 @@ impl Precision {
     }
     pub fn from_key(key: &str) -> Option<Precision> {
         Precision::ALL.into_iter().find(|p| p.key() == key)
-    }
-    /// Resident weights of one loaded instance (measured).
-    pub fn resident_bytes(self) -> u64 {
-        RESIDENT[self.index()]
     }
     /// Peak memory of one instance while it decides (measured): what the menu and Setup show as its memory.
     pub fn memory_bytes(self) -> u64 {
@@ -204,7 +199,6 @@ mod tests {
             assert_eq!(serde_json::to_string(&p).unwrap(), format!("\"{}\"", p.key()));
         }
         assert!(Precision::Int4.memory_bytes() < Precision::Int8.memory_bytes() && Precision::Int8.memory_bytes() < Precision::Bf16.memory_bytes());
-        assert!(Precision::ALL.iter().all(|p| p.resident_bytes() < p.memory_bytes()));
     }
 
     /// ("Install V6"): V6 by default, V5 a setting away, each in its three folders.
@@ -222,7 +216,6 @@ mod tests {
             for p in Precision::ALL {
                 let pick = Pick::new(m, p);
                 assert_eq!(crate::send_v3::version(Path::new(pick.folder())), Some(n));
-                assert_eq!(crate::send_v3::Generation::of(Path::new(pick.folder())), crate::send_v3::Generation::V5, "V6 asks V5's questions");
                 assert_eq!(version_label(pick), m.label());
                 assert!(pick.folder().ends_with(pick.name()));
             }

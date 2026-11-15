@@ -17,7 +17,7 @@ impl Pipeline {
             label: Some(ui::Label {
                 source: self.sources.get(s).map_or_else(|| display_name_from_id(s), display_name),
                 speaker: speaker.unwrap_or_else(|| {
-                    if self.owner(s) {
+                    if self.user_source(s) {
                         "User".into()
                     } else if self.is_call(s) {
                         "Speaker ?".into()
@@ -72,7 +72,9 @@ impl Pipeline {
                     )
                 })
                 .collect();
-            self.index.evidence.event(
+            // Night 8 Nov log sweep, finding 4: a note, never a wait for its commit on the live loop (a rename
+            // sends one per track).
+            self.index.evidence.note(
                 "speaker_name",
                 &track.source,
                 &ids,
@@ -81,13 +83,20 @@ impl Pipeline {
             )?;
             // A voice no name matches carries its code label like a name: never a prompt.
             let (track, name) = match e {
-                SpeakerEvent::VoiceCoded { track, code, new } => {
+                SpeakerEvent::VoiceCoded { track, code, new, near } => {
+                    self.coded_tracks.insert(track.clone(), (new, near.as_ref().map(|n| n.name.clone())));
                     if new {
                         self.coded_voices += 1;
                     }
+                    if let Some(near) = near {
+                        self.voice_question(&track.source, &code, &near);
+                    }
                     (track, code)
                 }
-                SpeakerEvent::LabelChanged { track, name } => (track, name),
+                SpeakerEvent::LabelChanged { track, name } => {
+                    self.coded_tracks.remove(&track);
+                    (track, name)
+                }
             };
             self.speaker_names.insert(track.clone(), name.clone());
             self.remember_call_name(&track,&name);
@@ -140,6 +149,7 @@ impl Pipeline {
             *self.speakers_sent.lock().unwrap() = Some(stamp);
             // The listened guests follow the file whoever wrote it (pipeline/listen_to.rs).
             *self.listened.lock().unwrap() = store.listened();
+            self.tools.speech_policy.set_listening_guests(!self.listened.lock().unwrap().is_empty());
             let owner = |name: &str| name.eq_ignore_ascii_case("User");
             self.ui(ui::UiUpdate::Speakers(
                 // The user first: always listened to, his switch locked on.
@@ -185,14 +195,6 @@ impl Pipeline {
                     .collect(),
             ));
         }
-    }
-    /// A permission event starts the passive Discord reader immediately, without gating audio.
-    pub fn refresh_discord_accessibility(&self) -> Result<()> {
-        if self.replay { return Ok(()); }
-        let snapshots: Vec<_> = speakers::ax::discord_processes().into_iter().filter_map(|pid|
-            speakers::ax::snapshot(pid, capture::host_now_ns() as f64 / 1e9).ok()).collect();
-        for (source, d) in &self.discord { if self.sources.get(source).is_some_and(is_discord_bundle) { d.actor.send(crate::speakers_runtime::Work::Ax(snapshots.clone()))?; } }
-        Ok(())
     }
 }
 
@@ -247,4 +249,38 @@ fn ignored_date(at_ms: u64) -> String {
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     unsafe { libc::localtime_r(&secs, &mut tm) };
     format!("{} {}", tm.tm_mday, MONTHS[tm.tm_mon.clamp(0, 11) as usize])
+}
+
+/// "If you're not sure… then you can just ask me verbally" (~08:15). A new voice in a call that sounds
+/// somewhat like a person he named (speakers::identity `NearMiss::Ask`) is put to the agent as a notice, at most once
+/// per call source per `ASK_EVERY`: the agent may ask him at a pause who it was, and `name_voice` joins the voice to
+/// that person's set on his answer. Nothing is said by the app itself.
+pub(super) const ASK_EVERY_MS: u64 = 3600_000;
+/// The notice for a voice question, or None while one was put for this call within `ASK_EVERY_MS`.
+pub(super) fn voice_question_text(code: &str, near: &speakers::naming::NearVoice, now_ms: u64, last_ms: Option<u64>) -> Option<String> {
+    if last_ms.is_some_and(|l| now_ms.saturating_sub(l) < ASK_EVERY_MS) {
+        return None;
+    }
+    Some(format!(
+        "Not sure who that was: a new voice in the call, labelled \"{code}\", sounds a little like {name} (voice match {c:.2}, below the {t:.2} that counts as the same person; microphones change voices). If it matters, ask {user} at a natural pause, in one short line, whether that was {name}. If he says yes, call name_voice with voice \"{code}\" and name \"{name}\"; if he names someone else, use that name. Do not interrupt the conversation for this, and do not ask again about this voice.",
+        name = near.name,
+        c = near.cosine,
+        t = speakers::identity::EnrollmentStore::default().calibration.map_or(0.4555, |c| c.threshold),
+        user = agent::identity::user(),
+    ))
+}
+impl Pipeline {
+    fn voice_question(&mut self, source: &str, code: &str, near: &speakers::naming::NearVoice) {
+        let now = agent::now_ms();
+        let Some(text) = voice_question_text(code, near, now, self.mic_voices.asked.get(source).copied()) else { return };
+        self.mic_voices.asked.insert(source.to_owned(), now);
+        let _ = self.index.evidence.note("voice_question", source, &[], capture::host_now_ns(), serde_json::json!({"schema":1,"code":code,"near":near}));
+        if self.replay {
+            return;
+        }
+        let told = self.tools.agent_enabled.permit().and_then(|permit| self.tools.notice(format!("voice-question:{code}"), text, &permit));
+        if let Err(e) = told {
+            eprintln!("Speakers: voice question not delivered: {e:#}");
+        }
+    }
 }

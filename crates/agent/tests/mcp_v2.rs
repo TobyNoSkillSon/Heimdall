@@ -11,24 +11,45 @@ fn full_catalog_schema_snapshot() {
     // `MCP_SCHEMA_WRITE=1` writes the fixture from the catalog instead of checking it (then read the diff).
     if std::env::var_os("MCP_SCHEMA_WRITE").is_some() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp-v2-schema.json");
-        std::fs::write(path, serde_json::to_string_pretty(&tools()).unwrap() + "\n").unwrap();
+        std::fs::write(path, serde_json::to_string_pretty(&agent::mcp_contract::templates()).unwrap() + "\n").unwrap();
         return;
     }
     let mut expected: Value =
         serde_json::from_str(include_str!("fixtures/mcp-v2-schema.json")).unwrap();
-    // The public edition's catalog is the same without `bug_note` (docs/bugs.md).
+    // The public edition's catalog is the same without `bug_note` (docs/personal/bugs.md).
     if cfg!(feature = "public") { expected.as_array_mut().unwrap().retain(|t| t["name"] != "bug_note"); }
+    // Nor `phone_show`: the phone endpoint is personal only (docs/personal/remote.md, docs/editions.md).
+    if cfg!(feature = "public") { expected.as_array_mut().unwrap().retain(|t| t["name"] != "phone_show"); }
     // Nor a grant on an ask option: the user's clicks grant nothing there (`heimdall_emergency::grants::ENABLED`).
     if !heimdall_emergency::grants::ENABLED {
         let ask = expected.as_array_mut().unwrap().iter_mut().find(|t| t["name"] == "ask").unwrap();
         ask["inputSchema"]["properties"]["questions"]["items"]["properties"]["options"]["items"]["oneOf"][1]["properties"].as_object_mut().unwrap().remove("grant").expect("the fixture's grant");
     }
-    assert_eq!(tools(), expected);
+    // Nor `reply_to` (the phone's reply route) or the personal edition's voices Drama 3 and Supertonic, and its
+    // delegate_task default is the user's own providers, not a named model.
+    if cfg!(feature = "public") {
+        for t in expected.as_array_mut().unwrap().iter_mut() {
+            match t["name"].as_str().unwrap() {
+                "settings" => t["inputSchema"]["properties"]["key"]["enum"].as_array_mut().unwrap().retain(|k| k != "reply_to"),
+                "personalise" => t["inputSchema"]["properties"]["speaking_model"]["enum"].as_array_mut().unwrap().retain(|m| m != "drama3" && m != "supertonic"),
+                "delegate_task" => {
+                    let live = agent::mcp_contract::templates().as_array().unwrap().iter().find(|t| t["name"] == "delegate_task").unwrap()["description"].clone();
+                    t["description"] = live;
+                }
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(agent::mcp_contract::templates(), expected);
     let list = tools();
     let list = list.as_array().unwrap();
     // 23, plus refresh_plan and the four Floating Islands tools (night 1022), plus name_voice (23 Oct), plus
     // archive_clip and listen_to, taste_note and taste_search (24 Oct), personalise and settings (26 Oct).
-    assert_eq!(list.len(), if cfg!(feature = "public") { 34 } else { 35 });
+    // phone_show, personal only (9 Nov).
+    // Computer, both editions (10 Nov).
+    // islands_list, both editions (bug note 2026-11-13T12-27-46).
+    // The six crew tools, both editions (14 Nov).
+    assert_eq!(list.len(), if cfg!(feature = "public") { 42 } else { 44 });
     let mut names = std::collections::HashSet::new();
     for t in list {
         assert!(names.insert(t["name"].as_str().unwrap()));
@@ -62,6 +83,29 @@ fn settings_contract() {
     let settings = t.as_array().unwrap().iter().find(|t| t["name"] == "settings").unwrap();
     assert_eq!(settings["inputSchema"]["properties"]["key"]["enum"].as_array().unwrap().len(), agent::mcp_contract::SETTINGS_KEYS.len());
     assert!(settings["description"].as_str().unwrap().contains("owner_asked"));
+}
+/// The public edition advertises only what it has: no `reply_to` (no phone), no Drama 3 or Supertonic, and a task
+/// default that names no vendor. The personal edition keeps all three.
+#[test]
+fn the_public_settings_schema_offers_only_this_edition_s_choices() {
+    let t = agent::mcp_contract::templates();
+    let tool = |name: &str| t.as_array().unwrap().iter().find(|t| t["name"] == name).unwrap().clone();
+    let keys = tool("settings")["inputSchema"]["properties"]["key"]["enum"].clone();
+    let voices = tool("personalise")["inputSchema"]["properties"]["speaking_model"]["enum"].clone();
+    let delegate = tool("delegate_task")["description"].as_str().unwrap().to_owned();
+    let public = cfg!(feature = "public");
+    // This source release has no phone in either build, so no build offers `reply_to`.
+    assert!(!keys.as_array().unwrap().iter().any(|k| k == "reply_to"), "{keys}");
+    assert_eq!(voices.as_array().unwrap().iter().any(|m| m == "drama3" || m == "supertonic"), !public, "{voices}");
+    assert!(validate_tool("settings", &json!({"action":"set","key":"reply_to","value":"phone"})).is_err());
+    assert_eq!(validate_tool("personalise", &json!({"speaking_model":"drama3"})).is_ok(), !public);
+    assert!(validate_tool("personalise", &json!({"speaking_model":"phonon"})).is_ok());
+    assert_eq!(delegate.contains("Claude Opus"), !public, "{delegate}");
+    if public {
+        assert!(delegate.contains("set up in T3 Code"), "{delegate}");
+    }
+    let speak = tool("speak")["description"].as_str().unwrap().to_owned();
+    assert!(speak.contains("English and Polish only"), "{speak}");
 }
 #[test]
 fn personalise_refuses_an_icon_and_a_drawing_together_and_relative_paths() {
@@ -105,7 +149,7 @@ fn validates_every_tool_and_rejects_unknown_keys_wrong_types_and_blank_text() {
         ("drawing_mode", json!({"open":true})),
         ("bug_note", json!({"text":"t3_workers returned a wall of JSON at 12:32."})),
         ("bug_note", json!({"text":"Island stuck on Working","evidence":"log: turn ended 12:40"})),
-        ("schedule_wake", json!({"at":"07:00","message":"Tell User whether the build passed"})),
+        ("schedule_wake", json!({"at":"07:00","message":"Tell the user whether the build passed"})),
         ("schedule_wake", json!({"in_minutes":45,"message":"Check the TTS research task"})),
         ("list_wakes", json!({})),
         ("cancel_wake", json!({"id":"wake-3f2a1c"})),
@@ -129,7 +173,7 @@ fn validates_every_tool_and_rejects_unknown_keys_wrong_types_and_blank_text() {
         ("plan_edit", json!({"action":"add","item":"Arsenal: push branch","list":"goals","kind":"approve","goal":"g-arsenal","detail":"after tests","proposal":{"text":"git push","actions":[{"label":"Yes","action":"yes"}]}})),
     ];
     for (name, args) in cases {
-        // The public edition has no bug notes: its contract refuses the tool (docs/bugs.md).
+        // The public edition has no bug notes: its contract refuses the tool (docs/personal/bugs.md).
         if cfg!(feature = "public") && name == "bug_note" {
             assert!(validate_tool(name, &args).is_err());
             continue;
@@ -203,7 +247,6 @@ fn cross_field_bounds_dates_tags_and_unicode() {
         ("delegate_task", json!({"task":"y","title":"x","target":{"model":"m"},"branch":"b"})),
         ("delegate_task", json!({"task":"y","title":"x","target":{"model":"m","options":{"effort":2}}})),
         ("delegate_task", json!({"task":"y","title":"x","target":{"provider":"p","model":"m"}})),
-        ("delegate_task", json!({"task":"y","title":"x"})),
         ("t3_thread_read", json!({})),
         ("t3_thread_read", json!({"threadId":"a","threadIds":["b"]})),
         ("t3_thread_read", json!({"threadIds":["a","b","c","d","e","f"]})),
@@ -214,6 +257,8 @@ fn cross_field_bounds_dates_tags_and_unicode() {
     ] {
         assert!(validate_tool(name, &args).is_err(), "{name}: {args}");
     }
+    // Lane S (proposal 5): delegate_task's target is optional (Opus 5.5 at medium on the account with quota).
+    validate_tool("delegate_task", &json!({"task":"y","title":"x"})).unwrap();
     validate_tool("speak", &json!({"text":"😀".repeat(4096)})).unwrap();
     validate_tool(
         "timeline_search",
@@ -237,17 +282,16 @@ fn island_notice_detail_and_ask_bounds() {
     ] {
         validate_tool("island_notice", &args).unwrap_or_else(|e| panic!("{args}: {e}"));
     }
-    // Review 19 Oct: the retired `kind` is accepted and ignored, not refused; it is still not advertised, and the rest
-    // of the call is checked as usual.
-    validate_tool("island_notice", &json!({"text":"Done","kind":"success","detail":{"type":"text","text":"a"}})).unwrap();
+    // The retired `kind` (status icons, 19 Oct) is not advertised; a call that still sends it is told to remove it.
     assert!(tools().as_array().unwrap().iter().find(|t| t["name"] == "island_notice").unwrap()["inputSchema"]["properties"].get("kind").is_none());
-    assert!(validate_tool("island_notice", &json!({"text":"Working","kind":"working"})).unwrap_err().to_string().contains("detail: required"));
+    let e = validate_tool("island_notice", &json!({"text":"Done","kind":"success","detail":{"type":"text","text":"a"}})).unwrap_err().to_string();
+    assert!(e.contains("kind: unknown field; remove it"), "{e}");
     // 19 Oct: no agent status icons. A status line ("Working", kind) is refused; content needs its detail.
     for (args, why) in [
-        (json!({"text":"x".repeat(41),"detail":{"type":"text","text":"a"}}), "string length"),
+        (json!({"text":"x".repeat(41),"detail":{"type":"text","text":"a"}}), "41 characters; the limit is 1 to 40"),
         (json!({"text":"Working"}), "detail: required"),
         (json!({"text":"Table","detail":{"type":"table","headers":["A"],"rows":[["1","2"]]}}), "more cells than headers"),
-        (json!({"text":"Table","detail":{"type":"table","headers":[],"rows":[["1"]]}}), "too many items"),
+        (json!({"text":"Table","detail":{"type":"table","headers":[],"rows":[["1"]]}}), "headers: 0 items; the limit is"),
         (json!({"text":"Chart","detail":{"type":"svg","svg":"not svg"}}), "one <svg>"),
         (json!({"text":"Pic","detail":{"type":"image"}}), "archive_id: required"),
         (json!({"text":"Pic","detail":{"type":"video","archive_id":"x"}}), "wrong type"),
@@ -332,8 +376,8 @@ fn durable_receipts_answers_replay_and_reload() {
     a.answer(&question, "No", &p).unwrap();
     a.answer(&question, "No", &p).unwrap();
     assert_eq!(a.state(&question).unwrap(), "answered");
-    assert!(sink.events.lock().unwrap().last().unwrap().contains("User clicked No."));
-    assert_eq!(sink.events.lock().unwrap().iter().filter(|e| e.contains("User clicked")).count(), 1, "answered once");
+    assert!(sink.events.lock().unwrap().last().unwrap().contains("The user clicked No."));
+    assert_eq!(sink.events.lock().unwrap().iter().filter(|e| e.contains("The user clicked")).count(), 1, "answered once");
     // Answered by voice: the agent closes the card; nothing is delivered back and a later click does nothing.
     let spoken = a.ask("q2", &card("When should I install it?", &["Today", "Tomorrow", "Friday", "Never"]), &p).unwrap();
     assert_eq!(a.close_question(&spoken, "after lunch", &p).unwrap(), "closed");
@@ -491,4 +535,77 @@ fn voice_and_click_race_for_one_card_and_only_the_first_answer_counts() {
     let guarded = a.ask("q4", &card("Delete project 'Vella'?", &["Yes", "No"]), &p).unwrap();
     assert!(a.needs_click(&guarded));
     assert!(!a.needs_click(&q2) && !a.needs_click("ask-unknown"));
+}
+
+/// `phone_show` (9 Nov): in the personal catalog, last, with a path and a title of 1-60 characters; absent from the
+/// public one, where a stray call is refused.
+#[test]
+fn phone_show_is_personal_only_and_strict() {
+    let list = tools();
+    let names: Vec<&str> = list.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+    if cfg!(feature = "public") {
+        assert!(!names.contains(&"phone_show"));
+        assert!(validate_tool("phone_show", &json!({"path": "/tmp/r.html"})).is_err());
+        return;
+    }
+    // Appended last on 9 Nov; only `computer` (night1111) and the six crew tools (14 Nov) follow it.
+    assert_eq!(names[names.len() - 8], "phone_show", "appended last: the prompt prefix before it is unchanged");
+    assert!(validate_tool("phone_show", &json!({"path": "/tmp/r.html"})).is_ok());
+    assert!(validate_tool("phone_show", &json!({"path": "/tmp/r.html", "title": "Latency"})).is_ok());
+    assert!(validate_tool("phone_show", &json!({"path": "/tmp/r.html", "title": "x".repeat(60)})).is_ok());
+    assert!(validate_tool("phone_show", &json!({"path": "/tmp/r.html", "title": "x".repeat(61)})).is_err());
+    assert!(validate_tool("phone_show", &json!({"path": "/tmp/r.html", "title": ""})).is_err());
+    assert!(validate_tool("phone_show", &json!({"title": "x"})).is_err());
+    assert!(validate_tool("phone_show", &json!({"path": "/tmp/r.html", "open": true})).is_err());
+    assert!(!agent::mcp_contract::writes_state("phone_show"));
+}
+
+/// `computer` (bug note 2026-10-22T19-16-01): in both catalogs, last, with an action and an app; the rest strict.
+#[test]
+fn computer_is_last_and_strict() {
+    let list = tools();
+    let names: Vec<&str> = list.as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+    // Only the six crew tools (14 Nov) follow it.
+    assert_eq!(names[names.len() - 7], "computer", "appended last: the prompt prefix before it is unchanged");
+    assert_eq!(names[names.len() - 6..], ["crew_add", "crew_tell", "crew_status", "crew_change", "crew_schedule", "crew_retire"]);
+    for (args, ok) in [
+        (json!({"action":"find","app":"Discord"}), true),
+        (json!({"action":"menu","app":"Discord","title":"morgan"}), true),
+        (json!({"action":"pick","app":"Discord","title":"Mute","role":"menu item","index":2}), true),
+        (json!({"action":"type","app":"Discord","text":"hi"}), true),
+        (json!({"action":"click","app":"Discord","x":-120.5,"y":40,"button":"right"}), true),
+        (json!({"action":"find"}), false),
+        (json!({"app":"Discord"}), false),
+        (json!({"action":"drag","app":"Discord"}), false),
+        (json!({"action":"find","app":""}), false),
+        (json!({"action":"find","app":"Discord","index":0}), false),
+        (json!({"action":"find","app":"Discord","index":51}), false),
+        (json!({"action":"find","app":"Discord","index":"2"}), false),
+        (json!({"action":"click","app":"Discord","x":"10","y":10}), false),
+        (json!({"action":"click","app":"Discord","x":1,"y":2,"button":"middle"}), false),
+        (json!({"action":"type","app":"Discord","text":"x".repeat(4001)}), false),
+        (json!({"action":"find","app":"Discord","keys":"cmd+q"}), false),
+        // night1111 fix-computer (review C3): the user's words naming an outward button.
+        (json!({"action":"press","app":"Mail","title":"Send","owner_asked":"press Send"}), true),
+        (json!({"action":"press","app":"Mail","title":"Send","owner_asked":""}), false),
+        (json!({"action":"press","app":"Mail","title":"Send","owner_asked":"x".repeat(501)}), false),
+    ] {
+        assert_eq!(validate_tool("computer", &args).is_ok(), ok, "{args}");
+    }
+    assert!(!agent::mcp_contract::writes_state("computer"));
+}
+
+/// Release 1114 boundary: the public catalog has none of the personal tools (bug notes, the taste ledger, the phone)
+/// and no phone settings key, and the features that came in (memory search, Control Apps, islands_list) are there.
+#[cfg(feature = "public")]
+#[test]
+fn the_public_tool_list_has_no_personal_tools() {
+    let names: Vec<String> = tools().as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect();
+    for gone in ["bug_note", "taste_note", "taste_search", "phone_show"] {
+        assert!(!names.iter().any(|n| n == gone), "{gone}");
+    }
+    assert!(!agent::mcp_contract::SETTINGS_KEYS.contains(&"reply_to"));
+    for kept in ["timeline_search", "computer", "islands_list", "settings"] {
+        assert!(names.iter().any(|n| n == kept), "{kept}");
+    }
 }

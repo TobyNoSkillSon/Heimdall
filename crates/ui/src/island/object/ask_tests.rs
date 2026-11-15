@@ -268,7 +268,8 @@ fn a_question_card_is_a_click_target_per_option_and_the_option_is_the_pick() {
     settle(&mut i, 1.0);
     assert_eq!(i.class(), Class::Question);
     let no = i.targets().iter().find(|(t, _)| matches!(t, Target::AskPick { option: 1, .. })).cloned().expect("No is a target");
-    assert!(no.1.w >= 500.0 && no.1.h >= 50.0, "a whole row is the target: {:?}", no.1);
+    // The card is 420 pt with 22 pt padding, rows 36 pt (islands climb, 11 Nov): a whole row is the card's inner width.
+    assert!(no.1.w >= 376.0 && no.1.h >= 36.0, "a whole row is the target: {:?}", no.1);
     i.apply(Event::Click(no.0), 1.0);
     assert_eq!(take_notices(&mut i), vec![AgentNoticeAction::Answer { request_id: "c8".into(), answers: vec![answer("q1", &["No"], None)], by_hand: vec![] }]);
 }

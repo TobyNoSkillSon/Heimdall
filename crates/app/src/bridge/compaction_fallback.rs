@@ -30,12 +30,10 @@ a structured summary that another model will use to continue the work. Do not co
 in it: write only the summary.";
 
 /// A compaction failure Heimdall moves to another model: a spent quota or credit, a refused sign-in, or a history too
-/// long for the model (the phrases `agent::notice` names a too-long conversation by).
+/// long for the model (`agent::limits::too_long`, the phrases `agent::notice` names a too-long conversation by).
 pub(super) fn wanted(error: &str) -> bool {
     use agent::emergency::Failure;
-    let lower = error.to_ascii_lowercase();
-    matches!(agent::emergency::classify(error), Some(Failure::Quota | Failure::Auth))
-        || ["prompt is too long", "context length", "too many tokens", "context window"].iter().any(|p| lower.contains(p))
+    matches!(agent::emergency::classify(error), Some(Failure::Quota | Failure::Auth)) || agent::limits::too_long(error)
 }
 
 /// What the failed compaction would have summarised (the extension's source file).
@@ -119,6 +117,37 @@ pub(super) enum Outcome {
     Failed { tried: Vec<String> },
     /// Every fitting model was refused before any request (Agent off, emergency mode's pause): nothing to say.
     Quiet { tried: Vec<String> },
+    /// The switch back from the relay (bug note 2026-11-08T02-03-47): a history past the new model's budget keeps its
+    /// newest turns up to `keep` tokens; `note` says where the rest can be read. No model call.
+    Handover { keep: u64, tokens_before: u64, previous: Option<String>, note: String },
+}
+
+/// A handover keeps the newest turns up to this share of the new model's budget, so the next turns have room before
+/// Heimdall's idle compaction (85%).
+pub(super) const HANDOVER_PERCENT: u64 = 50;
+
+/// What the context shows now in Pi's chars/4 estimate (the summary, each message's content, each context entry),
+/// and the newest compaction's id on the branch (the cut is for this history only).
+pub(super) fn visible(entries: &[Value]) -> (u64, Option<String>) {
+    let branch = crate::pi_session::branch(entries);
+    let previous = branch.iter().rev().find(|e| e["type"] == "compaction").and_then(|e| e["id"].as_str().map(str::to_owned));
+    let (summary, context) = crate::pi_session::active_context(entries);
+    let chars = |v: &Value| match v { Value::String(s) => s.len(), other => serde_json::to_string(other).map_or(0, |s| s.len()) };
+    let mut tokens = (summary.map_or(0, |s| s.len()) as u64).div_ceil(4);
+    for e in &context {
+        tokens += (match e["type"].as_str() {
+            Some("message") => chars(&e["message"]["content"]),
+            Some("custom_message") => chars(&e["content"]),
+            _ => 0,
+        } as u64).div_ceil(4);
+    }
+    (tokens, previous)
+}
+
+/// The handover cut when the history does not fit `limits` (past Heimdall's compaction mark), else `None`.
+pub(super) fn handover(entries: &[Value], limits: agent::provider::Limits, note: String) -> Option<Outcome> {
+    let (tokens, previous) = visible(entries);
+    (tokens > limits.compact_at()).then(|| Outcome::Handover { keep: limits.context * HANDOVER_PERCENT / 100, tokens_before: tokens, previous, note })
 }
 
 /// Tries each candidate whose window holds the summary, in order, until one answers. `budget`: the agent's request
@@ -229,6 +258,7 @@ impl CompactionFallback {
         match &done {
             Outcome::Summary { model, tried, .. } => eprintln!("Agent: compacted on {model} after the agent's provider refused{}", tail(tried)),
             Outcome::Cut { keep, tokens_before, tried, .. } => eprintln!("Agent: no model could summarise the {tokens_before}-token history; its newest turns up to {keep} tokens stay, the older part was cut (still in the session file){}", tail(tried)),
+            Outcome::Handover { keep, tokens_before, .. } => eprintln!("Agent: switched back from the relay: the {tokens_before}-token history keeps its newest turns up to {keep} tokens for this model; a note points to the rest (still in the session file)"),
             _ => {}
         }
         b.harness.journal.event("agent_compaction", "agent:pi", &[], capture::host_now_ns(), json!({"state":kind(&done),"model":match &done { Outcome::Summary { model, .. } => json!(model), _ => Value::Null }}))?;
@@ -257,7 +287,7 @@ impl CompactionFallback {
         }
         let Some(out) = self.ready.take() else { return Ok(()) };
         match &out {
-            Outcome::Summary { .. } | Outcome::Cut { .. } => if let Err(e) = self.supply(pi, data, out.clone()).await {
+            Outcome::Summary { .. } | Outcome::Cut { .. } | Outcome::Handover { .. } => if let Err(e) = self.supply(pi, data, out.clone()).await {
                 eprintln!("Agent: the compaction from another model could not be handed to Pi: {e:#}");
                 b.harness.journal.event("agent_compaction", "agent:pi", &[], capture::host_now_ns(), json!({"state":"fallback_failed","error":format!("{e:#}")}))?;
                 self.say(tools, &Outcome::Failed { tried: vec![] });
@@ -291,10 +321,23 @@ impl CompactionFallback {
         Ok(())
     }
     /// A summary or cut waiting: Pi writes it as its compaction now (`Pi` idle). The file is private and gone once read.
+    /// The switch back from the relay (bug note 2026-11-08T02-03-47): the history Pi takes over must fit this model.
+    /// Past Heimdall's compaction mark, its newest turns up to `HANDOVER_PERCENT` of the budget stay and `note` stands
+    /// for the rest (no model call: the relay's history was too long for the summary request too, 8 Nov 01:56).
+    pub async fn handover(&mut self, pi: &mut agent::harness::Pi, data: &Path, limits: agent::provider::Limits, note: String) -> Result<()> {
+        let path = pi.session_path().to_owned();
+        let len = std::fs::metadata(&path).map_or(0, |m| m.len());
+        let entries = crate::pi_session::entries(&path, len)?;
+        match handover(&entries, limits, note) {
+            None => { eprintln!("Agent: switched back from the relay: the history fits this model ({} of {} tokens)", visible(&entries).0, limits.compact_at()); Ok(()) }
+            Some(out) => self.supply(pi, data, out).await,
+        }
+    }
     pub async fn supply(&mut self, pi: &mut agent::harness::Pi, data: &Path, outcome: Outcome) -> Result<()> {
         let body = match &outcome {
             Outcome::Summary { summary, first_kept, previous, model, .. } => json!({"summary":summary,"firstKeptEntryId":first_kept,"previous":previous,"model":model}),
             Outcome::Cut { keep, tokens_before, first_kept, previous, .. } => json!({"mode":"cut","keepTokens":keep,"tokensBefore":tokens_before,"sourceKept":first_kept,"previous":previous,"at":chrono::Local::now().format("%-d %b %H:%M").to_string()}),
+            Outcome::Handover { keep, tokens_before, previous, note } => json!({"mode":"cut","keepTokens":keep,"tokensBefore":tokens_before,"previous":previous,"at":chrono::Local::now().format("%-d %b %H:%M").to_string(),"note":note}),
             _ => anyhow::bail!("nothing to supply"),
         };
         let path = data.join("agent/compaction/supply.json");
@@ -311,7 +354,7 @@ impl std::fmt::Display for NoSource { fn fmt(&self, f: &mut std::fmt::Formatter<
 impl std::error::Error for NoSource {}
 
 fn kind(o: &Outcome) -> &'static str {
-    match o { Outcome::Summary { .. } => "fallback", Outcome::Cut { .. } => "cut", Outcome::Failed { .. } => "fallback_failed", Outcome::Quiet { .. } => "fallback_paused" }
+    match o { Outcome::Summary { .. } => "fallback", Outcome::Cut { .. } => "cut", Outcome::Failed { .. } => "fallback_failed", Outcome::Quiet { .. } => "fallback_paused", Outcome::Handover { .. } => "handover_cut" }
 }
 fn tail(tried: &[String]) -> String { if tried.is_empty() { String::new() } else { format!(" ({})", tried.join("; ")) } }
 
@@ -328,6 +371,23 @@ pub(super) fn notice(outcome: &Outcome) -> Option<String> {
 mod tests {
     use super::*;
     use crate::background_model::BackgroundModel;
+    /// Bug note 2026-11-08T02-03-47: relay mode had added about 5 MB of context entries since Pi's last compaction
+    /// (31 Oct); switched back to Sol, the summary request overflowed too. The handover keeps the newest turns that fit.
+    #[test]
+    fn a_handover_cuts_only_a_history_past_the_new_models_mark_and_keeps_its_newest_half() {
+        let ctx = |id: &str, parent: &str, n: usize| json!({"type":"custom_message","id":id,"parentId":parent,"customType":"heimdall_context","content":"x".repeat(n)});
+        let mut entries = vec![json!({"type":"message","id":"u0","message":{"role":"user","content":"old"}}),
+            json!({"type":"compaction","id":"c0","parentId":"u0","firstKeptEntryId":"u0","summary":"s".repeat(400)})];
+        let mut parent = "c0".to_owned();
+        for i in 0..30 { let id = format!("m{i}"); entries.push(ctx(&id, &parent, 4_000)); parent = id; }
+        let limits = agent::provider::Limits::for_context(40_000, None);
+        // 100 summary tokens, the kept "old" (1) and 30 x 1,000: 30,101, under the 85% mark (34,000).
+        assert_eq!(visible(&entries), (30_101, Some("c0".into())));
+        assert_eq!(handover(&entries, limits, "note".into()), None);
+        for i in 30..40 { let id = format!("m{i}"); entries.push(ctx(&id, &parent, 4_000)); parent = id; }
+        assert_eq!(handover(&entries, limits, "note".into()), Some(Outcome::Handover { keep: 20_000, tokens_before: 40_101, previous: Some("c0".into()), note: "note".into() }));
+        assert_eq!(kind(&Outcome::Handover { keep: 0, tokens_before: 0, previous: None, note: String::new() }), "handover_cut");
+    }
     fn chatgpt(id: &str, name: &str, context: u64) -> agent::provider::ApiModel {
         agent::provider::ApiModel { provider: agent::provider::CHATGPT.into(), id: id.into(), name: name.into(), api: agent::provider::Api::OpenaiResponses, context, max_output: 128_000,
             images: true, reasoning: true, cost: None, context_budget: None, thinking: None, base_url: None, efforts: vec![] }
@@ -398,6 +458,8 @@ mod tests {
         assert!(wanted("Summarization failed: 401 invalid x-api-key"));
         assert!(wanted("Summarization failed: The ChatGPT user has reached their Subscription Sharing usage limit."));
         assert!(wanted("400 prompt is too long: 334007 tokens > 272000 maximum"));
+        // AGT-E3: OpenAI's wording for it moves the summary too (it was too long only for background calls).
+        assert!(wanted("400 {\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"This model's maximum context length is 272000 tokens.\"}}"));
         assert!(!wanted("Summarization failed: 529 overloaded_error"));
         assert!(!wanted("Compaction cancelled"));
     }

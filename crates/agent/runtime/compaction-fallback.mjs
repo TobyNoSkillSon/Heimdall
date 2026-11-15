@@ -84,7 +84,8 @@ export function registerCompactionFallback(pi, deps) {
       // this branch (a new or rotated session has neither).
       if (s.previous !== undefined && s.previous !== previous) return { cancel: true };
       if (s.sourceKept !== undefined && !branch.some((e) => e.id === s.sourceKept)) return { cancel: true };
-      const note = `[Heimdall, ${s.at}: the older part of this conversation was cut without a summary: the history (about ${s.tokensBefore} tokens) was past what any available model could summarise. The whole record stays in the session file.]`;
+      // A handover cut (bug note 2026-11-08T02-03-47) brings Heimdall's own note: where the cut part can be read.
+      const note = typeof s.note === 'string' && s.note.trim() ? s.note.trim() : `[Heimdall, ${s.at}: the older part of this conversation was cut without a summary: the history (about ${s.tokensBefore} tokens) was past what any available model could summarise. The whole record stays in the session file.]`;
       const summary = p.previousSummary ? `${p.previousSummary}\n\n${note}` : note;
       // `keepTokens` is the whole context after the cut (review 28 Oct): the summary and Pi's fixed part (system prompt,
       // tools: what Pi's count holds beyond the messages and the old summary) come out of it, so the history lands

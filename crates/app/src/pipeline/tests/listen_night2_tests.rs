@@ -109,11 +109,11 @@ fn a_verdict_after_its_turn_ended_drops_the_heard_cue() {
     assert!(records(&a).iter().any(|r| r.kind == "command_decision" && r.payload["reason"] == "turn_ended_before_verdict"));
 }
 
-/// D3 (20 Oct, Discord call with Morgan): while a call is going on, a mention of the name and the follow-up window wait
-/// for d1, which holds them back at not_for_heimdall >= 0.5; the user addressing Heimdall by name still wakes at once.
-/// After the call (no call line for two minutes) the name wakes as before.
+/// D3 (20 Oct, Discord call with Morgan) made mentions in a call wait for d1. Night 1115 ("You
+/// shouldn't be less reactive because we are on the call"): his name wakes at once in a call as off it, whatever d1
+/// says, and nothing waits for d1's verdict (no `call_gate`).
 #[test]
-fn during_a_call_mentions_wait_for_d1_and_an_address_still_wakes() {
+fn during_a_call_his_name_wakes_at_once_as_off_a_call() {
     let (_t, mut a, mic) = rig(false);
     let call = discord(&a);
     let mention = "Oh my god dude. I so I'm running like like remember Heimdall? Like the the thing I was doing?";
@@ -136,8 +136,8 @@ fn during_a_call_mentions_wait_for_d1_and_an_address_still_wakes() {
     let outcome = |d: &serde_json::Value| (d["outcome"].as_str().unwrap_or("").to_string(), d["trigger"].as_str().map(str::to_string), d["call_gate"]["wakes"].as_bool());
     let owner: Vec<_> = all.iter().filter(|d| d["audio"]["source_id"] == mic.as_str()).map(outcome).collect();
     assert_eq!(owner, [
-        ("not_for_heimdall".into(), None, Some(false)),
-        ("send".into(), Some("name".into()), Some(true)),
+        ("send".into(), Some("name".into()), None),
+        ("send".into(), Some("name".into()), None),
         ("send".into(), Some("name".into()), None),
         ("send".into(), Some("name".into()), None),
     ], "{owner:#?}");

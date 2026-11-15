@@ -348,6 +348,36 @@
      "bytes": 1488915288
     }
    ]
+  },
+  {
+   "id": "reranker",
+   "title": "Qwen3-Reranker-0.6B",
+   "files": [
+    {
+     "path": "qwen3-reranker-0.6b/config.json",
+     "url": "https://huggingface.co/Qwen/Qwen3-Reranker-0.6B/resolve/e61197ed45024b0ed8a2d74b80b4d909f1255473/config.json",
+     "sha256": "d479c427a9ca5295218063d4f9aca4f297ab4ac27487cca7af42c84643d51ef0",
+     "bytes": 727
+    },
+    {
+     "path": "qwen3-reranker-0.6b/tokenizer.json",
+     "url": "https://huggingface.co/Qwen/Qwen3-Reranker-0.6B/resolve/e61197ed45024b0ed8a2d74b80b4d909f1255473/tokenizer.json",
+     "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+     "bytes": 11422654
+    },
+    {
+     "path": "qwen3-reranker-0.6b/tokenizer_config.json",
+     "url": "https://huggingface.co/Qwen/Qwen3-Reranker-0.6B/resolve/e61197ed45024b0ed8a2d74b80b4d909f1255473/tokenizer_config.json",
+     "sha256": "253153d0738ceb4c668d2eff957714dd2bea0b56de772a9fdccd96cbf517e6a0",
+     "bytes": 9706
+    },
+    {
+     "path": "qwen3-reranker-0.6b/model.safetensors",
+     "url": "https://huggingface.co/Qwen/Qwen3-Reranker-0.6B/resolve/e61197ed45024b0ed8a2d74b80b4d909f1255473/model.safetensors",
+     "sha256": "27cd75a405b9c1b46b59abfd88aaa209e6fed2a1972cde9b70e7659537c5e65b",
+     "bytes": 1191588280
+    }
+   ]
   }
  ]
 }

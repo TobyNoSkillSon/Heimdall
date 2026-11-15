@@ -1,8 +1,7 @@
 Source: https://raw.githubusercontent.com/ggml-org/llama.cpp/62a6f74bab748b1755f4cd8dfc0871caf865c6c8/LICENSE
 Retrieved: 2026-10-27
 SHA-256 of the licence text below: 94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d
-Applies to: llama.cpp and ggml (MIT, copyright The ggml authors). Covers libheimdall_decide.dylib (crates/decide/scripts/runtime.lock.json),
-the ggml CPU and Metal backends statically linked into heimdall-speakers-worker (crates/speakers/vendor/ggml, identical to the upstream LICENSE),
+Applies to: llama.cpp and ggml (MIT, copyright The ggml authors). Covers the ggml CPU and Metal backends statically linked into heimdall-speakers-worker (crates/speakers/vendor/ggml, identical to the upstream LICENSE),
 and the ggml-derived Metal code inside the Splash engine. Splash's own notices are in Splash-THIRD_PARTY_NOTICES.txt.
 
 MIT License

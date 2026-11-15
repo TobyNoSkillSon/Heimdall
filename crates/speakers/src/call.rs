@@ -3,8 +3,6 @@
 use crate::{
     diar::SpeakerSegment,
     embedding::{Embedding, ReDimNet, VoiceEncoder},
-    live::LiveStrategy,
-    online::OnlineConfig,
     pipeline::Diarization,
 };
 use anyhow::{Context, Result, ensure};
@@ -30,8 +28,6 @@ enum Request {
     Start {
         models: PathBuf,
         gpu: i32,
-        strategy: LiveStrategy,
-        enrollments: crate::identity::EnrollmentStore,
     },
     Push(Vec<f32>),
     Segments,
@@ -280,15 +276,13 @@ impl crate::pipeline::Diarization for CallStream {
     }
 }
 /// Standby owns no models or helper. Activation starts one dedicated inference
-/// process; 15 seconds without VAD-confirmed speech expires its whole pipeline.
+/// process; `QUIET_TIMEOUT` (120 s) without VAD-confirmed speech expires its whole pipeline.
 /// Tick from the host timer even if capture has stopped. A new activation needs a
 /// new call/session ID and audio origin; pending naming evidence stays in parent.
 pub struct CallScopedSpeakers {
-    metal_backend: Option<String>,
     executable: PathBuf,
     models: PathBuf,
     gpu: i32,
-    strategy: LiveStrategy,
     pipeline: Option<crate::pipeline::SpeakerPipeline<CallEncoder, CallStream>>,
     naming: Option<crate::naming::NamingFlow>,
     last_activity: Option<Instant>,
@@ -306,11 +300,9 @@ impl CallScopedSpeakers {
         naming: crate::naming::NamingFlow,
     ) -> Self {
         Self {
-            metal_backend: None,
             executable,
             models,
             gpu,
-            strategy: LiveStrategy::default(),
             pipeline: None,
             naming: Some(naming),
             last_activity: None,
@@ -336,15 +328,11 @@ impl CallScopedSpeakers {
     ) -> Result<()> {
         ensure!(origin.is_finite(), "invalid call origin");
         ensure!(self.pipeline.is_none(), "call already active");
-        let store = &self.naming.as_ref().expect("standby naming").store;
         let (stream, encoder) = start_helper(
             &self.executable,
             &self.models,
             self.gpu,
-            self.strategy,
-            store,
             on_spawn,
-            self.metal_backend.as_deref(),
         )?;
         self.pipeline = Some(crate::pipeline::SpeakerPipeline::new(
             stream,
@@ -356,25 +344,6 @@ impl CallScopedSpeakers {
         )?);
         self.last_activity = Some(now);
         Ok(())
-    }
-    /// Change the backend only in standby; active calls keep their timeline/track IDs.
-    pub fn set_strategy(&mut self, strategy: LiveStrategy) -> Result<()> {
-        ensure!(
-            !self.is_active(),
-            "stop the active call before changing diarization strategy"
-        );
-        self.strategy = strategy;
-        Ok(())
-    }
-    /// Applied to the owned helper's environment only; never mutates the parent process.
-    pub fn set_metal_backend(&mut self, backend: &str) -> Result<()> {
-        ensure!(!self.is_active(), "speaker call must drain before changing backend");
-        ensure!(matches!(backend, "default" | "redimnet" | "nemotron" | "all"), "invalid speaker backend");
-        self.metal_backend = Some(match backend { "all" => "1", "default" => "0", b => b }.into());
-        Ok(())
-    }
-    pub fn strategy(&self) -> LiveStrategy {
-        self.strategy
     }
     pub fn pipeline_mut(
         &mut self,
@@ -439,14 +408,9 @@ fn start_helper(
     executable: &Path,
     models: &Path,
     gpu: i32,
-    strategy: LiveStrategy,
-    enrollments: &crate::identity::EnrollmentStore,
     on_spawn: impl FnOnce(u32),
-    metal_backend: Option<&str>,
 ) -> Result<(CallStream, CallEncoder)> {
-    let mut command = Command::new(executable);
-    if let Some(backend) = metal_backend { command.env("HEIMDALL_SPEAKERS_METAL", backend); }
-    let mut child = command
+    let mut child = Command::new(executable)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -467,8 +431,6 @@ fn start_helper(
     } = helper.borrow_mut().request(Request::Start {
         models: models.into(),
         gpu,
-        strategy,
-        enrollments: enrollments.clone(),
     })?
     else {
         anyhow::bail!("unexpected start reply")
@@ -498,8 +460,6 @@ pub struct EncoderHelper {
 impl EncoderHelper {
     pub fn start(executable: &Path, models: &Path, on_spawn: impl FnOnce(u32)) -> Result<Self> {
         let mut child = Command::new(executable)
-            // CPU only: the check must not queue behind the GPU's speech and transcription work.
-            .env("HEIMDALL_SPEAKERS_METAL", "0")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -564,14 +524,15 @@ fn run_encoder(models: &Path, input: &mut impl Read, output: &mut impl Write) ->
 pub fn run_helper() -> Result<()> {
     let mut input = std::io::stdin().lock();
     let mut output = std::io::stdout().lock();
-    let (models, gpu, strategy, enrollments) = match read_message(&mut input)? {
-        Request::Start { models, gpu, strategy, enrollments } => (models, gpu, strategy, enrollments),
+    let (models, gpu) = match read_message(&mut input)? {
+        Request::Start { models, gpu } => (models, gpu),
         Request::StartEncoder { models } => return run_encoder(&models, &mut input, &mut output),
         _ => anyhow::bail!("first speaker request must start"),
     };
     let loaded = (|| -> Result<_> {
-        let stream =
-            strategy.load_enrolled(&models, gpu, OnlineConfig::default(), Some(&enrollments))?;
+        // Boxed: the helper speaks through the `Diarization` trait (`frame_probabilities(since)`).
+        let stream: Box<dyn Diarization> =
+            Box::new(crate::diar::Diarizer::load(&models.join("Nemotron-3-Diarization.q8_0.gguf"), gpu)?.stream(16000)?);
         let encoder = ReDimNet::load(&models.join("ReDimNet2B6.onnx"))?;
         Ok((stream, encoder))
     })();

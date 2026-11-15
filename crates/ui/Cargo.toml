@@ -11,12 +11,20 @@ name = "ui"
 [[bin]]
 name = "heimdall-ui-demo"
 path = "src/bin/demo.rs"
+required-features = ["lab"]
 
 [features]
 # The public edition (app's `public` feature, docs/editions.md): no Bug Notes menu row.
 public = []
+# The offscreen render and check harnesses (`render_*`, the demo bin's flags): lab and test builds only, never linked
+# into Heimdall.app. `cargo build -p ui --features lab --bin heimdall-ui-demo`; the crate's own tests turn it on
+# through the dev-dependency below.
+lab = []
 
 # The island's fast reader plays crates/rsvp plans (phrase units, per-unit timing, recognition letters).
+[dev-dependencies]
+ui = { path = ".", features = ["lab"] }
+
 [dependencies]
 heimdall-home = { path = "../home" }
 rsvp = { path = "../rsvp" }

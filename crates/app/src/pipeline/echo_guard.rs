@@ -228,7 +228,7 @@ impl super::Pipeline {
     /// played through speakers around them).
     pub(super) fn echo_verdict(&self, source: &str, words: &[Word]) -> Option<Verdict> {
         let (first, last) = (words.first()?, words.last()?);
-        if !self.owner(source) {
+        if !self.user_source(source) {
             return None;
         }
         let played = self.tools.speech_policy.played_around(first.start_ns, last.end_ns);

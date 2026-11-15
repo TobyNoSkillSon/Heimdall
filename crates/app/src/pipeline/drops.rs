@@ -41,6 +41,7 @@ const DESCRIBE_WAIT: Duration = Duration::from_secs(3);
 /// A drop's message: ready, or still being written on its own thread (with its paths-only stand-in).
 #[derive(Debug)]
 enum Body {
+    #[cfg(test)]
     Ready(Message),
     Pending(std::sync::mpsc::Receiver<Message>, Message),
 }
@@ -48,6 +49,7 @@ enum Body {
 impl Body {
     fn get(self) -> Message {
         match self {
+            #[cfg(test)]
             Body::Ready(m) => m,
             Body::Pending(rx, quick) => rx.recv_timeout(DESCRIBE_WAIT).unwrap_or(quick),
         }
@@ -254,7 +256,7 @@ impl super::Pipeline {
         let source = match e {
             E::SpeechStart { source, .. } | E::SpeechEnd { source, .. } | E::PartialTranscript { source, .. } | E::TranscriptSegment { source, .. } | E::FinalUtterance { source, .. } | E::Discontinuity { source, .. } => source,
         };
-        if !self.owner(source) {
+        if !self.user_source(source) {
             return;
         }
         let now = Instant::now();
@@ -297,6 +299,7 @@ impl super::Pipeline {
         self.index.evidence.event("notch_drop_delivery", "notch", &[], capture::host_now_ns(), serde_json::json!({"label":m.label,"lines":m.lines,"images":m.images.len(),"joined":false,"typed":!text.trim().is_empty()}))?;
         self.ensure_agent()?;
         let Some(agent) = self.agent.as_ref() else { return Ok(()) };
+        crate::remote::mac_turn_started_via(crate::remote::MacVia::Drop); // a drop on the notch is a turn at the Mac
         if !text.trim().is_empty() {
             self.tools.speech_policy.owner_woke(text.trim(), capture::host_now_ns());
         }

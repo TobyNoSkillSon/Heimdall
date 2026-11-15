@@ -199,7 +199,7 @@ pub fn render_thread(raw: &ThreadRaw, now: chrono::DateTime<chrono::Utc>) -> Thr
     live.sort_by(|a, b| b.0.cmp(&a.0));
     head.extend(live.into_iter().map(|(_, l)| l));
     let mut own = format!("- the thread itself \"{}\": {status}", without_tag(t["title"].as_str().unwrap_or("")));
-    if pending > 0 { own.push_str(&format!(", {pending} question(s) waiting for User's answer")); }
+    if pending > 0 { own.push_str(&format!(", {pending} question(s) waiting for {}'s answer", super::user())); }
     if let Some(run) = raw.read["recentRuns"].as_array().and_then(|r| r.first()) {
         if !run["completedAt"].is_null() && ended { own.push_str(&format!("; its own turn ended {} ({})", local_hhmm(&run["completedAt"]), ago(&run["completedAt"]))); }
     }

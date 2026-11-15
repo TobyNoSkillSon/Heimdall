@@ -70,8 +70,8 @@ pub fn swap_notice(used: u64, heimdall: u64, largest: &[(String, u64)]) -> Strin
     format!(
         "Memory warning: macOS swap reached {} (the warning line is {}). Heimdall and its helpers hold {}. Largest processes now: {top}. \
          Swap growing means the Mac is out of memory: hold or stop heavy jobs you started (model loads, parallel builds) \
-         before starting more, and tell User if it keeps growing.",
-        gb(used), gb(SWAP_WARN), gb(heimdall)
+         before starting more, and tell {} if it keeps growing.",
+        gb(used), gb(SWAP_WARN), gb(heimdall), agent::identity::user()
     )
 }
 

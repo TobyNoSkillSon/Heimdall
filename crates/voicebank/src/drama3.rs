@@ -21,9 +21,6 @@ pub struct Drama3 {
     direction: Option<String>,
 }
 impl Drama3 {
-    pub fn load(assets: PathBuf, probe: PathBuf, bank: &std::path::Path) -> Result<Self> {
-        Self::load_with_splash_reserve(assets, probe, bank, "cap")
-    }
     pub fn load_with_splash_reserve(assets: PathBuf, probe: PathBuf, bank: &std::path::Path, reserve: &str) -> Result<Self> {
         ensure!(probe.is_file(), "ASR probe is missing");
         let service = match reserve {

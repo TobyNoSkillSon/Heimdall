@@ -268,6 +268,26 @@ pub fn route_devices(object: u32) -> Vec<(u32, String)> {
         })
         .collect()
 }
+/// Objects whose route or format events concern one open source (F5, 10 Nov): a microphone's device and its input
+/// streams; a tap's process object, and each of its output devices with their output streams. A ROUTE event on any
+/// other object leaves the source running.
+pub fn source_objects(target: &Target) -> Vec<u32> {
+    match target {
+        Target::Mic(device) => {
+            let mut objects = vec![*device];
+            objects.extend(list(*device, kAudioDevicePropertyStreams, kAudioObjectPropertyScopeInput).unwrap_or_default());
+            objects
+        }
+        Target::Tap { object, .. } => {
+            let mut objects = vec![*object];
+            for (device, _) in route_devices(*object) {
+                objects.push(device);
+                objects.extend(list(device, kAudioDevicePropertyStreams, kAudioObjectPropertyScopeOutput).unwrap_or_default());
+            }
+            objects
+        }
+    }
+}
 pub fn snapshot() -> Result<Snapshot> {
     let mut s = Snapshot::default();
     let global = kAudioObjectPropertyScopeGlobal;

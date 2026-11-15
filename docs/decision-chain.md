@@ -1,252 +1,267 @@
-# Command decisions and agent context
+# Decision chain: from a spoken sentence to send, wait or ignore
 
-Beta: the decider sometimes wakes Heimdall when you were not talking to it.
+How Heimdall decides whether a finished sentence is for it, how the two spoken screen commands are confirmed, how the
+user's voice interrupts Heimdall (barge-in), which sources may reach the agent, and how Agent Off cuts tool work.
 
-The decider (V6 by default; V5 is the rollback, Settings `decider_model`) does three jobs, and the app asks it nothing else: the wake (send, wait or not for Heimdall, with
-the acknowledgement line, on every sentence), suggest yes/no on every line (`docs/suggester.md`), and confirming the
-two screen commands below. Barge-in, the end-of-turn reply line, the fixed-command question and cancel-task left the
-decider. There is no follow-up window: a reply right after Heimdall
-spoke is the decider's to send like any sentence. The user's saying Heimdall's name and "send it" still wake at once.
+Read this when: you want to change when Heimdall wakes, you are debugging a missed or false wake, you are changing
+barge-in or the reply hold, you are changing the spoken commands, you want to read `send_decision`,
+`command_decision` or `barge_in` evidence, or you want the decider-label shortcuts.
+Code: `crates/decide/src/send.rs`, `crates/decide/src/command.rs`, `crates/app/src/pipeline/` (`send_worker.rs`,
+`utterances.rs`, `commands.rs`, `barge_in.rs`, `heimdall_voice.rs`, `mic_voice.rs`, `hotkeys.rs`),
+`crates/app/src/bridge/` (`hold.rs`, `speech_policy.rs`, `questions.rs`, `call_interrupt.rs`),
+`crates/app/src/context_policy.rs`.
 
-Design:. A spoken command is decided once, as soon as it is detected, by d1 reading text.
-The final transcript no longer gates commands and no transcript rule overrides the decider.
+## The chain
 
-## Detection to decision
+```mermaid
+flowchart TD
+    A["Final transcript on a microphone"] --> B{"Dictated to Vella?"}
+    B -- yes --> Z["Archive only, context marked dictated"]
+    B -- no --> C{"Voice check (mic_voice)"}
+    C -- "Heimdall's own voice" --> Z
+    C -- "Unknown" --> U["Context only, never a wake"]
+    C -- "user, or unclear" --> D{"Explicit cue?"}
+    D -- "name as address, 'send it'" --> W["Wake the agent"]
+    D -- none --> E["Decider: send / wait / not_for_heimdall"]
+    E -- send --> W
+    E -- "wait, not_for_heimdall" --> P["Stays pending"]
+    E --> S["Suggest question (suggester.md)"]
+```
 
-1. **Detection.** Phrases are matched only in Parakeet's text on the primary microphone (English or Polish): a
-   partial transcript (screen phrases), a 15-s window decode, or the turn's final. A screen phrase holds the
-   screen from the phrase's first word as soon as a partial or window carries it. Later detections of the same
-   command (within 1 s) merge into it. (The keyword spotter was removed: it caught 0 of 7 screen
-   phrases in 24 h.)
-2. **Text for the decider.** A window or final detection uses its own words over the last <=15 s of the
-   utterance up to 200 ms after the trigger. A partial's candidate waits for the window or the final.
-3. **Decision.** One question, specific to the command the phrase proposes, with the original criteria:
-   "Did the user, right now, ask Heimdall to look at their screen?" or "Did the user, right now, ask Heimdall to take a
-   screenshot?", exactly as the decider's training rows ask them. Answers `yes`, `false_alarm` (discussion,
-   quotation or narration), `unsure`. Text only (`DecisionMedia::Text`); no audio reaches the decider.
-   Context is the recent delivered turns and the pending agent transcript.
-4. **Outcome.** `yes` runs the command at once on the screen pinned at the phrase (screenshot attached to the
-   turn) and the island shows its result. `false_alarm`/`unsure`
-   shows nothing and releases the held screen. `unsure` and errors write an automatic review entry.
-5. **Partial only:** a candidate only a partial carried is decided from the final's words; if the final no
-   longer carries the phrase it is abandoned (`partial_phrase_retracted`) and its held screen released.
+1. Every finished line is archived whatever the verdict.
+2. Lines dictated to Vella never wake anything ([vella.md](vella.md)).
+3. Each finished utterance on the primary microphone is judged by voice (`pipeline/mic_voice.rs`): only the user's
+   voice reaches the decider as the user; Heimdall's own voice is archived only; another voice is "Unknown" and is
+   context, never a wake. With no verdict (no profile yet, encoder down or late) the line stays the user's. The
+   thresholds are in [speakers.md](speakers.md).
+4. Host wakes that skip the decider's argmax (`decide::send::explicit_trigger`): the assistant's name (below) and
+   "send it" when it opens its clause, follows a request frame ("can you send it") or joins another command ("write
+   the reply and send it"); never inside talk about sending.
+5. Otherwise the decider answers `send`, `wait` or `not_for_heimdall` over a 2,000-token text window
+   (`send::WINDOW`), with the acknowledgement line it picks. It asks `crates/decide/questions/dispatch-v5.json` on
+   every sentence. Oldest turns drop first; unsent text stays in the prompt unless it alone exceeds the window, when
+   only its newest suffix is inferred. A `wait` or `not_for_heimdall` never consumes pending text. Typed messages send
+   at once and form barriers.
+6. Outside a call, on the user's microphone with no question card up, a `send` within `NEAR_TIE` (0.01) of
+   `not_for_heimdall` and at least `wait` counts as a send although it is not the argmax (`send::d1_gate`,
+   `D1Gate::NearTie`).
+7. After each line's send decision the same conversation is asked the suggest question ([suggester.md](suggester.md)).
 
-The main transcript is unchanged: the utterance is transcribed by the live stream when the user finishes, never
-split at a command. Turns over 15 s are decoded in the stream's existing 15-s windows (segments), as before.
+There is no follow-up window: a reply right after Heimdall spoke goes to the decider like any sentence.
+`decide::send::FOLLOW_UP_NS` (30 s) survives only to restore Heimdall's finish time across a restart
+(`bridge/tools.rs`). There is no silence wake, score-threshold setting or decider switch.
 
-The spoken commands are "look at this" and "take a screenshot" (`pipeline::COMMAND_PHRASES`), the two decider confirms.
-Cancel-task and the "stop completely" family were removed ("cancel the task", said
-while discussing commands, once cancelled the agent's task); stopping the agent is the Agent window's or island's Stop, or
-a request to the agent. The other screen aliases ("take a look", "look at the screen", the Polish ones) and the
-pointing phrases are ordinary speech now. "Bug note" is not a spoken command: Heimdall files bug notes with its
-`bug_note` tool (`docs/bugs.md`). "Stop speaking" and "open ..." were removed earlier: stopping is the barge-in
-below, and an "open that in the browser" is ordinary speech that reaches the agent like any other turn.
+Which decider runs: `decider_model` (`v6` or `v5`) at `decider_precision` (`16bit`, `8bit`, `4bit`), default V6
+4-bit (`decide::precision::Pick::DEFAULT`). Keys, hot swap and missing-folder fallback are in
+[settings.md](settings.md); files and sizes in [models.md](models.md).
 
-`COMMAND_POLICY` is `command-check-v9;text-only;side-transcript-15s;single-question;native-escapes;no-transcript-veto;v5-two-screen-commands`.
-The former audio route, two-question chain, confidence floors and transcript-grammar veto
-(`command-directed-v4`, `directed-clause-v1..3`) are historical; their records remain in older archives.
+Other triggers (`decide::send::Trigger`):
 
-The legacy `Question::SendNow` and `Question::FixedCommand` requests stay in the decide crate for d1 reference-golden
-parity only; the app asks neither (the per-turn fixed-command question was removed). All local command
-actions go through this chain.
+- `OpenQuestion`: for `ANSWER_WINDOW_NS` (60 s) after a Heimdall question card appears, the user's line is sent when
+  the decider's `send` is at least `OPEN_CARD_SEND` (0.35), even if it is not the argmax (`bridge/questions.rs`).
+- `Dropped`: a drop on the notch while speaking (`pipeline/drops.rs`).
+- `Guest`: a listened-to call guest addressing Heimdall by name ([speakers.md](speakers.md)).
+- `PhonePress`, `Typed`. `FollowUp` appears only in old archives.
+
+## The name as an address
+
+`decide::send::addressed_by_name` reads the name as an address when it opens a sentence (after interjections such as
+"yo", "hey", "okay") or is set off by a comma. With the default name Heimdall also matches the recognizer's known
+misspellings (`KNOWN_ONE_WORD`, `KNOWN_TWO_WORDS`, `KNOWN_WHOLE_SENTENCE`); another configured name matches at a
+sentence start within an edit budget by length (7 or more letters: 2 edits, 5 or 6: 1, shorter: exact).
+
+- Address: "Heimdall, check this", "Heimdall is it done?" (inverted question), "Heimdall did you see that",
+  "Heimdall can you…" (modal).
+- Mention: the name as the subject of a statement, with no punctuation after it and a third-person verb next
+  ("Yeah, Heimdall is searching already.", "Heimdall was down all night").
+- Any name trigger wakes at once, in a call or not (night 1115). Every run the user's own words woke may answer
+  aloud on a call (`speech_policy::addressed_wake`, set in `Pipeline::dispatch_pending`).
+
+## Calls
+
+- Night 1115 ("You shouldn't be less reactive because we are on the call"): a call changes nothing
+  about which of the user's lines wake Heimdall. No call gate, no wait for the decider on names or "send it";
+  `held_in_call` is written only for a listened guest's line the decider sent (guests wake by name or "send it").
+- One call timer: a call is a live conversation (`speech_policy::in_conversation`), a line by a person the user named,
+  or a call line within 2 min of the user talking to someone else (the decider: `not_for_heimdall`), lasting
+  `CONVERSATION_NS` (45 s) after the last such line. Unnamed app audio in a call app (a stream, a video) is not a call.
+- On a call, Heimdall's answer to the user waits for a pause in the others' talk (`hold::PATIENCE`, then plays over
+  them); `speak` with `now` plays as soon as the user pauses. Runs the user did not start stay held for the call, with
+  one soft cue (`speech_policy::held_cue`).
+- A goodbye ends the call window early:
+  - a farewell by either side (`decide::send::farewell`, English and Polish), ending the line with at most one word
+    after it, or an unambiguous goodbye ("bye", "take care", "gotta go") ending any sentence of the line;
+  - the user's "I'm off the call" or "you can talk to me now" (`decide::send::off_call`), not negated or conditional;
+  - the user addressing Heimdall by name with nobody else heard for `ADDRESS_GAP_NS` (8 s) before the line, when the
+    user also said nothing to the call for 8 s or the line says they are back ("I'm back", `decide::send::says_back`;
+    `speech_policy::address_ends_call`).
+  A call line within `FAREWELL_SLACK_NS` (5 s) after the goodbye is the call's own goodbye; any later call line starts
+  the call again.
+- The speech hold (`speech_policy::in_conversation`) keeps replies silent on the island during a conversation: 45 s
+  after the last call line (`speech_policy::CONVERSATION_NS`), while a call source's voice is open, and until 3 s after
+  the last call source stops (`CALL_SOURCE_GONE`). It honours the goodbyes. A held reply is said, newest only, as soon
+  as the user's own words reach the agent after it.
+
+## Which sources may reach the agent
+
+Routing happens in the shared pipeline before `Command::Observe` reaches any harness (`context_policy::agent_context`):
+
+- Every opted-in microphone supplies context as the user (subject to the voice check above).
+- Known call apps supply context with their diarized speaker label or enrolled name. The list is
+  `context_policy::CALL_BUNDLES` (Discord and its PTB and Canary builds, Slack, Zoom, both Teams bundles, FaceTime).
+  Capture's owning-app bundle wins over helper-process identity; names and substring matches grant nothing.
+  Browser-hosted calls are archive-only.
+- Every other recorded app stays in the archive and transcript index, available to `timeline_search`, and never enters
+  pending text, decider context or the agent's observations.
+- Heimdall's own audible reply stays in the decider's conversation context; it is never an observation or a trigger.
+- A call final without a diarized track waits as `awaiting_diarization` for the speaker actor; at most 64 wait
+  (`pipeline/utterances.rs`), then `diarization_backlog_full`. Gaps, overflow or closure keep the transcript with an
+  archive-only reason. Undiarized mixed speech is never passed under an invented name; unknown people keep a
+  `Speaker n` label.
+- `agent_context_routing` evidence records each archive-only or queued disposition; `given_to_agent` means queued to the
+  bridge.
+
+## The decider worker
+
+- Send inference and the suggest question after it run on a bounded FIFO worker of `CAPACITY` (32) outstanding
+  sentences (`pipeline/send_worker.rs`). Explicit cues enqueue their wake at once. Failed or saturated inference
+  leaves speech pending and journals a problem.
+- One owner thread holds the app's only decider instance. Commands use its higher-priority lanes: they run before
+  queued sends, never in parallel.
+- Wake, suggest and the command check share that runtime. The model reads the whole text each time (no KV cache).
+
+## Spoken screen commands
+
+The two spoken commands are "look at this" and "take a screenshot" (`pipeline::COMMAND_PHRASES`). Each is decided once,
+as soon as it is detected, by a text question to the decider. No transcript rule overrides the decider.
+`COMMAND_POLICY` (`crates/decide/src/command.rs`) names the current policy.
+
+1. Detection: the phrase is matched in Parakeet's text on the primary microphone in a partial, a 15-s window decode
+   or the final. A screen phrase holds the screen from the phrase's first word. Detections of the same command within
+   1 s (`COMMAND_MERGE_NS`, `pipeline/mod.rs`) merge; a late duplicate adds a `phase: merged` row instead of a second
+   action.
+2. Text: a window or final detection uses its own words over the last 15 s (`SIDE_MAX_NS`) up to 200 ms after the
+   trigger (`SIDE_AFTER_NS`). A partial's candidate waits for the window or the final; if the final no longer carries
+   the phrase it is abandoned (`partial_phrase_retracted`) and the held screen released.
+3. Decision: one question per command ("did the user, right now, ask Heimdall to look at the screen / take a
+   screenshot?"), text only. Context is the recent delivered turns (20, `decide::MAX_CONTEXT`) and the pending
+   transcript. Answers: `yes`, `false_alarm`, `unsure` (`CommandIntent`).
+4. Outcome: `yes` runs the command on the screen pinned at the phrase (the screenshot is attached to the turn).
+   `false_alarm` and `unsure` show nothing and release the held screen. `unsure` and inference errors write an
+   automatic review entry to `bugs/command-reviews/` beside the bug inbox (`kind: command_decision_auto`,
+   `crates/app/src/bugs.rs`), never into the inbox itself.
+
+Stopping the agent is the Agent window's or island's Stop, or a request to the agent; there is no spoken stop or cancel
+command. The main transcript is never split at a command.
 
 ## Barge-in
 
-Decision 31 (it replaces the earlier one-second decider design): while
-Heimdall's voice plays, speech that speaker ID confidently matches to the user stops it at once. Other voices and
-Heimdall's own echo never do. No side transcript and no decider question (it would need a transcript, which is too slow).
-Outside playback nothing is checked. There is no stop command. Code: `crates/app/src/pipeline/barge_in.rs`,
+While Heimdall's voice plays, speech that speaker ID confidently matches to the user stops it at once. Heimdall's own
+echo never does. There is no transcript and no decider question in this path
+(`barge_in::POLICY` = `user-voice-v1;no-transcript;no-decider`). Code: `pipeline/barge_in.rs`,
 `pipeline/heimdall_voice.rs`.
 
-1. **Arming.** The user's speech starts on the primary microphone while Heimdall is speaking (agent speech queued,
-   synthesizing or playing, with Speaking on), or Heimdall starts speaking while the user's speech is
-   already going on. Heimdall's own app audio, other microphones and dictation to Vella never arm it.
-2. **The check.** From the onset, every 0.5 s the microphone's last 1.5 s (the 300 ms before the onset included, so
-   the first check lands 1.2 s after the onset) is embedded by the speaker encoder (ReDimNet, in the speakers helper)
-   and scored against the user's voice profile and Heimdall's own voices (`heimdall_voice::user_verdict`).
-3. **Stop** when two windows in a row are the user's voice: at least 0.60 against their profile (`USER_MIN`), beating the
-   score against Heimdall's voices by 0.10 (`USER_MARGIN`), and not Heimdall's own voice (`HEIMDALL_MIN`). A window
-   quieter than RMS 0.0095 is not speech and is never scored: near-silent windows on the microphone score about 0.7
-   against the profile. Stopping is `Tools::interrupt` (agent speech); the island shows nothing.
-   Measured on archive audio (1.5 s windows, a profile from 12 of the user's other
-   wakes): no echo stops, 0.7% of ten Discord guests' utterances and 6.7% of media clips would stop it, and the user over
-   speaker echo stops it in 82% of mixes, median 1.04 s after the first word (audio time, plus about 0.24 s of
-   encoder). The 18% that never stop were the user at or below the echo's level or one-word clips. Not measured: a live
-   overlap, people in the room, guests heard through the speakers.
-4. **Continue** on anything else: Heimdall's echo, another person, no confident speaker, a failed or lost check.
-   While the speech goes on the next window is checked half a second later, so the user's voice starting over steady
-   background talk still stops it. Speech that ends before the first check (a cough, "mhm") is not judged.
-5. **Echo guard through speakers.** The microphone hears Heimdall's voice there: a window scoring as Heimdall's own
-   voice is never the user's, and their score must beat Heimdall's by the margin. Heimdall's voices are enrolled silently
-   from rendered lines (`docs/speakers.md`). The transcript echo guard (`pipeline/echo_guard.rs`) still keeps the echo
-   out of finals and early sends, and every finished utterance on the microphone is judged by voice as a whole
-   (`pipeline/mic_voice.rs`): only the user's voice print reaches the decider as the user; Heimdall's voice is archived only and
-   another voice is "Unknown", never a wake. These checks do not depend on the barge-in's loudness gate: once
-   Apple's echo cancellation left Heimdall's echo at RMS 0.003-0.006, every barge-in window was skipped as
-   quiet, and the text guard was the only filter.
-6. **The user's voice profile** (`user-voice.json` in Heimdall's data folder, `heimdall_voice::UserVoice`) is learned from the user's
-   own primary-microphone turns that woke Heimdall outside calls while Heimdall was silent: each turn's middle six
-   seconds, embedded by the same encoder; at most 16 samples, the newest kept; a sample joins only if it matches at
-   least half of those kept at the speaker model's same-speaker threshold, and five misfits that agree with each other
-   replace the profile (the mic changed). It is used from three samples on. Until then (a fresh
-   install, before the first three wakes) a window confidently not Heimdall's voice stops it, so the user can always
-   interrupt.
+1. Arming: the user's speech starts on the primary microphone while Heimdall is speaking (agent speech queued,
+   synthesizing or playing, with Speaking on), or Heimdall starts speaking during the user's speech. Heimdall's own
+   app audio, other microphones and dictation to Vella never arm it.
+2. The check: from the onset, every 0.5 s (`STEP_NS`) the microphone's last 1.5 s (`WINDOW_NS`, including 300 ms before
+   the onset, `PREROLL_NS`) is embedded by the speaker encoder and scored against the user's voice profile and
+   Heimdall's own voices (`heimdall_voice::user_verdict`).
+3. Stop when `USER_WINDOWS` (2) windows in a row are the user's: at least `USER_MIN` (0.60) against the profile,
+   beating the score against Heimdall's voices by `USER_MARGIN` (0.10), and not Heimdall's own voice (`HEIMDALL_MIN`,
+   0.45). On a worn headset microphone (AirPods, Beats: `heimdall_voice::headset_device`) with Heimdall in the
+   headphones the bar is `HEADSET_USER_MIN` (0.50). A window quieter than RMS `SPEECH_RMS` (0.0095) is never scored.
+   Stopping is `Tools::interrupt`; the island shows nothing.
+4. Continue on anything else: Heimdall's echo, another person, no confident speaker, a failed check, or a check slower
+   than 1.5 s (`CHECK_LIMIT`). Checks go on 1.5 s past the user's last voice (`END_TAIL_NS`), so a short "stop" is
+   judged; a sound too short for two windows never stops it. After a stop, continuing speech arms nothing for 1 s
+   (`REST_NS`).
+5. Before the profile has `USER_MIN_SAMPLES` (3) samples, a window confidently not Heimdall's voice stops it, so the
+   user can always interrupt. How the profile is learned: [speakers.md](speakers.md).
+6. Call voices are a separate path: during a conversation a call voice still open after `GUEST_CUT_AFTER` (400 ms)
+   while Heimdall is audible stops it (`Tools::guest_talked_over`); while a guest is listened to, only that guest and
+   unlabelled voices do (`bridge/call_interrupt.rs`). The rules are in [speakers.md](speakers.md).
 
-Speaking off still stops Heimdall at once; Listening off does not. Each checked window is a `barge_in`
-evidence record (schema 2): the window, both scores, the verdict and the outcome (`docs/archive.md`).
+Speaking off stops Heimdall at once; Listening off does not. Each checked window is a `barge_in` evidence record
+(schema 2: the window, both scores, the verdict and the outcome).
 
-## Evidence schema 1
+## The reply hold
 
-Synchronous journal appends use SQLite WAL with `synchronous=FULL`, `fullfsync=ON` and
-`checkpoint_fullfsync=ON`; authorization is committed before executing a command.
-
-Evidence kind `command_decision` has phases `candidate`, `chain` and `abandoned` (`target_selection` appears only in older archives).
-The candidate row records the proposal and its origin immediately, even if the source later
-closes without a final. The chain row carries:
-
-- `candidate`: source, trigger host nanoseconds, phrase guess, score (always 1 for text matches).
-- `utterance_id`, `phrase_start_ns`, resident model `runtime`.
-- `stage` (`early` at detection, `final` when the final decided it), `transcript` (the decider's text) and
-  `decider_text`: its origin (`window_decode` or `final`; older archives may show `side_parakeet`) and
-  timed words.
-- `steps`: the one question, exact rendered instructions/options and state, typed answer with full
-  distribution, complete native output, input tokens and error.
-- `policy` version, explicit `aliases` with original byte spans, each step's `d1_ms`, `policy_choice` and optional
-  `policy_probabilities` (`policy_veto` is always null); native answers/output are never overwritten.
-- Policy `intent`, optional policy `selection`, optional `approved`, optional `error`. Approval is distinct from successful
-  execution; `command_action` records the latter's error and dry-run flag. Screenshots keep their existing image
-  evidence and additive transcript notes.
-
-A false alarm has null selection/approval. An unsure answer has null approval and an automatic review entry;
-inference errors also produce automatic entries. Source closure/gaps archive pending proposals as abandoned, without acting.
-
-Automatic records go to `bugs/command-reviews/` beside the bug inbox, written privately and atomically as JSON and
-Markdown: `kind: command_decision_auto`, `auto: true`, with the complete `command_decision` payload. They never enter
-the bug inbox or the Bug Notes menu count. False alarms are journalled but create no review entry.
-
-## Recorded versus supplied context
-
-Routing happens in the shared app pipeline, before `Command::Observe` reaches any harness:
-
-- Every opted-in microphone supplies context as the user.
-- Known call apps supply context with their diarized speaker label or enrolled name.
-- Every other recorded app remains in the raw archive and transcript index, available to `transcript_search`.
-  It cannot enter pending text, d1 recent context, link-candidate context, the harness's observation store or wake it.
-- Heimdall's own audible reply keeps its existing d1 conversational-context role; it is never a new harness
-  observation or trigger.
-
-Exact known bundles are `com.hnc.Discord`, `com.hnc.DiscordPTB`, `com.hnc.DiscordCanary`,
-`com.tinyspeck.slackmacgap`, `us.zoom.xos`, `com.microsoft.teams2`, `com.microsoft.teams` and
-`com.apple.FaceTime`. Capture's owning-app bundle takes precedence over helper-process identity; names and
-substring matches cannot grant context access. This is a source-class policy: non-call audio emitted by one of
-these call apps is also eligible. Browser-hosted calls are archive-only until their source class is explicitly
-supported.
-
-The existing diarization/name-enrollment actor now runs for every known call app. Discord Accessibility hints
-are used only for Discord sources. If a call final lacks a diarized track, its archive status is
-`awaiting_diarization`; it is held until the actor supplies a track/name. Unknown people retain an explicit
-`Speaker n` label. At most 64 finals (at most about 123 MB of 30-second f32 waveform tails) wait across sources.
-Overflow, gaps or closure preserve the transcript with a named archive-only reason. They never pass undiarized
-mixed speech under an invented name. Multi-speaker utterances keep the existing dominant-track assignment;
-this change does not split words between simultaneous speakers.
-
-`agent_context_routing` records each archive-only/queued disposition and the exact labelled observation. In
-eligible rows, `given_to_agent` means queued to the harness-independent bridge; the existing transport evidence
-records what actually crossed the provider boundary. The Agent window still renders those transport records,
-so excluded recordings never appear as sent messages. No menu switch was added.
-
-## Checks and limits
-
-The unit/integration checks cover all 24 intent/selection combinations, native option parsing and malformed
-responses, inference errors, escape archival/inbox separation, successful screenshot attachment, spoken-note
-lifecycle, external timestamp proposals, archive-only app routing and delayed named call delivery. The native
-d1 test runs both new question heads and confirms an identical legacy SendNow/fixed-command result before and
-after them. Existing native text/audio/image parity and send/timing tests also pass.
-
-Real recognition and intent recall still need labelled
-recordings.
-
-## Proposals and merging
-
-Each proposal is immediately journalled with its origin: `parakeet_partial`, `parakeet_window` or
-`parakeet_final` (older archives may also show `keyword_spotter`). Proposals on the same source
-within one second merge across origins; same-origin occurrences at distinct timestamps remain separate. Final
-word timing becomes the representative trigger. A chain retains every original proposal in `proposals`. A late
-duplicate adds a `phase: merged` row linked to the original utterance instead of another chain/action.
-Primary changes and source gaps abandon old proposals.
-
-The one-second coalescing window is an engineering timing allowance, not a learned acoustic alignment.
+A reply never starts over the user (`bridge/hold.rs`). On the primary microphone, with the check ready, an onset makes
+a coming reply wait while the barge-in window checks run (`armed_by`, outcome `hold_check`): the user's voice skips
+the reply; another voice or Heimdall's echo lets it play; a quiet or unsure window decides nothing; with no answer it
+plays `VERIFY_MAX` (3 s) after its first look. Without a check (no encoder or profile, another microphone) an onset
+counts as the user's at once. The reply waits `QUIET_AFTER` (2.2 s) past `SpeechEnd`. Each skip's log line names the
+source, how long it had been speaking and why it counted as the user's.
 
 ## Agent Off at the MCP boundary
 
-The provider transport and MCP server share the same `DeliveryGate`. Each tool request receives one epoch
-permit: Off prevents execution, cancels its future, and invalidates its HTTP response body even if Agent
-is switched back On before delivery. The original permit is passed into speech, screenshot and search
-implementations. Speech enqueue is serialized with Off; Agent Off interrupts active synthesis, playback and queued jobs
-immediately. Listening off stops no speech.
+The provider transport and the MCP server share one `DeliveryGate` (`crates/agent/src/delivery.rs`).
 
-Pending archive searches interrupt their active SQLite query and check cancellation between sessions/rows.
-Screenshot work checks its epoch before capture and after acquisition; cancelled results remove their
-scratch PNGs and cannot be delivered. A native capture already executing can finish before its result is
-discarded. Bytes already yielded to the HTTP transport before Off cannot be recalled. The old listener is
-closed before awaiting harness shutdown on restart. Loopback regression tests exercise all tools while
-Off, in-flight cancellations, rapid Off/On, response-body suppression and queued speech without TCC or
-playback.
+- Each tool request gets one epoch permit. Off prevents execution, cancels its future and invalidates its HTTP
+  response, even if Agent is switched back on before delivery.
+- The permit is passed into speech, screenshot and search work. Agent Off interrupts synthesis, playback and queued
+  speech at once. Listening off stops no speech.
+- Archive searches interrupt their SQLite query; screenshots check the epoch before capture and after acquisition, and
+  cancelled results delete their scratch PNGs. A native capture already running may finish before it is discarded.
+  Bytes already handed to the HTTP transport cannot be recalled.
 
-## Live labels: ⌃⌘\ and ⌃⌘'
+## Label the decider: ⌃⌘\, ⌃⌘' and Stop
 
-The user can label in real time when Heimdall should have woken up or suggested, without saying its name. Two global shortcuts (the physical backslash and quote keys, whatever the layout; listed in
-the menu's Shortcuts) label lines for decider training. Code: `crates/app/src/pipeline/hotkeys.rs`.
+Two global shortcuts (the physical backslash and quote keys, `crates/ui/src/shortcuts.rs`, shown read-only in the
+menu's Shortcuts submenu as Wake Heimdall and Suggest Now) and the island's Stop label lines for decider training.
+Code: `pipeline/hotkeys.rs`.
 
-- **⌃⌘\ Wake Heimdall.** Everything said since the last wake goes to the agent at once, as the user's own wake (wake
-  sound, ack, relay or harness alike). Their latest unsent line (else anyone's) is labelled `send`.
-- **⌃⌘' Suggest Now.** A suggestion pass starts at once, past the pacing and the "talking to Heimdall" hold; an open
-  card makes way. The latest decided line is labelled `suggest` = yes, with the decider's suggest question asked once more on the
-  exact snapshot it saw for that line.
-
-- **The island's Stop (5 Nov).** While Heimdall speaks the notch's left ear is a stop glyph; a press cuts the voice
-  at once (lines held for after a call go too) and labels the line V5 woke the speaking run for (`outcome` `send`)
-  `not_for_heimdall`, source `owner-stop` ("this moment wasn't for Heimdall"). Only while speech plays at the press,
-  only for the run whose reply was cut (a reply a T3 result or notice woke, a typed message, a wake key or a relaunch
-  labels nothing), and once per line however often Stop is pressed. The turn goes on, but the rest of that run's
+- ⌃⌘\ Wake Heimdall (`UiAction::ForceWake`): everything said since the last wake goes to the agent at once as the
+  user's own wake. The user's latest unsent line (else anyone's) is labelled `send`.
+- ⌃⌘' Suggest Now (`UiAction::ForceSuggest`): a suggestion pass starts at once, past the pacing and the addressing
+  hold. The latest decided line is labelled `suggest` = `yes`, with the suggest question asked again on the snapshot
+  the decider saw.
+- The island's Stop while Heimdall speaks (`UiAction::StopSpeaking`): the voice stops at once (lines held for after a
+  call go too). The line whose `send` woke that run is labelled `not_for_heimdall`, once per line. A cut reply that no
+  decider line woke (a T3 result, a notice, a typed message) leaves a `speak` row instead. The rest of that run's
   replies are shown on the island unsaid until the user's own words reach the agent again.
 
 A line still being decided when a key is pressed is labelled when its decision lands. Each press is also a `hotkey`
-evidence record (`key`, and for wake `woke`, `through`, `lines`; for stop `speaking`, `labelled`).
+evidence record.
 
-Labels are JSON lines appended to `decider-v6-labels.jsonl` in the archive store (beside the index, normally
-`~/Library/Application Support/Heimdall/archive/decider-v6-labels.jsonl`), schema 1:
+Labels are JSON lines in `decider-v6-labels.jsonl` (`hotkeys::LABELS_FILE`) in the archive store, schema 1:
 
 | field | meaning |
 |---|---|
-| `task` | `send` (⌃⌘\, Stop) or `suggest` (⌃⌘') |
+| `task` | `send` (⌃⌘\, Stop), `suggest` (⌃⌘') or `speak` (Stop on a reply no decider line woke: adds `spoken`, `in_call`, `words`) |
 | `label` | `send`, `yes`, or `not_for_heimdall` (Stop) |
-| `source` | `owner-hotkey`, or `owner-stop` (with `speaking`: whether audio played at the press) |
+| `source` | `user-hotkey` (`LABEL_SOURCE`) or `user-stop` (`STOP_SOURCE`, with `speaking`) |
 | `at_ms` | Unix ms of the label |
-| `utterance_id`, `speaker`, `text`, `line_source` | the labelled line (the observation id the archive uses) |
-| `decider_input` | the exact decider request for that line: the send decision's `prompt`, or the suggest request |
-| `v5` | the decider's own answer: send `choice`, `probabilities`, `outcome`, `trigger`, `d1_gate`; suggest `yes`, `choice` (or `error`) |
-| `woke`, `also_sent` | send only: whether the wake went out (false with Agent off) and the other unsent lines' ids it carried |
+| `utterance_id`, `speaker`, `text`, `line_source` | the labelled line |
+| `decider_input` | the exact decider request for that line |
+| `v5` | the live decider's own answer: choice, probabilities, outcome, trigger, `d1_gate` (the field keeps its old name) |
+| `woke`, `also_sent` | send only: whether the wake went out, and the other unsent lines it carried |
 
-## A goodbye ends a call
+A Stop on a line a decider `send` woke appends a new `send` row for that line with `label` `not_for_heimdall`,
+`source` `user-stop` and `speaking: true`; it never edits earlier rows.
 
-The call window (`CALL_ACTIVE_NS`, 2 min after the last call line) also ends at a goodbye in the call, the user's or another speaker's
-(`decide::send::farewell`, English and Polish, ending any sentence of the line with at most one word after it;
-`call_active`), and at the user's own "I'm off the call" or "you can talk to me now" (`decide::send::off_call`). A call line
-within 5 s after the goodbye is the call's own goodbye; any later call line starts the call again. In one case
-the user said goodbye, another speaker answered, and the user left Discord; for two minutes their lines to Heimdall, sent by the decider with
-high scores, were held as call chatter (`held_in_call`), and replies were held "in a call". Both the send gate
-and the speech hold (`speech_policy::in_conversation`) use the goodbyes. The speech hold has its own, shorter evidence
-(it once held three replies after the call): 45 s after the last call line
-(`speech_policy::CONVERSATION_NS`), or while a call source's voice is open, and over 3 s after the last call source
-stops. A reply held in a call is said, newest only, as soon as the user's own words reach the agent after it.
+## Evidence
 
-## The name as an address (5 Nov)
+- `send_decision`: the exact request, token counts, distribution, trigger, outcome, latency, trimming, `d1_gate` and
+  audio reference; typed sends record inference as bypassed. `heimdall-archive timeline --problems` flags failures,
+  inference above 500 ms and window truncation (`crates/archive/src/diagnostics.rs`).
+- `command_decision`, phases `candidate`, `chain`, `merged` and `abandoned`. The chain row holds the candidate (source,
+  trigger time, phrase), `stage` (`early` or `final`), the decider's text and its origin (`window_decode` or `final`),
+  the one step's rendered question, typed answer with full distribution and native output, `policy`, `aliases`,
+  `intent`, `approved` and `error`. Approval is not execution: `command_action` records the execution's error and
+  dry-run flag. Journal appends use SQLite WAL with `synchronous=FULL`; authorization is committed before a command
+  runs.
+- Proposal origins: `parakeet_partial`, `parakeet_window`, `parakeet_final`. Older archives may show
+  `keyword_spotter`, `side_parakeet`, `target_selection`, `d1_tcl` or `Question::Legacy` records; they still parse.
+- Other kinds: `barge_in`, `hotkey`, `agent_context_routing`, `mic_voice`, `suggest_decision`, `d1_question`.
 
-`decide::send::addressed_by_name` reads the name as an address when it opens a sentence (after interjections) or is set
-off by a comma. The name as the subject of a statement is a mention: no punctuation after it and a third-person verb
-next ("Yeah, Heimdall is searching already.", "Heimdall was down all night"); an inverted question ("Heimdall is it
-done?", "Heimdall did you see that") and modals ("Heimdall can you…") stay addresses. In a call a mention waits for d1
-(`call_trigger_waits`). Bug 2026-11-05T02-32-17: at 00:13:07 the user's "Yeah, Heimdall is searching already." to the
-other person in the call woke the agent at once though d1 said not_for_heimdall 0.99. In a call, the user's lines that
-d1 sends and the call gate holds feed the suggester instead (`docs/suggester.md`).
+## See also
+
+- [speakers.md](speakers.md): voice profiles, Heimdall's own voice, listened-to guests, call-voice interrupts
+- [suggester.md](suggester.md): the suggest question and the cards
+- [vella.md](vella.md): dictation that must not wake Heimdall
+- [settings.md](settings.md): `decider_model`, `decider_precision`, hot swap and fallback
+- [models.md](models.md): the decider's files and sizes
+- [archive.md](archive.md): evidence records and the archive CLI
+- [crates/decide/README.md](../crates/decide/README.md): the decide crate's code map and tests

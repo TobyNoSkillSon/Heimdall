@@ -426,6 +426,10 @@ pub fn describe_source(id: &str, metadata: &str) -> (String, String) {
     if let Some(device) = kind.get("InputDevice") {
         return ("mic".into(), format!("Mic: {}", device["name"].as_str().unwrap_or("input")));
     }
+    // The user's phone's live microphone (the app's phone_mic.rs), with the phone's input that heard it.
+    if let Some(phone) = kind.get("Phone") {
+        return ("mic".into(), format!("Phone: {}", phone["name"].as_str().unwrap_or("iPhone")));
+    }
     if let Some(process) = kind.get("Process") {
         let name = process["name"].as_str().unwrap_or("app");
         let owner = process["owner"]["name"].as_str().unwrap_or(name);
@@ -572,8 +576,9 @@ impl Placer {
             let (pcm, codec) = reader.object(&object)?;
             let tier = match codec.as_str() {
                 "f32-zstd-planar-v1" | "f32-zstd" => format!("native {} Hz lossless", pcm.rate),
-                "flac16" => "FLAC 16 kHz mono (speech)".to_owned(),
+                "flac16" => format!("FLAC {} Hz {} (speech)", pcm.rate, if pcm.channels == 1 { "mono" } else { "stereo" }),
                 "opus-har1" => "Opus 12 kb/s 16 kHz mono (non-speech)".to_owned(),
+                crate::audio::OPUS_NATIVE => format!("Opus 32 kb/s {} Hz mono (non-speech)", pcm.rate),
                 other => other.to_owned(),
             };
             self.cache = Some((object, pcm, tier));
@@ -1551,6 +1556,8 @@ mod tests {
         assert_eq!(speaker_label(Some("User"), Some("Shure MV7i")), "User");
         let mic = r#"{"kind":{"InputDevice":{"name":"Shure MV7i","uid":"x"}}}"#;
         assert_eq!(describe_source("mic:x", mic), ("mic".into(), "Mic: Shure MV7i".into()));
+        let phone = r#"{"kind":{"Phone":{"kind":"airpods","name":"AirPods Pro","capture":"headset","voice_processing":true}}}"#;
+        assert_eq!(describe_source("phone:airpods:1", phone), ("mic".into(), "Phone: AirPods Pro".into()));
         let call = r#"{"kind":{"Process":{"name":"Discord Helper","bundle_id":"com.hnc.Discord.helper","owner":{"name":"Discord","bundle_id":"com.hnc.Discord"}}}}"#;
         assert_eq!(describe_source("process:1", call).1, "Call: Discord Helper");
         let me = r#"{"kind":{"Process":{"name":"Heimdall","bundle_id":"dev.heimdall.app","owner":{"name":"Heimdall","bundle_id":"dev.heimdall.app"}}}}"#;

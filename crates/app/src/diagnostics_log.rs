@@ -391,10 +391,16 @@ mod tests {
         // Several in one read count the same way.
         sink.write(b"Listen failed: evidence worker failed\nListen failed: evidence worker failed\n").unwrap();
         sink.write(b"agent: Ready\nagent: Ready\n\nagent: Ready\n").unwrap();
+        // The seconds are wall time (413 synced writes can pass 1.5 s on a loaded Mac: 13 Nov night pass), so the
+        // test reads them as "N s" and checks only the counts and the lines.
+        let written = std::fs::read_to_string(d.path().join("heimdall.log")).unwrap();
+        let timeless: String = written.split(" in ").enumerate()
+            .map(|(i, part)| if i == 0 { part.to_owned() } else { format!(" in N{}", part.trim_start_matches(|c: char| c.is_ascii_digit())) })
+            .collect();
         assert_eq!(
-            std::fs::read_to_string(d.path().join("heimdall.log")).unwrap(),
-            "T Listen failed: evidence worker failed\nT (the line above repeated 413 more times in 1 s)\n\
-             T agent: Ready\nT (the line above repeated 1 more times in 1 s)\n\nT agent: Ready\n"
+            timeless,
+            "T Listen failed: evidence worker failed\nT (the line above repeated 413 more times in N s)\n\
+             T agent: Ready\nT (the line above repeated 1 more times in N s)\n\nT agent: Ready\n"
         );
         // A line split across reads is written whole and never counted.
         sink.write(b"agent: Re").unwrap();

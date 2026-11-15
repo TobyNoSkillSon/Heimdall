@@ -142,28 +142,6 @@ for line in sys.stdin:
         assert_eq!(failure.remaining, "First. Next.");
         assert!(failure.played.samples.is_empty());
         assert!(failure.played_text.is_empty());
-        struct Fallback(Vec<String>);
-        impl crate::Synthesizer for Fallback {
-            fn synthesize(&mut self, text: &str, _: &str, _: &dyn Fn() -> bool) -> Result<Audio> {
-                self.0.push(text.into());
-                Ok(Audio {
-                    samples: vec![0.8; 10],
-                    sample_rate: 44100,
-                    first_audio_ms: 0.,
-                    synthesis_ms: 0.,
-                })
-            }
-        }
-        let mut fallback = Fallback(vec![]);
-        let mut complete = 0;
-        let audio = finish_unplayed(failure, &mut fallback, "en", &|| false, &mut |a| {
-            complete += a.samples.len();
-            Ok(())
-        })
-        .unwrap();
-        assert_eq!(fallback.0, ["First.", "Next."]);
-        assert_eq!(complete, 20);
-        assert_eq!(audio.samples.len(), 20);
         assert!(service.ready());
         service.stop();
     }
@@ -433,26 +411,6 @@ for line in sys.stdin:
         );
         assert_eq!(failure.played_text, "First.");
         assert_eq!(failure.remaining, "Second. Third.");
-        struct Fallback(Vec<String>);
-        impl crate::Synthesizer for Fallback {
-            fn synthesize(&mut self, text: &str, _: &str, _: &dyn Fn() -> bool) -> Result<Audio> {
-                self.0.push(text.into());
-                Ok(Audio {
-                    samples: vec![0.8; 64],
-                    sample_rate: 44100,
-                    first_audio_ms: 0.,
-                    synthesis_ms: 0.,
-                })
-            }
-        }
-        let mut fallback = Fallback(vec![]);
-        finish_unplayed(failure, &mut fallback, "en", &|| false, &mut |audio| {
-            played.push(audio.samples.len());
-            Ok(())
-        })
-        .unwrap();
-        assert_eq!(fallback.0, ["Second.", "Third."]);
-        assert_eq!(played, [64, 64, 64]);
     }
     #[test]
     fn fallback_mid_utterance_never_synthesizes_the_started_sentence_again() {
@@ -469,29 +427,6 @@ for line in sys.stdin:
         let failure = error.downcast::<SpeechFailure>().unwrap();
         assert_eq!(failure.remaining, "Two. Three.");
         assert_eq!(failure.played_text, "One.");
-        struct Fake {
-            calls: Vec<String>,
-        }
-        impl crate::Synthesizer for Fake {
-            fn synthesize(&mut self, t: &str, _: &str, _: &dyn Fn() -> bool) -> Result<Audio> {
-                self.calls.push(t.into());
-                Ok(Audio {
-                    samples: vec![0.2; 64],
-                    sample_rate: 44100,
-                    first_audio_ms: 0.,
-                    synthesis_ms: 1.,
-                })
-            }
-        }
-        let mut fallback = Fake { calls: vec![] };
-        let audio = finish_unplayed(failure, &mut fallback, "en", &|| false, &mut |a| {
-            output.push(a.samples.len());
-            Ok(())
-        })
-        .unwrap();
-        assert_eq!(fallback.calls, ["Two.", "Three."]);
-        assert_eq!(output, [64, 64, 64]);
-        assert_eq!(audio.samples.len(), 192);
         assert!(service.ready());
         service.stop();
     }
@@ -679,6 +614,9 @@ for line in sys.stdin:
             ("Python 3 x64 on Windows 10 x64, a 2 x 3 grid, buy 2x 4090.", "Python 3 x64 on Windows 10 x64 a 2 by 3 grid buy 2 times 4090."),
             ("Zebrał $2k, $1k, $3M, 22k użytkowników, 2M zł i 5k zł.", "Zebrał 2 tysiące dolarów 1 tysiąc dolarów 3 miliony dolarów 22 tysiące użytkowników 2 miliony złotych i 5 tysięcy złotych."),
             ("Model 1.7B on an M5, version 5.5, at 00:40, call +48 123.", "Model 1.7B on an M5 version 5.5 at 00 40 call plus 48 123."),
+            // Night 10–11 Nov sweep: "GiB" is said "gigabytes"; a Polish text keeps it as written.
+            ("About 13 GiB left, 1 GiB more, 512MiB and 2.5 TiB, a GiBbon 4KiBs.", "About 13 gigabytes left 1 gigabyte more 512 megabytes and 2.5 terabytes a GiBbon 4KiBs."),
+            ("Zostało 13 GiB.", "Zostało 13 GiB."),
         ] {
             assert_eq!(normalize(written), said, "{written}");
         }
@@ -907,6 +845,8 @@ fn fallback_causes_group_the_logged_reasons() {
         ("Too many open files (os error 24)", "fd_exhausted"),
         ("sidecar load: channel is empty and sending half is closed", "load_failed"),
         ("sidecar exited exit status: 19: no reason given", "sidecar_crash"),
+        // A memory exit is memory in the log too, as the retry policy treats it (`memory_reason`).
+        ("sidecar exited exit status: 73", "memory"),
         ("Drama 3 load deadline", "timeout"),
         ("word coverage deadline", "timeout"),
         ("incomplete sentence after 3 takes", "word_check"),
@@ -917,6 +857,8 @@ fn fallback_causes_group_the_logged_reasons() {
         ("mlx is not installed", "other"),
         ("the live take stalled", "timeout"),
         ("word coverage after 3 takes", "word_check"),
+        // 9 Nov 12:38: the engine's own floor at load, logged only as "Jarvis stopped".
+        ("Need 55 GB available before loading Drama 3", "memory"),
     ] {
         assert_eq!(fallback_cause(reason), cause, "{reason}");
     }
@@ -948,6 +890,43 @@ fn a_slow_exit_is_reaped_off_the_calling_thread() {
     assert!(at.elapsed() < Duration::from_millis(50), "waited {:?}", at.elapsed());
     assert!(reaped_within(pid, Duration::from_secs(5)), "left a zombie");
     drop(child);
+}
+/// 9 Nov 12:38: the reload after an interruption's cancel deadline spawned while the killed worker still held its
+/// memory; the engine refused ("Need 55 GB available") and Jarvis was out for a minute. A load waits for a stopped
+/// worker to be gone first. A child that takes a second to leave stands in for one tearing down its model.
+#[test]
+fn a_reload_waits_for_the_stopped_worker_to_free_its_memory() {
+    let (_dir, s) = sidecar("import json,sys\nprint(json.dumps({'event':'ready'}),flush=True)\nsys.stdin.read()\n");
+    let old = std::process::Command::new("/bin/sleep").arg("1").spawn().unwrap();
+    let pid = old.id() as libc::pid_t;
+    reap_detached(pid);
+    let at = Instant::now();
+    s.configure(true);
+    settle(&s);
+    assert!(s.ready(), "{:?}", s.events());
+    assert!(at.elapsed() >= Duration::from_millis(800), "loaded after {:?}, before the old worker left", at.elapsed());
+    assert!(reaped_within(pid, Duration::from_millis(1)), "the old worker was still there when the new one was ready");
+    assert!(s.events().iter().any(|v| v["event"] == "previous_worker_reaped"));
+    s.stop();
+    drop(old);
+}
+/// Speaking off while a load waits for a stopped worker ends the wait at once.
+#[test]
+fn speaking_off_ends_the_wait_for_a_stopped_worker() {
+    let (_dir, s) = sidecar("import json,sys\nprint(json.dumps({'event':'ready'}),flush=True)\nsys.stdin.read()\n");
+    let old = std::process::Command::new("/bin/sleep").arg("3").spawn().unwrap();
+    let pid = old.id() as libc::pid_t;
+    reap_detached(pid);
+    s.configure(true);
+    std::thread::sleep(Duration::from_millis(100));
+    let at = Instant::now();
+    s.configure(false);
+    settle(&s);
+    assert!(at.elapsed() < Duration::from_millis(500), "the wait outlived Speaking off by {:?}", at.elapsed());
+    assert!(!s.ready());
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    assert!(reaped_within(pid, Duration::from_secs(2)));
+    drop(old);
 }
 #[test]
 fn dropping_a_process_kills_it_and_leaves_no_zombie() {
@@ -1110,7 +1089,7 @@ fn a_memory_refusal_or_cancel_is_not_a_reason_to_change_engines() {
     service.stop();
 }
 
-/// Bug note 2026-11-03T22-38-44: a job's declared need over the 95 GB line makes Jarvis give way (never mid-line),
+/// Bug note 2026-11-03T22-38-44: a job's declared need over the 105 GB line makes Jarvis give way (never mid-line),
 /// the island hears of it once, he stays out while the need stands, and he comes back a minute after memory is back,
 /// between replies.
 #[test]
@@ -1138,10 +1117,10 @@ fn over_the_memory_line_jarvis_gives_way_holds_and_returns_between_replies() {
     assert!(s.ready(), "{:?}", s.events());
     s.configure(true);
     assert!(s.ready(), "60 GB in use: he stays");
-    // The Arsenal restore declares 40 GB: 60 + 40 passes 95.
+    // The Arsenal restore declares 50 GB: 60 + 50 passes 105.
     {
         let mut r = reading.lock().unwrap();
-        r.need = 40 * gb;
+        r.need = 50 * gb;
         r.why = vec!["Arsenal locomotive restore".into()];
     }
     later(2);
@@ -1159,9 +1138,9 @@ fn over_the_memory_line_jarvis_gives_way_holds_and_returns_between_replies() {
     assert_eq!(s.status().as_deref(), Some(NOTE_MEMORY));
     let events = s.events();
     let gave = events.iter().find(|v| v["event"] == "memory_give_way").expect("memory_give_way");
-    assert_eq!(gave["need_bytes"], 40 * gb);
+    assert_eq!(gave["need_bytes"], 50 * gb);
     assert_eq!(gave["needed_by"][0], "Arsenal locomotive restore");
-    assert!(gave["reason"].as_str().unwrap().starts_with("Memory would pass 95 GB (60.0 GB in use plus 40.0 GB needed"));
+    assert!(gave["reason"].as_str().unwrap().starts_with("Memory would pass 105 GB (60.0 GB in use plus 50.0 GB needed"));
     assert_eq!(events.iter().filter(|v| v["event"] == "memory_give_way").count(), 1);
     assert!(events.iter().any(|v| v["event"] == "memory_unload" && v["phase"] == "give_way"));
     // Phonon S says the lines; the island hears of it once.
@@ -1238,8 +1217,8 @@ fn memory_rising_during_his_own_load_never_holds_him() {
     let (reading, later) = memory_gate(&s, 60, 1);
     s.configure(true);
     assert!(s.starting.load(Ordering::Acquire));
-    // 20 GiB of him are in: 80 GiB in use, too little room for another 24 GiB, but it is his.
-    reading.lock().unwrap().used = 80 << 30;
+    // 30 GiB of him are in: 90 GiB in use, too little room for another 24 GiB, but it is his.
+    reading.lock().unwrap().used = 90 << 30;
     later(2);
     s.configure(true);
     assert!(s.memory_held().is_none(), "{:?}", s.events());
@@ -1259,7 +1238,7 @@ fn passing_the_line_during_his_load_gives_way_and_no_line_waits_for_it() {
     {
         let mut r = reading.lock().unwrap();
         r.used = 90 << 30;
-        r.need = 10 << 30;
+        r.need = 20 << 30;
     }
     later(2);
     s.configure(true);
@@ -1285,7 +1264,7 @@ fn a_give_way_during_his_load_stops_it_and_kills_the_half_loaded_worker() {
         std::thread::sleep(Duration::from_millis(5));
     }
     let pid = s.pid.load(Ordering::Acquire);
-    reading.lock().unwrap().need = 40 << 30;
+    reading.lock().unwrap().need = 50 << 30;
     later(2);
     let gave = Instant::now();
     s.configure(true);
@@ -1299,7 +1278,7 @@ fn a_give_way_during_his_load_stops_it_and_kills_the_half_loaded_worker() {
     let events = s.events();
     assert!(!events.iter().any(|v| v["event"] == "ready"), "{events:?}");
     let unload = events.iter().find(|v| v["event"] == "memory_unload" && v["cancelled"] == "load").expect("cancelled load");
-    assert!(unload["reason"].as_str().unwrap().starts_with("Memory would pass 95 GB"), "{unload}");
+    assert!(unload["reason"].as_str().unwrap().starts_with("Memory would pass 105 GB"), "{unload}");
     assert!(!events.iter().any(|v| ["failure", "load_retry", "engine_strike", "memory_wait"].contains(&v["event"].as_str().unwrap_or(""))), "{events:?}");
     assert!(s.failures.lock().unwrap().is_empty());
     assert!(!s.giving_way.load(Ordering::Acquire) && !s.ready.load(Ordering::Acquire) && s.pid.load(Ordering::Acquire) == 0);
@@ -1326,7 +1305,7 @@ fn a_hold_during_the_retry_pause_stops_the_retry() {
         seen.extend(s.events());
         std::thread::sleep(Duration::from_millis(5));
     }
-    reading.lock().unwrap().need = 40 << 30;
+    reading.lock().unwrap().need = 50 << 30;
     later(2);
     s.configure(true);
     settle(&s);
@@ -1366,7 +1345,7 @@ fn the_memory_notice_repeats_only_after_jarvis_was_actually_back() {
     returned(&s, 120);
     assert!(s.ready(), "{:?}", s.events());
     // Back, then over the line again: a new hold, a new notice.
-    reading.lock().unwrap().need = 40 << 30;
+    reading.lock().unwrap().need = 50 << 30;
     later(2);
     s.configure(true);
     s.lighter_voice("Three.", NOTICE_NOT_LOADED, "not loaded");
@@ -1401,4 +1380,111 @@ fn a_worker_memory_exit_waits_for_memory_to_be_back_not_30_s() {
     assert!(s.events().iter().any(|v| v["event"] == "memory_return"), "a minute back: he returns");
     settle(&s);
     assert!(s.memory_held().is_some(), "the worker exited for memory again: held again");
+}
+
+/// Bug note 2026-11-08T02-03-45: Speaking off unloads him with a line saying it was the switch, not the memory line;
+/// Speaking on says he is wanted again and, when memory is short, the hold that keeps him out says why and for how
+/// long; his return says how long he was out.
+#[test]
+fn switch_unloads_and_holds_without_a_give_way_each_leave_an_event_with_the_reason() {
+    use crate::memory_line::{Gate, Sample, Source};
+    struct Shared(Arc<Mutex<Sample>>);
+    impl Source for Shared {
+        fn sample(&mut self) -> Result<Sample> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+    }
+    let gb = 1u64 << 30;
+    let reading = Arc::new(Mutex::new(Sample { used: 46 * gb, pressure: 1, ..Default::default() }));
+    let offset = Arc::new(Mutex::new(Duration::ZERO));
+    let start = Instant::now();
+    let clock = {
+        let offset = offset.clone();
+        move || start + *offset.lock().unwrap()
+    };
+    let later = |s: u64| *offset.lock().unwrap() += Duration::from_secs(s);
+    let (_dir, s) = sidecar("import json,sys\nprint(json.dumps({'event':'ready'}),flush=True)\nfor line in sys.stdin: pass\n");
+    s.set_memory_gate(Gate::new(Box::new(Shared(reading.clone()))).with_clock(Box::new(clock)));
+    s.configure_for(true, "Speaking on");
+    settle(&s);
+    assert!(s.ready(), "{:?}", s.events());
+    let wanted: Vec<_> = s.events().into_iter().filter(|e| e["event"] == "wanted").collect();
+    assert_eq!(wanted.len(), 1, "{wanted:?}");
+    assert_eq!(wanted[0]["reason"], "Speaking on");
+    // 01:38:01: Speaking off unloads him: the switch, with the reading, never a memory_give_way.
+    later(2);
+    s.configure_for(false, "Speaking off");
+    assert!(!s.ready());
+    let events = s.events();
+    let off: Vec<_> = events.iter().filter(|e| e["event"] == "unwanted").collect();
+    assert_eq!(off.len(), 1, "{events:?}");
+    assert_eq!(off[0]["reason"], "Speaking off");
+    assert_eq!(off[0]["resident"], true);
+    assert_eq!(off[0]["used_bytes"], 46 * gb);
+    assert!(!events.iter().any(|e| e["event"] == "memory_give_way"));
+    s.configure_for(false, "Speaking off");
+    assert!(s.events().iter().all(|e| e["event"] != "unwanted"), "once per change");
+    // A 62 GB need appears while he is out; Speaking on: he is held, and the hold says why and for how long.
+    {
+        let mut r = reading.lock().unwrap();
+        r.need = 62 * gb;
+        r.why = vec!["Vella Nemotron (angel-nemotron-wer.json)".into()];
+    }
+    later(2);
+    s.configure_for(true, "Speaking on");
+    assert!(!s.starting.load(Ordering::Acquire) && !s.ready());
+    let events = s.events();
+    let hold: Vec<_> = events.iter().filter(|e| e["event"] == "memory_hold").collect();
+    assert_eq!(hold.len(), 1, "{events:?}");
+    assert!(hold[0]["reason"].as_str().unwrap().contains("62.0 GB needed for Vella Nemotron (angel-nemotron-wer.json)"), "{hold:?}");
+    assert_eq!(hold[0]["hold_s"], 60.0);
+    later(2);
+    s.configure_for(true, "Speaking on");
+    assert!(s.events().iter().all(|e| e["event"] != "memory_hold"), "one line per hold, not per tick");
+    // The need released; memory stays back a minute; he returns, and the return says how long he was out.
+    {
+        let mut r = reading.lock().unwrap();
+        r.need = 0;
+        r.why.clear();
+    }
+    later(1);
+    s.configure_for(true, "Speaking on");
+    later(61);
+    s.configure_for(true, "Speaking on");
+    let events = s.events();
+    let back: Vec<_> = events.iter().filter(|e| e["event"] == "memory_return").collect();
+    assert_eq!(back.len(), 1, "{events:?}");
+    assert_eq!(back[0]["out_s"], 64.0);
+    assert_eq!(back[0]["released"], true);
+    s.stop();
+}
+/// Night 11–12 Nov sweep: a house number after a Polish street name in an English sentence is written in English words,
+/// so Jarvis says it in English and the word check expects those words (11 Nov: "Hoża 6" heard "Hoja Shiks", "Zacisze
+/// 8" heard "Zachisha Osh" and "Ocean"; the 11:32 sentence went to the lighter voice).
+#[test]
+fn english_sentences_say_house_numbers_after_polish_names_in_english() {
+    for (written, said) in [
+        ("One thing to confirm, I heard the address as Hoża 6.", "One thing to confirm, I heard the address as Hoża six."),
+        ("Zacisze 8 and Makropol's website and register entry give the same address.",
+         "Zacisze eight and Makropol's website and register entry give the same address."),
+        ("The office is at Poznańska 62 in Jeżyce, about 2.5 km from Hoża.", "The office is at Poznańska sixty two in Jeżyce, about 2.5 km from Hoża."),
+        ("It is at Marszałkowska 105, which is far from the station.", "It is at Marszałkowska one hundred and five, which is far from the station."),
+        // Two sentences: only the English one changes.
+        ("Mieszkam na Hoża 6 od roku. The office is at Hoża 6 and it is close.", "Mieszkam na Hoża 6 od roku. The office is at Hoża six and it is close."),
+    ] {
+        assert_eq!(english_house_numbers(written), said, "{written}");
+        assert_eq!(normalize(written), normalize(said), "{written}");
+    }
+    for unchanged in [
+        // A Polish sentence keeps its digits.
+        "Biuro jest na Hoża 6 w Poznaniu.",
+        // Not after a Polish name, a decimal, a range, a long number or a time.
+        "The office is at Baker Street 221 and it is in the city.",
+        "The score is Hoża 6.5 at the end of the test.",
+        "From Hoża 6-8 at the corner of the street.",
+        "From Hoża 1500 at the corner of the street.",
+        "The model in Zacisze 4,000 at the corner of the street.",
+    ] {
+        assert_eq!(english_house_numbers(unchanged), unchanged, "{unchanged}");
+    }
 }

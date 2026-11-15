@@ -25,7 +25,8 @@ impl BugNotes {
         Self { inbox, listed }
     }
 
-    /// The notes still in the inbox: the menu's count.
+    /// The notes still in the inbox.
+    #[cfg(test)]
     pub fn open(&self) -> usize {
         self.listed.iter().filter(|n| n.is_open()).count()
     }
@@ -97,7 +98,7 @@ pub fn prune_reviews(dir: &Path, keep: usize) -> Result<()> {
     Ok(())
 }
 
-/// `<data>/bugs/inbox`; the personal app uses the code checkout's inbox (where the night round works) when the
+/// `<data>/bugs/notes`; the personal app uses the code checkout's inbox (where the night round works) when the
 /// `bug_inbox` setting names one, else Heimdall's checkout in the home folder when it is there.
 /// `HEIMDALL_BUG_INBOX` overrides both.
 pub fn inbox_dir(data: &Path, replay: bool) -> PathBuf {
@@ -121,7 +122,7 @@ pub fn reviews_dir(inbox: &Path) -> PathBuf {
 
 /// The spoken-note recorder kept crash checkpoints in `<data>/bugs/pending`. It is gone; remove that folder (and an
 /// empty `<data>/bugs`) when empty, so nothing looks like a second inbox. A non-empty one is left for a person.
-// The public edition never files a note (no `bug_note` tool, docs/bugs.md).
+// The public edition never files a note (no `bug_note` tool, docs/personal/bugs.md).
 #[cfg_attr(feature = "public", allow(dead_code))]
 pub fn retire_spoken_note_checkpoints(data: &Path) {
     let pending = data.join("bugs/pending");
@@ -194,7 +195,7 @@ pub fn list_item(record: &Value, now: u64) -> ui::BugNote {
 }
 
 /// The `bug_note` tool's side, shared with the MCP host: the pipeline sets the inbox, the UI attach sets the island.
-// The public edition never files a note (no `bug_note` tool, docs/bugs.md).
+// The public edition never files a note (no `bug_note` tool, docs/personal/bugs.md).
 #[cfg_attr(feature = "public", allow(dead_code))]
 #[derive(Default)]
 pub struct Filing {
@@ -204,7 +205,7 @@ pub struct Filing {
     scout: std::sync::atomic::AtomicBool,
 }
 
-// The public edition never files a note (no `bug_note` tool, docs/bugs.md).
+// The public edition never files a note (no `bug_note` tool, docs/personal/bugs.md).
 #[cfg_attr(feature = "public", allow(dead_code))]
 impl Filing {
     pub fn set_inbox(&self, inbox: PathBuf) {
@@ -287,7 +288,7 @@ mod tests {
     #[test]
     fn the_tool_files_one_note_per_call_and_the_menu_counts_the_store() {
         let t = tempfile::tempdir().unwrap();
-        let inbox = t.path().join("bugs/inbox");
+        let inbox = t.path().join("bugs/notes");
         let actions = agent::actions::Actions::open(&t.path().join("actions.sqlite")).unwrap();
         let (_gate, p) = permit();
         let filing = Filing::default();
@@ -322,7 +323,7 @@ mod tests {
     #[test]
     fn a_card_carries_the_title_cause_files_evidence_and_status() {
         let t = tempfile::tempdir().unwrap();
-        let inbox = t.path().join("bugs/inbox");
+        let inbox = t.path().join("bugs/notes");
         let note = heimdall_night::bug_notes::write(&inbox, "At 23:11 the island chat drew its placeholder twice. Expected: one.", Some("screenshot at 23:11"), agent::now_ms()).unwrap();
         let id = note["id"].as_str().unwrap();
         let cause = json!({"class": "code", "reasoning": "The field and a drawn copy both draw it.", "confidence": 0.75, "by": "scout",
@@ -347,7 +348,7 @@ mod tests {
     #[test]
     fn command_reviews_keep_only_the_newest() {
         let t = tempfile::tempdir().unwrap();
-        let notes = BugNotes::new(t.path().join("bugs/inbox"));
+        let notes = BugNotes::new(t.path().join("bugs/notes"));
         let dir = reviews_dir(&notes.inbox);
         // Older seconds, and many within one second (suffixes past -9 sort as numbers).
         std::fs::create_dir_all(&dir).unwrap();
@@ -414,8 +415,8 @@ mod tests {
         assert!(t.path().join("bugs/pending/x.json").exists());
         // A replay inbox in the same folder keeps the folder.
         let u = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(u.path().join("bugs/inbox")).unwrap();
+        std::fs::create_dir_all(u.path().join("bugs/notes")).unwrap();
         retire_spoken_note_checkpoints(u.path());
-        assert!(u.path().join("bugs/inbox").is_dir());
+        assert!(u.path().join("bugs/notes").is_dir());
     }
 }

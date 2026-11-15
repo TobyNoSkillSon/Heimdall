@@ -825,6 +825,30 @@ fn speaker_turn_indexing_waits_for_committed_samples_and_backfill_repairs_old_er
     Ok(())
 }
 
+/// 13 Nov: the indexer held the archive's reader lock through model inference, group after group, so video tiering
+/// (which needs a moment without readers) tiered nothing from 10:22 to 20:03. Inference holds no reader now; media
+/// preparation takes its own.
+#[test]
+fn embedding_inference_holds_no_archive_reader() -> Result<()> {
+    let (t,db,_j,sid,_)=setup();
+    final_row(&db,sid,"free","mic",S,2*S,"hello","User")?;
+    timeline::utterance(&db,sid,"free")?;
+    struct Probe { free: Vec<bool> }
+    impl Embedder for Probe {
+        fn model(&self)->Model {Model{id:"reader-probe".into(),version:"1".into(),dimensions:2}}
+        fn embed(&mut self,root:&Path,_:&Chunk)->Result<Vec<f32>> {
+            // What tiering's probe does: an exclusive lock on the lifetime lock file, without waiting.
+            let file=std::fs::OpenOptions::new().read(true).write(true).open(root.join(".compact.lock"))?;
+            let free=unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file),libc::LOCK_EX|libc::LOCK_NB)==0 };
+            self.free.push(free);
+            Ok(vec![1.,0.])
+        }
+    }
+    let mut probe=Probe{free:vec![]};
+    assert!(timeline::embed_batch(t.path(),&mut probe,100,&mut on)?>0);
+    assert!(!probe.free.is_empty() && probe.free.iter().all(|f|*f),"inference ran while a reader held the archive: {:?}",probe.free);
+    Ok(())
+}
 #[test]
 fn embedding_database_contention_retries_without_persistent_health_error() -> Result<()> {
     let (t,db,_j,sid,_)=setup();

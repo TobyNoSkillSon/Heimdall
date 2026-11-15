@@ -185,6 +185,12 @@ final class Runtime {
     static let swapWindow = 120.0
     let footprintLimit: UInt64
     var lastAdmission = 0.0
+    /// Free memory needed to load: the per-request floor (4 GiB, `admit`) plus the loaded weights' footprint
+    /// (1.8 GB, rounded up to 2 GiB), so a load that starts also passes its own first admission. Measured 30 Oct
+    /// (lab/memory-cache/README.md): weights 1.50 GB, 1.80 GB footprint after load, peak 3.16 GB over a burst of
+    /// texts up to 2,853 tokens and a 1080p screen. It was 8 GiB until 14 Nov (VM run: refused on a 16 GB Mac).
+    /// The host mirrors it (`embedding::ADMISSION_GIB`) and reads exit code 75 as this refusal.
+    static let admissionBytes: UInt64 = 6 << 30
     /// Fast parts in use (Gate.resolve); `.plain` is stock MLX everywhere.
     var fast: Fast = .plain
     var quantSpec: [String: Int] = [:]
@@ -194,10 +200,12 @@ final class Runtime {
     var batchChecked = false
     init(directory: URL, tokenizer: any Tokenizers.Tokenizer) throws {
         let memory = try MemoryState.current()
-        guard memory.free >= 8 << 30 else { throw WorkerError.invalid("embedding admission needs 8 GiB free") }
+        guard memory.free >= Self.admissionBytes else { throw WorkerError.invalid("embedding admission needs \(Self.admissionBytes >> 30) GiB free") }
         swapSamples = [(ProcessInfo.processInfo.systemUptime, memory.swap)]
-        footprintLimit = min(8 << 30, memory.free / 4)
-        Memory.memoryLimit = min(6 << 30, Int(memory.free / 4))
+        // A quarter of what was free, but never under the measured peak (3.16 GB): at the 6 GiB floor a quarter
+        // (1.5 GiB) is under the loaded weights' own footprint (1.8 GB) and every request would be refused.
+        footprintLimit = min(8 << 30, max(4 << 30, memory.free / 4))
+        Memory.memoryLimit = min(6 << 30, max(2 << 30, Int(memory.free / 4)))
         Memory.cacheLimit = CachePolicy.current.limit(free: memory.free)
         let configuration = try JSONDecoder().decode(EmbeddingGemma2Configuration.self,
             from: Data(contentsOf: directory.appendingPathComponent("config.json")))
@@ -639,13 +647,13 @@ final class Runtime {
 }
 
 @main struct Worker {
-    static func line() throws -> Data? {
+    static func line(limit: Int = 1024 * 1024) throws -> Data? {
         var data = Data()
         while true {
             let byte = fgetc(stdin)
             if byte == EOF { return data.isEmpty ? nil : data }
             if byte == 10 { return data }
-            guard data.count < 1024 * 1024 else { throw WorkerError.invalid("request exceeds protocol bound") }
+            guard data.count < limit else { throw WorkerError.invalid("request exceeds protocol bound") }
             data.append(UInt8(byte))
         }
     }
@@ -656,6 +664,11 @@ final class Runtime {
                 let free = try MemoryState.current().free
                 Memory.cacheLimit = CachePolicy.current.limit(free: free)
                 print("{\"cache_limit_bytes\":\(Memory.cacheLimit),\"clears\":\(CachePolicy.current != .legacy)}")
+                return
+            }
+            // Qwen3-Reranker server (Rerank.swift); the embedding paths below are untouched.
+            if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--rerank" {
+                await Rerank.main(directory: URL(fileURLWithPath: CommandLine.arguments[2]))
                 return
             }
             if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--tokenize" {
@@ -751,6 +764,10 @@ final class Runtime {
                 // pool, their buffers landed back in the cache afterwards).
                 CachePolicy.current.release()
             }
-        } catch { fputs("EmbeddingGemma 2: \(error.localizedDescription)\n", stderr); exit(1) }
+        } catch {
+            fputs("EmbeddingGemma 2: \(error.localizedDescription)\n", stderr)
+            // 75 (EX_TEMPFAIL): too little free memory to load; the host says "paused for low memory", not "crashed".
+            exit(error.localizedDescription.hasPrefix("embedding admission needs") ? 75 : 1)
+        }
     }
 }

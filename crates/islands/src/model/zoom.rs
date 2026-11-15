@@ -116,6 +116,87 @@ pub fn layout_width(natural: f64, viewport: f64, m: f64) -> f64 {
     natural.max(viewport / m)
 }
 
+// MARK: Pictures (bug note 2026-11-10T10-52-07)
+//
+// A tall picture (a long screenshot, a before/after strip) opens fitted to the viewer's width and scrolls, instead of
+// shrunk to the viewer's height; zoom 1 is that fit, zoom below 1 shows more of it, down to the whole picture.
+
+/// The lowest a picture's zoom goes, however tall it is (below this a strip is a sliver).
+pub const PICTURE_FLOOR: f64 = 0.1;
+
+/// A picture at zoom 1 in a view `view_w` × `view_h` (points): the document it sits in and the zoom that shows it
+/// whole.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PictureFit {
+    /// The document: as wide as the view, at least as tall, taller when the picture is.
+    pub doc_w: f64,
+    pub doc_h: f64,
+    /// The picture's width in the document: the view's width, never more than its own points unless the view's
+    /// height needs it (a small picture is not blown up; one that fits whole fills as before).
+    pub shown_w: f64,
+    /// The zoom that shows the whole document (1 when it already fits).
+    pub whole: f64,
+}
+
+/// Where a picture of `nat_w` × `nat_h` points sits at zoom 1 in a view `view_w` × `view_h`.
+pub fn picture_fit(nat_w: f64, nat_h: f64, view_w: f64, view_h: f64) -> PictureFit {
+    let ok = |v: f64| v.is_finite() && v > 0.0;
+    if !(ok(nat_w) && ok(nat_h) && ok(view_w) && ok(view_h)) {
+        return PictureFit { doc_w: view_w.max(0.0), doc_h: view_h.max(0.0), shown_w: view_w.max(0.0), whole: 1.0 };
+    }
+    let aspect = nat_h / nat_w;
+    let shown_w = view_w.min(nat_w.max(view_h / aspect));
+    // Within a point of the view (its height was floored to whole points) it fits: no hairline scroll.
+    let tall = shown_w * aspect;
+    let doc_h = if tall <= view_h + 1.0 { view_h } else { tall };
+    PictureFit { doc_w: view_w, doc_h, shown_w, whole: (view_h / doc_h).min(1.0) }
+}
+
+/// A picture's zoom range: in to 4×, out to the whole picture (1 when it already fits whole).
+pub fn picture_range(whole: f64) -> Range {
+    let min = if whole.is_finite() { whole.clamp(PICTURE_FLOOR, 1.0) } else { 1.0 };
+    Range { min, max: MAX }
+}
+
+/// The content size a picture of `nat_w` × `nat_h` points asks for within `max_w` × `max_h`: its width (never more
+/// than its own points), and its height at that width, capped by `max_h` (the rest scrolls).
+pub fn picture_content(nat_w: f64, nat_h: f64, max_w: f64, max_h: f64) -> (f64, f64) {
+    let k = 1f64.min(max_w / nat_w);
+    ((nat_w * k).floor().max(240.0), (nat_h * k).min(max_h).floor().max(60.0))
+}
+
+/// The most pixels a picture is loaded at (about 190 MB decoded).
+pub const PICTURE_MAX_PIXELS: f64 = 48.0e6;
+
+/// The long side a picture of `w` × `h` pixels is loaded at: its own, so a tall strip fitted to the width (and zoomed
+/// in) stays sharp, unless that is more than `PICTURE_MAX_PIXELS`; never under 2400 (the old fixed size).
+pub fn picture_load_side(w: f64, h: f64) -> usize {
+    if !(w.is_finite() && h.is_finite()) || w <= 0.0 || h <= 0.0 {
+        return 2400;
+    }
+    let s = (PICTURE_MAX_PIXELS / (w * h)).sqrt().min(1.0);
+    (w.max(h) * s).floor().max(2400.0) as usize
+}
+
+/// ⌘-scroll: the zoom factor for one scroll event's vertical delta (as a browser: away from you zooms in).
+/// `precise`: a trackpad's points; else a wheel's lines.
+pub fn scroll_factor(dy: f64, precise: bool) -> f64 {
+    if !dy.is_finite() {
+        return 1.0;
+    }
+    let k = if precise { 0.006 } else { 0.1 };
+    (dy * k).exp().clamp(0.5, 2.0)
+}
+
+/// Double-click on a picture: at its fit, in to 2× there; zoomed either way, back to the fit.
+pub fn double_click_zoom(z: f64) -> f64 {
+    if same(z, 1.0) {
+        2.0
+    } else {
+        1.0
+    }
+}
+
 /// Whether two zooms are the same for saving (a pinch never lands exactly).
 pub fn same(a: f64, b: f64) -> bool {
     (a - b).abs() < EPS

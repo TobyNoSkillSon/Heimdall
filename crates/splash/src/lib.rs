@@ -6,7 +6,7 @@
 //! schemas through llguidance (`constrain`), model download and preparation from Hugging Face (`hub`), and the
 //! OpenAI-compatible HTTP API Heimdall's agent and background calls speak (`server`).
 //! The Python reference is Splash 1.4.1 (`/opt/homebrew/Cellar/splash/1.4.1/libexec`); each module names the files it
-//! ports. `docs/splash-native.md` is the map.
+//! ports. `docs/inference-engine.md` is the map.
 pub mod chat;
 pub mod constrain;
 pub mod engine;

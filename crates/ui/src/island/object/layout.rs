@@ -71,7 +71,13 @@ pub const NOTE_PIN_GAP: f64 = 28.0;
 pub const PEEK_BELOW: f64 = 14.0;
 pub const STACK_ICON_Y: f64 = 48.0;
 pub const STACK_WORD_Y: f64 = 74.0;
-pub const STACK_H: f64 = 94.0;
+/// A one-row message under the notch (islands climb, 11 Nov): its centre line, its symbol's size (the helmet's), the
+/// gap to its words, and its height.
+pub const ROW_Y: f64 = 50.0;
+const ROW_ICON: f64 = 18.0;
+const ROW_HELMET: f64 = 20.0;
+const ROW_GAP: f64 = 8.0;
+pub const ROW_H: f64 = 76.0;
 pub const LIP_BAND: f64 = 22.0;
 /// The composer at the foot of the pulled-down conversation: its height and the gap above it.
 pub const COMPOSER_H: f64 = 36.0;
@@ -136,22 +142,32 @@ pub const DRAW_BTN: (f64, f64) = (112.0, 34.0);
 pub const Q_DOCK_GAP: f64 = 18.0;
 /// The question card (DESIGN.md's island at 580 pt): its width, its inner width (22 pt padding either side), and its
 /// rows. Numbers from `lab/ui-renders/ask-card` (the design's mockup, 24 Oct).
-pub const ASK_W: f64 = 580.0;
+pub const ASK_W: f64 = 420.0;
 const ASK_INNER: f64 = ASK_W - 2.0 * PAD;
 /// Whether `text` stays on one line as a card's question (no countdown), by the simulator's width estimate: for callers
 /// that keep a question to one line (the voice cards, `crates/app/src/voice_suggest.rs`). The estimate runs about 8 %
 /// wide of AppKit for this font; the limit is set from real renders (`question_line_tests`), on the safe side.
 pub fn question_fits_one_line(text: &str) -> bool {
     use super::measure::{Approx, Font, Measure};
-    Approx.width(text, Font::Question) <= ASK_INNER * 1.07
+    // The limit as measured (3 Nov: the 21 pt question in a 536 pt column), kept when the card narrowed and its question
+    // went to 17 pt (islands climb, 11 Nov), so the app cuts voice quotes as before; on the 420 pt card a question at
+    // this limit wraps to a second line.
+    Approx.width(text, Font::Question) * (21.0 / Font::Question.size()) <= 536.0 * 1.07
 }
-const ASK_PAD_TOP: f64 = 16.0;
+const ASK_PAD_TOP: f64 = 12.0;
 const ASK_HEAD: f64 = 22.0;
 const ASK_CHIP_H: f64 = 26.0;
 const ASK_CHIP_GAP: f64 = 6.0;
-const ASK_Q_LINE: f64 = 25.0;
-const ASK_OPT_H: f64 = 50.0;
-const ASK_OPT_GAP: f64 = 5.0;
+const ASK_Q_LINE: f64 = 22.0;
+const ASK_OPT_H: f64 = 36.0;
+/// The header symbol's size and the column it holds: the question, the option labels and the field start after it.
+const ASK_SYMBOL: f64 = 18.0;
+const ASK_SYMBOL_ROOM: f64 = 28.0;
+/// An expired card's Dismiss (90 pt) and its gap to the question.
+const DISMISS_ROOM: f64 = 102.0;
+/// An option row with a description under its label (islands climb, 11 Nov): two lines need this much.
+const ASK_OPT_DESC_H: f64 = 48.0;
+const ASK_OPT_GAP: f64 = 4.0;
 /// A granting option's well (approval grants, 4 Nov): its padding, a line of SF Mono 12, the gap between items, the
 /// text's indent after the symbol, and the room below the well inside the row.
 const GRANT_PAD_X: f64 = 10.0;
@@ -161,8 +177,9 @@ const GRANT_ITEM_GAP: f64 = 3.0;
 const GRANT_INDENT: f64 = 20.0;
 const GRANT_BELOW: f64 = 12.0;
 /// The well runs from the label's column less its padding to 12 pt inside the row: the text gets the rest.
-const GRANT_TEXT_W: f64 = ASK_INNER - 52.0 + GRANT_PAD_X - 12.0 - 2.0 * GRANT_PAD_X - GRANT_INDENT;
-const ASK_BLUE: Rgba = Rgba([0x39, 0x87, 0xE5, 255]);
+const GRANT_TEXT_W: f64 = ASK_INNER - 28.0 + GRANT_PAD_X - 12.0 - 2.0 * GRANT_PAD_X - GRANT_INDENT;
+/// The system blue (#0A84FF), the accent every island uses for the one thing to act on (islands climb, 11 Nov).
+const ASK_BLUE: Rgba = Rgba([0x0A, 0x84, 0xFF, 255]);
 /// The Other row's placeholder: the one line the user reads before he types his own answer.
 const OTHER_PLACEHOLDER: &str = "Type your own answer";
 /// The send arrow inside the Other row's right edge (lit once he types); its hit area is a whole 44 pt target.
@@ -180,12 +197,12 @@ const ASK_RING_GAP: f64 = 7.0;
 const ASK_COUNT_ROOM: f64 = 80.0;
 /// A naming card's guessed names (`agent_notice::OtherField`): one-click chips in one row, this tall, at least this
 /// wide, with this padding either side of the name and this gap between them.
-const NAME_CHIP_H: f64 = 40.0;
+const NAME_CHIP_H: f64 = 34.0;
 const NAME_CHIP_MIN_W: f64 = 96.0;
 const NAME_CHIP_PAD: f64 = 20.0;
 const NAME_CHIP_GAP: f64 = 8.0;
 /// The quiet answers after the name field ("Not important"): a low pill this tall, with this padding.
-const NAME_AFTER_H: f64 = 34.0;
+const NAME_AFTER_H: f64 = 30.0;
 const NAME_AFTER_PAD: f64 = 16.0;
 /// Between the conversation's window and a question docked under it.
 pub const Q_DOCK_TOP: f64 = 16.0;
@@ -339,7 +356,7 @@ pub enum Scene {
     /// A question open while the user has the conversation pulled down docks at its bottom (`ask`), above the band.
     /// `working`: the agent's turn runs (Pi's or the relay's, docs/claude-relay.md): the thinking dots sit under the
     /// conversation, above the composer (bug note 30 Oct 03:00).
-    Reply { paragraphs: Vec<String>, notes: Vec<NoteView>, chat: crate::island::chat::Around, follow: bool, tail: bool, ask: Option<Ask>, status: Option<(Glyph, String)>, level: u16, flat: bool, scroll: f64, hot: bool, composer_empty: bool, attached: Vec<crate::island::drop::DropItem>, working: bool, copied: bool },
+    Reply { paragraphs: Vec<String>, notes: Vec<NoteView>, chat: crate::island::chat::Around, follow: bool, tail: bool, ask: Option<Ask>, status: Option<(Glyph, String)>, level: u16, flat: bool, scroll: f64, hot: bool, composer_empty: bool, secret: bool, secret_empty_said: bool, attached: Vec<crate::island::drop::DropItem>, working: bool, copied: bool },
     Listening,
     /// A question card; while Heimdall speaks (`speech`), his words stay on top and the card docks below them (the user, 23
     /// Oct 22:07: "I should see you talking, and the decision goes down").
@@ -549,18 +566,14 @@ impl B<'_> {
             None => 0.0,
         }
     }
-    /// The newest sentences that fit the speaking row's lines from `y` (each line its own element, `voice.s<k>.<j>`):
-    /// their widest line and the last line's centre.
-    fn sentences(&mut self, sentences: &[String], y0: f64) -> (f64, Option<f64>) {
-        self.sentences_max(sentences, y0, SPEAK_LINES)
-    }
-    /// `sentences` with at most `max_lines` lines (a card docked below them takes the rest of the bound).
+    /// The newest sentences that fit `max_lines` lines from `y` (each line its own element, `voice.s<k>.<j>`; a card
+    /// docked below them takes the rest of the bound): their widest line and the last line's centre.
     fn sentences_max(&mut self, sentences: &[String], y0: f64, max_lines: usize) -> (f64, Option<f64>) {
         let kept = newest_sentences(self.m, sentences, max_lines);
         let (mut y, mut widest, mut last) = (y0, 0.0f64, None);
         for (k, lines, w) in &kept {
             for (j, line) in lines.iter().enumerate() {
-                let lw = self.width(line, Font::Spoken).clamp(1.0, *w);
+                                let lw = self.width(line, Font::Spoken).clamp(1.0, *w);
                 self.push(&format!("voice.s{k}.{j}"), Content::Text { lines: vec![line.clone()], font: Font::Spoken, color: Rgba::WHITE, line_h: LINE }, Rect::new(-lw / 2.0, y - LINE / 2.0, lw, LINE));
                 last = Some(y);
                 y += LINE;
@@ -591,15 +604,23 @@ impl B<'_> {
         if n > 1 {
             let labels: Vec<String> = card.questions.iter().enumerate().map(|(k, x)| x.header.clone().unwrap_or_else(|| format!("Q{}", k + 1))).collect();
             // Each chip is at least 44 pt (a trackpad's target), and its position is laid out with that width.
-            let widths: Vec<f64> = labels.iter().map(|l| (self.width(l, Font::Chip).min(120.0) + 24.0 + ASK_MARK).max(44.0)).collect();
+            // On the 420 pt card the chips share the row before Send (and a countdown): each label is capped so they fit
+            // (islands climb, 11 Nov), and a capped label is cut with an ellipsis.
+            let lead = if card.countdown.is_some() { ASK_COUNT_ROOM } else { 0.0 };
+            let room = ASK_INNER - lead - ASK_ARROW_D - ASK_SEND_GAP - ASK_CHIP_GAP * (n - 1) as f64;
+            let cap = (room / n as f64 - 24.0 - ASK_MARK).clamp(20.0, 120.0);
+            let labels: Vec<String> = labels.iter().map(|l| super::measure::ellipsize(self.m, l, Font::Chip, cap, false)).collect();
+            let widths: Vec<f64> = labels.iter().map(|l| (self.width(l, Font::Chip).min(cap) + 24.0 + ASK_MARK).max(44.0)).collect();
             let send_cx = right - ASK_ARROW_D / 2.0;
-            let mut x = send_cx - ASK_ARROW_D / 2.0 - ASK_SEND_GAP - widths.iter().sum::<f64>() - ASK_CHIP_GAP * (n - 1) as f64;
+            // The chips start at the content's left edge (after a countdown's ring and time); Send stays at the right.
+            let mut x = left + lead;
             for (k, label) in labels.iter().enumerate() {
                 // A tap target is never narrower than a trackpad's (44 pt), whatever its label measures.
                 let w = widths[k];
                 let done = card.picks.get(k).is_some_and(|p| !p.labels.is_empty() || p.other.is_some());
-                let (fill, ink) = if k == tab { (Rgba::WHITE, Rgba::BLACK) } else if done { (Rgba::white(0.08), Rgba::white(0.8)) } else { (Rgba([0, 0, 0, 0]), Rgba::white(0.62)) };
-                let ring = (k != tab && !done).then_some((Rgba::white(0.25), 1.0));
+                // One chip drawing (islands climb, 11 Nov): quiet filled capsules, the current one white.
+                let (fill, ink) = if k == tab { (Rgba::WHITE, Rgba::BLACK) } else if done { (Rgba::white(0.10), Rgba::white(0.85)) } else { (Rgba::white(0.10), Rgba::white(0.62)) };
+                let ring: Option<(Rgba, f64)> = None;
                 let rect = Rect::new(x, head_cy - ASK_CHIP_H / 2.0, w, ASK_CHIP_H);
                 self.push(&format!("{name}.chip.{k}"), Content::Panel { fill, ring, radius: ASK_CHIP_H / 2.0 }, rect);
                 let tw = self.width(label, Font::Chip).min(w - 24.0 - ASK_MARK).max(1.0);
@@ -610,7 +631,7 @@ impl B<'_> {
                 if done {
                     self.glyph(&format!("{name}.chip.{k}.tick.{on}"), &Glyph::new("checkmark").colors(&[ink]).bold(), 9.0, x0 + 5.0, head_cy).free = true;
                 } else {
-                    self.push(&format!("{name}.chip.{k}.open.{on}"), Content::Dot { color: ASK_BLUE, d: 6.0 }, Rect::centered(x0 + 5.0, head_cy, 6.0, 6.0));
+                    self.push(&format!("{name}.chip.{k}.open.{on}"), Content::Dot { color: if k == tab { Rgba([0, 0, 0, 110]) } else { Rgba::white(0.45) }, d: 5.0 }, Rect::centered(x0 + 5.0, head_cy, 5.0, 5.0));
                 }
                 self.push(&format!("{name}.chip.{k}.word"), Content::Text { lines: vec![label.clone()], font: Font::Chip, color: ink, line_h: ASK_CHIP_H }, Rect::new(x0 + ASK_MARK, head_cy - ASK_CHIP_H / 2.0, tw, ASK_CHIP_H));
                 if open {
@@ -625,10 +646,17 @@ impl B<'_> {
         // The question, left-aligned: one text element for all its lines, so its lines travel together (one line per
         // element let them slide over one another on arrival and when the card moved).
         let beside = card.countdown.is_some() && n == 1;
-        let q_w = if beside { ASK_INNER - ASK_COUNT_ROOM } else { ASK_INNER };
-        let (lines, _) = wrap(self.m, &q.text, Font::Question, q_w, 3);
+        // The side islands' header (islands climb, 11 Nov): a symbol at the content's left edge, the question beside it
+        // and wrapping under itself, not under the symbol. A question waits on the user (orange); an expired one is grey.
+        let q_x = left + ASK_SYMBOL_ROOM;
+        // An expired card holds its Dismiss beside the question's first line: the question wraps short of it.
+        let q_w = if beside { ASK_INNER - ASK_COUNT_ROOM } else if dim { ASK_INNER - DISMISS_ROOM } else { ASK_INNER } - ASK_SYMBOL_ROOM;
+        // Four lines at the narrower card (420 pt) hold the longest question the app lets through (160 characters).
+        let (lines, _) = wrap(self.m, &q.text, Font::Question, q_w, 4);
         let head = if n > 1 { ASK_HEAD + 16.0 } else { 0.0 };
         let first = top + ASK_PAD_TOP + head + ASK_Q_LINE / 2.0;
+        let symbol = if dim { Glyph::new("clock").colors(&[Rgba::white(0.55)]) } else { Glyph::new("questionmark.circle.fill").colors(&[Rgba::WHITE, Rgba::ORANGE]) };
+        self.glyph(&format!("{name}.symbol"), &symbol, ASK_SYMBOL, left + ASK_SYMBOL * 1.15 / 2.0, first);
         if let Some(c) = card.countdown {
             // Live: each second's numerals and ring cut in place, never a motion.
             let text = c.text();
@@ -648,13 +676,15 @@ impl B<'_> {
         let color = Rgba::white(if dim { 0.55 } else { 1.0 });
         let count = lines.len().max(1);
         if !lines.is_empty() {
-            self.push(&format!("{name}.q"), Content::Text { lines, font: Font::Question, color, line_h: ASK_Q_LINE }, Rect::new(left, first - ASK_Q_LINE / 2.0, lw, ASK_Q_LINE * count as f64));
+            // An expired question is its own element (islands climb, 11 Nov): on the narrower card a question that comes
+            // next can run to more lines, and sharing the element let it land at full strength over the leaving Dismiss.
+            let qid = if dim { format!("{name}.q.dim") } else { format!("{name}.q") };
+            self.push(&qid, Content::Text { lines, font: Font::Question, color, line_h: ASK_Q_LINE }, Rect::new(q_x, first - ASK_Q_LINE / 2.0, lw, ASK_Q_LINE * count as f64));
         }
         let qbottom = first + ASK_Q_LINE * (count - 1) as f64 + ASK_Q_LINE / 2.0;
         // An expired or unavailable card keeps its question and offers Dismiss alone.
         if dim {
-            let cy = qbottom + 16.0 + 16.0;
-            let rect = self.capsule(&format!("{name}.dismiss"), "Dismiss", None, None, Capsule::White, 0.0, cy, 100.0, 32.0);
+            let rect = self.capsule(&format!("{name}.dismiss"), "Dismiss", None, None, Capsule::Quiet, right - 45.0, first, 90.0, 30.0);
             self.targets.push((Target::Dismiss(id.into()), rect));
             return (ASK_W, self.ask_bottom(from, top));
         }
@@ -699,34 +729,46 @@ impl B<'_> {
             // item in full, so the user sees exactly what his click approves.
             let well = self.grant_lines(&o.grant);
             let well_h = grant_well_h(&well);
-            let row = Rect::new(left, y, ASK_INNER, ASK_OPT_H + if well.is_empty() { 0.0 } else { well_h + GRANT_BELOW });
-            let cy = y + ASK_OPT_H / 2.0;
-            self.push(&format!("{name}.o{i}.row"), Content::Panel { fill: Rgba::white(if on { 0.11 } else { 0.05 }), ring: None, radius: 16.0 }, row);
-            let tile = Rect::new(left + 10.0, cy - 15.0, 30.0, 30.0);
-            self.push(&format!("{name}.o{i}.tile"), Content::Panel { fill: Rgba::white(if on { 1.0 } else { 0.10 }), ring: None, radius: 9.0 }, tile);
-            self.push(&format!("{name}.o{i}.digit"), Content::Text { lines: vec![(i + 1).to_string()], font: Font::Button, color: if on { Rgba::BLACK } else { Rgba::white(a) }, line_h: 30.0 }, tile);
-            let text_x = left + 52.0;
-            let max_label = ASK_INNER - 52.0 - 12.0 - 22.0 - 12.0;
-            let label_cy = if o.description.is_some() { cy - 10.0 } else { cy };
+            // One row height per question: a question with a description anywhere keeps all its rows at the taller height.
+            let oh = if q.options.iter().any(|o| o.description.is_some()) { ASK_OPT_DESC_H } else { ASK_OPT_H };
+            let row = Rect::new(left, y, ASK_INNER, oh + if well.is_empty() { 0.0 } else { well_h + GRANT_BELOW });
+            let cy = y + oh / 2.0;
+            // Flat rows, as the side islands' lists (islands climb, 11 Nov): no slab at rest, a fill only once picked,
+            // a hairline between rows, and the number as quiet text in the symbol's column.
+            self.push(&format!("{name}.o{i}.row"), Content::Panel { fill: Rgba::white(if on { 0.11 } else { 0.0 }), ring: None, radius: 9.0 }, row);
+            if i + 1 < q.options.len() {
+                self.push(&format!("{name}.o{i}.rule"), Content::Panel { fill: Rgba::white(0.09), ring: None, radius: 0.0 }, Rect::new(left + ASK_SYMBOL_ROOM, row.max_y() + ASK_OPT_GAP / 2.0 - 0.25, ASK_INNER - ASK_SYMBOL_ROOM, 0.5));
+            }
+            let text_x = left + ASK_SYMBOL_ROOM;
+            let max_label = ASK_INNER - ASK_SYMBOL_ROOM - 12.0 - 20.0 - 12.0;
+            let label_cy = if o.description.is_some() { cy - 9.0 } else { cy };
+            // With several questions a tab's labels are its own elements, so a tab change cross-fades them rather than
+            // gliding one tab's label over the other's leaving description (islands climb, 11 Nov).
+            let tabk = if n > 1 { format!(".t{tab}") } else { String::new() };
+            // The number sits on its label's line.
+            let tile = Rect::new(left + 4.0, label_cy - 11.0, ASK_SYMBOL, 22.0);
+            self.push(&format!("{name}.o{i}.digit"), Content::Text { lines: vec![(i + 1).to_string()], font: Font::Button, color: Rgba::white(if on { 1.0 } else { 0.45 * a }), line_h: 22.0 }, tile);
             let label = super::measure::ellipsize(self.m, &o.label, Font::OptionLabel, max_label, false);
             let lw = self.width(&label, Font::OptionLabel).clamp(1.0, max_label);
-            self.push(&format!("{name}.o{i}.label"), Content::Text { lines: vec![label], font: Font::OptionLabel, color: Rgba::white(a), line_h: 20.0 }, Rect::new(text_x, label_cy - 10.0, lw, 20.0));
+            self.push(&format!("{name}{tabk}.o{i}.label"), Content::Text { lines: vec![label], font: Font::OptionLabel, color: Rgba::white(a), line_h: 20.0 }, Rect::new(text_x, label_cy - 10.0, lw, 20.0));
             if let Some(d) = &o.description {
                 let dt = super::measure::ellipsize(self.m, d, Font::Describe, max_label, false);
                 let dw = self.width(&dt, Font::Describe).clamp(1.0, max_label);
-                self.push(&format!("{name}.o{i}.desc"), Content::Text { lines: vec![dt], font: Font::Describe, color: Rgba::white(0.72 * a), line_h: 16.0 }, Rect::new(text_x, cy + 11.0 - 8.0, dw, 16.0));
+                self.push(&format!("{name}{tabk}.o{i}.desc"), Content::Text { lines: vec![dt], font: Font::Describe, color: Rgba::white(0.72 * a), line_h: 16.0 }, Rect::new(text_x, cy + 10.0 - 8.0, dw, 16.0));
             }
             // The control: a dot (one answer) or a box (several), filled blue with a tick when picked.
-            let cx = right - 12.0 - 11.0;
-            let control = Rect::new(cx - 11.0, cy - 11.0, 22.0, 22.0);
-            let radius = if q.multi_select { 7.0 } else { 11.0 };
-            let (fill, ring) = if on { (ASK_BLUE, None) } else { (Rgba([0, 0, 0, 0]), Some((Rgba::white(0.35 * a), 1.5))) };
+            // A single answer shows no ring until it is picked: the number tile already marks the row as a choice
+            // (islands climb, 11 Nov: the ring repeated it). Several answers keep their boxes.
+            let cx = right - 12.0 - 10.0;
+            let control = Rect::new(cx - 10.0, cy - 10.0, 20.0, 20.0);
+            let radius = if q.multi_select { 6.0 } else { 10.0 };
+            let (fill, ring) = if on { (ASK_BLUE, None) } else if q.multi_select { (Rgba([0, 0, 0, 0]), Some((Rgba::white(0.35 * a), 1.5))) } else { (Rgba([0, 0, 0, 0]), None) };
             self.push(&format!("{name}.o{i}.control"), Content::Panel { fill, ring, radius }, control);
             if on {
                 self.glyph(&format!("{name}.o{i}.tick"), &Glyph::new("checkmark").colors(&[Rgba::WHITE]).bold(), 11.0, cx, cy).free = true;
             }
             if !well.is_empty() {
-                self.grant_well(&format!("{name}.o{i}.grant"), &well, a, text_x - GRANT_PAD_X, y + ASK_OPT_H, right - 12.0);
+                self.grant_well(&format!("{name}.o{i}.grant"), &well, a, text_x - GRANT_PAD_X, y + oh, right - 12.0);
             }
             // A grant cut off by the window's bottom is not one the user could read: it takes no click (review 4 Nov
             // evening; `agent::actions` keeps a card's grants short enough to fit).
@@ -781,13 +823,13 @@ impl B<'_> {
     fn other_row(&mut self, name: &str, id: &str, q: &AskQuestion, tab: usize, other: Option<String>, in_row: bool, sendable: bool, left: f64, right: f64, oy: f64) -> f64 {
         let ocy = oy + ASK_OPT_H / 2.0;
         let typed = other.is_some();
-        self.push(&format!("{name}.other.row"), Content::Panel { fill: Rgba::white(if typed { 0.11 } else { 0.05 }), ring: None, radius: 16.0 }, Rect::new(left, oy, ASK_INNER, ASK_OPT_H));
-        let tile = Rect::new(left + 10.0, ocy - 15.0, 30.0, 30.0);
-        self.push(&format!("{name}.other.tile"), Content::Panel { fill: Rgba::white(if typed { 0.22 } else { 0.10 }), ring: None, radius: 9.0 }, tile);
+        self.push(&format!("{name}.other.row"), Content::Panel { fill: Rgba::white(if typed { 0.11 } else { 0.05 }), ring: None, radius: 11.0 }, Rect::new(left, oy, ASK_INNER, ASK_OPT_H));
+        // Night 1111 second review S3: the pencil sits on the digits' tile and the field on the labels' edge.
+        let tile = Rect::new(left + 4.0, ocy - 11.0, ASK_SYMBOL, 22.0);
         // The glyphs keep one palette and dim by alpha: a symbol that changes colour in place is not redrawn in time.
-        self.glyph(&format!("{name}.other.pencil"), &Glyph::new("pencil").colors(&[Rgba::white(0.7)]), 13.0, tile.x + 15.0, ocy).free = true;
+        self.glyph(&format!("{name}.other.pencil"), &Glyph::new("pencil").colors(&[Rgba::white(0.55)]), 12.0, tile.x + ASK_SYMBOL / 2.0, ocy).free = true;
         let arrow_cx = right - 12.0 - ASK_TARGET / 2.0;
-        let field_x = left + 52.0;
+        let field_x = left + ASK_SYMBOL_ROOM;
         let field_r = if in_row { arrow_cx - ASK_TARGET / 2.0 - 4.0 } else { right - 16.0 };
         let field = Rect::new(field_x, ocy - 11.0, field_r - field_x, 22.0);
         self.push(&format!("{name}.other.field"), Content::Field { font: Font::OptionLabel, owner: Target::AskOther { id: id.into(), question: tab }, text: Some(other.clone().unwrap_or_default()), focus_until_ms: q.field.as_ref().map_or(0, |f| f.focus_until_ms) }, field);
@@ -895,11 +937,12 @@ pub fn layout(scene: &Scene, d: &Display, m: &dyn Measure) -> Layout {
                     b.glyph("lip.sent", &Glyph::new("arrow.up").bold().fx(Fx::Bounce), 16.0, 0.0, LIP_Y);
                 }
                 Lip::Dots => {
-                    b.push("turn.dots", Content::Dots, Rect::centered(0.0, LIP_Y, 36.0, 8.0));
+                    // Free: from a working row the dots glide in from the row's left (islands climb, 11 Nov).
+                    b.push("turn.dots", Content::Dots, Rect::centered(0.0, LIP_Y, 36.0, 8.0)).free = true;
                 }
                 // The compacting stack's icon settles into the lip in the same slot (it glides, no double).
                 Lip::Compress => {
-                    b.glyph("stack.icon", &Glyph::new("rectangle.compress.vertical").fx(Fx::Breathe), 16.0, 0.0, LIP_Y);
+                    b.glyph("stack.icon", &Glyph::new("rectangle.compress.vertical").fx(Fx::Breathe), 16.0, 0.0, LIP_Y).free = true;
                 }
                 // The bell rings (the system's wiggle), the question mark bounces, as the shape lands.
                 Lip::Nudge { question } => {
@@ -915,10 +958,32 @@ pub fn layout(scene: &Scene, d: &Display, m: &dyn Measure) -> Layout {
             // One glyph or the dots under the notch: the notch's own width, only deeper.
             (b.col_w(0.0), LIP_H, Class::Lip)
         }
+        // A short message that fits one line is one row, its symbol left of its words (islands climb, 11 Nov: the
+        // icon-over-label stack made a momentary line as tall as a card); a long one, or one with a button, stacks.
+        Scene::Stack { icon, words, button } if button.is_none() && !words.is_empty() && icon.name != VELLA && {
+            let g = if icon.name == HELMET { ROW_HELMET } else { ROW_ICON };
+            g * 1.15 + ROW_GAP + b.width(words, Font::Label) <= MAX_W - 2.0 * PAD
+        } => {
+            let g = if icon.name == HELMET { ROW_HELMET } else { ROW_ICON };
+            let ww = b.width(words, Font::Label).max(1.0);
+            // The glyph's box is 1.15 × its size (`glyph`): the row is laid out on the box, so it stays symmetric.
+            let gb = g * 1.15;
+            let total = gb + ROW_GAP + ww;
+            let x0 = -total / 2.0;
+            // Free, as `inline`'s row is: the pair is symmetric as a whole, not each part about the centre line, and the
+            // symbol cross-fades from a stacked one rather than gliding sideways.
+            b.glyph("stack.icon", icon, g, x0 + gb / 2.0, ROW_Y).free = true;
+            b.push("stack.words", Content::Text { lines: vec![words.clone()], font: Font::Label, color: Rgba::WHITE, line_h: LINE }, Rect::new(x0 + gb + ROW_GAP, ROW_Y - LINE / 2.0, ww, LINE)).free = true;
+            (b.col_w(total), ROW_H, Class::Stack)
+        }
         Scene::Stack { icon, words, button } => {
             let size = if icon.name == HELMET { 26.0 } else if icon.name == VELLA { VELLA_STACK } else { 24.0 };
-            b.glyph("stack.icon", icon, size, 0.0, STACK_ICON_Y);
+            // Free: from a one-row message the symbol glides in from the row's left (islands climb, 11 Nov).
+            b.glyph("stack.icon", icon, size, 0.0, STACK_ICON_Y).free = true;
             let (tw, n) = b.text("stack.words", words, Font::Label, Rgba::WHITE, 360.0, 3, 0.0, STACK_WORD_Y);
+            if let Some(t) = b.items.iter_mut().rev().find(|i| &*i.id == "stack.words") {
+                t.free = true;
+            }
             let n = n.max(1);
             let words_bottom = STACK_WORD_Y + LINE * (n - 1) as f64;
             match button {
@@ -937,10 +1002,19 @@ pub fn layout(scene: &Scene, d: &Display, m: &dyn Measure) -> Layout {
                 None => (b.col_w(tw.max(size * 1.15)), words_bottom + 20.0, Class::Stack),
             }
         }
+        // The working dots lead the agent's words on one row (islands climb, 11 Nov), as a short message does.
         Scene::Working { words } => {
-            b.push("turn.dots", Content::Dots, Rect::centered(0.0, STACK_ICON_Y, 36.0, 8.0));
-            let (tw, _) = b.text("turn.words", words, Font::Label, Rgba::WHITE, 360.0, 1, 0.0, STACK_WORD_Y);
-            (b.col_w(tw.max(36.0)), STACK_H, Class::Working)
+            let ww = if words.is_empty() { 0.0 } else { b.width(words, Font::Label).clamp(1.0, 360.0) };
+            let total = if ww > 0.0 { 36.0 + ROW_GAP + ww } else { 36.0 };
+            let x0 = -total / 2.0;
+            b.push("turn.dots", Content::Dots, Rect::centered(x0 + 18.0, ROW_Y, 36.0, 8.0)).free = ww > 0.0;
+            if ww > 0.0 {
+                b.text("turn.words", words, Font::Label, Rgba::WHITE, 360.0, 1, x0 + 36.0 + ROW_GAP + ww / 2.0, ROW_Y);
+                if let Some(t) = b.items.iter_mut().rev().find(|i| &*i.id == "turn.words") {
+                    t.free = true;
+                }
+            }
+            (b.col_w(total), ROW_H, Class::Working)
         }
         Scene::Lines { text } => {
             // The line up to the speaking row's lines (the pull-down holds the rest), as written: its line breaks,
@@ -977,7 +1051,7 @@ pub fn layout(scene: &Scene, d: &Display, m: &dyn Measure) -> Layout {
             let mut y = 50.0 + top;
             for (k, lines, w) in &kept {
                 for (j, line) in lines.iter().enumerate() {
-                    let lw = b.width(line, Font::Spoken).clamp(1.0, *w);
+                                        let lw = b.width(line, Font::Spoken).clamp(1.0, *w);
                     b.push(&format!("voice.s{k}.{j}"), Content::Text { lines: vec![line.clone()], font: Font::Spoken, color: Rgba::WHITE, line_h: LINE }, Rect::new(-lw / 2.0, y - LINE / 2.0, lw, LINE));
                     y += LINE;
                 }
@@ -992,7 +1066,7 @@ pub fn layout(scene: &Scene, d: &Display, m: &dyn Measure) -> Layout {
                 (b.col_w(widest).max(pair), last + 23.0, Class::Row)
             }
         }
-        Scene::Reply { paragraphs, notes, chat, follow, tail, ask, status, level, flat, scroll, hot, composer_empty, attached, working, copied } => {
+        Scene::Reply { paragraphs, notes, chat, follow, tail, ask, status, level, flat, scroll, hot, composer_empty, secret, secret_empty_said, attached, working, copied } => {
             b.stop_ear(!*flat, true);
             // The live bars while the voice plays; quiet, the system's waveform glyph (flat bars read as an
             // ellipsis, "still loading").
@@ -1113,7 +1187,7 @@ pub fn layout(scene: &Scene, d: &Display, m: &dyn Measure) -> Layout {
             let anchor = if !turn || *tail {
                 f64::INFINITY
             } else {
-                pre.owners.last().copied().filter(|t| shift - t < visible).unwrap_or(shift)
+                pre.user_rows.last().copied().filter(|t| shift - t < visible).unwrap_or(shift)
             };
             let scroll = if *follow { anchor } else { *scroll };
             let scroll = if scroll.is_finite() || scroll == f64::INFINITY { scroll.clamp(0.0, b.scroll_max) } else { 0.0 };
@@ -1252,9 +1326,21 @@ pub fn layout(scene: &Scene, d: &Display, m: &dyn Measure) -> Layout {
             let comp_from = b.items.len();
             b.push("reply.composer.fill", Content::Panel { fill: Rgba::white(0.08), ring: None, radius: COMPOSER_H / 2.0 }, composer);
             attachments(&mut b, attached, composer);
-            let field = Rect::new(-cw / 2.0 + 16.0, comp_top + row + 7.0, cw - 32.0, 22.0);
-            let message = composer_placeholder();
-            b.push("reply.composer", Content::Field { font: Font::Field, owner: Target::Composer, text: None, focus_until_ms: 0 }, field);
+            // Night 1111 [input]: the lock at the composer's right end (bug note 2026-11-10T16-30-03). Locked, the
+            // field is a secure one for a secret, and the lock is lit; its placeholder says only "Secret".
+            let lock_x = cw / 2.0 - 16.0 - LOCK_SIZE / 2.0;
+            let lock_y = comp_top + row + COMPOSER_H / 2.0;
+            let lock = if *secret { Glyph::new("lock.fill").alpha(0.92) } else { Glyph::new("lock").alpha(0.38) };
+            // Free, as the placeholder and the band's pin are: it sits at one end, outside the column's symmetry (I2).
+            b.glyph(if *secret { "reply.composer.lock.on" } else { "reply.composer.lock" }, &lock, LOCK_SIZE, lock_x, lock_y).free = true;
+            b.targets.push((Target::ComposerLock, Rect::centered(lock_x, lock_y, 28.0, COMPOSER_H)));
+            let field = Rect::new(-cw / 2.0 + 16.0, comp_top + row + 7.0, cw - 32.0 - LOCK_SIZE - 8.0, 22.0);
+            let (owner, message) = match (*secret, *secret_empty_said) {
+                (true, true) => (Target::ComposerSecret, SECRET_EMPTY_PLACEHOLDER.to_string()),
+                (true, false) => (Target::ComposerSecret, SECRET_PLACEHOLDER.to_string()),
+                _ => (Target::Composer, composer_placeholder()),
+            };
+            b.push("reply.composer", Content::Field { font: Font::Field, owner, text: None, focus_until_ms: 0 }, field);
             // The placeholder is drawn here while the composer is empty (as the Other row's is).
             if *composer_empty {
                 let tw = b.width(&message, Font::Field);
@@ -1302,7 +1388,7 @@ pub fn layout(scene: &Scene, d: &Display, m: &dyn Measure) -> Layout {
             // Thinking dots sit in the card's top padding, under the notch: the card does not move when they come or go
             // (a moving card glided its lines across one another when the agent's turn timed out at 600 s).
             let top = if *thinking && status.is_none() {
-                b.push("turn.dots", Content::Dots, Rect::centered(0.0, b.nh + ASK_PAD_TOP / 2.0, 36.0, 8.0));
+                b.push("turn.dots", Content::Dots, Rect::centered(0.0, b.nh + ASK_PAD_TOP / 2.0, 36.0, 8.0)).free = true;
                 0.0
             } else {
                 b.status(status)
@@ -1339,7 +1425,9 @@ pub fn layout(scene: &Scene, d: &Display, m: &dyn Measure) -> Layout {
                 None => nh + top,
             };
             let (widest, bottom) = b.ask(if speech.is_some() { "q.under" } else { "q" }, id, card, card_top);
-            let w = b.col_w(widest).max(if speech.is_some() { pair } else { 0.0 });
+            // The card's own width already holds its padding (`ASK_W`); padding it again made the tuck band wider than
+            // the shape once the card was narrower than `MAX_W` (islands climb, 11 Nov).
+            let w = widest.max(if speech.is_some() { pair } else { 0.0 });
             // Without a notch nothing could bring a tucked card back: no lip there.
             if card.look != QLook::Open || !d.has_notch() {
                 (w, bottom, Class::Question)
@@ -1457,7 +1545,9 @@ pub fn layout(scene: &Scene, d: &Display, m: &dyn Measure) -> Layout {
             };
             let (bw, bh) = DRAW_BTN;
             let cx = 6.0 + bw / 2.0;
-            let close_rect = b.capsule("draw.close", "Close", Some("esc"), None, style(*close), -cx, DRAW_BTN_Y, bw, bh);
+            // Close is the secondary action: quiet at rest, so Send is the one white button (islands climb, 11 Nov).
+            let close_style = if *close == SendState::Rest { Capsule::Quiet } else { style(*close) };
+            let close_rect = b.capsule("draw.close", "Close", Some("esc"), None, close_style, -cx, DRAW_BTN_Y, bw, bh);
             let send_rect = b.capsule("draw.send", "Send", Some("↩"), None, style(*send), cx, DRAW_BTN_Y, bw, bh);
             // Hover and press answer the pointer at once (cuts, not motions).
             for it in b.items.iter_mut().filter(|i| &*i.id == "draw.close" || &*i.id == "draw.send") {
@@ -1501,6 +1591,12 @@ pub fn layout(scene: &Scene, d: &Display, m: &dyn Measure) -> Layout {
 
 /// The composer's placeholder, the one place its words come from: the island draws it while the composer is empty
 /// (the native field draws none; bug note 2026-10-25T23-12-07).
+/// Night 1111 [input]: the lock glyph's size (points) and the locked composer's placeholder.
+const LOCK_SIZE: f64 = 12.0;
+pub const SECRET_PLACEHOLDER: &str = "Secret";
+/// Review nit (night 1111): the locked composer's placeholder after a Return with nothing in it.
+pub const SECRET_EMPTY_PLACEHOLDER: &str = "Empty secret, nothing sent";
+
 pub fn composer_placeholder() -> String {
     format!("Message {}", crate::identity::name())
 }
@@ -1583,7 +1679,7 @@ mod question_line_tests {
     #[test]
     fn the_one_line_estimate_matches_the_renders() {
         for (text, one) in [
-            ("Are you talking to Kanan? \u{201c}It was way faster than last…\u{201d}", true),
+            ("Are you talking to Alex? \u{201c}It was way faster than last…\u{201d}", true),
             ("New voice: \u{201c}It was way faster than last week, honestly.\u{201d}", false),
             ("Are you talking to Mari? Or Ellie? \u{201c}It was way faster than…\u{201d}", false),
             ("New voice: \u{201c}Whoever wins Monday's WWDC Workshop owes…\u{201d}", false),

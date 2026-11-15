@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 /// Kind of every bug-note record, old spoken ones included.
 pub const KIND: &str = "bug_note";
-/// What a note is about (`docs/bugs.md`, "Cause classes"). Each class has one route in `docs/nightly-build.md`.
+/// What a note is about (`docs/personal/bugs.md`, "Cause classes"). Each class has one route in `docs/personal/nightly-build.md`.
 pub const CAUSE_CLASSES: [&str; 6] = ["code", "decider", "agent-prompt", "model-quality", "environment", "unknown"];
 /// The decider's answers for a wake case: the dispatch question's labels (`send`, `wait`, `not_for_heimdall`).
 pub const DECIDER_LABELS: [&str; 3] = ["send", "wait", "not_for_heimdall"];
@@ -22,7 +22,7 @@ const WHO: [&str; 3] = ["scout", "triage", "coordinator"];
 
 /// The configured inbox, in a code checkout where the night round works: `HEIMDALL_BUG_INBOX`, else the `bug_inbox`
 /// setting in Heimdall's settings.json, else Heimdall's own checkout in the home folder
-/// (`<home>/Projects/Heimdall/bugs/inbox`, when that project's `BRIEF.md` exists). None otherwise; notes then go to
+/// (`<home>/Projects/Heimdall/bugs/notes`, when that project's `BRIEF.md` exists). None otherwise; notes then go to
 /// `data_inbox`.
 pub fn default_inbox() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("HEIMDALL_BUG_INBOX") {
@@ -31,7 +31,7 @@ pub fn default_inbox() -> Option<PathBuf> {
     setting_inbox(&heimdall_home::data_dir()).or_else(|| checkout_inbox(&heimdall_home::home_dir()))
 }
 
-/// `<home>/Projects/Heimdall/bugs/inbox` when the checkout is there (its `BRIEF.md` marks it).
+/// `<home>/Projects/Heimdall/bugs/notes` when the checkout is there (its `BRIEF.md` marks it).
 pub fn checkout_inbox(home: &Path) -> Option<PathBuf> {
     let project = home.join("Projects").join("Heimdall");
     project.join("BRIEF.md").is_file().then(|| project.join("bugs").join("inbox"))
@@ -43,9 +43,9 @@ pub fn setting_inbox(data: &Path) -> Option<PathBuf> {
     settings["bug_inbox"].as_str().map(PathBuf::from).filter(|p| p.is_absolute())
 }
 
-/// The inbox when none is configured: `bugs/inbox` in Heimdall's data folder.
+/// The inbox when none is configured: `bugs/notes` in Heimdall's data folder.
 pub fn data_inbox(data: &Path) -> PathBuf {
-    data.join("bugs/inbox")
+    data.join("bugs/notes")
 }
 
 /// Where handled notes go: `bugs/resolved` beside the inbox.
@@ -170,6 +170,9 @@ fn mentions(text: &str, id: &str) -> bool {
 pub fn reconcile(inbox: &Path, commits: &[(String, String, String)], now_ms: u64) -> Result<Vec<(String, String)>> {
     let mut done = Vec::new();
     for id in list(inbox).iter().filter_map(|n| n["id"].as_str().map(str::to_owned)) {
+        // A note left open on purpose (`## Shelved: …`, `## Reopened …`) stays open though commits name it: the
+        // integrator reopened it after an earlier reconcile closed it (7 Nov: the call-behaviour note, twice).
+        if kept_open(&std::fs::read_to_string(inbox.join(format!("{id}.md"))).unwrap_or_default()) { continue; }
         let naming: Vec<&(String, String, String)> = commits.iter().filter(|(_, _, msg)| mentions(msg, &id)).collect();
         let Some((sha, subject, _)) = naming.first() else { continue };
         let mut text = format!("Fixed on main by {sha}: {subject}");
@@ -182,6 +185,11 @@ pub fn reconcile(inbox: &Path, commits: &[(String, String, String)], now_ms: u64
         done.push((id, text));
     }
     Ok(done)
+}
+
+/// A note's Markdown says it stays open on purpose: a `## Shelved` or `## Reopened` section.
+pub fn kept_open(md: &str) -> bool {
+    md.lines().any(|l| l.starts_with("## Shelved") || l.starts_with("## Reopened"))
 }
 
 /// The night round handled note `id`: move it to `bugs/resolved` with what was done, leaving nothing in the inbox.
@@ -233,14 +241,6 @@ pub fn resolve(inbox: &Path, id: &str, resolution: &str, now_ms: u64) -> Result<
         }
     }
     Ok(out)
-}
-
-/// Resolve every handled note; notes not in `handled` stay in the inbox. Returns how many were resolved.
-pub fn resolve_all(inbox: &Path, handled: &[(&str, &str)], now_ms: u64) -> Result<usize> {
-    for (id, resolution) in handled {
-        resolve(inbox, id, resolution, now_ms)?;
-    }
-    Ok(handled.len())
 }
 
 fn ensure_id(id: &str) -> Result<()> {
@@ -313,14 +313,44 @@ fn sentences(text: &str) -> usize {
     (0..chars.len()).filter(|&i| matches!(chars[i], '.' | '!' | '?') && chars.get(i + 1).is_none_or(|c| c.is_whitespace())).count()
 }
 
-/// Writes `cause` into open note `id` (checked by `check_cause`) and rewrites its `.md` to show it. A note keeps its
-/// last cause: the night pass or the coordinator may replace a scout's.
+/// Writes `cause` into open note `id` (checked by `check_cause`) and rewrites its `.md` to show it, keeping what a
+/// person added (`## Shelved: …`, `## Reopened …`). A note keeps its last cause: the night pass or the coordinator may
+/// replace a scout's.
 pub fn set_cause(inbox: &Path, id: &str, cause: &Value) -> Result<Value> {
     let mut record = get(inbox, id)?;
+    let old = record.clone();
     record["cause"] = check_cause(cause).with_context(|| format!("cause for {id}"))?;
+    let md_path = inbox.join(format!("{id}.md"));
+    let added = added_by_hand(&std::fs::read_to_string(&md_path).unwrap_or_default(), &old);
+    let mut md = summary(&record);
+    if !added.is_empty() && !added.starts_with('\n') {
+        md.push('\n');
+    }
+    md += &added;
     heimdall_archive::atomic_write(&inbox.join(format!("{id}.json")), &serde_json::to_vec_pretty(&record)?)?;
-    heimdall_archive::atomic_write(&inbox.join(format!("{id}.md")), summary(&record).as_bytes())?;
+    heimdall_archive::atomic_write(&md_path, md.as_bytes())?;
     Ok(record)
+}
+
+/// What a person added to note Markdown `md` beyond the summary `old` made: the text after that summary, or, when the
+/// summary itself was edited, every `##` section the summary does not write (`## Cause`, `## Evidence`).
+fn added_by_hand(md: &str, old: &Value) -> String {
+    if let Some(tail) = md.strip_prefix(summary(old).as_str()) {
+        return tail.to_owned();
+    }
+    let (mut out, mut keep, mut fenced) = (String::new(), false, false);
+    for line in md.split_inclusive('\n') {
+        if !fenced && line.starts_with("## ") {
+            keep = !(line.starts_with("## Cause") || line.starts_with("## Evidence"));
+        }
+        if line.starts_with("```") {
+            fenced = !fenced;
+        }
+        if keep {
+            out += line;
+        }
+    }
+    out
 }
 
 fn cause_section(c: &Value) -> String {
@@ -424,18 +454,18 @@ mod tests {
     #[test]
     fn the_inbox_is_in_the_data_folder_unless_a_checkout_is_configured() {
         let t = tempfile::tempdir().unwrap();
-        assert_eq!(data_inbox(t.path()), t.path().join("bugs/inbox"));
+        assert_eq!(data_inbox(t.path()), t.path().join("bugs/notes"));
         assert_eq!(setting_inbox(t.path()), None);
         std::fs::write(t.path().join("settings.json"), r#"{"bug_inbox":"relative/inbox"}"#).unwrap();
         assert_eq!(setting_inbox(t.path()), None, "only a full path");
-        std::fs::write(t.path().join("settings.json"), r#"{"dry_run":true,"bug_inbox":"/code/bugs/inbox"}"#).unwrap();
-        assert_eq!(setting_inbox(t.path()), Some(PathBuf::from("/code/bugs/inbox")));
+        std::fs::write(t.path().join("settings.json"), r#"{"dry_run":true,"bug_inbox":"/code/bugs/notes"}"#).unwrap();
+        assert_eq!(setting_inbox(t.path()), Some(PathBuf::from("/code/bugs/notes")));
     }
 
     #[test]
     fn a_note_is_plain_text_with_its_evidence_private_and_complete() {
         let t = tempfile::tempdir().unwrap();
-        let inbox = t.path().join("bugs/inbox");
+        let inbox = t.path().join("bugs/notes");
         let text = "Zażółć gęślą jaźń — the t3_workers result was a wall of JSON 🧱 at 12:32; expected one line per worker.";
         let r = write(&inbox, &format!("  {text}\n"), Some("{\"workers\":[…]}"), NOW).unwrap();
         let id = r["id"].as_str().unwrap();
@@ -463,7 +493,7 @@ mod tests {
     #[test]
     fn a_commit_naming_an_open_note_is_reported_until_the_note_is_resolved() {
         let t = tempfile::tempdir().unwrap();
-        let inbox = t.path().join("bugs/inbox");
+        let inbox = t.path().join("bugs/notes");
         let first = write(&inbox, "first", None, NOW).unwrap()["id"].as_str().unwrap().to_owned();
         // Same second, so the second note's ID is `<first>-2`.
         let second = write(&inbox, "second", None, NOW).unwrap()["id"].as_str().unwrap().to_owned();
@@ -478,7 +508,7 @@ mod tests {
     #[test]
     fn a_note_whose_fix_is_on_main_is_resolved_with_that_commit_and_the_rest_stay() {
         let t = tempfile::tempdir().unwrap();
-        let inbox = t.path().join("bugs/inbox");
+        let inbox = t.path().join("bugs/notes");
         let fixed = write(&inbox, "fixed", None, NOW).unwrap()["id"].as_str().unwrap().to_owned();
         let sibling = write(&inbox, "same second", None, NOW).unwrap()["id"].as_str().unwrap().to_owned();
         let open = write(&inbox, "open", None, NOW + 5_000).unwrap()["id"].as_str().unwrap().to_owned();
@@ -498,6 +528,41 @@ mod tests {
         let md = std::fs::read_to_string(resolved_dir(&inbox).unwrap().join(format!("{fixed}.md"))).unwrap();
         assert!(md.contains("Fixed on main by bbb2222"));
         assert!(reconcile(&inbox, &commits, NOW).unwrap().is_empty(), "a second run resolves nothing more");
+    }
+
+    /// 7 Nov: reconcile closed the shelved call-behaviour note a second time; a note kept open on purpose stays.
+    #[test]
+    fn reconcile_leaves_a_shelved_or_reopened_note_open() {
+        let t = tempfile::tempdir().unwrap();
+        let inbox = t.path().join("bugs/notes");
+        let shelved = write(&inbox, "needs a decider", None, NOW).unwrap()["id"].as_str().unwrap().to_owned();
+        let reopened = write(&inbox, "reopened", None, NOW + 5_000).unwrap()["id"].as_str().unwrap().to_owned();
+        for (id, section) in [(&shelved, "## Shelved: needs Decider v7\n\nItem 1."), (&reopened, "## Reopened 2026-11-05\n\nOn purpose.")] {
+            let md = inbox.join(format!("{id}.md"));
+            let text = std::fs::read_to_string(&md).unwrap();
+            std::fs::write(&md, format!("{text}\n{section}\n")).unwrap();
+        }
+        // A cause written after the section (`bugs set-cause`, a scout re-run) rewrites the summary and keeps it.
+        let cause = json!({"class": "decider", "reasoning": "Needs training.", "confidence": 0.7});
+        set_cause(&inbox, &shelved, &cause).unwrap();
+        // The same when the person also edited the summary itself.
+        let md = inbox.join(format!("{reopened}.md"));
+        std::fs::write(&md, std::fs::read_to_string(&md).unwrap().replace("reopened", "reopened, edited by hand")).unwrap();
+        set_cause(&inbox, &reopened, &cause).unwrap();
+        for (id, kept) in [(&shelved, "## Shelved: needs Decider v7\n\nItem 1.\n"), (&reopened, "## Reopened 2026-11-05\n\nOn purpose.\n")] {
+            let md = std::fs::read_to_string(inbox.join(format!("{id}.md"))).unwrap();
+            assert!(md.contains("## Cause: decider") && md.ends_with(kept), "{md}");
+            assert_eq!(md.matches("## Cause").count(), 1, "{md}");
+        }
+        let c = |sha: &str, msg: String| (sha.to_owned(), msg.lines().next().unwrap().to_owned(), msg);
+        let commits = [c("aaa1111", format!("Fix part of it\n\nFixes bug note {shelved}.\nFixes bug note {reopened}."))];
+        assert!(reconcile(&inbox, &commits, NOW).unwrap().is_empty());
+        assert_eq!(list(&inbox).len(), 2);
+        // A second cause replaces the first and still keeps the section.
+        set_cause(&inbox, &shelved, &json!({"class": "code", "reasoning": "A state bug.", "confidence": 0.6})).unwrap();
+        let md = std::fs::read_to_string(inbox.join(format!("{shelved}.md"))).unwrap();
+        assert!(md.contains("## Cause: code") && !md.contains("## Cause: decider") && md.contains("## Shelved"), "{md}");
+        assert!(kept_open("x\n## Shelved: later\n") && !kept_open("text mentioning ## Shelved inline"));
     }
 
     #[test]
@@ -560,15 +625,16 @@ mod tests {
     #[test]
     fn night_round_clears_handled_notes_and_keeps_the_rest() {
         let t = tempfile::tempdir().unwrap();
-        let inbox = t.path().join("bugs/inbox");
+        let inbox = t.path().join("bugs/notes");
         let a = write(&inbox, "speak returned a wall of JSON", None, NOW).unwrap();
         let b = write(&inbox, "island stuck on Working", Some("log line"), NOW).unwrap();
         let c = write(&inbox, "not fixed tonight", None, NOW).unwrap();
         // A hand-written note without a record is resolvable too.
         std::fs::write(inbox.join("2026-10-18T16-45-47.md"), "# Bug note (from User via coordinator)\n\nJarvis voice missing").unwrap();
         let (a, b, c) = (a["id"].as_str().unwrap(), b["id"].as_str().unwrap(), c["id"].as_str().unwrap());
-        let n = resolve_all(&inbox, &[(a, "Fixed in abc123: one line per result."), (b, "Fixed: the glyph ends with the turn."), ("2026-10-18T16-45-47", "Jarvis is loaded first.")], NOW + 1000).unwrap();
-        assert_eq!(n, 3);
+        for (id, resolution) in [(a, "Fixed in abc123: one line per result."), (b, "Fixed: the glyph ends with the turn."), ("2026-10-18T16-45-47", "Jarvis is loaded first.")] {
+            resolve(&inbox, id, resolution, NOW + 1000).unwrap();
+        }
         assert_eq!(files(&inbox), [format!("{c}.json"), format!("{c}.md")]);
         assert_eq!(list(&inbox).len(), 1);
         let resolved = t.path().join("bugs/resolved");
@@ -645,7 +711,7 @@ mod tests {
     #[test]
     fn decider_cases_export_only_labelled_decider_notes_open_or_resolved() {
         let t = tempfile::tempdir().unwrap();
-        let inbox = t.path().join("bugs/inbox");
+        let inbox = t.path().join("bugs/notes");
         let wake = write(&inbox, "User said shut up and Heimdall acked.", None, NOW).unwrap()["id"].as_str().unwrap().to_owned();
         let code = write(&inbox, "Island stuck.", None, NOW + 1000).unwrap()["id"].as_str().unwrap().to_owned();
         let old = write(&inbox, "Decider woke late.", None, NOW + 2000).unwrap()["id"].as_str().unwrap().to_owned();

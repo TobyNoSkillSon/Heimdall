@@ -90,6 +90,54 @@ pub(crate) fn agent_row(target: Option<Result<(String, String, BackgroundModel),
     row("agent", "Agent", detail, "sparkles", state)
 }
 
+/// The Keychain item that holds the agent's key or sign-in: the API provider's, or T3's pairing for the relay.
+pub(crate) fn agent_secret(s: &crate::settings::Settings) -> Option<&'static str> {
+    if s.agent_relay {
+        return Some(t3::client::KEYCHAIN_SERVICE);
+    }
+    match &s.agent_model {
+        agent::provider::AgentModel::Api { provider, .. } => agent::provider::provider(provider).map(|p| p.keychain_service),
+        _ => None,
+    }
+}
+
+/// The agent's row when the Keychain door cannot read its key (`keychain::Store::problem`): a problem with the fix, never
+/// a green tick (VM run 14 Nov, upgrade from alpha.1: the item alpha.1 saved answered errSecAuthFailed, the test
+/// endpoint answered without a key, and the row was green). Unlocking cannot fix an item an earlier build saved, so the
+/// words send the user to save the key again.
+pub(crate) fn agent_key_problem(r: ui::ReadyRow, cause: Option<keychain::Cause>, relay: bool) -> ui::ReadyRow {
+    let Some(cause) = cause else { return r };
+    // No agent chosen (no label): that row's own problem stands.
+    if r.detail.is_none() {
+        return r;
+    }
+    let (again, fix) = if relay {
+        ("connect T3 Code again", ui::ReadyFix::Step { title: "Connect\u{2026}".into(), step: ui::SetupStep::T3 })
+    } else {
+        ("re-enter it in Providers", ui::ReadyFix::Step { title: "Re-enter Key\u{2026}".into(), step: ui::SetupStep::Providers })
+    };
+    let what = if relay { "T3 pairing" } else { "saved key" };
+    let why = match cause {
+        keychain::Cause::Unreadable => format!("This build can\u{2019}t read the {what}: {again}"),
+        keychain::Cause::Locked => format!("Keychain locked: unlock it, or {again}"),
+        keychain::Cause::Blocked => "Keychain not answering: unlock it or close its prompt".to_string(),
+        keychain::Cause::Failed => format!("Couldn\u{2019}t read the {what}: {again}"),
+    };
+    ui::ReadyRow { state: problem(&why, Some(fix)), ..r }
+}
+
+/// The microphone's row while macOS denies Heimdall the microphone (`AVCaptureDevice` says denied or restricted): the
+/// capture runs but hears silence, so without this the row said "No sound from …" with Choose…, which cannot help (VM
+/// run 14 Nov, upgrade from alpha.1: the grant belonged to the old signature). Allow… goes to the page whose button
+/// opens System Settings.
+pub(crate) fn microphone_access(r: ui::ReadyRow, denied: bool) -> ui::ReadyRow {
+    if !denied || matches!(&r.state, ui::ReadyState::Problem { why, .. } if why == "No microphone found") {
+        return r;
+    }
+    let fix = ui::ReadyFix::Step { title: "Allow\u{2026}".into(), step: ui::SetupStep::Permissions };
+    ui::ReadyRow { state: problem("Microphone access is off in System Settings", Some(fix)), ..r }
+}
+
 /// The voice's row: Phonon S speaking the chosen preset, learnt (its profile, so Heimdall knows its own voice).
 pub(crate) fn voice_row(speaking: bool, preset: Option<&str>, learnt: bool, learning: bool, waits: bool) -> ui::ReadyRow {
     let detail = preset.map(|p| format!("Phonon S \u{b7} {p}"));
@@ -214,8 +262,9 @@ pub(crate) fn system_audio_row(access: Option<capture::tap_gate::TapAccess>, den
     Some(row("system-audio", "System audio", None, "waveform.circle", ui::ReadyState::Optional { why, fix }))
 }
 
-/// The free memory memory search's worker needs to load (`embedding/worker.py`'s admission).
-pub(crate) const MEMORY_NEEDED: u64 = 8 << 30;
+/// The free memory memory search's worker needs to load (`Worker.swift`'s admission).
+pub(crate) const MEMORY_NEEDED: u64 = heimdall_archive::embedding::ADMISSION_GIB << 30;
+fn needs_memory() -> String { format!("Needs {} GB free memory", heimdall_archive::embedding::ADMISSION_GIB) }
 
 /// Memory search's row, once its model is downloaded (until then its download row stands): green once the worker
 /// loaded and embedded; otherwise not needed to start (`Optional`), with why: too little free memory (VM run 5 Nov
@@ -225,8 +274,8 @@ pub(crate) fn memory_row(downloaded: bool, search: crate::embeddings::Search, fr
     if !downloaded { return None; }
     let state = match search {
         Search::Running => ui::ReadyState::Ready,
-        Search::NoMemory => ui::ReadyState::Optional { why: "Needs 8 GB free memory".into(), fix: None },
-        Search::NotYet if free.is_some_and(|f| f < MEMORY_NEEDED) => ui::ReadyState::Optional { why: "Needs 8 GB free memory".into(), fix: None },
+        Search::NoMemory => ui::ReadyState::Optional { why: needs_memory(), fix: None },
+        Search::NotYet if free.is_some_and(|f| f < MEMORY_NEEDED) => ui::ReadyState::Optional { why: needs_memory(), fix: None },
         Search::NotYet => ui::ReadyState::Optional { why: "Starts with the first thing to index".into(), fix: None },
     };
     Some(row("memory", "Memory search", Some("EmbeddingGemma 2".into()), "magnifyingglass", state))
@@ -270,7 +319,7 @@ impl Pipeline {
         let name = shown.and_then(|id| inputs.iter().find(|d| d.id == id).map(|d| d.name.clone()).or_else(|| capturing.as_ref().map(|(_, n)| n.clone())));
         let listening_on = self.live_worker.as_ref().is_some_and(|w| w.is_ready() && !w.is_finished());
         let start = capture_start(listening_on, self.capture_starting.is_some(), self.component_status.get("capture").cloned());
-        let mic = microphone_row(inputs.len(), name, hearing, self.capture_since.map(|t| t.elapsed()), start);
+        let mic = microphone_access(microphone_row(inputs.len(), name, hearing, self.capture_since.map(|t| t.elapsed()), start), self.mic_denied);
         let mic_ready = mic.state == ui::ReadyState::Ready;
         rows.push(mic);
         rows.push(voice_row(self.settings.speak_replies, preset.as_deref(), learnt, learning, waits));
@@ -291,7 +340,9 @@ impl Pipeline {
             engine_waits = r.state != ui::ReadyState::Ready;
             rows.push(r);
         }
-        rows.push(agent_row(agent_target(&self.settings, &self.tools.relay_catalog.lists()), &self.agent_check, engine_waits));
+        let agent = agent_row(agent_target(&self.settings, &self.tools.relay_catalog.lists()), &self.agent_check, engine_waits);
+        let key = agent_secret(&self.settings).and_then(|service| keychain::store().problem(service));
+        rows.push(agent_key_problem(agent, key, self.settings.agent_relay));
         ui::SetupReadiness { rows }
     }
 

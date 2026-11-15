@@ -383,7 +383,7 @@ pub fn tiles(t: &Telemetry, clock: &dyn Fn(u64) -> String) -> Vec<Tile> {
 /// A turn's heading after its time: what started it, how it ended (coloured) and the facts ("6.2 s · 3 tools").
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Heading {
-    pub what: &'static str,
+    pub what: String,
     pub outcome: &'static str,
     pub outcome_tone: Tone,
     pub facts: String,
@@ -391,10 +391,10 @@ pub struct Heading {
 
 pub fn turn_heading(t: &Turn) -> Heading {
     let what = match t.trigger {
-        Trigger::Wake => "Wake",
-        Trigger::Typed => crate::identity::USER_HEADING,
-        Trigger::Context => "Context",
-        Trigger::Earlier => "Earlier",
+        Trigger::Wake => "Wake".into(),
+        Trigger::Typed => crate::identity::user_heading(),
+        Trigger::Context => "Context".into(),
+        Trigger::Earlier => "Earlier".into(),
     };
     let (outcome, tone) = match t.outcome {
         Outcome::Running => ("Running", Tone::Blue),
@@ -502,7 +502,7 @@ mod tests {
             error: false,
             sent: true,
             queued: false,
-            owner_text: None,
+            user_text: None,
             usage: None,
         }
     }
@@ -532,7 +532,7 @@ mod tests {
     /// wait that travels as a Compaction row.
     fn fixture() -> Vec<Row> {
         let mut typed = e("m1", 60, AgentLiveKind::Prompt, "[Heimdall delivery: m1]\n[Heimdall typed message]\nrun the tests");
-        typed.owner_text = Some("run the tests".into());
+        typed.user_text = Some("run the tests".into());
         let mut rate = e("provider-rate-wait", 62, AgentLiveKind::Compaction, "Anthropic rate limit · retrying in 5 seconds");
         rate.finished = true;
         [
@@ -578,7 +578,7 @@ mod tests {
         assert_eq!(turn_start(&rows, 9), 8);
         assert_eq!(turn_at(&rows, 8, &HashMap::new(), false), t[1]);
         let h = turn_heading(&t[0]);
-        assert_eq!((h.what, h.outcome), ("Wake", "Spoke"));
+        assert_eq!((h.what.as_str(), h.outcome), ("Wake", "Spoke"));
         assert_eq!(h.facts, "8.0 s · first token 1.0 s · 3 tools · 1 failed · 250 out");
         assert_eq!(h.outcome_tone, Tone::Orange, "a turn with a failed tool is not plain green");
         assert_eq!(turn_heading(&t[3]).outcome_tone, Tone::Red);

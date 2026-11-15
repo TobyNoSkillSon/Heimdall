@@ -413,8 +413,8 @@ fn valued_title(title: &str, value: &str, stop: f64, dimmed: bool, mark: Option<
     Retained::into_super(out)
 }
 
-/// Where the values' right edge sits in a title: as far right as the menu keeps its width, measured once with AppKit
-/// (a menu with a submenu row so titled, and Quit's ⌘Q column, laid out at the tiles' width).
+// Where the values' right edge sits in a title: as far right as the menu keeps its width, measured once with AppKit
+// (a menu with a submenu row so titled, and Quit's ⌘Q column, laid out at the tiles' width).
 thread_local! { static VALUE_STOP: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) }; }
 
 fn value_stop() -> f64 {
@@ -653,6 +653,92 @@ pub(crate) fn islands_shown_item(on: bool, target: Option<&AnyObject>, mtm: Main
     (item, row)
 }
 
+// ---- islands display (night 1107, bug note 2026-11-07T02-02-35) ----
+pub(crate) const ISLANDS_DISPLAY_TITLE: &str = "Islands Display";
+pub(crate) const ISLANDS_DISPLAY_ICON: &str = "display";
+/// A row's tag for Follow Cursor; a display's row is tagged with its index among the connected displays.
+pub(crate) const FOLLOW_TAG: isize = -1;
+/// The locked display while it is not connected: shown, checked and greyed (the islands follow meanwhile).
+const ABSENT_TAG: isize = -2;
+
+/// One row of Islands Display ▸.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DisplayRow {
+    pub title: String,
+    pub icon: &'static str,
+    pub checked: bool,
+    pub enabled: bool,
+    pub tag: isize,
+}
+
+/// Islands Display ▸'s rows: Follow Cursor, then each connected display by macOS's name. The checked row is where the
+/// islands go: Follow Cursor while unlocked; the locked display; a locked display not connected is listed last,
+/// checked and greyed, while the islands follow the pointer until it is back.
+pub(crate) fn islands_display_rows(connected: &[String], locked: Option<&str>) -> Vec<DisplayRow> {
+    let names: Vec<&str> = connected.iter().map(String::as_str).collect();
+    let found = locked.and_then(|l| crate::islands_display::find(&names, l));
+    let mut rows = vec![DisplayRow { title: crate::islands_display::FOLLOW_TITLE.into(), icon: "cursorarrow", checked: locked.is_none(), enabled: true, tag: FOLLOW_TAG }];
+    for (i, name) in connected.iter().enumerate() {
+        let icon = if name.to_lowercase().contains("built-in") { "laptopcomputer" } else { "display" };
+        rows.push(DisplayRow { title: name.clone(), icon, checked: found == Some(i), enabled: true, tag: i as isize });
+    }
+    if let (Some(l), None) = (locked, found) {
+        rows.push(DisplayRow { title: l.to_string(), icon: "display", checked: true, enabled: false, tag: ABSENT_TAG });
+    }
+    rows
+}
+
+/// Islands Display ▸ as a menu (`selectIslandsDisplay:`).
+pub(crate) fn islands_display_menu(connected: &[String], locked: Option<&str>, target: Option<&AnyObject>, mtm: MainThreadMarker) -> Retained<NSMenu> {
+    let menu = NSMenu::new(mtm);
+    menu.setAutoenablesItems(false);
+    for (k, row) in islands_display_rows(connected, locked).into_iter().enumerate() {
+        if k == 1 {
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
+        }
+        let item = menu_item(&row.title, Some(row.icon), row.enabled.then_some(sel!(selectIslandsDisplay:)), "", if row.enabled { target } else { None }, mtm);
+        item.setTag(row.tag);
+        item.setState(if row.checked { NSControlStateValueOn } else { NSControlStateValueOff });
+        item.setEnabled(row.enabled);
+        menu.addItem(&item);
+    }
+    show_menu_images(&menu);
+    menu
+}
+
+/// The connected displays' names, as the menu lists them now.
+pub(crate) fn connected_displays(mtm: MainThreadMarker) -> Vec<String> {
+    objc2_app_kit::NSScreen::screens(mtm).iter().map(|s| s.localizedName().to_string()).collect()
+}
+
+/// Islands Display ▸'s rows again (a setting changed, the displays changed), in the same submenu.
+pub(crate) fn sync_islands_display(state: &mut State) {
+    let Some(item) = state.islands_display_item.clone() else { return };
+    let connected = connected_displays(state.mtm);
+    // Only when the displays or the lock changed: other syncs (an engine download's progress) leave its rows alone.
+    let shown = (connected.clone(), state.settings_value.islands_display.clone());
+    if state.islands_display_shown.as_ref() == Some(&shown) {
+        return;
+    }
+    state.islands_display_shown = Some(shown);
+    let target = state.target();
+    let fresh = islands_display_menu(&connected, state.settings_value.islands_display.as_deref(), Some(&*target), state.mtm);
+    state.islands_display_names = connected;
+    refill(&item, &fresh);
+}
+
+/// Islands Display as the menu builds it, for offscreen renders: the window rows with the submenu's rows below.
+pub(crate) fn islands_display_preview(connected: &[String], locked: Option<&str>, mtm: MainThreadMarker) -> (Retained<NSMenu>, Retained<NSMenu>) {
+    let menu = NSMenu::new(mtm);
+    menu.addItem(&islands_shown_item(true, None, mtm).0);
+    let sub = islands_display_menu(connected, locked, None, mtm);
+    menu.addItem(&submenu_item(ISLANDS_DISPLAY_TITLE, Some(ISLANDS_DISPLAY_ICON), &islands_display_menu(connected, locked, None, mtm), mtm));
+    menu.addItem(&menu_item("Open Transcript", Some("text.alignleft"), None, "", None, mtm));
+    show_menu_images(&menu);
+    (menu, sub)
+}
+// ---- end islands display ----
+
 /// Show Islands on Streams: the island in screen shares and streams or not, last in Seeing ▸
 /// Recording ("Show Islands on Streams should go to Recordings"). Toggles in place like Wake Sound.
 pub(crate) fn islands_on_streams_item(on: bool, target: Option<&AnyObject>, mtm: MainThreadMarker) -> (Retained<NSMenuItem>, Retained<controls::CheckRow>) {
@@ -797,6 +883,9 @@ pub fn build(state: &mut State) {
     agent_model_item(state, &menu, target, mtm);
     if let Some((item, row)) = &state.session_item { sync_session(item, row, state); }
     // [/providers]
+    let (item, row) = computer_control_item(state.settings_value.computer_control, target, mtm);
+    menu.addItem(&item);
+    state.computer_control_row = Some(row);
     // [chrome] "Rename 'Open agent' to 'Debug agent'" (the [debug] worker's window behind it).
     menu.addItem(&menu_item(DEBUG_AGENT_TITLE, Some("waveform.path.ecg"), Some(sel!(openAgent:)), "", target, mtm));
     end_section(state, &menu, MenuSection::Agent, header, from);
@@ -872,6 +961,14 @@ pub fn build(state: &mut State) {
     let (shown, row) = islands_shown_item(state.settings_value.islands_shown, target, mtm);
     state.islands_shown_row = Some(row);
     menu.addItem(&shown);
+    // Islands Display ▸ (night 1107): follow the pointer or stay on one display.
+    let connected = connected_displays(mtm);
+    let sub = islands_display_menu(&connected, state.settings_value.islands_display.as_deref(), target, mtm);
+    let display_item = submenu_item(ISLANDS_DISPLAY_TITLE, Some(ISLANDS_DISPLAY_ICON), &sub, mtm);
+    state.islands_display_shown = Some((connected.clone(), state.settings_value.islands_display.clone()));
+    state.islands_display_names = connected;
+    state.islands_display_item = Some(display_item.clone());
+    menu.addItem(&display_item);
     menu.addItem(&menu_item("Open Transcript", Some("text.alignleft"), Some(sel!(openTranscript:)), "", target, mtm));
     menu.addItem(&menu_item("Speakers…", Some("person.2"), Some(sel!(openSpeakers:)), "", target, mtm));
     // Friends (personal edition only): the submenu lists the friends as this menu builds it; its row tags index
@@ -881,7 +978,7 @@ pub fn build(state: &mut State) {
         state.friend_menu_ids = ids;
         menu.addItem(&submenu_item("Friends", Some("person.2.badge.plus"), &sub, mtm));
     }
-    // Bug Notes: personal edition only; the public edition has no bug inbox (docs/bugs.md).
+    // Bug Notes: personal edition only; the public edition has no bug inbox (docs/personal/bugs.md).
     #[cfg(not(feature = "public"))]
     menu.addItem(&menu_item(&bug_notes_title(state.bug_notes.iter().filter(|n| n.is_open()).count()), Some("ladybug"), Some(sel!(openBugNotes:)), "", target, mtm));
     // [chrome] The Archive submenu is gone ("useless; remove it"); the folder stays. A disk problem
@@ -1184,6 +1281,19 @@ pub(crate) const WAKE_SOUND_ICON: &str = "bell";
 pub const ISLANDS_ON_STREAMS_ROW: usize = 3;
 pub(crate) const ISLANDS_ON_STREAMS_TITLE: &str = "Show Islands on Streams";
 pub(crate) const ISLANDS_ON_STREAMS_ICON: &str = "dot.radiowaves.left.and.right";
+/// `check_row_clicked` index of Agent ▸ Control Apps (past the sections' 20 on and Add Provider's 10 on).
+pub const COMPUTER_CONTROL_ROW: usize = 40;
+pub(crate) const COMPUTER_CONTROL_TITLE: &str = "Control Apps";
+pub(crate) const COMPUTER_CONTROL_ICON: &str = "cursorarrow.click.2";
+/// Agent ▸ Control Apps (bug note 2026-10-22T19-16-01): the agent's `computer` tool on or off. Toggles in place like
+/// Wake Sound; off by default.
+pub(crate) fn computer_control_item(on: bool, target: Option<&AnyObject>, mtm: MainThreadMarker) -> (Retained<NSMenuItem>, Retained<controls::CheckRow>) {
+    let item = menu_item(COMPUTER_CONTROL_TITLE, Some(COMPUTER_CONTROL_ICON), Some(sel!(toggleComputerControl:)), "", target, mtm);
+    item.setTag(COMPUTER_CONTROL_ROW as isize);
+    let row = controls::CheckRow::new(COMPUTER_CONTROL_ROW, COMPUTER_CONTROL_TITLE, Some(COMPUTER_CONTROL_ICON), on, mtm);
+    item.setView(Some(&row));
+    (item, row)
+}
 
 /// [providers] Agent ▸ Model: the sub-table (`api_providers_menu`) with the built-in engine inside Local. The engine's
 /// radios, facts and thinking selector keep their state slots, so choosing and syncing work as they did.
@@ -2569,8 +2679,10 @@ pub fn sync_tracking(state: &mut State) {
     if let Some(paused) = &state.background_paused { super::background_paused::sync(paused, &state.background_task_rows, &state.settings_value.background_off, &state.relay, &|t| super::background_picker::paused_value(state, t)); }
     if let Some(row) = &state.relay_row { row.setState(if relay_drawn(state) { NSControlStateValueOn } else { NSControlStateValueOff }); }
     if let Some(row) = &state.islands_shown_row { row.set_on(state.settings_value.islands_shown); }
+    sync_islands_display(state); // Islands Display (night 1107)
     sync_shortcuts(state);
     if let Some(row) = &state.islands_on_streams_row { row.set_on(state.settings_value.islands_on_streams); }
+    if let Some(row) = &state.computer_control_row { row.set_on(state.settings_value.computer_control); } // night1111 computer control
     if let Some(row) = &state.speed_row { row.set_percent(state.settings_value.voice_speed_percent); }
     super::speaking_menu::sync(state); // [speech] night 1022
     super::personalise::sync(state);
@@ -2852,3 +2964,28 @@ mod tests {
         assert_eq!(two[..4].iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), ["960 × 540", "1280 × 720", "Half Native", "Native"]);
     }
 }
+
+// ---- islands display (night 1107, bug note 2026-11-07T02-02-35) ----
+#[cfg(test)]
+mod islands_display_tests {
+    use super::{islands_display_rows, FOLLOW_TAG};
+
+    /// Islands Display ▸: Follow Cursor checked by default; the locked display checked when connected; unplugged, it
+    /// stays listed, checked and greyed, while the islands follow the pointer.
+    #[test]
+    fn the_rows_show_where_the_islands_go() {
+        let both = vec!["Built-in Retina Display".to_string(), "MSI MAG 271QPX".to_string()];
+        let rows = islands_display_rows(&both, None);
+        assert_eq!(rows.iter().map(|r| r.title.as_str()).collect::<Vec<_>>(), ["Follow Cursor", "Built-in Retina Display", "MSI MAG 271QPX"]);
+        assert_eq!(rows.iter().map(|r| r.checked).collect::<Vec<_>>(), [true, false, false]);
+        assert_eq!((rows[0].tag, rows[1].tag, rows[2].tag), (FOLLOW_TAG, 0, 1));
+        assert_eq!((rows[1].icon, rows[2].icon), ("laptopcomputer", "display"));
+        let rows = islands_display_rows(&both, Some("MSI MAG 271QPX"));
+        assert_eq!(rows.iter().map(|r| r.checked).collect::<Vec<_>>(), [false, false, true]);
+        let rows = islands_display_rows(&both[..1], Some("MSI MAG 271QPX"));
+        assert_eq!(rows.len(), 3);
+        assert!(rows[2].checked && !rows[2].enabled && rows[2].title == "MSI MAG 271QPX", "{rows:?}");
+        assert!(!rows[0].checked, "the lock is kept for when it is back");
+    }
+}
+// ---- end islands display ----

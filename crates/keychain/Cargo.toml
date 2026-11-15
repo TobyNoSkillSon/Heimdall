@@ -1,0 +1,16 @@
+[package]
+name = "keychain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Heimdall's one door to the login Keychain: only the installed app reads it, never with a prompt, never longer than a second on the caller's thread; tests and lab runs get an isolated store."
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+# The public edition (app's `public` feature via agent, docs/editions.md): its bundle is Heimdall Alpha.app.
+public = []

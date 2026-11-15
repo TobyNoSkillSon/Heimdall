@@ -7,12 +7,31 @@ use std::path::Path;
 pub const START: &str = "<available_skills>";
 pub const END: &str = "</available_skills>";
 
-/// One skill: its name and description from the frontmatter, and its folder's name.
+/// Whose a skill is (docs/skills.md, "Two layers"). A `public` skill is true for any user and ships in the app and
+/// the public repository; a `private` one is one user's own and lives only in their data folder. Each `SKILL.md`
+/// declares it as `class:` under `metadata:` in its frontmatter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Class {
+    Public,
+    Private,
+}
+impl Class {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Class::Public => "public",
+            Class::Private => "private",
+        }
+    }
+}
+
+/// One skill: its name and description from the frontmatter, its folder's name, and the class it declares (None when
+/// it declares none or an unknown one).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Skill {
     pub name: String,
     pub description: String,
     pub folder: String,
+    pub class: Option<Class>,
 }
 
 /// The skills in `dirs`, each subfolder with a `SKILL.md` that has a description and no
@@ -51,7 +70,27 @@ pub fn parse(text: &str, folder: &str) -> Option<Skill> {
     }
     let description = field("description").filter(|d| !d.is_empty())?;
     let name = field("name").filter(|n| !n.is_empty()).unwrap_or_else(|| folder.to_string());
-    Some(Skill { name, description, folder: folder.to_string() })
+    Some(Skill { name, description, folder: folder.to_string(), class: class(front) })
+}
+
+/// The class a frontmatter declares: the `class:` line indented under `metadata:` (the Agent Skills field every
+/// harness ignores), `public` or `private`.
+pub fn class(front: &str) -> Option<Class> {
+    let mut in_metadata = false;
+    for line in front.lines() {
+        if !line.starts_with([' ', '\t']) {
+            in_metadata = line.trim_end() == "metadata:";
+            continue;
+        }
+        if in_metadata {
+            match line.trim().strip_prefix("class:").map(|v| unquote(v.trim())) {
+                Some("public") => return Some(Class::Public),
+                Some("private") => return Some(Class::Private),
+                _ => {}
+            }
+        }
+    }
+    None
 }
 
 fn unquote(v: &str) -> &str {
@@ -69,8 +108,14 @@ fn escape(s: &str) -> String {
 
 /// The index block, `START` to `END`, each location `<root>/<folder>/SKILL.md`.
 pub fn render(skills: &[Skill], root: &str) -> String {
+    render_located(&skills.iter().map(|s| (s.clone(), root.to_string())).collect::<Vec<_>>())
+}
+
+/// `render` for skills from several folders, each with its own root: the user's own skills and the general ones in
+/// one index.
+pub fn render_located(skills: &[(Skill, String)]) -> String {
     let mut lines = vec![START.to_string()];
-    for s in skills {
+    for (s, root) in skills {
         lines.push("  <skill>".into());
         lines.push(format!("    <name>{}</name>", escape(&s.name)));
         lines.push(format!("    <description>{}</description>", escape(&s.description)));
@@ -99,24 +144,19 @@ directory (parent of SKILL.md) and use that absolute path in tool commands.\n\n{
     )
 }
 
-/// The source files of the edition's relay prompt, relative to the agent crate: the relay section, Heimdall's prompt,
-/// and the skill sets (edition, shared) under the repository's `skills/`.
-pub fn sources(public: bool) -> (&'static str, &'static str, [&'static str; 2]) {
-    if public {
-        ("prompt/public/relay.md", "prompt/public/heimdall.md", ["../../skills/public", "../../skills/shared"])
-    } else {
-        ("prompt/relay.md", "prompt/heimdall.md", ["../../skills/heimdall", "../../skills/shared"])
-    }
+/// The source files of the relay prompt, relative to the agent crate: the relay section, Heimdall's general prompt,
+/// and the general skill sets under the repository's `skills/`. One set of sources for every edition: what differs
+/// per user is the private layer, added at runtime from their data folder (`crate::environment`).
+pub fn sources() -> (&'static str, &'static str, [&'static str; 2]) {
+    ("prompt/relay.md", "prompt/heimdall.md", ["../../skills/public", "../../skills/shared"])
 }
 
-/// The edition's relay template composed from the files under the agent crate `dir`.
-pub fn compose_from(dir: &Path, public: bool) -> std::io::Result<String> {
-    let (relay, prompt, sets) = sources(public);
+/// The relay template composed from the files under the agent crate `dir`.
+pub fn compose_from(dir: &Path) -> std::io::Result<String> {
+    let (relay, prompt, sets) = sources();
     let skills = scan(&[&dir.join(sets[0]), &dir.join(sets[1])]);
     Ok(compose(&std::fs::read_to_string(dir.join(relay))?, &std::fs::read_to_string(dir.join(prompt))?, &render(&skills, SKILLS_DIR)))
 }
 
 /// The checked-in copy of the composed template, relative to the agent crate.
-pub fn snapshot(public: bool) -> &'static str {
-    if public { "prompt/public/relay.generated.md" } else { "prompt/relay.generated.md" }
-}
+pub const SNAPSHOT: &str = "prompt/relay.generated.md";

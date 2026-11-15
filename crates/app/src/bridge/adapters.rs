@@ -180,14 +180,6 @@ impl RecordedAdapter {
                 json!({"kind":"init","session":session,"capabilities":capabilities,"api_key_source":api_key_source}),
                 None,
             ),
-            Event::Limit {
-                rejected,
-                reset,
-                status,
-            } => (
-                json!({"kind":"limit","rejected":rejected,"reset":reset,"status":status}),
-                None,
-            ),
         };
         if matches!(e, Event::Other(v) if v["type"] == "heimdall_loop_stopped") {
             self.journal.event("agent_loop_guard", self.source(), &[], capture::host_now_ns(), payload.clone())?;

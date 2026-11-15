@@ -64,25 +64,6 @@ impl Silero {
         state.context.copy_from_slice(&audio[448..]);
         Ok(p)
     }
-    /// One shared model across streams. No state advances on a failed inference.
-    pub fn probabilities(
-        &mut self,
-        audio: &[[f32; 512]],
-        states: &mut [VadState],
-    ) -> Result<Vec<f32>> {
-        ensure!(
-            (1..=32).contains(&audio.len()) && states.len() == audio.len(),
-            "VAD batch bounds"
-        );
-        let mut next = states.to_vec();
-        let p = audio
-            .iter()
-            .zip(&mut next)
-            .map(|(a, s)| self.probability(a, s))
-            .collect::<Result<Vec<_>>>()?;
-        states.clone_from_slice(&next);
-        Ok(p)
-    }
 }
 /// The ONNX Runtime Silero this crate used before the native kernel: the parity
 /// reference for tests and the agent-only probe, never the app path.
@@ -151,39 +132,6 @@ mod silero_parity {
         Ok(())
     }
 }
-/// Agent-only probe: Smart Turn as a compiled Core ML ML Program (fp16), fed the same
-/// frontend features. Measured, not shipped (see lab/history/docs/optimisation/small-models-2026-10-13.md).
-#[cfg(all(target_os = "macos", feature = "placement-probe"))]
-pub struct CoreMlTurn {
-    model: crate::coreml::Model,
-    input: crate::coreml::Array,
-}
-#[cfg(all(target_os = "macos", feature = "placement-probe"))]
-impl CoreMlTurn {
-    /// `units`: 0 CPU, 1 CPU+GPU, 2 all, 3 CPU+Neural Engine (MLComputeUnits).
-    pub fn load(path: &Path, units: isize) -> Result<Self> {
-        Ok(Self {
-            model: crate::coreml::Model::load(path, objc2_core_ml::MLComputeUnits(units))?,
-            input: crate::coreml::Array::zeros(
-                &[1, 80, 800],
-                objc2_core_ml::MLMultiArrayDataType::Float32,
-            )?,
-        })
-    }
-    pub fn probability(&mut self, features: &[f32]) -> Result<f32> {
-        self.input.copy_f32(features)?;
-        let p = self
-            .model
-            .predict(&[("input_features", &self.input)])?
-            .array("probability")?
-            .get(0);
-        ensure!(
-            p.is_finite() && (0.0..=1.0).contains(&p),
-            "Invalid Smart Turn probability"
-        );
-        Ok(p)
-    }
-}
 struct SmartTurnModel {
     session: Option<Session>,
     #[cfg(target_os = "macos")]
@@ -250,6 +198,13 @@ impl SmartTurn {
         );
         #[cfg(not(target_os = "macos"))]
         ensure!(backend == "cpu", "Metal requires macOS");
+        if backend == "metal" {
+            // Missing Metal data is a setup failure, not a GPU fault: it gets no CPU fallback that retries the GPU
+            // every 30 s under a "GPU error" status. Reload names it; the first load picks CPU (engine.rs).
+            for asset in [path.with_extension("metal.json"), path.with_extension("metal.bin")] {
+                ensure!(asset.is_file(), "Smart Turn Metal data missing: {}", asset.display());
+            }
+        }
         Ok(Self {
             state: crate::gpu_recovery::Recovery::load(backend == "metal", |gpu| {
                 SmartTurnModel::load_backend(path, if gpu { "metal" } else { "cpu" })
@@ -290,5 +245,24 @@ mod fault_model_tests {
         assert_eq!(model.probability(&audio)?, expected);
         assert!(model.state.is_gpu());
         Ok(())
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod missing_metal_tests {
+    use super::*;
+    /// CAP-5 (cleanup 14 Nov): the stock CPU turn model has no Metal data. Asking for Metal used to load CPU under a
+    /// "GPU error" fallback status and rebuild the model every 30 s; it is now a named load failure.
+    #[test]
+    fn missing_metal_turn_data_is_a_named_failure_not_a_gpu_fallback() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/smart-turn/smart-turn-v3.2-cpu.onnx");
+        if !path.is_file() {
+            eprintln!("skipped: stock Smart Turn model missing");
+            return;
+        }
+        assert!(!path.with_extension("metal.json").exists());
+        let error = SmartTurn::load_backend(&path, "metal").err().expect("Metal without its data must fail");
+        assert!(format!("{error:#}").contains("Metal data missing"), "{error:#}");
+        assert_eq!(crate::gpu_recovery::gpu_status(), None, "no GPU fallback is reported");
     }
 }

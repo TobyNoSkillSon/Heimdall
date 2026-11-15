@@ -3,7 +3,7 @@
 //! JSONL protocol, so they need no model, GPU or installed app.
 use anyhow::Result;
 use heimdall_archive::{
-    embedding::{Input, MlxEmbedder, DIMENSIONS, MODEL_ID, MODEL_VERSION},
+    embedding::{Input, MlxEmbedder, ADMISSION_GIB, DIMENSIONS, MODEL_ID, MODEL_VERSION},
     store, timeline::{self, BackfillGate, Chunk, Embedder, Model}, Journal,
 };
 use rusqlite::params;
@@ -63,7 +63,7 @@ fn native_default_query_and_cancellation_restart() {
 /// Text decides behaviour: "n:K" → one-hot vector at K, "fail" → worker-reported error,
 /// "crash" → killed by SIGKILL with the request pending (a signal death, like a Metal abort,
 /// but SIGKILL writes no crash report and opens no "quit unexpectedly" dialog), "exit" → orderly exit(1) with it pending
-/// (like the start-up memory refusal), "nobatch" → garbage reply to a batch.
+/// (a start-up failure), "lowmem" → exit 75 (the start-up memory refusal), "oldlowmem" → the refusal on stderr and exit 1 (helpers before 75), "nobatch" → garbage reply to a batch.
 /// `startup.txt` beside it holds seconds to wait before reading the first request (the real
 /// helper's self-test and weight load); "slow:K" answers after 0.5 s.
 const FAKE_WORKER: &str = r#"import json, os, signal, sys, time
@@ -104,6 +104,10 @@ for line in sys.stdin:
     t = text(r["inputs"])
     if "crash" in t:
         os.kill(os.getpid(), signal.SIGKILL)
+    if "oldlowmem" in t:
+        sys.stderr.write("EmbeddingGemma 2: embedding admission needs 8 GiB free\n"); sys.stderr.flush(); os._exit(1)
+    if "lowmem" in t:
+        os._exit(75)
     if "exit" in t:
         os._exit(1)
     if "fail" in t:
@@ -282,6 +286,24 @@ fn orderly_exits_are_not_crashes() {
     assert!(!p.safe_mode());
     p.query("n:1", &mut || true).unwrap();
     assert!(f.starts().iter().all(|s| s["safe"] == Value::Null));
+}
+
+#[test]
+fn a_refusal_to_load_for_memory_says_so_instead_of_disconnected() {
+    // 14 Nov VM run (8 GiB guest): the tool said "embedding worker disconnected without a reply".
+    let f = fake("");
+    let mut p = MlxEmbedder::with_state(&f.models, Some(f.models.join("state")));
+    let e = format!("{:#}", p.query("lowmem", &mut || true).unwrap_err());
+    assert!(e.contains("paused for low memory") && e.contains(&format!("needs {ADMISSION_GIB} GiB free")), "{e}");
+    assert!(!e.contains("disconnected"), "{e}");
+    assert!(heimdall_archive::embedding::memory_paused(&e));
+    assert!(!heimdall_archive::embedding::memory_paused("embedding worker disconnected without a reply"));
+    assert!(!p.safe_mode());
+    // A helper built before exit code 75 says it only on stderr: the same plain answer, in its own words.
+    let e = format!("{:#}", p.query("oldlowmem", &mut || true).unwrap_err());
+    assert!(e.contains("needs 8 GiB free") && e.contains("paused for low memory"), "{e}");
+    // Memory back: the next query starts the worker again.
+    p.query("n:1", &mut || true).unwrap();
 }
 
 #[test]

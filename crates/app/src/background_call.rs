@@ -270,6 +270,14 @@ impl std::fmt::Display for Stopped {
 impl std::error::Error for Stopped {}
 
 /// Whether `e` means the same input should wait for something new: over the limit, or paid for without an answer.
+/// A failed request's status and text say the request is too large for the model or the server (HTTP 413, a prompt
+/// over the context window): deterministic, unlike a server's or the network's failure.
+pub fn too_large(status: u16, text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    status == 413 || (400..500).contains(&status) && ["prompt is too long", "context length", "context_length_exceeded", "maximum context", "request_too_large", "too many tokens", "input is too long"]
+        .iter().any(|w| lower.contains(w))
+}
+
 pub fn settled(e: &anyhow::Error) -> bool { e.downcast_ref::<OverLimit>().is_some() || e.downcast_ref::<Stopped>().is_some() }
 
 /// The worst case before the call (module doc).
@@ -533,6 +541,11 @@ async fn post(e: &Endpoint, key: &str, c: &Call<'_>, hash: u64, body: &Value, wo
         crate::background_gate::mark_fault(e.provider, fault, retry_after.map(|s| now + s * 1000), &format!("HTTP {}", status.as_u16()), now);
         let msg = serde_json::from_str::<Value>(&text).map(|v| wire::message(&v)).unwrap_or_default();
         let msg = if e.provider == agent::provider::CHATGPT { agent::chatgpt::explain(&text).unwrap_or(msg) } else { msg };
+        // A request too large for the model fails the same way every time: settled, so the job does not resend it
+        // unchanged (bug note 2026-11-08T02-03-41). Nothing was billed.
+        if fault.is_none() && too_large(status.as_u16(), &text) {
+            return Err(Stopped { usage: Usage::default(), usd: 0.0, reason: format!("{} answered {status}: the request is too large ({})", provider_name(e), clean(msg)) }.into());
+        }
         bail!("{} answered {status}: {}", provider_name(e), clean(msg));
     }
     let read = match e.wire {
@@ -552,7 +565,8 @@ async fn post(e: &Endpoint, key: &str, c: &Call<'_>, hash: u64, body: &Value, wo
 /// stored key). Errors never carry the key.
 pub async fn ask(e: &Endpoint, c: &Call<'_>) -> Result<Answer> {
     let key = e.key.clone().with_context(|| format!("{} is not connected, or the background model is not on it", provider_name(e)))?;
-    let system = agent::identity::for_agent(c.system, &agent::identity::current());
+    let names = agent::identity::current();
+    let system = agent::identity::for_agent(&agent::identity::tokens(c.system, &names), &names);
     let c = &with_effort(e, &edition_worded(c, &system));
     if ui::t3_instance(e.provider).is_some() { return t3::ask(e, c).await }
     let l = Loop::for_endpoint(e);
@@ -643,25 +657,6 @@ fn round_budget(job: &'static str, m: &Model, input_bytes: usize, spent: f64, li
     Ok(Budget { max_tokens, worst_usd: input_usd + max_tokens as f64 * price.output / 1e6, prompt_tokens: tokens, limited: max_tokens < m.max_output })
 }
 
-/// The tool loop without the network, so tests can script it. `send` posts one body (with its worst case in USD) and
-/// returns the response; `run` executes one local tool and returns its text. The loop ends when the model calls
-/// `submit` (the answer is that call's input). It stops with `Stopped` on a refusal, a cut-off, a turn that ends
-/// without `submit`, or no answer within `max_rounds`; `OverLimit` when the next round no longer fits in `limit`.
-/// Every round is counted in the ledger, and the run's spend stays under `limit`. Anthropic's Messages format at
-/// Anthropic's prices: `run_tools_on` is the same loop on any format (the network path goes there directly).
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn run_tools(
-    c: &Call,
-    tools: &[Tool],
-    submit: &str,
-    max_rounds: usize,
-    limit: f64,
-    run: &mut dyn FnMut(&str, &Value) -> String,
-    send: &mut dyn FnMut(&Value, f64) -> Result<Value>,
-) -> Result<Answer> {
-    run_tools_on(&Loop { wire: Wire::Anthropic, limit: Some(limit), max_output: None, reasoning: true, efforts: 0 }, c, tools, submit, max_rounds, run, send)
-}
-
 /// How a tool loop is sent and paid for (`Loop::for_endpoint`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Loop {
@@ -689,8 +684,12 @@ fn unpriced_max_tokens(l: &Loop, id: &str) -> u64 {
     l.max_output.filter(|n| *n > 0).or_else(|| MODELS.iter().find(|m| m.id == id).map(|m| m.max_output)).unwrap_or(32_000)
 }
 
-/// `run_tools` on any request format (`background_wire`): the same `Tool`s, the same `submit`, the same stops, the
-/// same ledger lines; dollars and the limit only where `l.limit` is set.
+/// The tool loop on any request format (`background_wire`), without the network so tests can script it. `send` posts
+/// one body (with its worst case in USD) and returns the response; `run` executes one local tool and returns its text.
+/// The loop ends when the model calls `submit` (the answer is that call's input). It stops with `Stopped` on a refusal,
+/// a cut-off, a turn that ends without `submit`, or no answer within `max_rounds`; `OverLimit` when the next round no
+/// longer fits in `l.limit`. Every round is counted in the ledger; dollars and the limit only where `l.limit` is set,
+/// and then the run's spend stays under it.
 pub fn run_tools_on(
     l: &Loop,
     c: &Call,
@@ -756,14 +755,15 @@ pub fn run_tools_on(
     Err(Stopped { usage, usd: spent, reason: format!("no answer within {max_rounds} rounds") }.into())
 }
 
-/// `run_tools` on the network, on whatever `e` names (`background_model::tool_endpoint`: any provider; a job's
+/// `run_tools_on` on the network, on whatever `e` names (`background_model::tool_endpoint`: any provider; a job's
 /// `endpoint`: Anthropic): each round is one POST in `e.wire`'s format with `e`'s credential. No credential (not
 /// connected, or a job's endpoint off Anthropic): no call. Blocking: call it from a thread outside the async runtime.
 pub fn ask_tools_blocking(e: &Endpoint, c: &Call<'_>, tools: &[Tool], submit: &str, max_rounds: usize, run: &mut dyn FnMut(&str, &Value) -> String) -> Result<Answer> {
     // The tools run here; a T3 thread cannot call them (module doc).
     if ui::t3_instance(e.provider).is_some() { return Err(t3::NoToolsOnT3 { job: c.job }.into()) }
     let key = e.key.clone().with_context(|| format!("{} is not connected, or the background model is not on it", provider_name(e)))?;
-    let system = agent::identity::for_agent(c.system, &agent::identity::current());
+    let names = agent::identity::current();
+    let system = agent::identity::for_agent(&agent::identity::tokens(c.system, &names), &names);
     let c = &with_effort(e, &edition_worded(c, &system));
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let hash = prompt_hash(c);
@@ -782,8 +782,8 @@ pub(crate) fn edition_worded<'a>(c: &Call<'_>, system: &'a str) -> Call<'a> {
         history: c.history.iter().map(|t| Turn { user: word(&t.user), assistant: t.assistant.clone() }).collect(), session: c.session.clone() }
 }
 
-/// Effort names a level may carry (`Call::effort` is `&'static str`): OpenAI's, Anthropic's, T3's Claude extras.
-const EFFORT_NAMES: [&str; 11] = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "ultrathink", "ultracode", "auto"];
+// Effort names a level may carry: one list, in `background_wire`.
+use wire::EFFORT_NAMES;
 
 /// The effort a level asks for on `e`'s format: the level itself when it is a known name; the menu's "off" as the
 /// least each format takes (Messages' and T3's "low", OpenAI's "minimal"); an unknown name: `None` (the job's own).

@@ -13,7 +13,6 @@ fn path(args: &mut impl Iterator<Item = String>, name: &str) -> Result<PathBuf> 
         .into())
 }
 fn main() -> Result<()> {
-    std::env::set_var("HEIMDALL_SPEAKERS_METAL", "0");
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
   // The night fixing round's inbox (bug_notes.rs): list what is open, resolve what was handled.
@@ -69,7 +68,7 @@ fn main() -> Result<()> {
      let out=heimdall_night::bug_notes::resolve(&inbox,&id,&done,now)?;
      println!("Resolved {id}: {}; {} still open.",out.display(),heimdall_night::bug_notes::list(&inbox).len());
     }
-    // A commit that names an open note's ID fixed it: the note must be resolved before the pass ends (docs/nightly-build.md §2).
+    // A commit that names an open note's ID fixed it: the note must be resolved before the pass ends (docs/personal/nightly-build.md §2).
     Some("check")=>{
      let range=args.next().context("bugs check BASE..HEAD")?;
      let log=std::process::Command::new("git").args(["log","--format=%B",&range]).output().context("git log")?;
@@ -78,7 +77,7 @@ fn main() -> Result<()> {
      if stale.is_empty() { println!("No open bug note is named by {range}."); }
      else { bail!("{} open bug note(s) named by {range} are still in the inbox: {}; resolve each with bugs resolve",stale.len(),stale.join(", ")); }
     }
-    // A note whose fix is already on main closes with that commit (docs/bugs.md, "Closing notes"). Run from a checkout.
+    // A note whose fix is already on main closes with that commit (docs/personal/bugs.md, "Closing notes"). Run from a checkout.
     Some("reconcile")=>{
      let rev=args.next().unwrap_or_else(||"main".into());
      let log=std::process::Command::new("git").args(["log","--since=60 days ago","--format=%h%x1f%s%x1f%B%x1e",&rev]).output().context("git log")?;
@@ -112,15 +111,6 @@ fn main() -> Result<()> {
    let enroll=args.next().map(PathBuf::from);
    println!("completed_jobs={}",job::run(&dataset,&models,enroll.as_deref(),&output)?);
   }
-  Some("export")=>{
-   let snapshot=path(&mut args,"archive snapshot")?;let output=path(&mut args,"output")?;let additional=args.next().map(PathBuf::from);
-   ensure!(snapshot.join("NIGHT_SNAPSHOT").is_file(),"export requires an isolated night snapshot");
-   println!("utterances={}",heimdall_archive::export::export_with_additional(&snapshot,&output,additional.as_deref())?);
-  }
-  Some("snapshot")=>{
-   let archive=path(&mut args,"completed archive session")?;let destination=path(&mut args,"snapshot destination")?;
-   heimdall_archive::export::snapshot_archive(&archive,&destination)?;println!("snapshot={}",destination.display());
-  }
   Some("enroll-fixture")=>{
    let voices=path(&mut args,"public fixture manifest")?;let models=path(&mut args,"models")?;let output=path(&mut args,"new enrollment file")?;
    ensure!(!output.exists(),"fixture enrollment exists");
@@ -138,7 +128,7 @@ fn main() -> Result<()> {
    let mixture=path(&mut args,"mixed wav")?;let references=path(&mut args,"reference json")?;let models=path(&mut args,"models")?;let output=path(&mut args,"new lab output")?;let enroll=args.next().map(PathBuf::from);
    evaluate(mixture,references,models,output,enroll)?;
   }
-  _=>bail!("Agent CLI: bugs list | bugs resolve ID WHAT_WAS_DONE | gate | process SESSION MODELS OUTPUT [ENROLLMENTS] | snapshot SESSION DEST | export SNAPSHOT DEST [NIGHT_OUTPUT] | run DATASET MODELS OUTPUT [ENROLLMENTS] | evaluate MIX REFERENCES MODELS LAB_OUTPUT [ENROLLMENTS] | enroll-fixture VOICES MODELS NEW_ENROLLMENTS"),
+  _=>bail!("Agent CLI: bugs list | bugs resolve ID WHAT_WAS_DONE | bugs check BASE..HEAD | bugs reconcile [REV] | bugs scout ID|--open | bugs set-cause ID JSON | bugs export-decider-cases OUT.jsonl | gate | process ARCHIVE MODELS OUTPUT [ENROLLMENTS] | run DATASET MODELS OUTPUT [ENROLLMENTS] | evaluate MIX REFERENCES MODELS LAB_OUTPUT [ENROLLMENTS] | enroll-fixture VOICES MODELS NEW_ENROLLMENTS"),
  }
     Ok(())
 }

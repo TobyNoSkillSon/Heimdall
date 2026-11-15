@@ -1,6 +1,6 @@
 //! Agent-operated resident A/B probe. JSON lines in/out; private audio stays in place.
 use anyhow::{Context, Result};
-use listen::{AudioChunk, ListenConfig, ListenEngine, ListenEvent, Recognizer, Transcript};
+use listen::{AudioChunk, ListenEngine, ListenEvent, Recognizer, Transcript};
 use serde::Deserialize;
 use std::{
     cell::RefCell,
@@ -94,15 +94,7 @@ fn main() -> Result<()> {
         inner: listen::onnx::Silero::load(&models.join("silero/silero_vad.onnx"))?,
         stats: stats.clone(),
     };
-    let policy = models.join("smart-turn/owner-policy.json");
-    let mut config=ListenConfig::default();
-    let turn_path=if policy.exists(){
-        let p:serde_json::Value=serde_json::from_slice(&std::fs::read(policy)?)?;
-        config.pause_samples=p["minimum_silence_ms"].as_u64().context("turn silence")? as usize*16;
-        config.maximum_silence_samples=40000;
-        config.complete_threshold=p["threshold"].as_f64().context("turn threshold")? as f32;
-        models.join("smart-turn/owner-turn.onnx")
-    }else{models.join("smart-turn/smart-turn-v3.2-cpu.onnx")};
+    let (turn_path, config) = listen::turn_model(&models)?;
     let mut turn=listen::onnx::SmartTurn::load(&turn_path)?;
     println!("{{\"ready\":true}}");
     io::stdout().flush()?;

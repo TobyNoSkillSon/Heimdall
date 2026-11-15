@@ -50,11 +50,16 @@ fn capture_commits_while_compaction_runs() {
     let source = SourceInfo::new(SourceKind::InputDevice { name: "Synthetic".into(), uid: "hardening".into() }, format, 1);
     archive.add_source(&source, 0).unwrap();
     let compactor = compact::Compactor::start_gated(root.clone(), || true).unwrap();
-    let (mut worst, mut callbacks) = (Duration::ZERO, 0u64);
+    let (mut worst, mut callbacks, mut flushes) = (Duration::ZERO, 0u64, 0u32);
     let started = Instant::now();
     let mut host = 0u64;
-    // Fifteen seconds of 10 ms callbacks, flushed once a second like the committer.
-    while started.elapsed() < Duration::from_secs(15) {
+    // 10 ms callbacks, flushed once a second like the committer, while compaction moves the old hot audio to cold
+    // (until 14 Nov a fixed 15 s, which on a busy Mac ended about there), and at least three flushes.
+    let old_hot = || -> i64 {
+        store::open(&root).unwrap().query_row("SELECT count(*) FROM blocks WHERE source_id='mic' AND codec='f32-zstd'", [], |r| r.get(0)).unwrap()
+    };
+    while flushes < 3 || old_hot() > 0 {
+        assert!(started.elapsed() < Duration::from_secs(60), "compaction did not move the old audio to cold in 60 s");
         for _ in 0..100 {
             let pcm: Vec<f32> = (0..160).map(|k| ((k as u64 + host / 1000) as f32 * 0.013).sin() * 0.2).collect();
             archive.append(&source.id, host, format, &pcm, false).unwrap();
@@ -64,11 +69,12 @@ fn capture_commits_while_compaction_runs() {
         let t = Instant::now();
         archive.flush().unwrap();
         worst = worst.max(t.elapsed());
+        flushes += 1;
         std::thread::sleep(Duration::from_secs(1).saturating_sub(t.elapsed()));
     }
     drop(compactor);
     let blocks = archive.read_blocks(&source.id).unwrap();
-    eprintln!("capture: {} flushes, longest {worst:?}, {} of {callbacks} callbacks committed", started.elapsed().as_secs(), blocks.len());
+    eprintln!("capture: {flushes} flushes in {:?}, longest {worst:?}, {} of {callbacks} callbacks committed", started.elapsed(), blocks.len());
     assert_eq!(blocks.len() as u64, callbacks, "every callback committed");
     let short: Vec<_> = blocks.iter().enumerate().filter(|(_, b)| b.samples.len() != 160).map(|(i, b)| (i, b.samples.len())).take(5).collect();
     assert!(short.is_empty(), "every callback with its audio: {short:?}");

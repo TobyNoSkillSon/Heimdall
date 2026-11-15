@@ -649,6 +649,7 @@ impl KeyPanel {
 /// with the focus where the user would type. Nothing reaches the screen, so AppKit draws them as an inactive window: no
 /// focus ring, and Connect grey where the live panel shows it blue. Returns what failed: a missing file, or a panel
 /// whose Connect is enabled when it should not be (or the reverse).
+#[cfg(feature = "lab")]
 pub(crate) fn render(dir: &std::path::Path, mtm: MainThreadMarker) -> Vec<String> {
     use objc2_app_kit::{NSAppearance, NSAppearanceCustomization as _, NSAppearanceNameAqua, NSAppearanceNameDarkAqua};
     std::fs::create_dir_all(dir).ok();

@@ -267,6 +267,41 @@ fn a_jarvis_that_stops_mid_line_hands_the_rest_to_the_lighter_voice_visibly() {
     assert!(!service.ready());
     assert_eq!(switches(&service), [("Crash here. After the crash.".to_string(), NOTICE_STOPPED.to_string())]);
 }
+/// Voice-drop sweep 14 Nov, 09:23:03: the user chose Phonon in the menu while Jarvis spoke; the unload cut the line and
+/// was logged `cause=sidecar_crash` with "Jarvis stopped". A chosen switch is no fallback; a real crash still is.
+#[test]
+fn a_voice_chosen_mid_line_is_a_switch_not_a_crash() {
+    struct Switching(Voices2, Arc<Service>);
+    impl Voices for Switching {
+        fn jarvis(&mut self, service: &Service, written: &str, resumed: bool, cancel: &dyn Fn() -> bool,
+            emit: &mut dyn FnMut(crate::SpeechPacket) -> Result<()>) -> (Result<Audio>, bool) {
+            let mut emit = |packet: crate::SpeechPacket| {
+                if matches!(packet, crate::SpeechPacket::Audio(_)) {
+                    self.1.configure_for(false, "another voice is chosen");
+                }
+                emit(packet)
+            };
+            self.0.jarvis(service, written, resumed, cancel, &mut emit)
+        }
+        fn lighter(&mut self, sentence: &str, cancel: &dyn Fn() -> bool) -> Result<Audio> {
+            self.0.lighter(sentence, cancel)
+        }
+    }
+    let (_dir, service) = jarvis();
+    let mut voices = Switching(Voices2::default(), service.clone());
+    speak_line(&service, &mut voices, "Fine. Two is fine. Three is fine.", &|| false, &mut |_| Ok(())).unwrap();
+    assert!(!service.ready());
+    assert_eq!(voices.0.lighter, ["Two is fine.", "Three is fine."], "the chosen voice says the rest");
+    let events = service.events();
+    assert!(events.iter().all(|e| e["event"] != "voice_switch"), "no fallback, no notice: {events:?}");
+    assert!(events.iter().any(|e| e["event"] == "unloaded"), "{events:?}");
+    // A real crash keeps its class and notice.
+    let (_dir, service) = jarvis();
+    heard(&service, &mut Voices2::default(), "Fine. Crash here.").unwrap();
+    let events = service.events();
+    let crash = events.iter().find(|e| e["event"] == "voice_switch").expect("a crash still switches");
+    assert_eq!((crash["cause"].as_str(), crash["notice"].as_str()), (Some("sidecar_crash"), Some(NOTICE_STOPPED)));
+}
 #[test]
 fn a_line_while_jarvis_is_not_loaded_is_shown_and_logged_with_the_reason() {
     // 19 Oct 12:15:52: "Yes, I can hear you." while Jarvis waited out a memory refusal was said by the lighter voice

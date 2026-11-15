@@ -92,16 +92,18 @@ pub(super) fn note(missed: &[(String, Duration)]) -> Option<String> {
     match missed {
         [] => None,
         [(text, on)] => Some(format!(
-            "User has probably not read your earlier reply: it showed as text and your next reply followed {} s later, \
+            "{} has probably not read your earlier reply: it showed as text and your next reply followed {} s later, \
              before he could finish reading it. The notch's pull-down shows both, newest last. If it still matters or he \
              asks, say it again briefly. It began: \"{}\"",
+            agent::identity::user_start(),
             on.as_secs(),
             quote(text)
         )),
         many => Some(format!(
-            "User has probably not read {} of your earlier replies: they showed as text and the next reply followed \
+            "{} has probably not read {} of your earlier replies: they showed as text and the next reply followed \
              before he could finish reading them. The notch's pull-down shows them, newest last. If they still matter \
              or he asks, say them again briefly. They began: {}",
+            agent::identity::user_start(),
             many.len(),
             many.iter().map(|(text, _)| format!("\"{}\"", quote(text))).collect::<Vec<_>>().join("; ")
         )),
@@ -131,7 +133,7 @@ mod tests {
         assert_eq!(second.earlier.as_deref(), Some(MISTRAL));
         assert_eq!(second.missed, vec![(MISTRAL.to_string(), Duration::from_millis(7_500))]);
         let note = note(&second.missed).unwrap();
-        assert!(note.starts_with("User has probably not read your earlier reply") && note.contains("followed 7 s later"), "{note}");
+        assert!(note.starts_with("The user has probably not read your earlier reply") && note.contains("followed 7 s later"), "{note}");
         assert!(note.contains("It began: \"I found it: it's the Mistral voice agent demo"), "{note}");
         assert!(note.chars().count() < 520, "a short note: {note}");
         // Told once: a third reply soon after keeps both unread replies but tells only the new one.
@@ -188,7 +190,7 @@ mod tests {
         // Two not yet told (shown without a reply between them, e.g. a skipped final): one note for both.
         let two = vec![("First one.".to_string(), Duration::from_secs(4)), ("Second one.".to_string(), Duration::from_secs(1))];
         let note = note(&two).unwrap();
-        assert!(note.starts_with("User has probably not read 2 of your earlier replies") && note.ends_with("\"First one.\"; \"Second one.\""), "{note}");
+        assert!(note.starts_with("The user has probably not read 2 of your earlier replies") && note.ends_with("\"First one.\"; \"Second one.\""), "{note}");
     }
 
     /// A long reply is quoted by its start, cut at a word.

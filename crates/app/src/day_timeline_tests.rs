@@ -53,7 +53,10 @@ fn segments_carry_apps_people_and_a_kind_and_gaps_stay_empty() {
     assert!(!at(t + 60 * 60).active(), "nothing at 11:00");
     assert_eq!(at(t + 95 * 60).kind, "people", "a call outweighs the app in front");
     assert!(!at(t - 60 * 60).active(), "nothing before 10:00");
-    assert_eq!(app_name("com.citrolabs.ego.lite"), "Ego");
+    assert_eq!(app_name("com.citrolabs.ego.lite"), "Ego Lite");
+    assert_eq!(app_name("com.citrolabs.ego"), "Ego");
+    assert_eq!(app_name("ch.protonmail.desktop"), "Proton Mail");
+    assert_eq!(app_name("com.apple.QuickTimePlayerX"), "QuickTime");
     assert_eq!(app_name("org.example.someTool"), "SomeTool");
     assert_eq!(app_kind("com.valvesoftware.steam.helper"), "play");
 }
@@ -439,12 +442,11 @@ fn the_tags_give_people_apps_threads_and_files() {
     assert_eq!(b.meta.files, vec!["parts.rs".to_string()]);
     assert_eq!(b.meta.people, vec!["Morgan".to_string()], "unknown speakers are not people");
     assert_eq!(b.meta.apps, vec![("T3 Code".to_string(), 21), ("VS Code".to_string(), 10)]);
-    assert_eq!(b.meta.tags(), vec!["activity:agent work", "app:t3 code", "app:vs code"]);
     assert_eq!(file_names("~/Notes/README.md, Cargo.toml (edited) — v1.2 build"), vec!["README.md", "Cargo.toml"]);
 }
 
 #[test]
-fn the_models_details_are_kept_shown_and_searchable() {
+fn the_models_details_are_kept_and_shown() {
     let (ev, now) = sample();
     let (_, start) = morning();
     let segs = segments(&ev, start, now);
@@ -467,7 +469,7 @@ fn the_models_details_are_kept_shown_and_searchable() {
     // An answer without the details (an older prompt) still names the blocks.
     assert!(validate(&answer(json!([{"segments": ids[..3], "title": "A", "line": "", "kind": "build"}, {"segments": ids[3..], "title": "B", "line": "", "kind": "people"}])), &open).is_ok_and(|b| b[0].meta.activity == "agent work"));
 
-    // Round trip through the day file, onto the island and through search.
+    // Round trip through the day file and onto the island.
     let day = Day { date: "2026-10-23".into(), start, updated: now, blocks: blocks.clone(), version: VERSION, ..Default::default() };
     let dir = tempfile::tempdir().unwrap();
     save_day(dir.path(), &day).unwrap();
@@ -479,12 +481,6 @@ fn the_models_details_are_kept_shown_and_searchable() {
     assert_eq!(meta["decisions"], json!(["Keep the left dock"]));
     assert!(meta.get("people").is_none(), "empty lists are left out");
     assert_eq!(o["parts"][0]["blocks"][1]["meta"]["people"], json!(["User's brother"]), "Morgan is in the title; User and Heimdall are not people");
-    let found = |q: &str| search(dir.path(), q).into_iter().map(|(d, b)| format!("{d} {}", b.title)).collect::<Vec<_>>();
-    assert_eq!(found("project:heimdall"), vec!["2026-10-23 Heimdall islands"]);
-    assert_eq!(found("activity:call"), vec!["2026-10-23 Call with Morgan"]);
-    assert_eq!(found("ack VOICES"), vec!["2026-10-23 Heimdall islands"]);
-    assert_eq!(found("app:t3"), vec!["2026-10-23 Heimdall islands"]);
-    assert!(found("brother islands").is_empty() && found("").is_empty());
 }
 
 #[test]

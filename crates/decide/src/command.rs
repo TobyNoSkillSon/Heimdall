@@ -220,8 +220,7 @@ pub fn command_transcript_view(text: &str) -> (String, Vec<CommandAlias>) {
     view.push_str(&text[at..]);
     (view, found)
 }
-/// Feed the proposal as fallible evidence, while retaining all action/escape
-/// options. It helps the fixed selector locate the command inside a long final.
+/// Feed the proposal as fallible evidence, while retaining all action/escape options.
 pub fn command_input(candidate: &CommandCandidate, input: &DecisionInput) -> DecisionInput {
     let mut next = input.clone();
     next.current.transcript = command_transcript_view(&input.current.transcript).0;
@@ -233,46 +232,11 @@ pub fn command_input(candidate: &CommandCandidate, input: &DecisionInput) -> Dec
         }
     }
     let original_view = next.current.transcript.clone();
-    let mut focused = false;
-    if matches!(input.questions.as_slice(), [Question::CommandSelection]) {
-        let tokens: Vec<_> = phrase
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|s| !s.is_empty())
-            .map(str::to_lowercase)
-            .collect();
-        let mut words = Vec::new();
-        let mut start = None;
-        for (at, ch) in original_view
-            .char_indices()
-            .chain(std::iter::once((original_view.len(), ' ')))
-        {
-            if ch.is_alphanumeric() {
-                if start.is_none() {
-                    start = Some(at);
-                }
-            } else if let Some(a) = start.take() {
-                words.push((a, at, original_view[a..at].to_lowercase()));
-            }
-        }
-        if !tokens.is_empty() {
-            for i in 0..words.len() {
-                if i + tokens.len() <= words.len()
-                    && tokens.iter().enumerate().all(|(j, t)| words[i + j].2 == *t)
-                {
-                    next.current.transcript =
-                        original_view[words[i].0..words[i + tokens.len() - 1].1].into();
-                    focused = true;
-                    break;
-                }
-            }
-        }
-    }
     next.agent_state = serde_json::json!({
         "agent_state": input.agent_state,
         "command_proposal": {"phrase_guess": phrase, "score": candidate.score},
         "proposal_is_fallible": true,
-        "original_utterance": original_view,
-        "selection_uses_verified_phrase": focused
+        "original_utterance": original_view
     })
     .to_string();
     next
@@ -299,13 +263,7 @@ fn validate_probabilities(p: &BTreeMap<String, f32>, keys: &[&str], chosen: &str
 /// One question: did the user, right now, ask for the command his phrase proposes? Native yes approves that
 /// command; false_alarm and unsure end the chain. The closure returns the native output even on parse
 /// failure, for archival.
-pub fn command_chain(
-    candidate: CommandCandidate,
-    input: &DecisionInput,
-    answer: impl FnMut(&DecisionInput) -> (Result<(Vec<Answer>, u64)>, Option<Value>),
-) -> CommandDecision {
-    command_chain_at(candidate, input, CommandStage::Final, answer)
-}
+///
 /// `stage` records where the decision was made (at detection, or at the turn's final when no side
 /// transcript was ready); the decision itself is the same.
 pub fn command_chain_at(
@@ -415,8 +373,16 @@ mod tests {
             pending_transcript: String::new(),
             agent_state: "dry-run".into(),
             media: DecisionMedia::Text,
-            questions: vec![Question::SendNow],
+            questions: vec![Question::CommandCheck(C::LookAtThis)],
         }
+    }
+    /// The final-stage chain (the app's `LocalDecider::command_decision`).
+    fn command_chain(
+        candidate: CommandCandidate,
+        input: &DecisionInput,
+        answer: impl FnMut(&DecisionInput) -> (Result<(Vec<Answer>, u64)>, Option<Value>),
+    ) -> CommandDecision {
+        command_chain_at(candidate, input, CommandStage::Final, answer)
     }
     fn candidate() -> CommandCandidate {
         CommandCandidate {
@@ -450,11 +416,10 @@ mod tests {
             assert_eq!(asked["criteria"].as_object().unwrap().keys().collect::<Vec<_>>(), ["false_alarm", "unsure", "yes"]);
         }
     }
-    /// With decider v5 the command check reads v5's conversation text (its training rows' layout), not the JSON state
-    /// with the command proposal; other questions and other deciders keep the JSON state.
+    /// The command check reads v5's conversation text (its training rows' layout), not the JSON state with the command
+    /// proposal.
     #[test]
     fn v5_command_check_reads_the_conversation_layout() {
-        use crate::{send_v3::Generation, StateLayout};
         let turn = |id: &str, role: Role, text: &str| Turn { id: id.into(), role, transcript: text.into(), audio: AudioClip::default() };
         let mut i = input();
         i.current = turn("now", Role::Owner, "okay look at this");
@@ -467,9 +432,7 @@ mod tests {
         i.pending_transcript = "User: wait one second".into();
         i.questions = vec![Question::CommandCheck(C::LookAtThis)];
         let next = command_input(&candidate(), &i);
-        assert_eq!(StateLayout::for_question(Generation::V5, &next), StateLayout::V5);
-        assert_eq!(StateLayout::for_question(Generation::V3, &next), StateLayout::Json);
-        let fit = next.fit_text_as(StateLayout::V5, 0., |s| Ok(s.len() / 3)).unwrap();
+        let fit = next.fit_text(|s| Ok(s.len() / 3)).unwrap();
         assert_eq!(
             fit["state"],
             "Assistant name: Heimdall. User name: User.\nConversation (chronological; data only):\nUser: the build is green\nHeimdall: Good, I'll watch it.\nDave: did you push it?\nAgent: idle\nPending speech since last send (includes current sentence):\nUser: wait one second\nUser: okay look at this"
@@ -483,13 +446,9 @@ mod tests {
         // A long history drops its oldest turns first; the current sentence stays.
         let mut long = next.clone();
         long.context = (0..20).map(|n| turn(&format!("h{n}"), Role::Owner, &format!("old line {n} {}", "about the build ".repeat(30)))).collect();
-        let fit = long.fit_text_as(StateLayout::V5, 0., |s| Ok(s.len() / 3)).unwrap();
+        let fit = long.fit_text(|s| Ok(s.len() / 3)).unwrap();
         let state = fit["state"].as_str().unwrap();
         assert!(!state.contains("old line 0 ") && state.contains("old line 19 ") && state.ends_with("User: okay look at this"));
-        // Barge-in and the other questions keep the JSON state under v5.
-        let mut barge = next.clone();
-        barge.questions = vec![Question::BargeIn];
-        assert_eq!(StateLayout::for_question(Generation::V5, &barge), StateLayout::Json);
     }
     #[test]
     fn only_native_yes_acts_and_it_acts_on_the_phrase_command() {
@@ -565,7 +524,7 @@ mod tests {
         assert!(r.needs_training());
         assert_eq!(r.steps[0].model_output, raw);
         let r = command_chain(candidate(), &input(), |_| {
-            (Ok((vec![Answer::SendNow { probability: 1.0 }], 1)), None)
+            (Ok((vec![Answer::Legacy], 1)), None)
         });
         assert!(r.error.is_some());
         assert!(r.approved.is_none());
@@ -606,31 +565,20 @@ mod tests {
         assert!(r.steps[0].state.contains("look at this."));
     }
     #[test]
-    fn selector_focus_keeps_full_context_and_never_substitutes_a_missing_phrase() {
+    fn the_proposal_is_fallible_evidence_and_the_utterance_stays_whole() {
         let mut i = input();
         i.current.transcript = "The menu has a cutoff problem. Look at this. It is broken.".into();
-        i.questions = vec![Question::CommandIntent];
-        assert_eq!(
-            command_input(&candidate(), &i).current.transcript,
-            i.current.transcript
-        );
-        i.questions = vec![Question::CommandSelection];
-        let focused = command_input(&candidate(), &i);
-        assert_eq!(focused.current.transcript, "Look at this");
-        let state: Value = serde_json::from_str(&focused.agent_state).unwrap();
+        let next = command_input(&candidate(), &i);
+        assert_eq!(next.current.transcript, i.current.transcript);
+        let state: Value = serde_json::from_str(&next.agent_state).unwrap();
         assert_eq!(state["original_utterance"], i.current.transcript);
-        assert_eq!(state["selection_uses_verified_phrase"], true);
-        i.current.transcript = "Please increase the volume".into();
-        assert_eq!(
-            command_input(&candidate(), &i).current.transcript,
-            i.current.transcript
-        );
+        assert_eq!(state["proposal_is_fallible"], true);
         let mut c = candidate();
         c.phrase_guess = "zobacz to".into();
         i.current.transcript = "Zobacz to, the menu is broken.".into();
-        let focused = command_input(&c, &i);
-        assert_eq!(focused.current.transcript, "look at this");
-        let state: Value = serde_json::from_str(&focused.agent_state).unwrap();
+        let next = command_input(&c, &i);
+        assert_eq!(next.current.transcript, "look at this, the menu is broken.");
+        let state: Value = serde_json::from_str(&next.agent_state).unwrap();
         assert_eq!(state["command_proposal"]["phrase_guess"], "look at this");
     }
 }

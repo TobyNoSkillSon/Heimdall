@@ -4,7 +4,7 @@
 
 <h1 align="center">Heimdall <img src="docs/images/alpha.svg" alt="Alpha" width="58" height="24"></h1>
 
-<p align="center">An assistant you talk to that sees and hears your Mac, instead of a chat window.</p>
+<p align="center">Talk to your Mac. Every job you mention starts at once.</p>
 
 <p align="center">
   <a href="#install-the-alpha"><img src="docs/images/download.svg" alt="Download" width="152" height="42"></a>
@@ -15,25 +15,19 @@
 </p>
 
 <p>
-<picture>
-  <source media="(max-width: 600px)" srcset="docs/images/readme-hero-phone.webp">
-  <img src="docs/images/readme-hero.webp" alt="A Mac desktop with Heimdall: the notch says the build is green, Goals and Scheduled cards on the left, a fine-tune job and a trip question on the right">
-</picture>
+  <img src="docs/images/readme-hero.webp" alt="Heimdall on a Mac: the Decider V6 report open from its job island, a Benchmark job at 62%, the Nightly build done and an Auth refactor job reading">
 </p>
 
-Say it out loud. Heimdall hears you without a wake word, hands the job to an agent, and shows it as a small card on your
-screen. It asks only when it must.
+Say it out loud: "Remember the test we were doing? Let's continue that." Heimdall starts the job at once, gives it its
+own island on your screen, and answers out loud when it is done.
 
-<p align="center">
-  <img src="docs/images/island-site.webp" alt="A landing page job card: the page's picture, its score and two judges' lines" width="359">
-  <img src="docs/images/island-film.webp" alt="A film restore job card: an 1897 frame, 212 of 480 frames done" width="359">
-</p>
+- **No wake word.** It knows when you mean it. It asks only when it must.
+- **It remembers what was said.** "What was that library Maya mentioned on Tuesday?" finds the line in Tuesday's call
+  and answers it.
+- **Audio never leaves your Mac.** Speech to text, who is speaking, the wake decision, its voice and memory search all
+  run on the Mac.
 
-<p>
-  <img src="docs/images/readme-islands.webp" alt="The Today timeline and the Settled card: what got done this week">
-</p>
-
-> **Alpha (v0.1.0-alpha.1).** This is an early build of the developer's own daily assistant. Expect rough edges,
+> **Alpha (v0.1.0-alpha.2).** This is an early build of the developer's own daily assistant. Expect rough edges,
 > features marked beta below, and changes without migration. 
 
 ## Install the alpha
@@ -44,14 +38,14 @@ With [Homebrew](https://brew.sh):
 brew install --cask tobynoskillson/tap/heimdall-alpha
 ```
 
-Or download `Heimdall-Alpha-0.1.0-alpha.1-arm64.zip` from the
-[v0.1.0-alpha.1 release](https://github.com/TobyNoSkillSon/Heimdall/releases/tag/v0.1.0-alpha.1), unzip it and move
+Or download `Heimdall-Alpha-0.1.0-alpha.2-arm64.zip` from the
+[v0.1.0-alpha.2 release](https://github.com/TobyNoSkillSon/Heimdall/releases/tag/v0.1.0-alpha.2), unzip it and move
 `Heimdall Alpha.app` to Applications. The app is ad-hoc signed, not notarised: open it once, then click **Open Anyway**
 in System Settings → Privacy & Security, or run `xattr -dr com.apple.quarantine "/Applications/Heimdall Alpha.app"`
 (Homebrew clears the download flag for you).
 
 Setup walks you through the rest: your name, the agent provider, the macOS permissions and the model downloads (about
-3.8 GB, each file checked against its pinned SHA-256). The full guide, also written for an agent setting Heimdall up
+5.0 GB, each file checked against its pinned SHA-256). The full guide, also written for an agent setting Heimdall up
 for you: [tobynoskillson.com/heimdall/docs](https://tobynoskillson.com/heimdall/docs/).
 
 Updates: `brew upgrade --cask heimdall-alpha`, or download the newer zip. The in-app updater is off in this alpha.
@@ -60,26 +54,41 @@ To build it yourself instead, see [Build and install](#build-and-install).
 
 ## Privacy, read this first
 
-Heimdall records. With listening and screen capture on it transcribes everyone in the room and on your calls, stores
-voiceprints of the people it hears, and archives what is on your screen, including messages and anything else that
-appears there. All of that stays on your Mac, in `<your home folder>/.heimdall`. What leaves the Mac: the text,
-screenshots and recent conversation the agent needs, sent to the provider you connect (Claude, ChatGPT or OpenCode
-Go). Tell the people around you, and check the recording laws where you live.
+Audio never leaves your Mac. The microphone and recordings, speech to text, who is speaking, the wake decision, its
+voice, memory search and the archive all stay on it, in `<your home folder>/.heimdall`. The agent you connect never
+gets audio: it gets your request and the conversation it needs as text, and the screenshots it needs. If the agent
+runs on the Mac, nothing leaves at all.
+
+Heimdall records. With listening and screen capture on, it transcribes everyone in the room and on your calls, keeps
+voiceprints of the people it hears, and archives what is on your screen, messages included. Tell the people around
+you, and check the recording laws where you live.
 
 ## Requirements
 
-- A Mac with Apple silicon and macOS 14.4 or later; **macOS 26 recommended** (memory search needs it). 32 GB of RAM
+- A Mac with Apple silicon and macOS 14.4 or later; **macOS 26 recommended** (memory search was tested there). 32 GB of RAM
   recommended; the models use about 4 GB.
 - About 6 GB of free disk for the models, plus about 25 GB for the Rust build.
-- Xcode 26 (for Swift, Metal and the macOS SDK), Rust (stable, via [rustup](https://rustup.rs)), CMake, and Python 3.11+
-  (build scripts only; nothing Python ships in the app).
+- Xcode 26 or later (for Swift, Metal and the macOS SDK) with its Metal Toolchain, Rust (stable, via
+  [rustup](https://rustup.rs)), and from [Homebrew](https://brew.sh) CMake, Python 3.11+ (build scripts only; nothing
+  Python ships in the app) and ffmpeg. Exact steps: [docs/install.md](docs/install.md#before-the-first-build).
 - Optional: an Apple Development signing certificate (free with any Apple Account in Xcode → Settings → Accounts).
   macOS ties microphone, screen and accessibility permissions to the signature, so a signed build keeps them across
   rebuilds.
-- One agent provider: a Claude subscription through T3 Code, a ChatGPT
-  subscription, an OpenCode Go subscription, or an Anthropic or OpenRouter API key.
+- One agent provider: a Claude subscription through T3 Code, a ChatGPT or OpenCode Go subscription, an Anthropic API
+  key, or any OpenAI- or Anthropic-compatible server, hosted (OpenRouter, for one) or on the Mac.
 
 ## Build and install
+
+Once per Mac (details in [docs/install.md](docs/install.md#before-the-first-build)):
+
+```sh
+sudo xcode-select -s /Applications/Xcode.app/Contents/Developer   # again after installing Homebrew
+sudo xcodebuild -license accept
+xcodebuild -downloadComponent MetalToolchain                      # about 840 MB
+brew install cmake python ffmpeg
+```
+
+Then:
 
 ```sh
 git clone https://github.com/TobyNoSkillSon/Heimdall.git
@@ -88,15 +97,23 @@ cd Heimdall
 # 1. Models (about 4.5 GB, checked against pinned SHA-256 hashes; see "Models" below)
 scripts/fetch_models.sh
 
-# 2. Build the app, ad-hoc signed: dist/public/Heimdall Alpha.app
+# 2. The decider engine (MLX), then commit the locks this Mac's build rewrote
+scripts/build_decider_v5.sh --lock
+git commit -am "Locks for this build"
+
+# 3. Build the app, ad-hoc signed: dist/public/Heimdall Alpha.app
 scripts/bundle.sh --adhoc
 ```
 
-With a certificate, `git config heimdall.signingIdentity <SHA-1>` and run `scripts/bundle.sh` instead
-(`security find-identity -v -p codesigning` lists the SHA-1).
+The decider and memory-search helper build at low priority with two jobs (`HEIMDALL_JOBS=8` gives them more); the
+app's cargo build uses every core (`CARGO_BUILD_JOBS=4` limits it).
 
-An ad-hoc build is unsigned as far as macOS is concerned: open it once, then click **Open Anyway** in System Settings →
-Privacy & Security; the permissions may need granting again after each rebuild.
+With a certificate, `git config heimdall.signingIdentity <SHA-1>` and run `scripts/bundle.sh` instead
+(`security find-identity -v -p codesigning` lists the SHA-1). macOS ties the microphone, screen and accessibility
+permissions to the signature, so an ad-hoc build may need them granted again after each rebuild; Heimdall asks for the
+microphone again at launch and shows a red pill for any other grant it lost.
+
+A build made on this Mac carries no download flag, so no Open Anyway step is needed.
 
 Copy `dist/public/Heimdall Alpha.app` to `/Applications` and open it. The setup wizard asks for a home folder (Heimdall
 keeps its own files in `<home>/.heimdall`), walks through the microphone, screen recording and accessibility
@@ -119,9 +136,10 @@ revision into `models/`, and `scripts/bundle.sh` copies them into the app.
 
 | Part | Model | Size | Licence |
 |---|---|---|---|
-| Wake decision | Decider V6, 8-bit ([Toby-NoSkillSon/heimdall-d1-v6](https://huggingface.co/Toby-NoSkillSon/heimdall-d1-v6), fine-tuned from LiquidAI d1-2B) | 2.1 GB | LFM Open License 1.0 |
+| Wake decision | Decider V6, 4-bit by default ([Toby-NoSkillSon/heimdall-d1-v6](https://huggingface.co/Toby-NoSkillSon/heimdall-d1-v6), fine-tuned from LiquidAI d1-2B) | 1.37 GB | LFM Open License 1.0 |
 | Speech to text | Parakeet Ultra, Core ML (FluidInference/parakeet-ultra-coreml) | 0.6 GB | CC BY 4.0 |
 | Memory search | EmbeddingGemma 2 (google/embeddinggemma-2) | 1.5 GB | Apache-2.0, Gemma prohibited-use policy |
+| Memory search reranking | Qwen3-Reranker-0.6B (Qwen/Qwen3-Reranker-0.6B), downloaded at first run | 1.2 GB | Apache-2.0 |
 | Speaker naming | Nemotron 3 Diarization, ReDimNet2 B6 | 0.15 GB | OpenMDW-1.1, MIT |
 | Voice | Phonon S (gradium/phonon-31m-en) | 0.07 GB | Apache-2.0 |
 | Voice activity, end of turn | Silero VAD, Smart Turn v3.2 | small | MIT, BSD-2-Clause |
@@ -144,7 +162,7 @@ Beta, expect failures:
 
 - **Speaker naming**: tells voices apart and asks who a new one is. New code; labels can be wrong.
 - **Wake decision** (no wake word): it sometimes wakes when you were not talking to it, or misses you.
-- **Screen recording and memory search**: capture can pause after an archive lock; memory search needs macOS 26.
+- **Screen recording and memory search**: capture can pause after an archive lock; memory search was tested on macOS 26 only.
 - **Archive clips**: turns a past window of screen and audio into a movie. Lightly tested.
 - **Voice**: English only, one small built-in voice, no instant acknowledgements. Replies held during a call can be
   dropped.

@@ -1,7 +1,6 @@
 //! Stateless Streamable HTTP MCP, loopback only and bearer authenticated.
 use crate::{
     delivery::{DeliveryGate, DeliveryPermit},
-    protocol::Attachment,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -26,40 +25,9 @@ pub trait TranscriptSearch: Send + Sync {
     async fn chunks(&self, _query: Value, _permit: &DeliveryPermit) -> Result<Value> {
         anyhow::bail!("chunk index is not available yet")
     }
-    async fn search(&self, _query: &str, _limit: usize, _permit: &DeliveryPermit) -> Result<Value> {
-        anyhow::bail!("archive index is not available")
-    }
 }
 pub struct UnavailableArchive;
-#[async_trait]
-impl TranscriptSearch for UnavailableArchive {
-    async fn search(&self, _: &str, _: usize, _: &DeliveryPermit) -> Result<Value> {
-        anyhow::bail!("archive index is not available yet")
-    }
-}
-pub struct ScreenshotResult {
-    pub images: Vec<Attachment>,
-    /// Supplemental failures accompany usable ring images, rather than isError.
-    pub warnings: Vec<String>,
-    /// Plain answers in place of images, such as that the user switched the screen off.
-    pub notes: Vec<String>,
-}
-impl ScreenshotResult {
-    pub fn into_value(self) -> Result<Value> {
-        let mut content = vec![];
-        for image in self.images {
-            let block = image.block()?;
-            content.push(json!({"type":"image","data":block["source"]["data"],"mimeType":block["source"]["media_type"]}));
-        }
-        for warning in self.warnings {
-            content.push(json!({"type":"text","text":warning}));
-        }
-        for note in self.notes {
-            content.push(json!({"type":"text","text":note}));
-        }
-        Ok(json!({"content":content}))
-    }
-}
+impl TranscriptSearch for UnavailableArchive {}
 #[async_trait]
 pub trait ToolHost: Send + Sync {
     fn speak_replay(
@@ -73,6 +41,12 @@ pub trait ToolHost: Send + Sync {
             "Speech queued: {}.",
             self.speak(text, language, permit)?
         ))
+    }
+    /// `speak_replay` with the tool's `now` (night 1115, call speech): said as soon as the user pauses, over other
+    /// people on a call. Hosts without call rules ignore it.
+    fn speak_replay_now(&self, text: &str, language: &str, action: &str, permit: &DeliveryPermit, now: bool) -> Result<String> {
+        let _ = now;
+        self.speak_replay(text, language, action, permit)
     }
     async fn screen_frames(&self, _query: Value, _permit: &DeliveryPermit) -> Result<Value> {
         anyhow::bail!("CAPTURE_UNAVAILABLE: screen store is not attached")
@@ -89,9 +63,6 @@ pub trait ToolHost: Send + Sync {
 
     /// Enqueue speech; never wait for inference/playback. Return the speech job ID.
     fn speak(&self, text: &str, language: &str, permit: &DeliveryPermit) -> Result<u64>;
-    async fn screenshot_now(&self, _permit: &DeliveryPermit) -> Result<ScreenshotResult> {
-        anyhow::bail!("capture unavailable")
-    }
     /// `look`: bring `app` forward (if given) and return the display the user is on as image content.
     async fn look(&self, _app: Option<&str>, _permit: &DeliveryPermit) -> Result<Value> {
         anyhow::bail!("CAPTURE_UNAVAILABLE: screen capture is not attached")
@@ -283,10 +254,18 @@ fn resolve_handles(archive: &dyn TranscriptSearch, name: &str, args: &Value) -> 
         "island_notice" => if let Some(v) = args.get_mut("detail").and_then(|d| d.get_mut("archive_id")) { fix(v) },
         _ => {}
     }
+    // `owner_asked` was `owner_asked` before 14 Nov: a session or relay prompt from an older build still passes it.
+    if let Some(map) = args.as_object_mut().filter(|m| !m.contains_key("owner_asked")) {
+        if let Some(words) = map.remove("owner_asked") { map.insert("owner_asked".into(), words); }
+    }
     args
 }
 /// One tool call, validated and gated: the main server's and the scoped one's shared path.
 async fn dispatch(s: &Service, name: &str, args: &Value, action: &str, permit: &DeliveryPermit) -> Result<Value> {
+    // A title too long is shortened and a time without offset read as local, not refused.
+    let (fitted, fit_notes) = crate::mcp_contract::fit_args(name, args);
+    let args = &fitted;
+    // ---- end lane T fit ----
     crate::mcp_contract::validate_tool(name, args)
         .map_err(|e| anyhow::anyhow!("INVALID_ARGUMENT: {e}"))?;
     // A state write admitted now runs to its end even if Agent turns off during it; its answer is still withheld after Off, like every other result.
@@ -295,11 +274,12 @@ async fn dispatch(s: &Service, name: &str, args: &Value, action: &str, permit: &
     permit
         .run(async {
             let result = match name {
-                "speak" => text_result(s.host.speak_replay(
+                "speak" => text_result(s.host.speak_replay_now(
                     args["text"].as_str().unwrap(),
                     args["language"].as_str().unwrap_or("en"),
                     &action,
                     &permit,
+                    args["now"].as_bool().unwrap_or(false),
                 )?),
                 "screen_frames" => {
                     s.host.screen_frames(args.clone(), &permit).await?
@@ -324,6 +304,7 @@ async fn dispatch(s: &Service, name: &str, args: &Value, action: &str, permit: &
             };
             // tool-output: every tool answers in plain lines, never raw JSON (plain.rs).
             let mut result = result;
+            if !fit_notes.is_empty() { push_text(&mut result, &fit_notes.join(" ")) } // lane T fit
             crate::plain::result_blocks(&mut result, name, &chrono::Local);
             // Every image leaves labelled from its own bytes (20 Oct: a JPEG labelled PNG
             // poisoned the conversation; `history`).
@@ -621,6 +602,7 @@ mod handle_tests {
         assert_eq!(resolve_handles(&Handles, "taste_note", &json!({"lines":["h3","session-2:9","h99"]}))["lines"], json!([id, "session-2:9", "h99"]));
         assert_eq!(resolve_handles(&Handles, "island_notice", &json!({"text":"x","detail":{"type":"image","archive_id":"h3"}}))["detail"]["archive_id"], id);
         assert_eq!(resolve_handles(&Handles, "speak", &json!({"text":"h3"}))["text"], "h3", "other tools are untouched");
+        assert_eq!(resolve_handles(&Handles, "settings", &json!({"action":"set","owner_asked":"turn yourself off now"})), json!({"action":"set","owner_asked":"turn yourself off now"}), "the old argument name still works");
         for (name, args) in [("screen_frames", json!({})), ("island_notice", json!({"text":"x"})), ("taste_note", json!({"subject":"s"}))] {
             assert_eq!(resolve_handles(&Handles, name, &args), args, "nothing is added to {name}");
         }

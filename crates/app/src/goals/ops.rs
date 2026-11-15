@@ -3,7 +3,7 @@
 //! shape plus `goal`). The model answers with ops, not the whole list (output was the plan refresher's main cost), and
 //! every op quotes the words in the new lines that justify it: code drops an op whose quote is not there, so nothing
 //! is invented. Hard caps live here, not in the prompt: at most `MAX_ACTIVE` active goals, titles `TITLE_CHARS`, the
-//! now line `NOW_CHARS`, an ask's detail `DETAIL_CHARS`. The user's ticks and unknown keys survive; an ask he answered by
+//! now line `NOW_CHARS`. The user's ticks and unknown keys survive; an ask he answered by
 //! a click (chosen or done) leaves.
 
 use crate::islands::files::{read_object, write_atomic, Root};
@@ -16,9 +16,6 @@ pub const ICON: &str = "flag";
 pub const MAX_ACTIVE: usize = 6;
 pub const TITLE_CHARS: usize = 40;
 pub const NOW_CHARS: usize = 60;
-pub const DETAIL_CHARS: usize = 60;
-/// Open asks at most: they stay small and few.
-pub const MAX_ASKS: usize = 8;
 /// Ops one answer may carry (more are dropped, logged).
 pub const MAX_OPS: usize = 12;
 /// A quote shorter than this (normalised) proves nothing.
@@ -39,14 +36,22 @@ pub const BY: &str = "goals";
 pub const KINDS: [&str; 9] = ["approve", "test", "pick", "send", "decide", "review", "write", "fix", "answer"];
 /// Every op code knows. `ask` is refused:, "clear these orange goals and remember I didn't want them":
 /// Goals hold the big goals only; what needs him comes as a card when it is needed, never raised by the shadow.
+#[cfg(test)]
 pub const OPS: [&str; 9] = ["add_goal", "progress", "decided", "finish_goal", "pause_goal", "ask", "answered", "drop_task", "drop_ask"];
 /// The ops the model may write (the schema's enum).
 /// Asks are answered or dropped through the answer's `checked` list, never by an op of the model's own.
 pub const MODEL_OPS: [&str; 6] = ["progress", "decided", "add_goal", "finish_goal", "pause_goal", "drop_task"];
 pub const TASK_STATES: [&str; 3] = ["done", "now", "next"];
 
+/// A seed goal: id, title, SF Symbol, what work serves it.
+pub type Seed = (&'static str, &'static str, &'static str, &'static str);
+/// The public edition seeds nothing (`islands::live` passes `seed` false), and its binary carries none of these
+/// personal goals as text (VM run 14 Nov found them compiled in): `the_public_edition_carries_no_seed_goals`.
+#[cfg(feature = "public")]
+pub const SEED: [Seed; 0] = [];
 /// The four seed goals (proposed; the user decides the final set): id, title, SF Symbol, what work serves it.
-pub const SEED: [(&str, &str, &str, &str); 4] = [
+#[cfg(not(feature = "public"))]
+pub const SEED: [Seed; 4] = [
     ("g-job", "Get a job", "briefcase", "CV, job search, applications, interviews."),
     ("g-arsenal", "Ship Arsenal", "shippingbox", "Arsenal, the Mac app that runs on-device AI models: its models, tests, MCP tools, site and release."),
     ("g-heimdall-public", "Ship Heimdall publicly", "eye", "Heimdall's public release (editions, licences, privacy, signing, updater, installer, setup wizard, first run, website and opening film) and product work on Heimdall, Vella and their parts that ships with it (menus, islands, relay, voice features, fixes)."),
@@ -104,6 +109,7 @@ impl Op {
         Op { op: s("op"), goal: s("goal"), task: s("task"), title: s("title"), state: s("state"), now: s("now"), kind: s("kind"),
              detail: s("detail"), ask: s("ask"), icon: s("icon"), about: s("about"), quote: s("quote") }
     }
+    #[cfg_attr(not(test), allow(dead_code))] // goals-lab (goals/lab.rs) reads it
     pub fn to_value(&self) -> Value {
         json!({"op": self.op, "goal": self.goal, "task": self.task, "title": self.title, "state": self.state, "now": self.now,
                "kind": self.kind, "detail": self.detail, "ask": self.ask, "icon": self.icon, "about": self.about, "quote": self.quote})
@@ -148,6 +154,7 @@ pub struct Evidence { pub all: String, pub owner: String, pub times: Vec<(String
 
 impl Evidence {
     /// Plain text: everything is the lines, and the user's (tests, callers without kinds); no times.
+    #[cfg(test)]
     pub fn text(t: &str) -> Evidence { Evidence { all: t.into(), owner: t.into(), ..Evidence::default() } }
 }
 
@@ -199,6 +206,33 @@ pub fn goal_state(g: &Map<String, Value>) -> &str {
     match s(g, "state") { "done" => "done", "paused" => "paused", _ => "active" }
 }
 
+// ---- goals: finish on the user's yes, ongoing goals (bug note 2026-11-06T11-42-43) ----
+
+/// An open-ended goal (`ongoing: true`, or `kind: "ongoing"`): it has no end state, so it is never finished or asked
+/// about, and the islands app draws it with a loop in place of the completion ring.
+pub fn ongoing(g: &Map<String, Value>) -> bool {
+    g.get("ongoing").and_then(Value::as_bool) == Some(true) || s(g, "kind") == "ongoing"
+}
+
+/// The "done?" card for a goal (`kind: "complete"`, under the goal): the ask the user answers with Yes.
+pub fn complete_draft(g: &Map<String, Value>, why: &str, by: &str) -> crate::islands::proposals::Draft {
+    let title = format!("{} looks done: close it?", cap(s(g, "title"), crate::islands::proposals::TITLE_CHARS - 23));
+    crate::islands::proposals::Draft { list: ID.into(), kind: "complete".into(), title, goal: s(g, "id").into(), why: why.into(), by: by.into(), ..Default::default() }
+}
+
+/// A goal finished on the user's yes (`yes`: how he gave it): state done, `finished` and `moved` stamped. Returns its title.
+pub fn finish(g: &mut Map<String, Value>, yes: Value, now: i64) -> std::result::Result<String, String> {
+    if goal_state(g) == "done" { return Err("that goal is finished already".into()) }
+    if ongoing(g) { return Err("an ongoing goal has no end: it is paused or given an end first (ongoing false)".into()) }
+    g.insert("state".into(), json!("done"));
+    g.insert("finished".into(), json!(now));
+    g.insert("finish_yes".into(), yes);
+    g.insert("moved".into(), json!(now));
+    Ok(s(g, "title").to_owned())
+}
+
+// ---- end goals: finish on the user's yes, ongoing goals ----
+
 /// What a new Goals island starts as (docked left first, where To do was).
 pub fn fresh() -> Map<String, Value> {
     json!({"id": ID, "preset": "todo", "list": ID, "title": TITLE, "icon": ICON, "side": "left", "order": 0, "items": [], "goals": []})
@@ -231,6 +265,7 @@ pub fn settle_answered(file: &mut Map<String, Value>) -> Vec<String> {
 pub struct Outcome { pub op: Op, pub kept: bool, pub reason: String }
 
 impl Outcome {
+    #[cfg_attr(not(test), allow(dead_code))] // goals-lab (goals/lab.rs) reads it
     pub fn to_value(&self) -> Value {
         let mut v = self.op.to_value();
         v["kept"] = json!(self.kept);
@@ -269,8 +304,8 @@ pub fn apply(file: &mut Map<String, Value>, ops: &[Op], lines: &Evidence, now: i
 fn needs_owner(file: &Map<String, Value>, op: &Op, owner: &str) -> Option<String> {
     let own = || file.get("items").and_then(Value::as_array).into_iter().flatten().any(|i| i["id"] == op.ask.as_str() && i["by"] == BY);
     match op.op.as_str() {
-        "answered" if !quoted(&op.quote, owner) => Some("an answer is User's: quote his words or his click".into()),
-        "decided" if !quoted(&op.quote, owner) => Some("a decision is User's: quote his words or his click".into()),
+        "answered" if !quoted(&op.quote, owner) => Some("an answer is User's: quote their words or their click".into()),
+        "decided" if !quoted(&op.quote, owner) => Some("a decision is User's: quote their words or their click".into()),
         "drop_ask" if !quoted(&op.quote, owner) && !own() => Some("an ask the shadow did not raise leaves on User's word".into()),
         _ => None,
     }
@@ -365,14 +400,17 @@ fn apply_one(file: &mut Map<String, Value>, op: &Op, lines: &Evidence, now: i64)
             Ok(format!("{id} {state}"))
         }
         "finish_goal" => {
+            // A goal whose aim looks met is asked about, never closed by the job (bug note 2026-11-06T11-42-43: the user,
+            // "it should notice when a goal's aim is met and ask"): a "done?" card under it; his Yes finishes it.
             goal_known(file)?;
             let g = find_goal(file, &op.goal).unwrap();
             if goal_state(g) == "done" { return Err("goal finished already".into()) }
-            g.insert("state".into(), json!("done"));
+            if ongoing(g) { return Err("an ongoing goal has no end".into()) }
+            let d = complete_draft(g, &op.quote, BY);
             let line = cap(&op.now, NOW_CHARS);
             if !line.is_empty() { g.insert("now".into(), json!(line)); }
-            g.insert("moved".into(), json!(now));
-            Ok("finished".into())
+            let (id, _) = crate::islands::proposals::push_in(file, &d, &lines.recorded, now).map_err(|e| e.to_string())?;
+            Ok(format!("asked {id}"))
         }
         "pause_goal" => {
             goal_known(file)?;
@@ -449,7 +487,7 @@ pub fn apply_file(root: &Root, ops: &[Op], lines: &Evidence, now: i64) -> Result
 pub fn compact(file: &Map<String, Value>, all: bool) -> String {
     let mut out = String::new();
     for g in file.get("goals").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_object) {
-        let mut head = format!("- {} · {} · {}", s(g, "id"), s(g, "title"), goal_state(g));
+        let mut head = format!("- {} · {} · {}{}", s(g, "id"), s(g, "title"), goal_state(g), if ongoing(g) { " · ongoing (no end)" } else { "" });
         if !s(g, "about").is_empty() { head.push_str(&format!(" · about: {}", s(g, "about"))) }
         if !s(g, "now").is_empty() { head.push_str(&format!(" · now: {}", s(g, "now"))) }
         out.push_str(&head);
@@ -582,8 +620,8 @@ pub fn ensure(root: &Root, now: i64, seed: bool) -> Result<Vec<String>> {
 }
 
 /// Before the migration writes: the islands folder's files copied once to `<root>/backup-goals-<YYYYMMDD-HHMMSS>/`
-/// (beside `islands/`, so the helper never shows it; `islands::plan::backup_once`'s rule, its own prefix because that
-/// one runs once ever and the user's folder has had one since 22 Oct). Nothing when one exists. Call holding the lock.
+/// (beside `islands/`, so the helper never shows it; its own prefix because the night-1022 plan migration's `backup-*`
+/// has been in the user's folder since 22 Oct). Nothing when one exists. Call holding the lock.
 pub fn backup_once(root: &Root) -> Result<Option<std::path::PathBuf>> {
     let taken = std::fs::read_dir(&root.0).into_iter().flatten().flatten()
         .any(|e| e.file_name().to_string_lossy().starts_with("backup-goals-") && e.path().is_dir());

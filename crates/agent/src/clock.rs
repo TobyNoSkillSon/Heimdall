@@ -75,6 +75,16 @@ pub fn now_line(ms: u64) -> String {
     let at = local(ms).map(|t| t.format("%A %-d %b %Y, %H:%M").to_string()).unwrap_or_else(|| "unknown".into());
     format!("{NOW_PREFIX}{at}]")
 }
+/// `now_line` with `extra` inside the same brackets after " · " (`[Now: Thursday 13 Nov 2026, 09:02 · the user: away since
+/// 08:43 · reply: phone]`), so it stays one line and `strip_now_line` and the history summary take it off as before.
+/// A `]` or line break in `extra` is dropped, so it can never end the stamp early.
+pub fn now_line_with(ms: u64, extra: Option<&str>) -> String {
+    let line = now_line(ms);
+    match extra.map(|e| e.chars().filter(|c| *c != ']' && *c != '\n' && *c != '\r').collect::<String>()) {
+        Some(e) if !e.trim().is_empty() => format!("{} · {}]", &line[..line.len() - 1], e.trim()),
+        _ => line,
+    }
+}
 /// `text` without a leading `now_line` (display and edit paths show what was said, not the stamp).
 pub fn strip_now_line(text: &str) -> &str {
     match text.strip_prefix(NOW_PREFIX).and_then(|rest| rest.split_once("]\n")) {
@@ -114,6 +124,17 @@ mod clock_lint {
         assert_eq!(super::strip_now_line(body), body);
         assert_eq!(super::strip_now_line("[Now: what\nis this]\nx"), "[Now: what\nis this]\nx");
         assert_eq!(super::strip_now_line("[Now: no newline]"), "[Now: no newline]");
+    }
+    #[test]
+    fn now_line_with_adds_presence_inside_the_one_stamp() {
+        use chrono::TimeZone;
+        let ms = chrono::Local.with_ymd_and_hms(2026, 11, 13, 9, 2, 0).single().unwrap().timestamp_millis() as u64;
+        let line = super::now_line_with(ms, Some("User: away since 08:43 · reply: phone"));
+        assert_eq!(line, "[Now: Friday 13 Nov 2026, 09:02 · User: away since 08:43 · reply: phone]");
+        assert_eq!(super::strip_now_line(&format!("{line}\nhi")), "hi");
+        assert_eq!(super::now_line_with(ms, None), super::now_line(ms));
+        assert_eq!(super::now_line_with(ms, Some("  ")), super::now_line(ms));
+        assert_eq!(super::now_line_with(ms, Some("a]\nb")), "[Now: Friday 13 Nov 2026, 09:02 · ab]");
     }
     #[test]
     fn sim_clock_moves_only_when_advanced() {

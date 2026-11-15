@@ -51,8 +51,8 @@ impl Font {
             Font::Reader(s) => s as f64,
             Font::ReaderTitle => 22.0,
             Font::Sentence => 17.0,
-            Font::Question => 21.0,
-            Font::OptionLabel => 16.0,
+            Font::Question => 17.0,
+            Font::OptionLabel => 15.0,
             Font::Describe => 13.0,
             Font::Chip => 12.5,
             Font::Field => 15.0,
@@ -63,10 +63,12 @@ impl Font {
     pub fn weight(self) -> f64 {
         match self {
             Font::Label | Font::EarNum | Font::Button | Font::ReaderTitle | Font::Small => 0.3,
-            Font::Spoken | Font::Key | Font::Reader(_) | Font::Sentence | Font::Caption => 0.23,
+            Font::Key | Font::Reader(_) | Font::Sentence | Font::Caption => 0.23,
+            // A reply is read, not announced: regular weight (islands climb, 11 Nov).
+            Font::Spoken => 0.0,
             Font::Strong => 0.4,
             Font::Question | Font::Chip => 0.3,
-            Font::OptionLabel => 0.3,
+            Font::OptionLabel => 0.23,
             Font::Describe | Font::Field | Font::Path => 0.0,
         }
     }

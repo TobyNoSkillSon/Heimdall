@@ -16,18 +16,9 @@ impl AgentFeed {
         let selected=s.selected_api_model().map(|m|m.name.clone()).unwrap_or_else(||"Qwen3.8 27B".into());
         let mut model=Some(selected.clone());
         let history_file=if s.dry_run{Some(crate::archive::run_dir(data,session).join("dry-run.jsonl"))}else{active_session(data).ok()}.filter(|p|p.is_file());
-        // The session's facts (model, id) come from its start; the window's rows from the bounded tail.
+        // The session's facts (model, id) come from its start; the window's rows from `window_history`.
         let (view, _) = history_file
-            .clone()
             .and_then(|p| agent::view::read_history(&p, 4 * 1024 * 1024).ok())
-            .unwrap_or_default();
-        let history: Vec<agent::view::Entry> = history_file
-            .as_ref()
-            .and_then(|p| bounded_session_history(p).ok())
-            .map(|rows| {
-                let mut tail = agent::view::SessionView::default();
-                rows.iter().flat_map(|row| tail.history_line(row)).collect()
-            })
             .unwrap_or_default();
         if !s.dry_run && s.selected_api_model().is_none() {
             model = view.model.clone().or(model);
@@ -56,32 +47,19 @@ impl AgentFeed {
             if let Some(history)=window_history(data){u.send(ui::UiUpdate::AgentWindow(history));}
             u.send(ui::UiUpdate::AgentWindow(ui::AgentWindowUpdate::Session(session_stats(s,data))));
             u.send(ui::UiUpdate::AgentSession(info));
-            u.send(ui::UiUpdate::AgentHistory(history.into_iter().map(|e| feed.entry(e)).collect()));
         }
         feed
     }
-    pub(super) fn entry(&self, e: agent::view::Entry) -> ui::AgentEntry {
-        use agent::view::Kind;
-        let kind = match e.kind {
-            Kind::Prompt { query } => ui::AgentEntryKind::Prompt { query, sent: self.sent },
-            Kind::Reply => ui::AgentEntryKind::Reply,
-            Kind::ToolCall { name } => ui::AgentEntryKind::ToolCall { name },
-            Kind::ToolResult { name, error } => ui::AgentEntryKind::ToolResult { name, error },
-            Kind::Failure => ui::AgentEntryKind::Failure,
-        };
-        ui::AgentEntry { time: clock_label_ms(e.time_ms), kind, text: e.text }
-    }
     pub(super) fn sent(&self, wire: &Value) {
         if let Some(u)=self.ui{let e=self.live.lock().unwrap().sent(wire,agent::now_ms());u.send(ui::UiUpdate::AgentWindow(ui::AgentWindowUpdate::Entries(e.into_iter().map(|e|{let mut e=live_entry(e);e.sent=self.sent;e}).collect())));}
-        let entries = self.view.lock().unwrap().sent(wire, agent::now_ms());
-        self.publish(entries);
     }
     pub(super) fn received(&self, wire: &Value) {
         if let Some(u)=self.ui{let e=self.live.lock().unwrap().received(wire,agent::now_ms());if !e.is_empty(){u.send(ui::UiUpdate::AgentWindow(ui::AgentWindowUpdate::Entries(e.into_iter().map(live_entry).collect())));}}
-        let (entries, model, session_id) = {
+        // The window draws the live stream above; this parse only follows the session's model and id.
+        let (model, session_id) = {
             let mut view = self.view.lock().unwrap();
-            let entries = view.received(wire, agent::now_ms());
-            (entries, view.model.clone(), view.session_id.clone())
+            view.received(wire, agent::now_ms());
+            (view.model.clone(), view.session_id.clone())
         };
         // The harness's init names the model it actually runs.
         let mut session = self.session.lock().unwrap();
@@ -90,19 +68,11 @@ impl AgentFeed {
             if session_id.is_some(){session.session_id=session_id;}
             if let Some(u) = self.ui { u.send(ui::UiUpdate::AgentSession(session.clone())); }
         }
-        drop(session);
-        self.publish(entries);
-    }
-    pub(super) fn publish(&self, entries: Vec<agent::view::Entry>) {
-        if entries.is_empty() { return; }
-        if let Some(u) = self.ui {
-            u.send(ui::UiUpdate::AgentEntries(entries.into_iter().map(|e| self.entry(e)).collect()));
-        }
     }
 }
 pub(super) fn live_entry(e:agent::view::StreamEntry)->ui::AgentLiveEntry{
     use agent::view::StreamKind as K;use ui::AgentLiveKind as U;
-    ui::AgentLiveEntry{id:e.id,session_entry_id:e.session_entry_id,timestamp_ms:e.time_ms,kind:match e.kind{K::Prompt=>U::Prompt,K::Thinking=>U::Thinking,K::Reply=>U::Reply,K::ToolCall=>U::ToolCall,K::ToolResult=>U::ToolResult,K::Compaction=>U::Compaction,K::Failure=>U::Failure,K::Reload=>U::Reload,K::Repair=>U::Repair},text:e.text.clone(),tool_name:e.tool,attachments:e.images.into_iter().map(|(media_type,archive_id)|ui::AgentAttachment{media_type,archive_id}).collect(),finished:e.finished,editable:e.editable,error:e.error,sent:true,queued:false,owner_text:agent::view::typed_text(&e.text).map(str::to_owned),usage:e.usage.map(|u|ui::AgentUsage{input:u.input,output:u.output,cache_read:u.cache_read,cache_write:u.cache_write,started_ms:u.started_ms,first_token_ms:u.first_token_ms})}
+    ui::AgentLiveEntry{id:e.id,session_entry_id:e.session_entry_id,timestamp_ms:e.time_ms,kind:match e.kind{K::Prompt=>U::Prompt,K::Thinking=>U::Thinking,K::Reply=>U::Reply,K::ToolCall=>U::ToolCall,K::ToolResult=>U::ToolResult,K::Compaction=>U::Compaction,K::Failure=>U::Failure,K::Reload=>U::Reload,K::Repair=>U::Repair},text:e.text.clone(),tool_name:e.tool,attachments:e.images.into_iter().map(|(media_type,archive_id)|ui::AgentAttachment{media_type,archive_id}).collect(),finished:e.finished,editable:e.editable,error:e.error,sent:true,queued:false,user_text:agent::view::typed_text(&e.text).map(str::to_owned),usage:e.usage.map(|u|ui::AgentUsage{input:u.input,output:u.output,cache_read:u.cache_read,cache_write:u.cache_write,started_ms:u.started_ms,first_token_ms:u.first_token_ms})}
 }
 #[derive(Debug)]
 pub(super) struct WindowActionRejected(pub(super) String);
@@ -173,14 +143,6 @@ pub(super) fn live_session(data:&Path)->Option<String>{
     let spool=data.join("pi-spool.sqlite");if !spool.is_file()||!spool_has_deliveries(&spool).ok()?{return None;}
     let c=rusqlite::Connection::open_with_flags(spool,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
     c.query_row("SELECT value FROM meta WHERE key='session'",[],|r|r.get::<_,String>(0)).ok()
-}
-pub(super) fn clock_label_ms(ms: u64) -> String {
-    unsafe {
-        let mut tm: libc::tm = std::mem::zeroed();
-        let t = (ms / 1000) as libc::time_t;
-        libc::localtime_r(&t, &mut tm);
-        format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
-    }
 }
 
 #[cfg(test)]

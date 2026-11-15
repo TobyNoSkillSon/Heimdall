@@ -119,19 +119,19 @@ pub fn next(db: &Connection, store: &EnrollmentStore, state: &State, in_call: &[
     Ok(due.map(|(code, h)| Suggestion { code, quote: h.quote, candidates: vec![], error: None }))
 }
 
-pub const SYSTEM: &str = "You help User find out who one unnamed voice is in his recorded calls (mostly Discord). \
+pub const SYSTEM: &str = "You help {user} find out who one unnamed voice is in his recorded calls (mostly Discord). \
 Heimdall, his assistant, labelled it with a code such as \"Speaker Fri 23 Oct 21h #3\"; in the transcript below its \
-lines are marked VOICE. Other lines carry their speaker: User, a known person's name, or another code.
+lines are marked VOICE. Other lines carry their speaker: {user_label}, a known person's name, or another code.
 
 List the names this voice may have, most likely first, at most three. Evidence, strongest first:
 - the voice says its own name (\"it's Dave\", \"Dave here\");
 - someone addresses a person by name and the VOICE answers next (\"Dave, you there?\" then VOICE: \"yeah\");
 - others talk to or about the voice by name in a way only it fits.
 Not evidence: a name the VOICE itself says to someone else (that is another person); a name in a story, a game, a \
-stream or a song. ASR may misspell names; use the spelling the transcript uses most. Never answer User or Heimdall. \
+stream or a song. ASR may misspell names; use the spelling the transcript uses most. Never answer {user} or Heimdall. \
 Only names that appear in the transcript. confidence is high only when several moments point at that name and \
 nothing points elsewhere, low when it is a hunch; hints are the line numbers that name the person. No name at all is a \
-fine answer: User then types it.";
+fine answer: {user} then types it.";
 
 pub fn schema() -> Value {
     json!({
@@ -154,24 +154,18 @@ pub fn schema() -> Value {
     })
 }
 
-pub fn call(model: &str, prompt: &str) -> crate::background_call::Call<'static> {
-    crate::background_call::Call { job: namer::JOB, model: model.to_owned(), system: SYSTEM, schema: schema(), effort: "medium", prompt: prompt.into(), history: Vec::new(), session: None }
+/// `SYSTEM` with the configured names (`voice_namer::personal`).
+pub fn system() -> String {
+    namer::personal(SYSTEM)
+}
+
+pub fn call<'a>(model: &str, system: &'a str, prompt: &str) -> crate::background_call::Call<'a> {
+    crate::background_call::Call { job: namer::JOB, model: model.to_owned(), system, schema: schema(), effort: "medium", prompt: prompt.into(), history: Vec::new(), session: None }
 }
 
 pub fn ask_model(e: &crate::plan_refresher::Endpoint, prompt: &str) -> Result<String> {
     let model = e.model.clone().unwrap_or_else(crate::background_model::anthropic_model);
-    Ok(crate::background_call::ask_blocking(e, &call(&model, prompt))?.text)
-}
-
-/// A name a card may offer: a plausible person's name, not the user or Heimdall, not one the user turned down for this voice.
-fn plausible(name: &str, declined: &[String]) -> bool {
-    let lower = name.to_lowercase();
-    !name.is_empty()
-        && name.chars().count() <= 40
-        && name.split_whitespace().count() <= 3
-        && name.chars().all(|c| c.is_alphabetic() || c == ' ' || c == '-' || c == '\'')
-        && !["owner", "heimdall", "voice", "speaker", "unknown", "yes", "not important", "forget"].contains(&lower.as_str())
-        && !declined.iter().any(|d| namer::same_names(d, name))
+    Ok(crate::background_call::ask_blocking(e, &call(&model, &system(), prompt))?.text)
 }
 
 /// The known voice this one sounds closest to, when within `NEAR_MIN` (and under the naming threshold, or it would
@@ -199,17 +193,13 @@ pub fn verify(answer: &str, lines: &[Line], declined: &[String]) -> Result<Vec<C
     for c in v["candidates"].as_array().into_iter().flatten() {
         let name = c["name"].as_str().unwrap_or("").split_whitespace().collect::<Vec<_>>().join(" ");
         let real = matches!(c["confidence"].as_str(), Some("high" | "medium"));
-        if !real || !plausible(&name, declined) || out.iter().any(|o| namer::same_names(&o.name, &name)) || !lines.iter().any(|l| namer::says(&l.text, &name)) {
+        if !real || !namer::plausible(&name, declined) || out.iter().any(|o| namer::same_names(&o.name, &name)) || !lines.iter().any(|l| namer::says(&l.text, &name)) {
             continue;
         }
-        let mut hints = 0;
-        for n in c["hints"].as_array().into_iter().flatten().filter_map(Value::as_u64) {
-            let Some(l) = lines.iter().find(|l| l.n == n as usize) else { continue };
-            let answered = lines.iter().find(|x| x.n > l.n && x.session == l.session).is_some_and(|x| x.own && x.wall_ms - l.wall_ms <= 20_000);
-            if namer::says(&l.text, &name) && if l.own { namer::introduces(&l.text, &name) } else { answered } {
-                hints += 1;
-            }
-        }
+        let hints = c["hints"].as_array().into_iter().flatten().filter_map(Value::as_u64)
+            .filter_map(|n| lines.iter().find(|l| l.n == n as usize))
+            .filter(|l| namer::hint_counts(l, lines, &name))
+            .count();
         let addressed = lines.iter().any(|l| l.own && namer::says(&l.text, &name) && !namer::introduces(&l.text, &name));
         out.push(Candidate { name, sure: c["confidence"] == "high" && hints >= SURE_HINTS && !addressed });
     }
@@ -236,7 +226,7 @@ pub fn guess(db: &Connection, store: &EnrollmentStore, state: &State, s: &mut Su
         }
     }
     candidates.sort_by_key(|c| !c.sure);
-    if let Some((name, _)) = sounds_like(store, code).filter(|(n, _)| plausible(n, &declined)) {
+    if let Some((name, _)) = sounds_like(store, code).filter(|(n, _)| namer::plausible(n, &declined)) {
         if !candidates.iter().any(|c| namer::same_names(&c.name, &name)) {
             candidates.push(Candidate { name, sure: false });
         }

@@ -2,7 +2,7 @@
 //! No inference or channel send waits on the capture caller. Dropped audio and
 //! undelivered transcript events are explicit gaps, never silent concatenation.
 use crate::{
-    AudioChunk, ListenEngine, ListenEvent, PartialPolicy, Recognizer, SpeechDetector, TurnDetector,
+    AudioChunk, ListenEngine, ListenEvent, Recognizer, SpeechDetector, TurnDetector,
 };
 use anyhow::{ensure, Result};
 use std::{
@@ -79,7 +79,6 @@ struct Slot {
     flush: bool,
     closing: bool,
     closed: bool,
-    policy: Option<PartialPolicy>,
     discard: bool,
     output_gap: Option<(u64, u64)>,
     last_ns: u64,
@@ -100,7 +99,7 @@ struct SideRequest {
 }
 // Half-second ownership with 250 ms context per side: at most one second
 // reaches the recognizer before returning to command/live scheduling.
-pub const CORRECTION_SLICE_SAMPLES: usize = 8000;
+const CORRECTION_SLICE_SAMPLES: usize = 8000;
 const CORRECTION_CONTEXT_SAMPLES: usize = 4000;
 /// Side transcripts waiting at most; spoken commands are rare, so a full queue means something is stuck.
 const MAX_SIDE_REQUESTS: usize = 8;
@@ -139,12 +138,12 @@ struct ExternalJob {
 }
 /// Live work queued for the inference owner: what a live batch would take next.
 fn live_pending(slot: &Slot) -> bool {
-    slot.discard || slot.policy.is_some() || slot.input_gap.is_some() || !slot.audio.is_empty() || slot.flush
+    slot.discard || slot.input_gap.is_some() || !slot.audio.is_empty() || slot.flush
 }
 /// Live batches it takes to drain what is queued now (one chunk per source per batch).
 fn live_backlog(s: &State) -> usize {
     s.slots.values().map(|slot| slot.audio.len()
-        + usize::from(slot.flush || slot.discard || slot.policy.is_some() || slot.input_gap.is_some())).max().unwrap_or(0)
+        + usize::from(slot.flush || slot.discard || slot.input_gap.is_some())).max().unwrap_or(0)
 }
 fn refuse_external(s: &mut State, reason: &str) {
     for job in s.external.drain(..) {
@@ -303,7 +302,7 @@ impl ListenWorker {
                         // Commands win; corrections run only between fully drained live batches.
                         if let Some(command) = s.side.pop_front() { Some((command, false)) }
                         else if !s.stopping && !s.reload && s.external.is_empty() && s.slots.values().all(|slot|
-                            slot.audio.is_empty() && slot.input_gap.is_none() && !slot.flush && !slot.discard && slot.policy.is_none()) {
+                            slot.audio.is_empty() && slot.input_gap.is_none() && !slot.flush && !slot.discard) {
                             s.correction.pop_front().map(|r| {
                                 // Keep execution visible atomically with removing queued ownership.
                                 s.correction_started = Some(std::time::Instant::now());
@@ -401,20 +400,18 @@ impl ListenWorker {
                                 s.order.push_back(id.clone());
                                 let slot = s.slots.get_mut(&id).unwrap();
                                 if slot.discard
-                                    || slot.policy.is_some()
                                     || slot.input_gap.is_some()
                                     || !slot.audio.is_empty()
                                     || slot.flush
                                 {
                                     let discard = std::mem::take(&mut slot.discard);
-                                    let policy = slot.policy.take();
                                     let gap = slot.input_gap.take();
                                     let chunk = slot.audio.pop_front();
                                     let flush = slot.flush && slot.audio.is_empty();
                                     if flush {
                                         slot.flush = false;
                                     }
-                                    found.push((id, discard, policy, gap, chunk, flush));
+                                    found.push((id, discard, gap, chunk, flush));
                                 }
                             }
                             if !found.is_empty() {
@@ -436,17 +433,9 @@ impl ListenWorker {
                         live_owed = live_owed.saturating_sub(1);
                     }
                     let mut batched_events = vec![vec![]; works.len()];
-                    for (i, (source, discard, policy, gap, chunk, _)) in works.iter().enumerate() {
+                    for (i, (source, discard, gap, chunk, _)) in works.iter().enumerate() {
                         if *discard {
                             engine.discard_source(source);
-                        }
-                        if let Some(policy) = policy {
-                            if let Err(e) = engine.set_source_policy(source, *policy) {
-                                batched_events[i].push(WorkerEvent::Error {
-                                    source: Some(source.clone()),
-                                    message: e.to_string(),
-                                });
-                            }
                         }
                         if let Some((start_ns, end_ns)) = gap {
                             match engine.flush_source(source) {
@@ -470,12 +459,12 @@ impl ListenWorker {
                     let positions: Vec<usize> = works
                         .iter()
                         .enumerate()
-                        .filter_map(|(i, w)| w.4.as_ref().map(|_| i))
+                        .filter_map(|(i, w)| w.3.as_ref().map(|_| i))
                         .collect();
                     let chunks: Vec<_> = positions
                         .iter()
                         .map(|i| {
-                            let (source, _, _, _, chunk, _) = &works[*i];
+                            let (source, _, _, chunk, _) = &works[*i];
                             let c = chunk.as_ref().unwrap();
                             AudioChunk {
                                 source,
@@ -496,7 +485,7 @@ impl ListenWorker {
                             }),
                         }
                     }
-                    for ((source, _, _, _, chunk, flush), mut events) in
+                    for ((source, _, _, chunk, flush), mut events) in
                         works.into_iter().zip(batched_events)
                     {
                         let processed_ns = chunk
@@ -694,16 +683,6 @@ impl ListenWorker {
         let s = self.shared.lock();
         s.external.len() + usize::from(s.external_running) >= EXTERNAL_SLOTS
     }
-    pub fn set_source_policy(&self, source: &str, policy: PartialPolicy) -> Result<()> {
-        ensure!(
-            !matches!(policy,PartialPolicy::Slow{interval_samples} if interval_samples<512),
-            "Invalid cadence"
-        );
-        let mut s = self.shared.lock();
-        self.slot(&mut s, source)?.policy = Some(policy);
-        self.shared.signal.notify_one();
-        Ok(())
-    }
     /// Abandon inference state after a disabled source or capture discontinuity.
     /// Retain lifecycle metadata; future audio starts a fresh utterance.
     pub fn discard_source(&self, source: &str) -> Result<()> {
@@ -807,7 +786,7 @@ impl ListenWorker {
         let waiting = s.side.len() + s.correction.len() + s.external.len() + usize::from(s.external_running)
             + usize::from(s.correction_started.is_some())
             + usize::from(s.reload)
-            + s.slots.values().map(|slot| slot.audio.len() + usize::from(slot.flush || slot.discard || slot.policy.is_some())).sum::<usize>();
+            + s.slots.values().map(|slot| slot.audio.len() + usize::from(slot.flush || slot.discard)).sum::<usize>();
         Progress { done: s.done, waiting, ready: s.ready, finished: s.finished, correction_started: s.correction_started }
     }
     pub fn reload_models(&self) -> Result<()> {
@@ -1484,7 +1463,7 @@ mod tests {
                 Vad,
                 Turn,
                 ListenConfig {
-                    source_policies: HashMap::from([("mic".into(), PartialPolicy::Responsive)]),
+                    source_policies: HashMap::from([("mic".into(), crate::PartialPolicy::Responsive)]),
                     partial_interval_samples: 512,
                     first_partial_samples: 512,
                     maximum_partial_interval_samples: 512,
@@ -1527,7 +1506,7 @@ mod tests {
                 Vad,
                 Turn,
                 ListenConfig {
-                    source_policies: HashMap::from([("mic".into(), PartialPolicy::Responsive)]),
+                    source_policies: HashMap::from([("mic".into(), crate::PartialPolicy::Responsive)]),
                     partial_interval_samples: 512,
                     first_partial_samples: 512,
                     maximum_partial_interval_samples: 512,
@@ -1609,10 +1588,16 @@ mod tests {
             for source in ["mic", "app"] {worker.push(AudioChunk {source,generation:1,host_time_ns:tick*32_000_000,samples:&[1.;512]}).unwrap();}
         }
         worker.reload_models().unwrap();
+        // A final heard while waiting for a reload counts too (13 Nov: the waits dropped it, and the end saw one source).
+        let mut finals=std::collections::HashSet::new();
         let deadline=std::time::Instant::now()+std::time::Duration::from_secs(3);
         let mut failure=false;
         while std::time::Instant::now()<deadline&&!failure {
-            if let Some(WorkerEvent::ModelsReloaded {error})=worker.pop_event(){assert!(error.unwrap().contains("unavailable candidate"));failure=true;}
+            match worker.pop_event() {
+                Some(WorkerEvent::ModelsReloaded {error})=>{assert!(error.unwrap().contains("unavailable candidate"));failure=true;},
+                Some(WorkerEvent::Listen(ListenEvent::FinalUtterance {source,..}))=>{finals.insert(source);},
+                _=>{},
+            }
             std::thread::yield_now();
         }
         assert!(failure);
@@ -1621,12 +1606,15 @@ mod tests {
         let deadline=std::time::Instant::now()+std::time::Duration::from_secs(3);
         let mut success=false;
         while std::time::Instant::now()<deadline&&!success {
-            if let Some(WorkerEvent::ModelsReloaded {error})=worker.pop_event(){assert!(error.is_none());success=true;}
+            match worker.pop_event() {
+                Some(WorkerEvent::ModelsReloaded {error})=>{assert!(error.is_none());success=true;},
+                Some(WorkerEvent::Listen(ListenEvent::FinalUtterance {source,..}))=>{finals.insert(source);},
+                _=>{},
+            }
             std::thread::yield_now();
         }
         assert!(success);
         worker.flush_source("mic").unwrap();worker.flush_source("app").unwrap();worker.request_shutdown();
-        let mut finals=std::collections::HashSet::new();
         while let Some(event)=worker.recv_event(){match event {
             WorkerEvent::ModelsReloaded {error}=>{assert!(error.is_none());success=true;},
             WorkerEvent::Listen(ListenEvent::FinalUtterance {source,..})=>{finals.insert(source);},

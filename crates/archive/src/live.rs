@@ -6,7 +6,7 @@
 //!
 //! Two lanes. Live jobs (journals, the transcript, listen evidence, capture, screen, images, logs) commit in groups:
 //! one transaction of up to `BATCH_JOBS` jobs (`BATCH_BEHIND` while a backlog drains) or `BATCH_TIME`, each job a
-//! savepoint of it. Background jobs
+//! savepoint of it; notes nobody waits on gather for `NOTE_GROUP` first. Background jobs
 //! (compaction publish steps, collection, embeddings) are each one bounded transaction and run when no live job waits,
 //! or at most once per `BACKGROUND_EVERY` between live groups; the caller prepares everything else on its own thread
 //! first. The thread runs at user-initiated
@@ -71,6 +71,21 @@ pub const WAL_CAP: u64 = 64 << 20;
 /// The least time between two WAL restarts the writer makes room for (`restart_wal`): each costs it one small
 /// checkpoint and a full sync.
 pub const RESTART_EVERY: Duration = Duration::from_secs(5);
+/// The most WAL frames the writer's restart checkpoint (`restart_wal`) copies: more, and it leaves them to the
+/// checkpointer's own thread and asks again after that one's next full copy. 9 Nov 16:39-16:45 the WAL stood at 169-553
+/// MB and the writer's restart checkpoints held every live write 2.0-7.3 s copying what had piled up (log sweep F2).
+pub const RESTART_COPY: u64 = 2048;
+/// Restarts skipped in a row for a larger tail before the writer copies it anyway: under a long burst each full copy
+/// can leave more than `RESTART_COPY` frames behind it, and the WAL must not grow without bound (3-4 Nov: 4.2 GB).
+pub const RESTART_SKIPS: u32 = 3;
+/// How often a gathering writer looks for a waiting background job or `settle` caller.
+const GATHER_STEP: Duration = Duration::from_millis(25);
+/// Notes alone (no caller waits on any queued job) gather this long after the previous commit before they commit. 9 Nov:
+/// listening's VAD notes (about 62 a second) went out one or two per transaction, about 62 commits a second, each
+/// rewriting about 12 index pages into the WAL and again into the database at its checkpoint: 6.3 MB a second of
+/// logical writes, 1,058 GB in 30 hours (macOS's disk-write reports, log sweep F1). Replaying that WAL's commits
+/// grouped by 16 (about 250 ms) wrote 2.0 times fewer pages. A waiting caller (`write`, `call`) still commits at once.
+pub const NOTE_GROUP: Duration = Duration::from_millis(250);
 
 /// Where in the code a write was handed over (`#[track_caller]`), so a slow one is named in the log.
 pub type Site = &'static std::panic::Location<'static>;
@@ -166,9 +181,19 @@ struct Shared {
     /// restarts in milliseconds (`RESTART_EVERY`); tests lower both.
     restart_frames: AtomicU64,
     restart_every_ms: AtomicU64,
+    /// WAL frames the checkpointer's last full copy covered, and the WAL's frames after the writer's last commit.
+    copied_frames: AtomicU64,
+    wal_frames: AtomicU64,
+    /// Callers waiting in `settle`: notes stop gathering for them.
+    settling: AtomicUsize,
+    /// `NOTE_GROUP` in milliseconds (tests set 0 to measure the writer as before).
+    note_group_ms: AtomicU64,
     /// The writer's current step, and the longest since it fell behind.
     doing: Mutex<Option<Doing>>,
     longest: Mutex<Option<Longest>>,
+    /// WAL pages each writer site committed since the checkpointer's last WAL line, and how many of its jobs: the line
+    /// names them (13 Nov: the WAL crossed its cap 41 times in 10 min and nothing said which writes filled it).
+    written: Mutex<std::collections::HashMap<Site, (u64, u64)>>,
 }
 struct Queued {
     site: Site,
@@ -228,6 +253,10 @@ fn canonical(root: &Path) -> PathBuf {
 thread_local! {
     /// Set on the writer threads (a write handed over from inside a job would wait for itself).
     static WRITER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Set while this thread holds the store's writer aside (`Queue::turn`).
+    static TURN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Set while this thread starts a writer under the registry lock (`Queue::existing`).
+    static STARTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Pages in the WAL after the writer's last commit (`wal_hook`).
     static WAL_PAGES: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
 }
@@ -245,6 +274,19 @@ fn guarded<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
 /// True on a writer thread (inside a job).
 pub fn on_writer() -> bool {
     WRITER.with(|w| w.get())
+}
+/// True while this thread holds the store's writer aside (inside `Queue::turn`).
+pub fn in_turn() -> bool {
+    TURN.with(|t| t.get())
+}
+/// Ends a turn: the parked writer goes on when `_release` drops, even if the turn's body panicked.
+struct TurnEnd {
+    _release: crossbeam_channel::Sender<()>,
+}
+impl Drop for TurnEnd {
+    fn drop(&mut self) {
+        TURN.with(|t| t.set(false));
+    }
 }
 
 impl Queue {
@@ -272,13 +314,23 @@ impl Queue {
                 _ => break,
             }
         }
-        let db = crate::store::open(root)?;
+        STARTING.with(|s| s.set(true));
+        let db = crate::store::open(root);
+        STARTING.with(|s| s.set(false));
+        let db = db?;
         // Opened on the caller's thread: a compactor thread's Quit interrupt must not reach the writer's statements.
         db.progress_handler(0, None::<fn() -> bool>)?;
         db.busy_timeout(BUSY)?;
         db.execute_batch("PRAGMA wal_autocheckpoint=0")?;
+        // Every live job is a savepoint of its group, so SQLite keeps each page a job first changes in a sub-journal,
+        // a temp file at `temp_store=FILE`: as many bytes again as the WAL took, written to disk and thrown away at
+        // commit (log sweep F1, 9 Nov). In memory it is bounded by one group's changed pages.
+        db.execute_batch("PRAGMA temp_store=MEMORY")?;
         db.wal_hook(Some(note_wal));
-        let checkpoints = crate::store::open(root)?;
+        STARTING.with(|s| s.set(true));
+        let checkpoints = crate::store::open(root);
+        STARTING.with(|s| s.set(false));
+        let checkpoints = checkpoints?;
         checkpoints.progress_handler(0, None::<fn() -> bool>)?;
         let shared = Arc::new(Shared {
             root: key,
@@ -295,8 +347,13 @@ impl Queue {
             restart: AtomicBool::new(false),
             restart_frames: AtomicU64::new(RESTART_AT / page_size(&db)),
             restart_every_ms: AtomicU64::new(RESTART_EVERY.as_millis() as u64),
+            note_group_ms: AtomicU64::new(NOTE_GROUP.as_millis() as u64),
+            copied_frames: AtomicU64::new(0),
+            wal_frames: AtomicU64::new(0),
+            settling: AtomicUsize::new(0),
             doing: Mutex::new(None),
             longest: Mutex::new(None),
+            written: Mutex::new(Default::default()),
         });
         let (live, live_rx) = crossbeam_channel::unbounded::<Queued>();
         let (background, background_rx) = crossbeam_channel::unbounded::<Background>();
@@ -421,6 +478,7 @@ impl Queue {
     pub fn background<T: Send + 'static>(&self, f: impl FnOnce(&Connection) -> Result<T> + Send + 'static) -> Result<T> {
         let site = std::panic::Location::caller();
         anyhow::ensure!(!on_writer(), "an archive write handed over from inside another write");
+        anyhow::ensure!(!in_turn(), "an archive write handed over while its thread holds the writer aside");
         let (done, answer) = crossbeam_channel::bounded(1);
         let job = Background { site, job: Box::new(move |db: &Connection| {
             let _ = done.send(guarded(|| background_once(db, f)));
@@ -428,8 +486,49 @@ impl Queue {
         self.inner.background.as_ref().context("archive writer stopped")?.send(job).map_err(|_| anyhow!("archive writer stopped"))?;
         answer.recv().map_err(|_| anyhow!("archive writer stopped"))?
     }
+    /// The store's writer of `root` if one runs in this process (`shared` would start one). `None` on a thread that
+    /// is starting a writer: `shared` opens the index under the registry lock, and that open's schema upgrade runs a
+    /// projection transaction that asks here.
+    pub fn existing(root: &Path) -> Option<Self> {
+        if STARTING.with(|s| s.get()) {
+            return None;
+        }
+        let key = canonical(root);
+        let queues = registry().lock().unwrap();
+        let found = queues.iter().filter_map(Weak::upgrade).find(|q| q.shared.root == key);
+        found.map(|inner| Self { inner })
+    }
+    /// Runs `f` on the caller's thread and connection while the store's writer stands aside: `f` starts in a
+    /// background slot (once no live job waits, or once per `BACKGROUND_EVERY` between live groups) and the writer
+    /// waits until it returns. For maintenance that writes on its own connection (the timeline backfill): SQLite
+    /// queues nobody for its write lock, so such a writer polling `store::BUSY` against a writer that takes the lock
+    /// again microseconds after each commit lost every poll and failed with "database is locked" (night 10-11 Nov,
+    /// `tests/contention.rs`). Inside a turn only another process can hold the lock. `f` must not hand a write to
+    /// this writer (it would wait for itself): that is refused. Keep turns to one bounded step; end one early once
+    /// `backlog` says live jobs have waited.
+    #[track_caller]
+    pub fn turn<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        if on_writer() || in_turn() {
+            return f();
+        }
+        let site = std::panic::Location::caller();
+        let (started, start) = crossbeam_channel::bounded::<()>(1);
+        let (release, released) = crossbeam_channel::bounded::<()>(1);
+        let job = Background { site, job: Box::new(move |_db: &Connection| {
+            if started.send(()).is_ok() {
+                // Disconnected when the turn ends.
+                let _ = released.recv();
+            }
+        }) };
+        self.inner.background.as_ref().context("archive writer stopped")?.send(job).map_err(|_| anyhow!("archive writer stopped"))?;
+        start.recv().map_err(|_| anyhow!("archive writer stopped"))?;
+        TURN.with(|t| t.set(true));
+        let _end = TurnEnd { _release: release };
+        f()
+    }
     /// False when the job was dropped (too many pending).
     fn submit(&self, q: Queued) -> Result<bool> {
+        anyhow::ensure!(!in_turn(), "an archive write handed over while its thread holds the writer aside");
         let shared = &self.inner.shared;
         if !shared.queued() {
             let n = shared.dropped.fetch_add(1, Ordering::Relaxed) + 1;
@@ -459,12 +558,22 @@ impl Queue {
     pub fn groups(&self) -> u64 {
         self.inner.shared.groups.load(Ordering::Relaxed)
     }
+    /// Sets how long notes gather (`NOTE_GROUP`); labs set zero to measure the writer as before.
+    #[doc(hidden)]
+    pub fn set_note_group(&self, group: Duration) {
+        self.inner.shared.note_group_ms.store(group.as_millis() as u64, Ordering::Relaxed);
+    }
     /// Notes queued and not yet committed.
     pub fn notes(&self) -> usize {
         self.inner.shared.notes.load(Ordering::Relaxed)
     }
     /// Waits until every queued write has been committed, or `timeout` (at once on the writer: it would wait for
     /// itself). True when nothing is left.
+    /// The writers that filled the WAL since the last WAL line, most first (lab measurements; the checkpointer says them).
+    #[doc(hidden)]
+    pub fn wal_writers(&self) -> Option<String> {
+        self.inner.shared.writers(4096)
+    }
     pub fn settle(&self, timeout: Duration) -> bool {
         settle_shared(&self.inner.shared, timeout)
     }
@@ -550,9 +659,43 @@ impl Shared {
             eprintln!("Archive writer busy {:.0} s so far with {}; {waiting} writes waiting", d.since.elapsed().as_secs_f64(), named(d.what, d.site));
         }
     }
-    /// After a commit: wakes the checkpointer once the WAL holds `CHECKPOINT_PAGES`.
-    fn committed(&self) {
-        if WAL_PAGES.with(|p| p.replace(0)) >= CHECKPOINT_PAGES {
+    /// The writers that filled the WAL since the last call, most first: "chunks.rs:491 520 MB in 30 jobs, ...".
+    fn writers(&self, page: u64) -> Option<String> {
+        let mut by_site: Vec<(Site, (u64, u64))> = self.written.lock().unwrap().drain().collect();
+        by_site.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+        let named: Vec<String> = by_site
+            .iter()
+            .take(3)
+            .filter(|(_, (pages, _))| *pages > 0)
+            .map(|(site, (pages, jobs))| format!("{}:{} {} MB in {jobs} jobs", site.file(), site.line(), (pages * page) >> 20))
+            .collect();
+        (!named.is_empty()).then(|| named.join(", "))
+    }
+    /// Wakes the checkpointer now (the writer left a restart's tail to it).
+    fn nudge_checkpointer(&self) {
+        let mut commits = self.commits.0.lock().unwrap();
+        *commits = commits.wrapping_add(1).min(u64::MAX - 1);
+        self.commits.1.notify_all();
+    }
+    /// After a commit by `sites`' jobs: counts the pages it wrote to them and wakes the checkpointer once the WAL holds
+    /// `CHECKPOINT_PAGES`.
+    fn committed(&self, db: &Connection, sites: &[Site]) {
+        let written = pages_written(db);
+        if written > 0 && !sites.is_empty() {
+            let mut by_site = self.written.lock().unwrap();
+            // A group's pages are shared out evenly among its jobs.
+            let share = written / sites.len() as u64;
+            for site in sites {
+                let entry = by_site.entry(*site).or_default();
+                entry.0 += share;
+                entry.1 += 1;
+            }
+        }
+        let pages = WAL_PAGES.with(|p| p.replace(0));
+        if pages > 0 {
+            self.wal_frames.store(pages as u64, Ordering::Release);
+        }
+        if pages >= CHECKPOINT_PAGES {
             *self.commits.0.lock().unwrap() += 1;
             self.commits.1.notify_all();
         }
@@ -601,13 +744,22 @@ fn drain(db: &Connection, live: &crossbeam_channel::Receiver<Queued>, background
     let mut catch_ups = CatchUps::default();
     let mut last_background = Instant::now();
     let mut last_restart: Option<Instant> = None;
+    let mut last_group = Instant::now();
+    let mut skipped = 0u32;
     loop {
         let every = Duration::from_millis(state.restart_every_ms.load(Ordering::Relaxed));
         if db.is_autocommit() && last_restart.is_none_or(|t| t.elapsed() >= every) && state.restart.swap(false, Ordering::AcqRel) {
-            if !state.step("a WAL restart checkpoint", None, || restart_wal(db)) {
-                state.restart.store(true, Ordering::Release);
+            if restart_now(state.wal_frames.load(Ordering::Acquire), state.copied_frames.load(Ordering::Acquire), skipped) {
+                skipped = 0;
+                if !state.step("a WAL restart checkpoint", None, || restart_wal(db)) {
+                    state.restart.store(true, Ordering::Release);
+                }
+                last_restart = Some(Instant::now());
+            } else {
+                // The checkpointer copies the tail on its own thread now; its next full copy asks again.
+                skipped += 1;
+                state.nudge_checkpointer();
             }
-            last_restart = Some(Instant::now());
         }
         while jobs.len() < BATCH_BEHIND {
             match live.try_recv() {
@@ -617,9 +769,10 @@ fn drain(db: &Connection, live: &crossbeam_channel::Receiver<Queued>, background
         }
         if !jobs.is_empty() && last_background.elapsed() >= BACKGROUND_EVERY {
             if let Ok(job) = background.try_recv() {
-                state.step("a background job", Some(job.site), || (job.job)(db));
+                let site = job.site;
+                state.step("a background job", Some(site), || (job.job)(db));
                 end_open(db);
-                state.committed();
+                state.committed(db, &[site]);
                 last_background = Instant::now();
                 continue;
             }
@@ -627,9 +780,10 @@ fn drain(db: &Connection, live: &crossbeam_channel::Receiver<Queued>, background
         if jobs.is_empty() {
             // Nothing live: one background job, else wait for either lane.
             if let Ok(job) = background.try_recv() {
-                state.step("a background job", Some(job.site), || (job.job)(db));
+                let site = job.site;
+                state.step("a background job", Some(site), || (job.job)(db));
                 end_open(db);
-                state.committed();
+                state.committed(db, &[site]);
                 last_background = Instant::now();
                 continue;
             }
@@ -644,15 +798,19 @@ fn drain(db: &Connection, live: &crossbeam_channel::Receiver<Queued>, background
                 },
                 recv(background) -> job => {
                     if let Ok(job) = job {
-                        state.step("a background job", Some(job.site), || (job.job)(db));
+                        let site = job.site;
+                        state.step("a background job", Some(site), || (job.job)(db));
                         end_open(db);
-                        state.committed();
+                        state.committed(db, &[site]);
                         last_background = Instant::now();
                     }
                     continue;
                 },
             }
             continue;
+        }
+        if !isolate {
+            gather(live, background, &state.settling, &mut jobs, last_group + Duration::from_millis(state.note_group_ms.load(Ordering::Relaxed)));
         }
         // Behind, a group takes up to `BATCH_BEHIND` jobs; past the first `BATCH_JOBS` only those prepared within
         // `BATCH_TIME` (a group stops at the first job still unprepared).
@@ -677,8 +835,10 @@ fn drain(db: &Connection, live: &crossbeam_channel::Receiver<Queued>, background
         let full = ran.finished.len() >= BATCH_JOBS || group_started.elapsed() >= BATCH_TIME;
         isolate = false;
         if !ran.finished.is_empty() {
+            last_group = Instant::now();
             state.groups.fetch_add(1, Ordering::Relaxed);
-            state.committed();
+            let sites: Vec<Site> = ran.finished.iter().map(|(q, _)| q.site).collect();
+            state.committed(db, &sites);
         }
         for (q, outcome) in ran.finished {
             if let (None, Err(e)) = (&q.done, &outcome) {
@@ -741,6 +901,20 @@ fn drain(db: &Connection, live: &crossbeam_channel::Receiver<Queued>, background
     }
 }
 
+/// While every queued job is a note (nobody waits on it), takes the notes that arrive until `until` (`NOTE_GROUP` after
+/// the previous commit), `BATCH_JOBS` of them, a job a caller waits on, a background job or a `settle` caller: one
+/// transaction then carries them all.
+fn gather(live: &crossbeam_channel::Receiver<Queued>, background: &crossbeam_channel::Receiver<Background>, settling: &AtomicUsize, jobs: &mut VecDeque<Queued>, until: Instant) {
+    while jobs.len() < BATCH_JOBS && jobs.iter().all(|q| q.done.is_none()) && background.is_empty() && settling.load(Ordering::Acquire) == 0 {
+        let Some(left) = until.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()) else { return };
+        match live.recv_timeout(left.min(GATHER_STEP)) {
+            Ok(job) => jobs.push_back(job),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
+        }
+    }
+}
+
 /// The database's page size (4096 unless the store says otherwise).
 fn page_size(db: &Connection) -> u64 {
     db.query_row("PRAGMA page_size", [], |r| r.get::<_, i64>(0)).ok().filter(|n| *n > 0).map_or(4096, |n| n as u64)
@@ -757,6 +931,21 @@ fn restart_wal(db: &Connection) -> bool {
     db.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |r| r.get::<_, i64>(0)).is_ok_and(|busy| busy == 0)
 }
 
+/// The writer's restart checkpoint copies only the frames committed since the checkpointer's full copy: at most
+/// `RESTART_COPY` (a WAL that restarted since has fewer frames than were copied: nothing left to copy), unless it
+/// skipped `RESTART_SKIPS` times in a row.
+fn restart_now(wal_frames: u64, copied_frames: u64, skipped: u32) -> bool {
+    wal_frames.saturating_sub(copied_frames) <= RESTART_COPY || skipped >= RESTART_SKIPS
+}
+
+/// Pages this connection wrote since the last call (SQLite's `SQLITE_DBSTATUS_CACHE_WRITE`, reset on read): in WAL
+/// mode, the frames its commits appended.
+fn pages_written(db: &Connection) -> u64 {
+    let (mut current, mut high) = (0, 0);
+    // SAFETY: the handle is this open connection's, used on its own thread; the call only reads and resets a counter.
+    let ok = unsafe { rusqlite::ffi::sqlite3_db_status(db.handle(), rusqlite::ffi::SQLITE_DBSTATUS_CACHE_WRITE, &mut current, &mut high, 1) };
+    if ok == rusqlite::ffi::SQLITE_OK { current.max(0) as u64 } else { 0 }
+}
 /// A background job that panicked mid-transaction leaves it open: rolled back before the next group.
 fn end_open(db: &Connection) {
     if !db.is_autocommit() {
@@ -797,13 +986,17 @@ fn checkpointer(db: &Connection, state: &Weak<Shared>) {
             if let Ok((log, copied)) = pages {
                 if let Some(shared) = state.upgrade() {
                     if log >= 0 && copied >= log && log as u64 >= shared.restart_frames.load(Ordering::Relaxed) {
+                        shared.copied_frames.store(log as u64, Ordering::Release);
                         shared.restart.store(true, Ordering::Release);
                     }
                 }
             }
             if let (Ok((log, copied)), Some(path)) = (pages, db.path().filter(|p| !p.is_empty())) {
                 let bytes = std::fs::metadata(format!("{path}-wal")).map_or(0, |m| m.len());
-                if let Some(line) = wal.look(bytes, log, copied, Instant::now()) {
+                if let Some(mut line) = wal.look(bytes, log, copied, Instant::now()) {
+                    if let Some(writers) = state.upgrade().and_then(|s| s.writers(page_size(db))) {
+                        line = format!("{line}; written since the last line by {writers}");
+                    }
                     if (0..log).contains(&copied) {
                         // A reader cut it short: name who may hold the old snapshot.
                         eprintln!("{line} ({})", crate::readers::suspects(path));
@@ -1061,10 +1254,14 @@ fn settle_shared(shared: &Shared, timeout: Duration) -> bool {
     let pending = shared.pending.lock().unwrap();
     let target = shared.submitted.load(Ordering::Relaxed);
     let reached = || shared.finished.load(Ordering::Relaxed) >= target;
-    if on_writer() {
+    // On the writer, or holding it aside in a turn, nothing queued can finish while this waits.
+    if on_writer() || in_turn() {
         return reached();
     }
+    // Notes gathering for `NOTE_GROUP` commit at once for a caller waiting here.
+    shared.settling.fetch_add(1, Ordering::AcqRel);
     let (_pending, _) = shared.settled.wait_timeout_while(pending, timeout, |_| !reached()).unwrap();
+    shared.settling.fetch_sub(1, Ordering::AcqRel);
     reached()
 }
 
@@ -1119,6 +1316,35 @@ fn set_user_initiated() {}
 #[cfg(test)]
 mod wal_tests {
     use super::*;
+    /// 13 Nov: the WAL crossed its cap 41 times in 10 min and the log did not say which writes filled it. The pages
+    /// each writer site commits are counted (a group's shared among its jobs) and the WAL line names the largest.
+    #[test]
+    fn the_wal_line_names_the_writers_that_filled_it() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("archive");
+        crate::Journal::open(&crate::store::session_path(&root, "session-writers")).unwrap();
+        let queue = Queue::shared(&root).unwrap();
+        queue.call(|db| Ok(db.execute_batch("CREATE TABLE IF NOT EXISTS writers_test(id INTEGER PRIMARY KEY, data BLOB)")?)).unwrap();
+        queue.inner.shared.written.lock().unwrap().clear();
+        queue
+            .background(|db| {
+                for i in 0..128i64 {
+                    db.execute("INSERT INTO writers_test VALUES(?1,?2)", rusqlite::params![i, vec![i as u8; 65_536]])?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        for i in 0..4i64 {
+            queue.call(move |db| Ok(db.execute("INSERT INTO writers_test VALUES(?1,X'00')", [1000 + i]).map(|_| ())?)).unwrap();
+        }
+        let line = queue.inner.shared.writers(4096).unwrap();
+        let first = line.split(", ").next().unwrap();
+        assert!(first.starts_with("crates/archive/src/live.rs:") && first.ends_with(" in 1 jobs"), "the background job wrote the most: {line}");
+        let mb: u64 = first.split(' ').nth(1).unwrap().parse().unwrap();
+        assert!((8..=9).contains(&mb), "8 MB of rows and their pages: {line}");
+        assert!(line.contains(" in 4 jobs"), "the four small writes are counted too: {line}");
+        assert!(queue.inner.shared.written.lock().unwrap().is_empty(), "said once, then counted afresh");
+    }
     /// The WAL restarts under continuous writes (3-4 Nov: it grew to 4.2 GB because every checkpoint raced a commit).
     /// The threshold is lowered to 1,000 frames (4 MB) here; 48 MB is written in 64 KB rows, committed back to back.
     #[test]
@@ -1152,6 +1378,143 @@ mod wal_tests {
         eprintln!("48 MB in {:?}; largest WAL {} MB", started.elapsed(), largest >> 20);
         assert_eq!(n as usize, rows, "every row kept");
         assert!(largest < 24 << 20, "the WAL restarted instead of growing to the data's size: largest {} MB", largest >> 20);
+    }
+    /// Log sweep F2 (6-9 Nov): the embedding index's pending selection scanned every chunk in one statement, 1-13 s,
+    /// again and again; its snapshot kept the WAL from restarting (620 MB at worst). A reader that scans the timeline
+    /// in slices (`timeline::by_slices`) holds a snapshot one slice long, so under continuous writes the WAL still
+    /// restarts. `HEIMDALL_WAL_READER_UNFIXED=1`: the same scan in one read transaction, as before.
+    #[test]
+    fn a_reader_scanning_in_slices_lets_the_wal_restart() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("archive");
+        let queue = Queue::shared(&root).unwrap();
+        queue.inner.shared.restart_frames.store(1000, Ordering::Relaxed);
+        queue.inner.shared.restart_every_ms.store(100, Ordering::Relaxed);
+        let chunks = 8 * crate::timeline::SLICE;
+        queue.call(move |db| {
+            db.execute_batch("CREATE TABLE IF NOT EXISTS wal_test(id INTEGER PRIMARY KEY, data BLOB)")?;
+            for i in 0..chunks {
+                db.execute("INSERT INTO main.timeline_chunks VALUES(?1,1,'text','utterance','mic',0,0,?2,?2,'','{}','h')", rusqlite::params![format!("c{i}"), i * 1000])?;
+            }
+            Ok(())
+        }).unwrap();
+        let unfixed = std::env::var_os("HEIMDALL_WAL_READER_UNFIXED").is_some();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (reader_root, reader_stop) = (root.clone(), stop.clone());
+        // Each slice takes 40 ms of "work", so one pass over the timeline takes about a third of a second.
+        let reader = std::thread::spawn(move || {
+            let db = crate::store::read_index(&reader_root).unwrap();
+            let mut passes = 0;
+            while !reader_stop.load(Ordering::Acquire) {
+                if unfixed {
+                    db.execute_batch("BEGIN").unwrap();
+                }
+                crate::timeline::by_slices(&db, i64::MIN, |lo, hi| {
+                    db.query_row("SELECT count(*) FROM main.timeline_chunks WHERE start_wall_ns>=?1 AND start_wall_ns<?2", [lo, hi], |r| r.get::<_, i64>(0))?;
+                    std::thread::sleep(Duration::from_millis(40));
+                    Ok(true)
+                }).unwrap();
+                if unfixed {
+                    db.execute_batch("COMMIT").unwrap();
+                }
+                passes += 1;
+            }
+            passes
+        });
+        let wal = root.join(format!("{}-wal", crate::store::INDEX));
+        let mut largest = 0u64;
+        for i in 0..640usize {
+            let data: Vec<u8> = (0..65_536u32).map(|k| (k.wrapping_mul(2_654_435_761) >> 13) as u8 ^ i as u8).collect();
+            queue.enqueue(move |db| Ok(db.execute("INSERT OR REPLACE INTO wal_test VALUES(?1,?2)", rusqlite::params![i as i64, data]).map(|_| ())?)).unwrap();
+            std::thread::sleep(Duration::from_millis(5));
+            if i % 16 == 0 {
+                largest = largest.max(std::fs::metadata(&wal).map_or(0, |m| m.len()));
+            }
+        }
+        assert!(queue.settle(Duration::from_secs(60)));
+        stop.store(true, Ordering::Release);
+        let passes = reader.join().unwrap();
+        largest = largest.max(std::fs::metadata(&wal).map_or(0, |m| m.len()));
+        eprintln!("40 MB written beside {passes} reader passes; largest WAL {} MB", largest >> 20);
+        assert!(passes >= 3, "the reader kept scanning ({passes} passes)");
+        assert!(largest < 24 << 20, "the WAL restarted between the reader's slices: largest {} MB", largest >> 20);
+    }
+    /// The writer's restart checkpoint copies at most `RESTART_COPY` frames; a larger backlog stays with the
+    /// checkpointer (9 Nov 16:39: the writer held 7.3 s by one).
+    #[test]
+    fn the_writers_restart_checkpoint_copies_only_a_small_tail() {
+        assert!(restart_now(1000, 1000, 0));
+        assert!(restart_now(1000 + RESTART_COPY, 1000, 0));
+        assert!(!restart_now(1001 + RESTART_COPY, 1000, 0));
+        assert!(!restart_now(140_660, 43_045, 0), "16:39-16:40: 97,615 frames piled up after the full copy");
+        assert!(restart_now(12, 43_045, 0), "the WAL restarted since: nothing left to copy");
+        // Review: under a long burst every full copy may leave a large tail; the WAL still restarts.
+        assert!(!restart_now(140_660, 43_045, RESTART_SKIPS - 1));
+        assert!(restart_now(140_660, 43_045, RESTART_SKIPS), "after {RESTART_SKIPS} skips in a row it copies the tail anyway");
+    }
+    /// Log sweep F1 (9 Nov): VAD notes arrived about 62 a second and nearly each committed alone, so the index WAL took
+    /// about 760 pages a second for 0.27 MB a second of content. Notes gather for `NOTE_GROUP`; a caller that waits
+    /// still commits at once. `HEIMDALL_NOTE_GROUP_UNFIXED=1` measures the writer as before.
+    #[test]
+    fn notes_gather_into_a_few_commits_a_second_and_a_waiting_call_is_not_held() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("archive");
+        let queue = Queue::shared(&root).unwrap();
+        if std::env::var_os("HEIMDALL_NOTE_GROUP_UNFIXED").is_some() {
+            queue.inner.shared.note_group_ms.store(0, Ordering::Relaxed);
+        }
+        queue.call(|db| Ok(db.execute_batch("CREATE TABLE IF NOT EXISTS notes_test(id INTEGER PRIMARY KEY AUTOINCREMENT, body BLOB)")?)).unwrap();
+        let groups = queue.groups();
+        let started = Instant::now();
+        let mut waited = Duration::ZERO;
+        // Two seconds of notes at 124 a second; every half second a caller waits for its own write.
+        for i in 0..248u32 {
+            queue.enqueue(move |db| Ok(db.execute("INSERT INTO notes_test(body) VALUES(randomblob(200))", []).map(|_| ())?)).unwrap();
+            if i % 62 == 31 {
+                let asked = Instant::now();
+                queue.call(|db| Ok(db.execute("INSERT INTO notes_test(body) VALUES(randomblob(200))", []).map(|_| ())?)).unwrap();
+                waited = waited.max(asked.elapsed());
+            }
+            std::thread::sleep(Duration::from_millis(8));
+        }
+        assert!(queue.settle(Duration::from_secs(10)));
+        let commits = queue.groups() - groups;
+        let seconds = started.elapsed().as_secs_f64();
+        eprintln!("252 writes in {seconds:.1} s: {commits} commits; longest waiting call {waited:?}");
+        let n: i64 = queue.call(|db| Ok(db.query_row("SELECT count(*) FROM notes_test", [], |r| r.get(0))?)).unwrap();
+        assert_eq!(n, 252, "every note kept");
+        assert!(commits as f64 <= seconds / NOTE_GROUP.as_secs_f64() + 8.0, "{commits} commits in {seconds:.1} s: notes gather for {NOTE_GROUP:?}");
+        assert!(waited < NOTE_GROUP * 2, "a waiting caller commits at once ({waited:?})");
+    }
+    /// Review of the gathering: a background job (compaction publishing, collection) and a `settle` caller are not
+    /// held for the rest of a gather while notes keep arriving.
+    #[test]
+    fn a_background_job_and_a_settle_do_not_wait_for_gathering_notes() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("archive");
+        let queue = Queue::shared(&root).unwrap();
+        queue.set_note_group(Duration::from_secs(5));
+        queue.call(|db| Ok(db.execute_batch("CREATE TABLE IF NOT EXISTS gather_test(id INTEGER PRIMARY KEY AUTOINCREMENT, body BLOB)")?)).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (notes, notes_stop) = (queue.clone(), stop.clone());
+        let feeder = std::thread::spawn(move || {
+            while !notes_stop.load(Ordering::Acquire) {
+                notes.enqueue(|db| Ok(db.execute("INSERT INTO gather_test(body) VALUES(randomblob(200))", []).map(|_| ())?)).unwrap();
+                std::thread::sleep(Duration::from_millis(8));
+            }
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        let asked = Instant::now();
+        let n: i64 = queue.background(|db| Ok(db.query_row("SELECT count(*) FROM gather_test", [], |r| r.get(0))?)).unwrap();
+        let background = asked.elapsed();
+        let asked = Instant::now();
+        let settled = queue.settle(Duration::from_secs(4));
+        let settle = asked.elapsed();
+        stop.store(true, Ordering::Release);
+        feeder.join().unwrap();
+        eprintln!("background job after {background:?} ({n} rows), settle after {settle:?}");
+        assert!(background < Duration::from_secs(1), "a background job waited {background:?} for a 5 s gather");
+        assert!(settled && settle < Duration::from_secs(1), "settle waited {settle:?} for a 5 s gather");
     }
     /// 2 Nov 15:55: the WAL at 991 MB against the 64 MB cap, and nothing said why. Past the cap the checkpointer says
     /// whether a reader stopped the checkpoint, once per doubling, and once when it is back.

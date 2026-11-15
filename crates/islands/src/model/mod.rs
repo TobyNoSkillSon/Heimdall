@@ -20,10 +20,14 @@ pub mod time;
 pub mod timeline;
 pub mod toggle;
 pub mod viewer_kind;
+// A page in the viewer may take the trackpad pinch itself (13 Nov).
+pub mod page_pinch;
+// The viewer island resizes like a window (night 1107, bug note 2026-11-07T01-40-23).
+pub mod viewer_size;
 pub mod zoom;
 
 pub use due::Due;
-pub use file::{IslandFile, Paths, Visibility};
+pub use file::{DisplayLock, IslandFile, Paths, Visibility};
 pub use goals::{Goal, GoalState, GoalTask, Goals, TaskState};
 pub use geometry::{Point, Rect, Size, Vector};
 pub use island::{Dock, FrameOrigin, Island, OpenButton, OpenRoute, OpenTarget, Presets, Step, TodoGroup};

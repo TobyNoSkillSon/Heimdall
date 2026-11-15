@@ -186,7 +186,7 @@ fn todo_items_group_and_tick() {
     assert_eq!(g.iter().map(|x| x.0.as_str()).collect::<Vec<_>>(), ["running", "waiting", "discussed"]);
     assert_eq!(g.last().unwrap().1[0].title, "Plain");
     assert_eq!(i.side().as_deref(), Some("left"));
-    assert!(!i.waits_on_owner(), "the only waiting item is ticked off");
+    assert!(!i.waits_on_user(), "the only waiting item is ticked off");
     assert!(Island::new("x", jobj! {"items": ["a", "b"]}).grouped_items().is_none(), "a plain list stays plain");
     assert_eq!(Island::new("x", jobj! {"position": {"x": 10, "y": 20}, "side": "left"}).side(), None);
 }
@@ -325,4 +325,34 @@ fn a_page_to_come_keeps_its_button_while_the_work_runs() {
     assert!(OpenTarget::button("https://example.com", false).live);
     assert!(!OpenTarget::button("not a target", true).live);
     let _ = std::fs::remove_dir_all(&d);
+}
+
+/// Heimdall's Islands Display (`display.json`, written by crates/app `islands::display`; bug note
+/// 2026-11-07T02-02-35): a display's name locks the islands there; null, empty or no file follows the pointer, as does
+/// a name no connected display has.
+#[test]
+fn islands_display_locks_by_name_and_follows_otherwise() {
+    use islands::model::DisplayLock;
+    assert_eq!(DisplayLock::locked_in(None), None, "no file: follow");
+    assert_eq!(DisplayLock::locked_in(Some(&jobj! {"display": serde_json::Value::Null})), None);
+    assert_eq!(DisplayLock::locked_in(Some(&jobj! {"display": " "})), None);
+    assert_eq!(DisplayLock::locked_in(Some(&jobj! {"display": "MSI MAG 271QPX"})).as_deref(), Some("MSI MAG 271QPX"));
+    let names = ["Built-in Retina Display", "MSI MAG 271QPX"];
+    assert_eq!(DisplayLock::find(&names, "MSI MAG 271QPX"), Some(1));
+    assert_eq!(DisplayLock::find(&names, "msi"), Some(1));
+    assert_eq!(DisplayLock::find(&names, "Built-in Retina Display"), Some(0));
+    assert_eq!(DisplayLock::find(&["Built-in Retina Display"], "MSI MAG 271QPX"), None, "unplugged: follow the pointer");
+    assert_eq!(DisplayLock::find(&["DELL U2723QE", "DELL P2422H"], "dell"), None, "ambiguous: follow");
+}
+
+/// Pointer moves are watched only while they can move the islands (audit ISL-3, 14 Nov): with one display, or with a
+/// locked display connected, every move used to wake the helper for nothing.
+#[test]
+fn pointer_moves_matter_only_while_the_islands_follow_the_pointer() {
+    use islands::model::DisplayLock;
+    let two = ["Built-in Retina Display", "MSI MAG 271QPX"];
+    assert!(DisplayLock::follows_pointer(&two, None), "two displays, no lock: follow");
+    assert!(!DisplayLock::follows_pointer(&two, Some("MSI")), "locked to a connected display: no watch");
+    assert!(DisplayLock::follows_pointer(&two, Some("DELL U2723QE")), "the locked display is unplugged: follow");
+    assert!(!DisplayLock::follows_pointer(&["Built-in Retina Display"], None), "one display: nothing to follow");
 }

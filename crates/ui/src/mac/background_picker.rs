@@ -46,7 +46,7 @@ impl Access {
 /// One provider row and the models it opens to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Provider {
-    /// The provider id a choice carries (`LOCAL_ENGINE`, "anthropic", "t3:claudeAgent_claude_code_2").
+    /// The provider id a choice carries (`LOCAL_ENGINE`, "anthropic", "t3:claudeAgent_2").
     pub id: String,
     /// "Anthropic API", "Claude Code subscription", "Local Splash Engine".
     pub title: String,
@@ -152,7 +152,7 @@ pub(crate) fn providers(api: &ApiProviders, engine: &EngineStatus, t3: &[T3Insta
     }
     // A T3 choice whose instance T3 has not listed (T3 Code closed, or its list not here yet): kept, and why.
     if let Some(instance) = t3_instance(&selected.0).filter(|i| !t3.iter().any(|t| t.instance == *i)) {
-        let known = T3Instance { instance: instance.into(), name: if instance == T3_DEFAULT_INSTANCE { "Claude code 2".into() } else { instance.into() }, driver: "claudeAgent".into(), models: vec![] };
+        let known = T3Instance { instance: instance.into(), name: if instance == T3_DEFAULT_INSTANCE { T3_DEFAULT_NAME.into() } else { instance.into() }, driver: "claudeAgent".into(), models: vec![] };
         let (title, icon, via) = t3_title(&known);
         out.push(Provider { id: chosen.0.clone(), title, via: Some(via), icon, access: Access::Subscription, reason: Some("T3 Code not running".into()),
             models: vec![Model { id: chosen.1.clone(), name: chosen.1.clone(), levels: vec![], default_level: None, reason: None }] });
@@ -199,7 +199,7 @@ fn caption_of(api: &ApiProviders, engine: &EngineStatus, t3: &[T3Instance], sett
         Some(instance) => {
             let i = t3.iter().find(|i| i.instance == instance);
             let name = i.and_then(|i| i.models.iter().find(|m| m.id == selected.1)).map_or_else(|| selected.1.clone(), |m| m.name.clone());
-            let place = i.map_or_else(|| if instance == T3_DEFAULT_INSTANCE { "Claude code 2".to_string() } else { "Claude Code subscription".to_string() }, |i| i.name.clone());
+            let place = i.map_or_else(|| if instance == T3_DEFAULT_INSTANCE { T3_DEFAULT_NAME.to_string() } else { "Claude Code subscription".to_string() }, |i| i.name.clone());
             format!("{name} · {place}")
         }
         None => menu::background_caption(api, engine, selected),
@@ -800,7 +800,7 @@ pub(crate) fn demo_t3() -> Vec<T3Instance> {
     let efforts = |extra: bool| { let mut e = vec!["low", "medium", "high", "xhigh", "max"]; if extra { e.push("ultracode"); } e.push("ultrathink"); e.into_iter().map(String::from).collect::<Vec<_>>() };
     let claude = |id: &str, name: &str, extra: bool, default: &str| T3Model { id: id.into(), name: name.into(), efforts: efforts(extra), default_effort: Some(default.into()) };
     vec![
-        T3Instance { instance: T3_DEFAULT_INSTANCE.into(), name: "Claude code 2".into(), driver: "claudeAgent".into(), models: vec![
+        T3Instance { instance: T3_DEFAULT_INSTANCE.into(), name: T3_DEFAULT_NAME.into(), driver: "claudeAgent".into(), models: vec![
             claude("claude-opus-5-5", "Claude Opus 5.5", true, "medium"),
             claude("claude-sonnet-5-5", "Claude Sonnet 5.5", false, "high"),
             claude("claude-fable-5-1", "Claude Fable 5.1", true, "medium"),
@@ -826,11 +826,12 @@ mod tests {
         let titles: Vec<(String, Option<String>, Access)> = all.iter().map(|p| (p.title.clone(), p.via.clone(), p.access)).collect();
         let at = |t: &str| titles.iter().position(|(x, ..)| x == t).unwrap_or_else(|| panic!("{t} missing from {titles:?}"));
         assert_eq!(titles[0], (LOCAL_ENGINE_TITLE.to_string(), None, Access::ThisMac));
-        assert_eq!(titles[at("Claude Code subscription")].1.as_deref(), Some("Claude code 2"));
+        // The public edition's default instance is T3's "Claude", which the title already says: "T3 Code" then.
+        assert_eq!(titles[at("Claude Code subscription")].1.as_deref(), Some(if cfg!(feature = "public") { "T3 Code" } else { T3_DEFAULT_NAME }));
         assert_eq!(titles[at("Codex subscription")].1.as_deref(), Some("T3 Code"), "the T3 Codex instance, named once");
         assert!(at("Claude Code subscription") < at("Anthropic API") && at("OpenCode Go subscription") < at("Anthropic API"));
         assert!(all.iter().all(|p| p.title.contains(p.access.label()) || p.via.as_deref() == Some("this Mac") || p.id == LOCAL_ENGINE), "{titles:?}");
-        let t3 = all.iter().find(|p| p.id == "t3:claudeAgent_claude_code_2").unwrap();
+        let t3 = all.iter().find(|p| p.id == format!("t3:{T3_DEFAULT_INSTANCE}")).unwrap();
         let names: Vec<&str> = t3.models.iter().map(|m| m.name.as_str()).collect();
         assert_eq!(names, ["Claude Opus 5.5", "Claude Sonnet 5.5", "Claude Fable 5.1", "Claude Haiku 5.5"]);
         assert_eq!(t3.models[3].levels.last().map(String::as_str), Some("ultrathink"));
@@ -855,8 +856,8 @@ mod tests {
     fn a_t3_choice_t3_has_not_listed_stays_with_its_reason() {
         let chosen = ("t3:".to_string(), "claude-haiku-5-5".to_string());
         let all = providers(&ApiProviders::default(), &EngineStatus::default(), &[], &chosen);
-        let t3 = all.iter().find(|p| p.id == "t3:claudeAgent_claude_code_2").unwrap();
-        assert_eq!((t3.reason.as_deref(), t3.via.as_deref()), (Some("T3 Code not running"), Some("Claude code 2")));
+        let t3 = all.iter().find(|p| p.id == format!("t3:{T3_DEFAULT_INSTANCE}")).unwrap();
+        assert_eq!((t3.reason.as_deref(), t3.via.as_deref()), (Some("T3 Code not running"), Some(if cfg!(feature = "public") { "T3 Code" } else { T3_DEFAULT_NAME })));
         // Listed: no stand-in row, the real one.
         let all = providers(&ApiProviders::default(), &EngineStatus::default(), &demo_t3(), &chosen);
         assert_eq!(all.iter().filter(|p| p.id.starts_with(T3_PROVIDER_PREFIX)).count(), 2);
@@ -864,14 +865,14 @@ mod tests {
 
     #[test]
     fn the_caption_names_the_t3_instance_and_the_chosen_level() {
-        let mut settings = Settings { background_model: ("t3:claudeAgent_claude_code_2".into(), "claude-haiku-5-5".into()), ..Default::default() };
+        let mut settings = Settings { background_model: (format!("t3:{T3_DEFAULT_INSTANCE}"), "claude-haiku-5-5".into()), ..Default::default() };
         let api = ApiProviders::default();
-        assert_eq!(caption(&api, &EngineStatus::default(), &demo_t3(), &settings), "Claude Haiku 5.5 · Claude code 2");
-        settings.background_efforts.push(("t3:claudeAgent_claude_code_2".into(), "claude-haiku-5-5".into(), "low".into()));
-        assert_eq!(caption(&api, &EngineStatus::default(), &demo_t3(), &settings), "Claude Haiku 5.5 · Claude code 2 · Low");
+        assert_eq!(caption(&api, &EngineStatus::default(), &demo_t3(), &settings), format!("Claude Haiku 5.5 · {T3_DEFAULT_NAME}"));
+        settings.background_efforts.push((format!("t3:{T3_DEFAULT_INSTANCE}"), "claude-haiku-5-5".into(), "low".into()));
+        assert_eq!(caption(&api, &EngineStatus::default(), &demo_t3(), &settings), format!("Claude Haiku 5.5 · {T3_DEFAULT_NAME} · Low"));
         // `t3:` alone is the default instance, for the level too.
         settings.background_model.0 = "t3:".into();
-        assert_eq!(caption(&api, &EngineStatus::default(), &demo_t3(), &settings), "Claude Haiku 5.5 · Claude code 2 · Low");
+        assert_eq!(caption(&api, &EngineStatus::default(), &demo_t3(), &settings), format!("Claude Haiku 5.5 · {T3_DEFAULT_NAME} · Low"));
         // An API choice keeps the menu's naming (every provider says API or subscription, menu branch 30 Oct); its level
         // follows.
         let settings = Settings { background_efforts: vec![("anthropic".into(), "claude-haiku-5-5".into(), "xhigh".into())], ..Default::default() };

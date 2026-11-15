@@ -1,5 +1,5 @@
 //! Code-driven job islands ("Islands: code-driven first"): a pure reducer from a bound thread's
-//! T3 activity items, its sub-agents and a TrainingLab run to what its island shows, with no model, within one T3 pass
+//! T3 activity items, its sub-agents and a ModelLab run to what its island shows, with no model, within one T3 pass
 //! (30 s). Before, the binding wrote only state and a stage on a state change and the plan refresher named stages
 //! every 5–30 minutes, so an island sat on "Starting" for 25 minutes (Assistant/Plans/background-jobs/design.html).
 //!
@@ -78,7 +78,7 @@ fn followed(s: &str, pat: &str, class: impl Fn(char) -> bool, tails: &[&str]) ->
 /// `BUILD = \b(cargo (build|run)|xcodebuild|swift build|scripts/(build|bundle)[\w_]*\.sh|make\b|npm run build)`
 pub fn is_build(c: &str) -> bool {
     ["cargo build", "cargo run", "xcodebuild", "swift build", "npm run build"].iter().any(|p| bounded(c, p, false))
-        || bounded(c, "make", true)
+        || (bounded(c, "make", true) && !c.contains("make.") && !c.contains("make/"))
         || ["scripts/build", "scripts/bundle"].iter().any(|p| {
             let mut from = 0;
             while let Some(i) = c[from..].find(p) {
@@ -92,9 +92,86 @@ pub fn is_build(c: &str) -> bool {
         })
 }
 
-/// `TEST = \b(cargo test|cargo nextest|pytest|swift test|unittest|npm test|vitest)\b`
+/// `TEST = \b(cargo test|cargo nextest|pytest|swift test|unittest|npm test|vitest)\b`, or a test script run as the
+/// program (`node test/e2e.mjs`, `bash tests/live.sh`).
 pub fn is_test(c: &str) -> bool {
-    ["cargo test", "cargo nextest", "pytest", "swift test", "unittest", "npm test", "vitest"].iter().any(|p| bounded(c, p, true))
+    ["cargo test", "cargo nextest", "pytest", "swift test", "unittest", "npm test", "vitest", "node --test"].iter().any(|p| bounded(c, p, true))
+        || programs(c).iter().any(|(_, script)| {
+            let s = script.as_str();
+            let named = s.split('/').any(|d| matches!(d, "test" | "tests" | "e2e")) || s.rsplit('/').next().is_some_and(|f| f.starts_with("e2e."));
+            named && [".mjs", ".js", ".sh", ".py"].iter().any(|x| s.ends_with(x))
+        })
+}
+
+/// The programs a shell line runs: for each command (split at `;`, `&&`, `||`, `|`, newlines and an opening bracket),
+/// its program after env assignments and wrappers (`nice -n 19`, `timeout 60`, `exec`), and the script it is handed
+/// when the program is an interpreter (`node test/e2e.mjs` → ("node", "test/e2e.mjs")); otherwise the program twice.
+/// Words inside quotes or after `cat`, `grep` or `sed` are arguments, never programs.
+pub fn programs(c: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for seg in c.split(['\n', ';', '|', '&', '(', ')']) {
+        let mut w = seg.split_whitespace().peekable();
+        while let Some(t) = w.peek() {
+            let t = *t;
+            if t.contains('=') && !t.starts_with('-') && !t.contains('/') { w.next(); continue }
+            if matches!(t, "nice" | "exec" | "time" | "command" | "env" | "sudo") { w.next(); continue }
+            if t == "-n" || t.parse::<f64>().is_ok() { w.next(); continue }
+            if t == "timeout" { w.next(); w.next(); continue }
+            break;
+        }
+        let Some(prog) = w.next() else { continue };
+        let prog = prog.trim_start_matches("./").to_owned();
+        let base = prog.rsplit('/').next().unwrap_or(&prog).to_owned();
+        let script = if matches!(base.as_str(), "node" | "python" | "python3" | "bash" | "sh" | "zsh" | "deno" | "bun") {
+            w.find(|a| !a.starts_with('-')).map(|a| a.trim_start_matches("./").to_owned()).unwrap_or_default()
+        } else { prog.clone() };
+        out.push((base, script));
+    }
+    out
+}
+
+/// A test that runs on another machine: a VM harness's guest shell, ssh into a test box, a VM tool (bug note
+/// 2026-11-06T12-02-01: "Arsenal 1.0.3 · Reading" for 15 minutes while it installed, spoke and transcribed in a fresh VM).
+/// Only as the program run: `grep "ssh " docs` reads.
+pub fn is_remote_test(c: &str) -> bool {
+    programs(c).iter().any(|(p, script)| matches!(p.as_str(), "ssh" | "tart" | "utmctl" | "prlctl") || script.ends_with("guest.sh"))
+}
+
+/// A judged round: a climb's round script, a judge run through a model's CLI (`claude -p`, `codex exec`), a judge
+/// script (bug note 2026-11-06T12-02-01: the promo and CV climbs read "Reading" while their judges scored). Only as the
+/// program run: `cat tools/round.sh` reads, `git add tools/round.sh` commits.
+pub fn is_judging(c: &str) -> bool {
+    let runs = programs(c);
+    runs.iter().any(|(p, script)| {
+        let f = script.rsplit('/').next().unwrap_or(script);
+        f == "round.sh" || f.starts_with("judge.") || f.starts_with("judge_")
+            || (p == "claude" && c.contains(" -p")) || (p == "codex" && c.contains("codex exec"))
+    })
+}
+
+/// A call into a live service to see it work: an API on this Mac (`curl http://127.0.0.1:…`), an MCP `tools/call`.
+pub fn is_live_call(c: &str) -> bool {
+    (bounded(c, "curl", true) && ["127.0.0.1", "localhost"].iter().any(|h| c.contains(h))) || c.contains("tools/call")
+}
+
+/// An MCP or app tool that only reads (a thread, a list, a status, a search); any other tool call acts on something.
+fn tool_reads(name: &str) -> bool {
+    let n = name.rsplit("__").next().unwrap_or(name).to_ascii_lowercase();
+    ["read", "list", "search", "query", "status", "get", "wait", "capabilit", "guide", "inspect", "find", "grep", "glob", "snapshot", "transcript", "help"]
+        .iter().any(|w| n.contains(w))
+}
+
+/// A brief that sets a sub-agent to review or judge: Reviewing (a climb's judges, a fresh review).
+fn reviews(brief: &str) -> bool {
+    let b = brief.to_lowercase();
+    ["review", "judge", "critique", "score"].iter().any(|w| bounded(&b, w, false))
+}
+
+/// A background command as a stage: a judge or review (`codex exec` judging a round) is Reviewing; a command with a
+/// stage of its own keeps it; reading or editing in the background says nothing.
+fn background_stage(c: &str, sig: &Sig) -> Option<String> {
+    if is_judging(c) { return Some("Reviewing".into()) }
+    sig.stage().filter(|s| !WEAK.contains(s)).map(str::to_owned)
 }
 
 /// `PROBE`: a built binary, a self-test, a render, a screenshot or a lab script.
@@ -137,7 +214,7 @@ pub fn merged_in(c: &str) -> Vec<String> {
     // newline or redirect. Each word: (text without quotes, quoted at all, the command's end follows it).
     let mut words: Vec<(String, bool, bool)> = Vec::new();
     let (mut cur, mut quoted, mut q, mut in_word) = (String::new(), false, None::<char>, false);
-    let mut push = |w: &mut String, quoted: &mut bool, in_word: &mut bool, end: bool, words: &mut Vec<(String, bool, bool)>| {
+    let push = |w: &mut String, quoted: &mut bool, in_word: &mut bool, end: bool, words: &mut Vec<(String, bool, bool)>| {
         if *in_word { words.push((std::mem::take(w), *quoted, false)) }
         if end { if let Some(l) = words.last_mut() { l.2 = true } else { words.push((String::new(), false, true)) } }
         *quoted = false;
@@ -287,7 +364,9 @@ pub fn image_in(s: &str) -> Option<String> {
         // The rightmost extension in the run followed by a word boundary, at least one character in.
         let mut best: Option<usize> = None;
         for ext in EXT {
-            let mut from = start + 1;
+            // One character in, not one byte: a run may start with 'Ł' (bug note 2026-11-07T13-12-26: slicing
+            // inside it panicked the thread-binding loop, and job islands stopped following their threads).
+            let mut from = start + chars[k].1.len_utf8();
             while from < end {
                 let Some(i) = lower[from..end].find(ext) else { break };
                 let e = from + i + ext.len();
@@ -421,12 +500,15 @@ fn classify(it: &Value) -> Sig {
             if n.contains("html_preview") || n.contains("html_render") || n.to_lowercase().contains("screenshot") || n.contains("preview_snapshot") { return Sig::Check(None) }
             if n == "Read" { if let Some(p) = image_in(&i) { return Sig::Image(p) } }
             if n.to_lowercase().contains("download") { return Sig::Download }
-            if n == "Agent" || n == "Task" { return Sig::Brief { review: i.to_lowercase().contains("review") } }
+            if n == "Agent" || n == "Task" || ["delegate_task", "t3_thread_launch", "create_threads"].iter().any(|t| n.ends_with(t)) { return Sig::Brief { review: reviews(&i) } }
+            // An MCP tool that acts (Arsenal's run, a TV control, a render) is the job checking its work, not reading.
+            if n.starts_with("mcp__") && !tool_reads(&n) { return Sig::Check(None) }
             Sig::Read
         }
         "command_execution" => {
             let (c, _) = split_command(text);
-            if is_test(&c) { return Sig::Test }
+            if is_judging(&c) { return Sig::Brief { review: true } }
+            if is_test(&c) || is_remote_test(&c) { return Sig::Test }
             if is_build(&c) { return Sig::Build }
             if is_commit(&c) { return Sig::Commit }
             if is_labelling(&c) { return Sig::Labelling }
@@ -434,6 +516,7 @@ fn classify(it: &Value) -> Sig {
             if let Some(w) = written(&c) { return Sig::Edit(w) }
             if let Some(d) = drafted(&c) { return Sig::Draft(d) }
             if is_probe(&c) { return Sig::Check(image_in(&c)) }
+            if is_live_call(&c) { return Sig::Check(None) }
             if is_fetch(&c) { return Sig::Research }
             Sig::Read
         }
@@ -508,6 +591,9 @@ pub struct Reducer {
     asked: Option<f64>,
     /// A labelling run or download running in the background: weak stages do not replace it while it runs.
     held: Option<String>,
+    /// The stage of the newest background command (a judge is Reviewing, a VM test Testing), for the island while
+    /// only background work runs: "Background" is no stage (bug note 2026-11-06T12-02-01).
+    background_stage: Option<String>,
     last_at: f64,
     /// The newest item position read.
     pub position: Option<u64>,
@@ -529,6 +615,9 @@ pub struct Reducer {
     status: Option<String>,
     /// Branches `git merge` brought in this run, in order (`merged_in`).
     merged: Vec<String>,
+    /// The deliverable the newest agent message naming one named (`kept_report::named_in`), not checked on disk.
+    delivered: Option<String>,
+    // ---- end lane R ----
 }
 
 /// The stage as the compact history and the island agent's triggers name it: weak stages are one Preparing.
@@ -608,6 +697,8 @@ impl Reducer {
             Sig::Say(t) => {
                 let s = first_sentence(t);
                 if !s.is_empty() { self.say = Some(s.clone()); self.note(at, format!("said: {s}")) }
+                // Lane R (bug note 2026-11-11T12-05-15): the report a final reply names.
+                if let Some(p) = super::kept_report::named_in(t) { self.delivered = Some(p) }
             }
             Sig::Owner => {
                 let t = text.trim();
@@ -639,6 +730,8 @@ impl Reducer {
             let (c, _) = split_command(text);
             if text.lines().skip(1).any(|l| l.contains("Command running in background with ID") || l.contains("was moved to the background")) {
                 self.background.push(at);
+                // The strongest stage among the open work: a monitor after a judge keeps Reviewing.
+                if let Some(st) = background_stage(&c, &sig) { self.background_stage = Some(st) }
                 // A labelling run or a download left going in the background is the stage while the agent watches it.
                 if matches!(sig, Sig::Labelling | Sig::Download) { self.held = sig.stage().map(str::to_owned) }
             }
@@ -653,7 +746,7 @@ impl Reducer {
             // One background command reported back (T3's notification: `Command "…" finished`).
             if !self.background.is_empty() { self.background.remove(0); }
         }
-        if self.background.is_empty() { self.held = None }
+        if self.background.is_empty() { self.held = None; self.background_stage = None }
         if sig == Sig::Question {
             if self.base != "Your answer" { self.before_question = Some(self.base.clone()) }
             self.asked.get_or_insert(at);
@@ -768,6 +861,7 @@ impl Reducer {
             subs_done: self.subs_done,
             subs_total: self.subs_total,
             background_open: open_bg,
+            background_stage: self.background_stage.clone(),
             pictures: self.pictures.clone(),
             sources: self.sources.clone(),
             progress,
@@ -782,6 +876,7 @@ impl Reducer {
             subs_names: self.subs_names.clone(),
             status: self.status.clone(),
             merged: self.merged.clone(),
+            delivered: self.delivered.clone(),
         }
     }
 }
@@ -840,6 +935,8 @@ pub struct Signals {
     pub subs_done: u32,
     pub subs_total: u32,
     pub background_open: usize,
+    /// What the open background work is, as a stage word (`Reducer::background_stage`).
+    pub background_stage: Option<String>,
     pub pictures: Vec<String>,
     pub sources: Vec<String>,
     /// (done, total) where it is measurable.
@@ -860,6 +957,10 @@ pub struct Signals {
     pub status: Option<String>,
     /// Branches merged this run, oldest first.
     pub merged: Vec<String>,
+    /// Lane R: the deliverable (report, page, picture, file) the newest agent message naming one named. Code's own:
+    /// not in the island agent's input.
+    #[serde(skip)]
+    pub delivered: Option<String>,
 }
 
 /// How the island stands for its history: still at work, asking the user, or over.
@@ -1132,12 +1233,6 @@ pub fn band_history_max(changes: &[(f64, String)], at: f64, cur: &str, max: usiz
         }
     }
     out
-}
-
-/// A length as the band labels it: "<1 min", "N min", "1 h 03".
-pub fn band_fmt(s: f64) -> String {
-    let s = s.max(0.0) as u64;
-    if s >= 3600 { format!("{} h {:02}", s / 3600, s % 3600 / 60) } else if s >= 60 { format!("{} min", s / 60) } else { "<1 min".into() }
 }
 
 /// Round 2's `with_current`: the history ends in the stage the island shows, from when it last began.

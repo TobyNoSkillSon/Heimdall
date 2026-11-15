@@ -161,7 +161,7 @@ pub fn remember_removed(file: &mut Map<String, Value>, title: &str, quote: &str,
 pub fn refuse(file: &Map<String, Value>, e: &Entry) -> Option<String> {
     if e.goal.is_empty() { return Some("serves no goal".into()) }
     if e.title.trim().is_empty() { return Some("no title".into()) }
-    if removed_like(file, &e.title, &e.quote, e.at) { return Some("User removed it".into()) }
+    if removed_like(file, &e.title, &e.quote, e.at) { return Some(format!("{} removed it", agent::identity::user_start())) }
     let items = file.get("items").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_object);
     for i in items {
         if !e.task.is_empty() && s(i, "task") == e.task { return Some("already settled (same task)".into()) }
@@ -177,6 +177,12 @@ pub fn add(file: &mut Map<String, Value>, entries: &[Entry]) -> Vec<String> {
     let mut out = Vec::new();
     let mut decided = 0;
     for e in entries {
+        // Lane R (bug note 2026-11-11T12-05-15): a closed job wrote this work's row with its report as proof; this
+        // entry takes that row over rather than standing beside it (before the title dedupe, which would keep the
+        // job's shorter words).
+        let settled_task = !e.task.is_empty() && file.get("items").and_then(Value::as_array).into_iter().flatten().any(|i| i["task"] == e.task.as_str());
+        if e.kind == "shipped" && !e.goal.is_empty() && !settled_task && !removed_like(file, &e.title, &e.quote, e.at)
+            && take_over(file, &e.title, &e.goal, &e.task, &e.quote, e.at) { out.push(String::new()); continue }
         if let Some(r) = refuse(file, e) { out.push(r); continue }
         // At most `DECISIONS` a turn (counted after dedupe): a decision sets a goal's direction; a run of instructions
         // is the work itself.
@@ -223,7 +229,7 @@ pub fn entries(before: &Map<String, Value>, after: &Map<String, Value>, outcomes
             let at = t["at"].as_i64().or_else(|| when(&quote, lines)).unwrap_or(now);
             // Its proof is on the line it came from, read by code; a task the user ticked is his own word.
             let proof = line_of(&quote, lines).and_then(|l| crate::goals::proof::near(l, &quote, at))
-                .or_else(|| (t["ticked"] == true).then(|| crate::goals::proof::quote("ticked done by User", at)));
+                .or_else(|| (t["ticked"] == true).then(|| crate::goals::proof::quote(&format!("ticked done by {}", crate::islands::files::user()), at)));
             out.push(Entry { title: title.into(), kind: "shipped", goal: gid.into(), task: id.into(), at, quote, proof });
         }
     }
@@ -247,4 +253,33 @@ pub fn record_locked(root: &Root, entries: &[Entry], now: i64) -> anyhow::Result
         crate::goals::ops::write_list(root, ID, &file)?;
     }
     Ok(out)
+}
+
+// Lane R (bug note 2026-11-11T12-05-15): a closed job's Settled rows, used by islands::kept_report and by `add` here.
+/// Who wrote a Settled row (`by`): a closed job, as against the Goals job (`goals::ops::BY`).
+pub const JOB_BY: &str = "job";
+/// A Settled row is the same work as a closed job's within this long and two shared content words.
+pub const JOB_SAME_WORK_S: i64 = 30 * 60;
+/// A Settled row and a closed job are the same work: within `JOB_SAME_WORK_S`, sharing two content words and at least
+/// `SAME_SHARE` of the shorter title's ("Heimdall latency" is not "Heimdall menu revamp").
+pub fn same_job_work(row_title: &str, row_at: i64, title: &str, at: i64) -> bool {
+    if (row_at - at).abs() > JOB_SAME_WORK_S { return false }
+    let (a, b) = (words(row_title), words(title));
+    let shared = a.iter().filter(|w| b.contains(w)).count();
+    shared >= 2 && shared as f64 >= JOB_SAME_SHARE * a.len().min(b.len()) as f64
+}
+/// The share of the shorter title's content words `same_work` needs.
+pub const JOB_SAME_SHARE: f64 = 0.6;
+
+/// The Goals job's row for work a closed job already wrote (`settle`): it takes that row over, its words and goal
+/// over the job's, keeping the file proof, instead of standing beside it. True when it did.
+pub fn take_over(file: &mut Map<String, Value>, title: &str, goal: &str, task: &str, quote: &str, at: i64) -> bool {
+    let Some(a) = file.get_mut("items").and_then(Value::as_array_mut) else { return false };
+    let Some(row) = a.iter_mut().rev().find(|i| i["by"] == JOB_BY && same_job_work(i["title"].as_str().unwrap_or(""), i["at"].as_i64().unwrap_or(0), title, at)) else { return false };
+    row["title"] = json!(crate::goals::ops::cap(title, TITLE_CHARS));
+    row["goal"] = json!(goal);
+    row["task"] = json!(task);
+    row["by"] = json!(crate::goals::ops::BY);
+    if !quote.is_empty() { row["quote"] = json!(crate::goals::ops::cap(quote, 200)) }
+    true
 }

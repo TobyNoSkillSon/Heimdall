@@ -23,6 +23,9 @@ DECIDER = [('4bit', 'int4', 'd1/d1-2B-heimdall-v6-4bit'), ('8bit', 'int8', 'd1/d
 # checkpoint carries the vision tower the engine skips). Same tensors, names, shapes and dtypes for the text model
 # (headers compared 4 Nov 2026).
 DECIDER_DIFFERS = {'config.json', 'bf16/model.safetensors'}
+RERANKER_REPO = 'Qwen/Qwen3-Reranker-0.6B'
+RERANKER_REVISION = 'e61197ed45024b0ed8a2d74b80b4d909f1255473'
+RERANKER_FILES = ['config.json', 'tokenizer.json', 'tokenizer_config.json', 'model.safetensors']
 SPEAKERS = [
     ('speakers/Nemotron-3-Diarization.q8_0.gguf', 'https://huggingface.co/nvidia/Nemotron-3-Diarization/resolve/f667ed73aee57d40cc39428eb768b4fd87a0a29e/Nemotron-3-Diarization.q8_0.gguf'),
     ('speakers/ReDimNet2B6.onnx', 'https://huggingface.co/soniqo/ReDimNet2-B6-ONNX-FP32/resolve/e911e3f063899805f3d94ee5d1db53fff8e9f3e8/ReDimNet2B6.onnx'),
@@ -68,7 +71,7 @@ def build():
             assert same != differs, f'{source}: published {sha[:12]} vs bundled {local["sha256"][:12]}; update DECIDER_DIFFERS'
             rows.append(dict(path=f'decide/{folder}/{name}', url=url, sha256=sha, bytes=entry['size']))
         groups.append(dict(id=f'decider-{key}', title='Decider', files=rows))
-    # The night pass's and speech split's separator (docs/night-pass.md): the revision docs/night-pass.md names, the
+    # The night pass's and speech split's separator (docs/personal/night-pass.md): the revision docs/personal/night-pass.md names, the
     # SHA-256 scripts/extra-models.lock.json ships.
     night = {r['path']: r for r in json.loads((ROOT / 'scripts/extra-models.lock.json').read_text())}['night/model.int8.onnx']
     url = 'https://huggingface.co/ipsilondev/MossFormer2-SS-16K-ONNX/resolve/abd8b1268dfded6b0e972ddae4c2dd6a3faf4f8a/model.int8.onnx'
@@ -81,6 +84,16 @@ def build():
     rows = sorted(embedding['files'], key=lambda r: r['path'].endswith('model.safetensors'))
     groups.append(dict(id='embedding', title='EmbeddingGemma 2', files=[
         dict(path=r['path'], url=base + r['path'].removeprefix('embeddinggemma2/weights/'), sha256=r['sha256'], bytes=r['bytes']) for r in rows]))
+    # Memory search's reranker (docs/models.md): Qwen's files as published, the SHA-256s scripts/extra-models.lock.json
+    # ships; the weights last, like EmbeddingGemma's (the search falls back to embedding order until they are in place).
+    extra = {r['path']: r['sha256'] for r in json.loads((ROOT / 'scripts/extra-models.lock.json').read_text())}
+    rows = []
+    for name in RERANKER_FILES:
+        url = f'https://huggingface.co/{RERANKER_REPO}/resolve/{RERANKER_REVISION}/{name}'
+        with urllib.request.urlopen(urllib.request.Request(url, method='HEAD'), timeout=60) as r:
+            size = int(r.headers.get('X-Linked-Size') or r.headers['Content-Length'])
+        rows.append(dict(path=f'qwen3-reranker-0.6b/{name}', url=url, sha256=extra[f'qwen3-reranker-0.6b/{name}'], bytes=size))
+    groups.append(dict(id='reranker', title='Qwen3-Reranker-0.6B', files=rows))
     return dict(note='Written by scripts/downloads_lock.py; what the public edition downloads (docs/models.md).', groups=groups)
 
 

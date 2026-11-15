@@ -26,12 +26,19 @@ pub const RETRY_MAX_MS: i64 = 30 * 60_000;
 /// older ones are set aside, logged (review 31 Oct: a turn had no cap).
 pub const TURN_LINES: usize = 400;
 pub const TURN_BYTES: usize = 60_000;
+/// A whole call (system prompt, schema, the segment's turns, the new turn) stays under this many bytes. T3's
+/// `t3_thread_launch` refuses a message over 120,000 characters, and a rolling session's first message carries all of
+/// it; bytes are never fewer than characters, and the rest is the wrapper's room. Over it, the segment starts over
+/// before the call, then the oldest new lines are set aside (8 Nov: a 145,000-character segment was refused 18 times,
+/// bug note 2026-11-08T02-03-41).
+pub const CALL_BYTES: usize = 100_000;
 
 /// The system prompt and the schema: what every call carries before its turns.
 pub fn fixed_bytes() -> usize { SYSTEM.len() + ops::schema().to_string().len() }
 
 /// One call to make.
 #[derive(Clone, Debug)]
+#[cfg_attr(not(test), allow(dead_code))] // goals-lab (goals/lab.rs) reads it
 pub struct Request {
     pub why: Why,
     pub at: i64,
@@ -49,6 +56,7 @@ pub struct Request {
 }
 
 impl Request {
+    #[cfg_attr(not(test), allow(dead_code))] // goals-lab (goals/lab.rs) reads it
     pub fn user(&self) -> String { format!("{}{}", self.stable, self.volatile) }
     pub fn lines_text(&self) -> String { self.lines.iter().map(Line::text).collect::<Vec<_>>().join("\n") }
     /// What the ops are checked against: every new line, and the user's own (his words, notices of his clicks).
@@ -73,6 +81,7 @@ pub enum Answer {
 
 /// What one turn did.
 #[derive(Clone, Debug)]
+#[cfg_attr(not(test), allow(dead_code))] // goals-lab (goals/lab.rs) reads it
 pub struct Done {
     pub outcomes: Vec<Outcome>,
     pub goals: Map<String, Value>,
@@ -187,6 +196,7 @@ impl Shadow {
         self.segment.save(&self.dir.join("segment.json"))
     }
 
+    #[cfg_attr(not(test), allow(dead_code))] // goals-lab (goals/lab.rs) reads it
     pub fn due(&self) -> Option<i64> { if self.pending.is_empty() { None } else { self.triggers.due() } }
 
     /// The call due at `now`, if one is. Only the newest `TURN_LINES` lines and `TURN_BYTES` bytes go; older ones
@@ -211,8 +221,30 @@ impl Shadow {
             self.recent.drain(..o);
         }
         let goals = self.root.read(ops::ID).unwrap_or_else(ops::fresh);
-        let first = self.segment.turns.is_empty();
-        let ledger = crate::goals::ledger::build(&self.pending, &goals);
+        let (stable, volatile, ledger) = loop {
+            let first = self.segment.turns.is_empty();
+            let ledger = crate::goals::ledger::build(&self.pending, &goals);
+            let stable = segment::stable(first.then_some(self.segment.header.as_str()), &self.pending);
+            let volatile = format!("{}{}", segment::volatile(&goals, now), crate::goals::ledger::text(&ledger));
+            let history: usize = self.segment.turns.iter().map(|t| t.user.len() + t.volatile.len() + t.assistant.len()).sum();
+            let size = fixed_bytes() + history + stable.len() + volatile.len();
+            if size <= CALL_BYTES { break (stable, volatile, ledger) }
+            if !first {
+                eprintln!("Goals: the call would carry {size} bytes, over {CALL_BYTES}; the context starts over first");
+                // The old segment's T3 thread is archived by the next call under the new key (`background_t3::run`).
+                self.restart(now);
+                if let Err(e) = self.save() { eprintln!("Goals: segment not saved: {e:#}") }
+                continue;
+            }
+            if self.pending.len() < 2 { break (stable, volatile, ledger) }
+            let over = self.pending.len() / 2;
+            eprintln!("Goals: the call would carry {size} bytes, over {CALL_BYTES}; {over} older line(s) set aside");
+            let aside: Vec<Line> = self.pending.drain(..over).collect();
+            if let Some(l) = aside.last() { self.segment.sent = Some(l.id.clone()) }
+            self.recent.extend(aside);
+            let o = self.recent.len().saturating_sub(TAIL_LINES);
+            self.recent.drain(..o);
+        };
         Some(Request {
             why,
             at: now,
@@ -220,8 +252,8 @@ impl Shadow {
             key: self.segment.key(),
             turn: self.segment.turns.len(),
             history: self.segment.turns.clone(),
-            stable: segment::stable(first.then_some(self.segment.header.as_str()), &self.pending),
-            volatile: format!("{}{}", segment::volatile(&goals, now), crate::goals::ledger::text(&ledger)),
+            stable,
+            volatile,
             lines: self.pending.clone(),
             ledger,
         })
@@ -287,9 +319,10 @@ impl Shadow {
 }
 
 /// The runner's request (`goals-lab`): the call as JSON.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn runner_input(req: &Request, effort: &str) -> Value {
     json!({
-        "session": req.key, "system": SYSTEM, "schema": ops::schema(),
+        "session": req.key, "system": agent::identity::template(SYSTEM, &agent::identity::current()), "schema": ops::schema(),
         "history": req.history.iter().map(|t| json!({"user": format!("{}{}", t.user, t.volatile), "assistant": t.assistant})).collect::<Vec<_>>(),
         "user": req.user(), "effort": effort,
     })

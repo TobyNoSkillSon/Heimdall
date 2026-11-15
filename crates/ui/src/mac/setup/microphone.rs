@@ -42,7 +42,6 @@ pub(crate) fn level_share(db: f32) -> f64 {
 
 pub(super) struct MicPage {
     pub frame: Frame,
-    pub card: Retained<Plate>,
     pub name: Retained<NSTextField>,
     pub track: Retained<Plate>,
     pub fill: Retained<Plate>,
@@ -80,7 +79,7 @@ impl MicPage {
         card.addSubview(&picker);
         Band::wrap(doc, &card, CONTENT_Y, CARD, SIDE, mtm);
         frame.set_height(CONTENT_Y + CARD_H);
-        Self { frame, card, name, track, fill, picker, ids: vec![], level: 0.0 }
+        Self { frame, name, track, fill, picker, ids: vec![], level: 0.0 }
     }
 
     pub(super) fn sync(&mut self, m: &Microphones) {

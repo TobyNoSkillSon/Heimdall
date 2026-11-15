@@ -122,7 +122,7 @@ const PROPOSED: &str = "Vireo: icon review";
 
 /// The notice for one proposal that came on screen, as `diff_text` words it.
 fn proposed_notice(title: &str) -> String {
-    format!("Plan: proposed \u{201c}{title}\u{201d} for Scheduled, waiting for User's yes (one is on screen: say it in one short line; his yes is plan_edit accept, his no decline).")
+    format!("Plan: proposed \u{201c}{title}\u{201d} for Scheduled, waiting for the user's yes (one is on screen: say it in one short line; their yes is plan_edit accept, their no decline).")
 }
 
 /// An answer that does what the model used to do to the lists (word for a time, tick, drop, move to Settled) and
@@ -281,14 +281,14 @@ async fn a_malformed_answer_changes_nothing_and_waits_for_something_new() {
     let (url, fake) = serve().await;
     let l = lab(&url, Some("k"), Duration::from_secs(10));
     seed(&l.root);
-    let before: Vec<_> = LISTS.iter().map(|(id, _)| items(&l.root, id)).collect();
+    let before: Vec<_> = ["scheduled", "settled"].iter().map(|id| items(&l.root, id)).collect();
     let shared = Shared::default();
     for bad in ["not json {", "{\"scheduled\": []}", "{\"scheduled\":[{\"id\":\"a1\"}],\"settled\":[],\"jobs\":[]}",
                 "{\"scheduled\":[],\"settled\":[],\"jobs\":[]}"] {
         *fake.mode.lock().unwrap() = Mode::Answer(bad.into());
         *shared.last.lock().unwrap() = None;
         assert!(pass(&l.cfg, &shared).await.is_err(), "{bad}");
-        let after: Vec<_> = LISTS.iter().map(|(id, _)| items(&l.root, id)).collect();
+        let after: Vec<_> = ["scheduled", "settled"].iter().map(|id| items(&l.root, id)).collect();
         assert_eq!(before, after, "never wipes or edits the lists on a bad answer: {bad}");
     }
     let hits = fake.hits.load(Ordering::SeqCst);
@@ -364,12 +364,12 @@ async fn requests_during_a_pass_coalesce_into_one_follow_up() {
 #[test]
 fn the_diff_reads_as_one_short_line() {
     let proposed = Diff { added: vec!["Arsenal: push branch".into()], ..Default::default() };
-    assert_eq!(diff_text(&proposed).unwrap(), "Plan: proposed \u{201c}Arsenal: push branch\u{201d} for Scheduled, waiting for User's yes.");
+    assert_eq!(diff_text(&proposed).unwrap(), "Plan: proposed \u{201c}Arsenal: push branch\u{201d} for Scheduled, waiting for the user's yes.");
     // The proposal that came on screen: Heimdall says it in one short line.
     let shown = Diff { shown: Some(json!({"id":"s-1","title":"Arsenal: push branch"}).as_object().unwrap().clone()), ..proposed.clone() };
     assert_eq!(diff_text(&shown).unwrap(), proposed_notice("Arsenal: push branch"));
     let two = Diff { added: vec!["A".into(), "B".into()], ..Default::default() };
-    assert_eq!(diff_text(&two).unwrap(), "Plan: proposed \u{201c}A\u{201d}, \u{201c}B\u{201d} for Scheduled, waiting for User's yes.");
+    assert_eq!(diff_text(&two).unwrap(), "Plan: proposed \u{201c}A\u{201d}, \u{201c}B\u{201d} for Scheduled, waiting for the user's yes.");
     assert_eq!(diff_text(&Diff::default()), None);
     let many = Diff { added: (0..200).map(|i| format!("Item number {i}")).collect(), ..Default::default() };
     assert!(diff_text(&many).unwrap().chars().count() <= 700);
@@ -377,7 +377,7 @@ fn the_diff_reads_as_one_short_line() {
 
 #[test]
 fn validation_caps_lists_and_strings_and_mints_ids_only_here() {
-    let current: Lists = [vec![json!({"id":"a1","title":"x"}).as_object().unwrap().clone()], vec![]];
+    let current: Lists = [vec![json!({"id":"a1","title":"x"}).as_object().unwrap().clone()]];
     let item = |id: &str, title: &str, done: bool| json!({"id":id,"title":title,"done":done});
     let mut sched: Vec<Value> = (0..50).map(|i| item("", &format!("T{i}"), i % 2 == 0)).collect();
     sched.insert(0, json!({"id":"a1","title":"y".repeat(300),"done":false,"when":"w".repeat(100)}));
@@ -388,7 +388,8 @@ fn validation_caps_lists_and_strings_and_mints_ids_only_here() {
     // A `todo` key (To do is Goals' now) is ignored.
     let answer = json!({"todo":[item("", "Stray To do", false)],"scheduled":sched,"settled":settled,"jobs":[]});
     let p = validate(&answer.to_string(), &current, &[], &[], "").unwrap();
-    assert_eq!((p.lists[0].len(), p.lists[1].len()), (LIST_CAP[0], 0));
+    assert_eq!((p.lists.len(), p.lists[0].len()), (1, LIST_CAP[0]), "Settled in an answer has no place to go");
+    assert!(p.lists[0].iter().all(|i| !i.title.starts_with('S')), "no Settled item lands in Scheduled");
     assert_eq!(p.lists[0][0].id, "a1");
     assert_eq!(p.lists[0][0].title.chars().count(), TITLE_CHARS);
     assert_eq!(p.lists[0][0].when.as_ref().unwrap().chars().count(), WHEN_CHARS);
@@ -455,7 +456,7 @@ fn job_islands_are_checked_against_the_style_doc_and_what_the_pass_knows() {
         job_answer("phone", json!({"state": "done", "stage": "Your test"})),
         job_answer("ipad", json!({"title": "iPad sale", "state": "done", "stage": "Live", "image": gone, "open": "localhost"})),
         job_answer("nobody", json!({}))]});
-    let p = validate(&a.to_string(), &[vec![], vec![]], &jobs, &[shot.clone()], conversation).unwrap();
+    let p = validate(&a.to_string(), &[vec![]], &jobs, &[shot.clone()], conversation).unwrap();
     assert_eq!(p.jobs.iter().map(|u| u.island.as_str()).collect::<Vec<_>>(), ["site", "phone", "ipad"], "unbound, known, once each: a bound island is never rebuilt");
     let site = &p.jobs[0];
     assert_eq!(site.title, None, "a good current title stays");
@@ -483,15 +484,15 @@ fn job_islands_are_checked_against_the_style_doc_and_what_the_pass_knows() {
     // A picture the conversation did not name is refused even when it exists; the island's own one may stay.
     let other = png(d.path(), "other.png");
     let a = json!({"scheduled":[],"settled":[],"jobs":[job_answer("site", json!({"image": other})), job_answer("ipad", json!({"image": other}))]});
-    let p = validate(&a.to_string(), &[vec![], vec![]], &jobs, &[], "").unwrap();
+    let p = validate(&a.to_string(), &[vec![]], &jobs, &[], "").unwrap();
     assert_eq!((p.jobs[0].image.as_ref(), p.jobs[1].image.as_ref()), (None, None));
-    let p = validate(&a.to_string(), &[vec![], vec![]], &jobs, &[other.clone()], "").unwrap();
+    let p = validate(&a.to_string(), &[vec![]], &jobs, &[other.clone()], "").unwrap();
     assert_eq!(p.jobs[1].image.as_deref(), Some(other.as_str()), "the conversation's pictures");
     let a = json!({"scheduled":[],"settled":[],"jobs":[job_answer("site", json!({"image": old}))]});
-    assert_eq!(validate(&a.to_string(), &[vec![], vec![]], &jobs, &[], "").unwrap().jobs[0].image.as_deref(), Some(old.as_str()));
+    assert_eq!(validate(&a.to_string(), &[vec![]], &jobs, &[], "").unwrap().jobs[0].image.as_deref(), Some(old.as_str()));
     // A malformed entry rejects the answer.
     let bad = json!({"scheduled":[],"settled":[],"jobs":[{"stage": "x"}]});
-    assert!(validate(&bad.to_string(), &[vec![], vec![]], &jobs, &[], "").is_err());
+    assert!(validate(&bad.to_string(), &[vec![]], &jobs, &[], "").is_err());
 }
 
 #[test]
@@ -507,7 +508,7 @@ fn open_targets_must_be_named_and_safe() {
     let jobs = vec![job("site", None, json!({"title": "site", "state": "running"})), job("ipad", None, json!({"title": "iPad sale"}))];
     let work = format!("Heimdall: wrote {page}\n  run answered: open {app}; {script} /tmp/clipped…");
     let answer = |island: &str, over: Value| json!({"scheduled":[],"settled":[],"jobs":[job_answer(island, over)]}).to_string();
-    let none: Lists = [vec![], vec![]];
+    let none: Lists = [vec![]];
     let site = |over: Value, conv: &str| validate(&answer("site", over), &none, &jobs, &[], conv).unwrap().jobs.remove(0);
     let u = site(json!({"state": "waiting", "title": "Arsenal site", "open": page}), &work);
     assert_eq!(u.state.as_deref(), Some("waiting"), "no thread: its state is the refresher's");
@@ -601,13 +602,13 @@ fn a_tick_owner_made_during_the_pass_wins_and_missing_lists_are_created() {
     let mut o = Map::new();
     o.insert("items".into(), json!([{"id":"a1","title":"A","done":false}]));
     root.put("scheduled", &o).unwrap();
-    let before: Lists = [vec![json!({"id":"a1","title":"A","done":false}).as_object().unwrap().clone()], vec![]];
+    let before: Lists = [vec![json!({"id":"a1","title":"A","done":false}).as_object().unwrap().clone()]];
     // The user ticks after the pass read the lists, and the agent adds an item with `plan_edit`.
     root.patch("scheduled", |o| {
         o["items"][0]["done"] = json!(true);
         o["items"].as_array_mut().unwrap().insert(0, json!({"id":"e1","title":"Added meanwhile","done":false}));
     }).unwrap();
-    let plan = Plan { lists: [vec![Item { id: "a1".into(), title: "A".into(), done: false, when: None, detail: None }], vec![]], jobs: vec![], keep: vec![] };
+    let plan = Plan { lists: [vec![Item { id: "a1".into(), title: "A".into(), done: false, when: None, detail: None }]], jobs: vec![], keep: vec![] };
     apply(&root, &before, &plan, &[]).unwrap();
     let sched = items(&root, "scheduled");
     assert_eq!(sched.len(), 2);
@@ -713,7 +714,7 @@ fn append(session: &Path, line: Value) {
 
 /// Review finding 1: the user's real Settled list (plain strings, no `preset`/`list`) must survive the first pass.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn owner_s_old_settled_list_survives_the_first_pass_and_is_migrated() {
+async fn owner_s_old_settled_list_survives_the_first_pass() {
     // Since 2 Nov Settled is the Goals shadow's: a pass never shows it to the model and never writes it.
     let (url, fake) = serve().await;
     let l = lab(&url, Some("k"), Duration::from_secs(10));
@@ -980,7 +981,7 @@ fn the_lists_hold_no_chores() {
 fn the_prompt_leaves_to_do_to_goals() {
     let personal = include_str!("../prompt/plan-refresher.md");
     let public = include_str!("../prompt/public/plan-refresher.md");
-    // no To do list, Goals the asks. Since 2 Nov Scheduled takes a proposal with a real time, never an item.
+    // No To do list, Goals the asks. Since 2 Nov Scheduled takes a proposal with a real time, never an item.
     assert!(personal.contains("- Nothing enters Scheduled without the user's yes (2 Nov). Your `scheduled` answer proposes: code takes only new items (id \"\") with a real local date-time in `when`"));
     assert!(public.contains("- Nothing enters Scheduled without the user's yes (2 Nov). Your `scheduled` answer proposes: code takes only new items (id \"\") with a real local date-time in `when`"));
     for text in [personal, public] {
@@ -994,7 +995,7 @@ fn the_prompt_leaves_to_do_to_goals() {
     assert!(schema()["properties"].get("todo").is_none() && schema()["$defs"]["item"]["properties"].get("group").is_none());
 }
 
-fn plan_of_items(items: Vec<Item>) -> Plan { Plan { lists: [items, vec![]], jobs: vec![], keep: vec![] } }
+fn plan_of_items(items: Vec<Item>) -> Plan { Plan { lists: [items], jobs: vec![], keep: vec![] } }
 
 fn new_item(title: &str, when: Option<&str>) -> Item { Item { id: String::new(), title: title.into(), done: false, when: when.map(str::to_owned), detail: None } }
 
@@ -1011,11 +1012,10 @@ fn existing_promises_and_owners_ticks_are_never_changed_by_a_pass() {
     root.put("scheduled", json!({"preset": "todo", "list": "scheduled", "items": [m1, t1], "unknown_key": "kept"}).as_object().unwrap()).unwrap();
     root.put("settled", json!({"preset": "todo", "list": "settled", "items": [s0]}).as_object().unwrap()).unwrap();
     let (sched_file, settled_file) = (std::fs::read(root.file("scheduled")).unwrap(), std::fs::read(root.file("settled")).unwrap());
-    let before: Lists = [vec![m1.as_object().unwrap().clone(), t1.as_object().unwrap().clone()], vec![s0.as_object().unwrap().clone()]];
+    let before: Lists = [vec![m1.as_object().unwrap().clone(), t1.as_object().unwrap().clone()]];
     let it = |id: &str, t: &str, done: bool, when: Option<&str>| Item { id: id.into(), title: t.into(), done, when: when.map(str::to_owned), detail: Some("new words".into()) };
-    // The plan rewords m1 and gives it a time, unticks t1, and lists a Settled item (Settled is not in the plan at all).
-    let plan = Plan { lists: [vec![it("m1", "Merge the night branch", true, Some("2031-01-01T10:00")), it("t1", "User ticked this", false, None)],
-                              vec![it("s0", "Old", true, None), it("m1", "Merge night", true, None), it("", "New thing", true, None)]], jobs: vec![], keep: vec![] };
+    // The plan rewords m1 and gives it a time and unticks t1 (Settled is not in the plan at all).
+    let plan = Plan { lists: [vec![it("m1", "Merge the night branch", true, Some("2031-01-01T10:00")), it("t1", "User ticked this", false, None)]], jobs: vec![], keep: vec![] };
     let diff = apply(&root, &before, &plan, &[]).unwrap();
     assert_eq!(diff, Diff::default());
     assert_eq!(std::fs::read(root.file("scheduled")).unwrap(), sched_file, "Scheduled is not rewritten");
@@ -1034,7 +1034,7 @@ fn an_item_without_a_time_is_no_promise_and_is_dropped() {
     let root = Root(d.path().to_path_buf());
     root.put("scheduled", json!({"preset": "todo", "list": "scheduled", "items": [{"id": "a1", "title": "Arsenal: push branch", "done": false}]}).as_object().unwrap()).unwrap();
     let file = std::fs::read(root.file("scheduled")).unwrap();
-    let before: Lists = [vec![json!({"id": "a1", "title": "Arsenal: push branch", "done": false}).as_object().unwrap().clone()], vec![]];
+    let before: Lists = [vec![json!({"id": "a1", "title": "Arsenal: push branch", "done": false}).as_object().unwrap().clone()]];
     let mut ticked = new_item("Ticked, with a time", Some(&in_days(1)));
     ticked.done = true;
     let mut existing = new_item("Arsenal: push branch", Some(&in_days(1)));
@@ -1595,7 +1595,9 @@ async fn luna_passes_share_one_cache_identity_and_a_byte_identical_prefix_on_the
     assert!(!t1[..stable1].contains("Now:"), "no clock in the reusable prefix");
     // A changed system prompt, model or effort is a new cache identity.
     let l2 = crate::background_call::Loop::for_endpoint(&e);
-    let base = call("gpt-6-luna", SYSTEM, p1.clone());
+    let names = agent::identity::current();
+    let system = agent::identity::for_agent(&agent::identity::tokens(SYSTEM, &names), &names);
+    let base = call("gpt-6-luna", &system, p1.clone());
     let k = |c: &crate::background_call::Call| crate::background_call::wire::answer_body(&l2, c, 0)["prompt_cache_key"].as_str().unwrap().to_owned();
     assert_eq!(k(&base), key);
     assert_ne!(k(&call("gpt-6-luna", "another system prompt", p1.clone())), key);

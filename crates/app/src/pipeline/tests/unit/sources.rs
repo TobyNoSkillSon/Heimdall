@@ -223,7 +223,7 @@
         a.source(info);
         a.audio.insert(source.clone(), AudioRing { start: 0, samples: vec![0.1;16000].into() });
         let (actor, speaker) = crate::speakers_runtime::Actor::finishing_fixture(source.clone(),0,a.session.clone(),a.speaker_tx.clone(),a.speaker_cpu.clone());
-        a.discord.insert(source.clone(), Discord { origin:0,session:0,actor_generation:0,actor,speaking:true,fed_until:1_000_000_000,active:true,loading:false,closed:false,segments:vec![],unlabelled:vec![] });
+        a.discord.insert(source.clone(), Discord { origin:0,session:0,actor_generation:0,actor,speaking:true,fed_until:1_000_000_000,active:true,loading:false,closed:false,segments:vec![],unlabelled:vec![],heard_until:0 });
         let worker = Arc::new(listen::ListenWorker::spawn(Default::default(), || ListenEngine::new(Silent, Silent, Silent, Default::default())).unwrap());
         worker.wait_ready().unwrap();
         worker.push(listen::AudioChunk {source: &source, generation: 0, host_time_ns: 0, samples: &[0.1;320]}).unwrap();

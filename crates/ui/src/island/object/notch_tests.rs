@@ -401,7 +401,7 @@ fn owner_pulls_down_the_conversation_opening_on_his_last_words_and_scrolls_up_to
     run_to(&mut i, 2.0);
     let Scene::Reply { chat, follow, .. } = i.scene().clone() else { panic!("{:?}", i.scene()) };
     assert!(follow);
-    assert_eq!(chat.before.last(), Some(&crate::chat::ChatKind::Owner("How much memory are the jobs using right now?".into())));
+    assert_eq!(chat.before.last(), Some(&crate::chat::ChatKind::User("How much memory are the jobs using right now?".into())));
     assert!(chat.before.iter().all(|k| !matches!(k, crate::chat::ChatKind::Heimdall { text, .. } if text == super::gallery::CHAT_REPLY)), "the live reply shows once");
     let l = i.layout().clone();
     assert!(l.scroll_max > 0.0 && l.scroll_at > 0.0 && l.scroll_at <= l.scroll_max, "opened down at the latest exchange: {} of {}", l.scroll_at, l.scroll_max);
@@ -436,7 +436,7 @@ fn a_send_and_a_new_reply_scroll_to_the_end() {
     i.apply(Event::ComposerSent("And the GPU?".into()), 2.0);
     i.apply(Event::Sent, 2.05);
     let at = rows.last().map_or(0, |e| e.at_ms) + 1000;
-    rows.push(crate::chat::ChatEntry { at_ms: at, kind: crate::chat::ChatKind::Owner("And the GPU?".into()) });
+    rows.push(crate::chat::ChatEntry { at_ms: at, kind: crate::chat::ChatKind::User("And the GPU?".into()) });
     i.apply(Event::Chat(rows.clone()), 2.1);
     run_to(&mut i, 3.0);
     assert!(i.reply_open());

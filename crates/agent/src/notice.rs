@@ -42,13 +42,9 @@ pub const EMERGENCY_COVER: &str = "emergency-cover:";
 /// The hand-back notice's key is its delivery id as well (`bridge/supervisor.rs`), and Pi takes only letters, digits,
 /// `-` and `_` there: a colon made the 27 Oct 03:12 hand-back fail with "invalid delivery id".
 pub const EMERGENCY_BACK: &str = "emergency-back-";
-/// The installed build's earlier hand-back prefix, for outbox rows queued before the change.
-pub const EMERGENCY_BACK_OLD: &str = "emergency-back:";
 /// Input that arrived while emergency mode was ending: nobody answered it, so it wakes the agent and is never held.
 /// Id-safe like `EMERGENCY_BACK` (night audit: the outbox hashes it today, but nothing should depend on that).
 pub const EMERGENCY_LATE: &str = "emergency-late-";
-/// The earlier prefix, still classified for outbox rows queued before the change.
-const EMERGENCY_LATE_OLD: &str = "emergency-late:";
 /// A notice whose text repeats one already delivered within this window is dropped (E6.4).
 pub const REPEAT_WINDOW_MS: u64 = 24 * 60 * 60_000;
 /// The user's request (a voice wake or typed text) queued at most this long before a start — while a reload waited for
@@ -64,6 +60,19 @@ pub const CATCHUP_BYTES: usize = 128 * 1024;
 
 /// The id of the first-run greeting the app sends once per profile when Setup finishes.
 pub const FIRST_RUN: &str = "first-run-greeting";
+/// A switch of model or account the user asked for just completed on the built-in agent (bug note 2026-11-10T06-19-44):
+/// a wake right after the new start, like the first-run greeting, so the agent confirms it once.
+pub const SWITCH_DONE: &str = "switch-done:";
+/// What the agent is told when a switch the user asked for just completed (`what`: the model or account it now runs on).
+/// Bug note 2026-11-10T06-19-44: the new session obeyed "don't do anything unless the user talks to you" and stayed
+/// silent, and the user had to ask whether the switch had happened.
+/// Review 1111: `by_owner` false (the agent's settings tool or a settings.json edit made the change) does not say he asked.
+pub fn switch_done_message(what: &str, by_owner: bool) -> String {
+    let user = crate::identity::user();
+    let who = if by_owner { format!("{} asked for a switch", crate::identity::user_start()) } else { format!("Heimdall's settings switched your model (not {user}'s click)") };
+    format!("{who} and it just completed: you now run on {what}. Confirm it to them once, in one short \
+spoken line naming the model or account you now run on. Say nothing else unless they talk to you.")
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NoticeKind {
@@ -124,13 +133,11 @@ impl NoticeKind {
     }
     /// The kind of an outbox delivery, from its deterministic id (E6.3) and text. Ids: `ask-…` (answer click),
     /// `fastread-…`, `terminal:` (Heimdall's tasks and watched runs; `stuck:` is retired), `question:/approval:` (their requests),
-    /// `t3:{thread}:{run}:{kind}:…` and `t3:batch:[attention:]{digest}` (T3 policy), `t3-connect-…`, `unheard-speech:…`; the legacy observer's random
-    /// `t3-activity:` lines are judged by their words.
+    /// `t3:{thread}:{run}:{kind}:…` and `t3:batch:[attention:]{digest}` (T3 policy), `t3-connect-…`, `unheard-speech:…`.
     pub fn classify(id: &str, text: &str) -> Self {
-        let lower = text.to_ascii_lowercase();
         if id.starts_with(crate::wakes::OUTBOX_PREFIX) {
             Self::Scheduled
-        } else if id.starts_with("ask-") || (text.starts_with("Question ") && text.contains(": User clicked ")) {
+        } else if id.starts_with("ask-") || (text.starts_with("Question ") && text.split_once(": ").is_some_and(|(_, rest)| rest.split_once(" clicked ").is_some_and(|(who, _)| !who.contains(':')))) {
             Self::Answer
         // The user's pick on an island suggestion card (crates/app/src/suggester.rs): he chose it, so it wakes like an answer.
         } else if id.starts_with("suggest-pick:") {
@@ -149,10 +156,10 @@ impl NoticeKind {
         // "while you were down" wakes the agent like a scheduled wake, also right after a start.
         } else if id.starts_with(EMERGENCY_COVER) {
             Self::Context
-        } else if id.starts_with(EMERGENCY_BACK) || id.starts_with(EMERGENCY_BACK_OLD) || id.starts_with(EMERGENCY_LATE) || id.starts_with(EMERGENCY_LATE_OLD) {
+        } else if id.starts_with(EMERGENCY_BACK) || id.starts_with(EMERGENCY_LATE) {
             Self::Scheduled
         // The one greeting after a profile's first Setup (app setup_wizard.rs): a wake although nobody has spoken yet.
-        } else if id.starts_with(FIRST_RUN) {
+        } else if id.starts_with(FIRST_RUN) || id.starts_with(SWITCH_DONE) {
             Self::Scheduled
         } else if id.starts_with("fastread-")
             || id.starts_with("unheard-speech")
@@ -160,6 +167,11 @@ impl NoticeKind {
             || id.starts_with("ack-said:")
             || id.starts_with("t3-connect")
             || id.starts_with("t3-offline")
+            // A task moved to another Claude account after a usage limit (crates/t3 failover.rs): said, never a wake.
+            || id.starts_with("t3-failover:")
+            // Arriving or leaving that is a blip, or already told within 10 minutes (app remote_presence.rs): said, never
+            // a wake. A real change (`presence:`) is an event and wakes.
+            || id.starts_with("presence-context:")
             || text.starts_with("Worker monitoring")
             || text.starts_with("Connect T3")
             || text.starts_with("Fast read")
@@ -171,12 +183,6 @@ impl NoticeKind {
             Self::Question
         } else if let Some(rest) = id.strip_prefix("t3:") {
             if rest.split(':').any(|part| matches!(part, "attention" | "question" | "approval" | "waiting")) {
-                Self::Question
-            } else {
-                Self::Event
-            }
-        } else if id.starts_with("t3-activity:") {
-            if lower.contains("waiting for") || lower.contains("question") || lower.contains("approv") {
                 Self::Question
             } else {
                 Self::Event
@@ -213,10 +219,18 @@ pub fn stamped(labelled: &str, at_ms: Option<u64>) -> String {
 }
 
 /// The last thing every start appends (E4.1). Nothing above it is a request.
+/// The start's last line after the user switched relay mode off (bug note 2026-11-08T02-03-47): Heimdall kept running,
+/// only the agent changed hands, so "you have just been restarted" was wrong.
+pub fn relay_back_message(at_ms: u64) -> String {
+    format!(
+        "Heimdall, {user} switched you back from the relay to your built-in agent at {}; Heimdall itself kept running. The relay's conversation above is yours. Don't do anything unless {user} talks to you.",
+        crate::clock::local_hm(at_ms), user = crate::identity::user()
+    )
+}
 pub fn restart_message(at_ms: u64) -> String {
     format!(
-        "Heimdall, you have just been restarted (or turned on) at {}. Everything above is historical context. Don't do anything unless User talks to you.",
-        crate::clock::local_hm(at_ms)
+        "Heimdall, you have just been restarted (or turned on) at {}. Everything above is historical context. Don't do anything unless {} talks to you.",
+        crate::clock::local_hm(at_ms), crate::identity::user()
     )
 }
 
@@ -245,6 +259,8 @@ pub struct StartContext {
     pub failed_on: Option<u32>,
     /// Where the catch-up begins (`Bridge::catchup_since`): the header names it.
     pub since_ms: Option<u64>,
+    /// The start ends relay mode (the app kept running): its last line says so, never "restarted".
+    pub relay_back: bool,
 }
 impl StartContext {
     pub fn new(at_ms: u64, reason: Option<String>) -> Self {
@@ -284,7 +300,7 @@ impl StartContext {
             text.push_str(reason.trim());
             text.push('\n');
         }
-        text.push_str(&restart_message(self.at_ms));
+        text.push_str(&if self.relay_back { relay_back_message(self.at_ms) } else { restart_message(self.at_ms) });
         text
     }
 }
@@ -318,7 +334,7 @@ pub fn provider_rejection(error: &str, repaired: bool) -> Option<String> {
     }
     let what = if lower.contains("image") && (lower.contains("exceed") || lower.contains("too large") || lower.contains("too big") || lower.contains("dimension")) {
         "the screenshot was too large for the model"
-    } else if lower.contains("prompt is too long") || lower.contains("context length") || lower.contains("too many tokens") {
+    } else if crate::limits::too_long(&lower) {
         "the conversation was too long for the model"
     } else if lower.contains("image") {
         "the model could not read the screenshot"
@@ -351,8 +367,6 @@ mod tests {
         for key in [format!("{}{}", EMERGENCY_BACK, 1_793_067_134_195u64), format!("{}{}", EMERGENCY_LATE, "w-1793067134195")] {
             assert!(key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'), "{key}");
         }
-        assert_eq!(NoticeKind::classify("emergency-late:w9", "x"), NoticeKind::classify(&format!("{EMERGENCY_LATE}w9"), "x"));
-        assert_eq!(NoticeKind::classify("emergency-back:1793067134195", "x"), NoticeKind::classify(&format!("{EMERGENCY_BACK}1793067134195"), "x"), "a hand-back queued by the installed build");
     }
 
     use super::*;
@@ -372,13 +386,13 @@ mod tests {
     #[test]
     fn every_outbox_id_has_its_kind() {
         let k = NoticeKind::classify;
-        assert_eq!(k("ask-1b2c", "Question ask-1b2c: User clicked Yes. Question: Install?"), NoticeKind::Answer);
+        assert_eq!(k("ask-1b2c", "Question ask-1b2c: The user clicked Yes. Question: Install?"), NoticeKind::Answer);
         // The user's pick on an island suggestion card (crates/app/src/suggester.rs): he chose it, so it wakes like an answer.
         assert_eq!(k("suggest-pick:5f0a", "[Heimdall suggestion, picked by User] Topic: CAD file."), NoticeKind::Answer);
         assert!(NoticeKind::Answer.wakes());
         assert_eq!(k("fastread-9", "Fast read: read at 390 wpm."), NoticeKind::Context);
-        assert_eq!(k("islands-answer:1f2e", "User chose Yes on the approval 'Delete old caches'."), NoticeKind::Answer);
-        assert_eq!(k("islands-context:9a8b", "User ticked 'Arsenal: push' in To do."), NoticeKind::Context);
+        assert_eq!(k("islands-answer:1f2e", "The user chose Yes on the approval 'Delete old caches'."), NoticeKind::Answer);
+        assert_eq!(k("islands-context:9a8b", "The user ticked 'Arsenal: push' in To do."), NoticeKind::Context);
         assert_eq!(k("plan-refresh-1792630210300", "Plan: added \u{201c}Arsenal: push branch\u{201d}."), NoticeKind::Context);
         assert!(!NoticeKind::Context.wakes(), "the plan refresher's notice never wakes the agent");
         assert_eq!(k("terminal:t:r:completed", "Worker t run r completed."), NoticeKind::Result);
@@ -396,14 +410,15 @@ mod tests {
         assert_eq!(k("t3:batch:attention:5f2a9c", "T3 update:\n- 'Pick region' asks: which?"), NoticeKind::Question);
         assert_eq!(k("t3:t-approve:p1:attention:approval", "waits for an approval"), NoticeKind::Question);
         assert_eq!(k("t3-activity:1234", "T3 update: 'Mobius' completed: No, it's not me"), NoticeKind::Event);
-        assert_eq!(k("t3-activity:1235", "T3: 'Mobius' is waiting for your answer"), NoticeKind::Question);
         assert_eq!(k("t3-connect-401:env", "Connect T3 · click"), NoticeKind::Context);
         assert_eq!(k("w", "Worker monitoring paused"), NoticeKind::Context);
         assert_eq!(k("unheard-speech:1", "Done."), NoticeKind::Context);
         // Scheduled wakes (agent::wakes): their own kind, a wake, whatever the note says.
-        assert_eq!(k("selfwake:wake-3f2a1c", "Scheduled wake wake-3f2a1c: … Your note: ask User a question"), NoticeKind::Scheduled);
+        assert_eq!(k("selfwake:wake-3f2a1c", "Scheduled wake wake-3f2a1c: … Your note: ask the user a question"), NoticeKind::Scheduled);
         assert!(NoticeKind::Scheduled.wakes());
         assert_eq!(k(FIRST_RUN, "This is your first run on the user's Mac"), NoticeKind::Scheduled);
+        // Bug note 2026-11-10T06-19-44: a completed switch wakes the agent to confirm it, even right after its start.
+        assert_eq!(k(&format!("{SWITCH_DONE}1"), &switch_done_message("claude-opus-5-5", true)), NoticeKind::Scheduled);
         assert_eq!(NoticeKind::parse(NoticeKind::Scheduled.as_str()), Some(NoticeKind::Scheduled));
     }
     #[test]
@@ -422,8 +437,12 @@ mod tests {
         let reason = text.find("Reloaded to pick up new tools").unwrap();
         assert!(text.find("second").unwrap() < reason);
         assert!(text.ends_with(&restart_message(at)), "{text}");
-        assert!(restart_message(at).contains("Don't do anything unless User talks to you"));
+        assert!(restart_message(at).contains("Don't do anything unless the user talks to you"));
         assert!(StartContext::new(at, None).text().starts_with("Heimdall, you have just been restarted"));
+        // Bug note 2026-11-08T02-03-47: a switch back from the relay is no restart of Heimdall.
+        let back = StartContext { relay_back: true, ..StartContext::new(at, None) }.text();
+        assert!(back.starts_with("Heimdall, the user switched you back from the relay") && !back.contains("restarted"), "{back}");
+        assert!(back.ends_with("Don't do anything unless the user talks to you."), "{back}");
     }
     #[test]
     fn catch_up_keeps_the_newest_lines_within_its_bound() {
@@ -446,6 +465,8 @@ mod tests {
             Some("Agent couldn't answer: the model refuses this conversation (the model could not read the screenshot)"));
         assert!(names_history_block("Invalid 'messages[12].content[1].image_url'") && !names_history_block("messages.: none") && !names_history_block("too many messages"));
         assert!(provider_rejection(r#"400 {"error":{"type":"invalid_request_error","message":"prompt is too long: 210000 tokens"}}"#, false).unwrap().contains("conversation was too long"));
+        // AGT-E3: OpenAI's code for the same thing is read the same way.
+        assert!(provider_rejection(r#"400 {"error":{"type":"invalid_request_error","code":"context_length_exceeded"}}"#, false).unwrap().contains("conversation was too long"));
         assert!(provider_rejection(r#"400 invalid_request_error: messages: Invalid `signature` in `thinking` block"#, false).is_none());
         assert!(provider_rejection("503 Service Unavailable", false).is_none());
         assert!(provider_rejection("429 rate limit", false).is_none());
@@ -457,7 +478,7 @@ mod tests {
             assert!(provider_rejection(e, false).unwrap().contains("usage limit is used up"), "{e}");
         }
         assert!(!quota_exhausted("429 Rate limit reached for requests") && !quota_exhausted("529 overloaded_error"));
-        assert!(provider_rejection("Stopped by User", false).is_none());
+        assert!(provider_rejection("Stopped by the user", false).is_none());
         assert!(provider_rejection("Anthropic did not answer within 120 seconds", false).unwrap().contains("did not start answering in time"));
     }
     #[test]

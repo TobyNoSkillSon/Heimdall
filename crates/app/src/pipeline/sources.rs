@@ -5,6 +5,13 @@ use super::*;
 /// Transcription stopped on its own three times in ten minutes: Heimdall relaunches (`worker_ended`).
 pub(super) const TRANSCRIPTION_GAVE_UP: &str = "Listen failed: transcription stopped 3 times in 10 minutes";
 
+/// Speech on `source` holds Heimdall's speech from the listen worker's own thread, before the pipeline sees it: the user's
+/// Mac microphones and his phone's live microphone (phone_mic.rs). The primary Mac microphone and the open phone source
+/// barge in (`barge_speech_start`, `talk_mic`), each through the speaker check.
+pub(super) fn holds_heimdall_early(source: &str) -> bool {
+    source.starts_with("mic:") || crate::phone_mic::is_phone_source(source)
+}
+
 impl Pipeline {
     /// The live 2-second tick's call work: queued speech-split corrections, then each call's transcript projection.
     pub(crate) fn call_tick(&mut self) -> Result<()> {
@@ -103,6 +110,7 @@ impl Pipeline {
             }
             let (kind, name) = match &i.kind {
                 capture::SourceKind::InputDevice { .. } => (ui::SourceKind::Mic, i.label.clone()),
+                capture::SourceKind::Phone { name, .. } => (ui::SourceKind::Mic, format!("Phone · {name}")),
                 capture::SourceKind::Process { name, owner, .. } => {
                     (ui::SourceKind::App, owner.as_ref().map_or(name.clone(), |o| o.name.clone()))
                 }
@@ -115,10 +123,23 @@ impl Pipeline {
         out.sort_by(|a, b| (a.kind != ui::SourceKind::Mic, &a.name).cmp(&(b.kind != ui::SourceKind::Mic, &b.name)));
         self.ui(ui::UiUpdate::Sources(out));
     }
-    pub(super) fn owner(&self, id: &str) -> bool {
-        self.sources
-            .get(id)
-            .is_some_and(|i| matches!(i.kind, capture::SourceKind::InputDevice { .. }))
+    /// The user's own microphone: every Mac input, and his phone's live microphone (phone_mic.rs: his phone, his toggle).
+    /// The Mac-only checks (capture health, permissions, the primary microphone, the voice print) look at
+    /// `InputDevice` alone and never at the phone.
+    /// A phone source that already closed (the stream stopped between its last final and the decider's answer) is
+    /// still his: its id says so (`phone_mic::is_phone_source`).
+    pub(super) fn user_source(&self, id: &str) -> bool {
+        match self.sources.get(id) {
+            Some(i) => matches!(i.kind, capture::SourceKind::InputDevice { .. } | capture::SourceKind::Phone { .. }),
+            None => crate::phone_mic::is_phone_source(id),
+        }
+    }
+    /// The phone's live microphone (phone_mic.rs), open or already closed.
+    pub(super) fn phone_source(&self, id: &str) -> bool {
+        match self.sources.get(id) {
+            Some(i) => matches!(i.kind, capture::SourceKind::Phone { .. }),
+            None => crate::phone_mic::is_phone_source(id),
+        }
     }
     /// Capture's effective primary includes the built-in fallback, regardless of saved extras.
     pub fn microphone_state(&mut self, state: &capture::MicrophoneState) {
@@ -189,8 +210,8 @@ impl Pipeline {
                     Some(listen::asr::Parakeet::load_backend(&reload_models.join("parakeet-ultra"),&next.parakeet_backend)?)
                 }else{None};
                 let turn=if next.turn_backend!=applied.turn_backend {
-                    let turn_path=if reload_models.join("smart-turn/owner-policy.json").exists(){"smart-turn/owner-turn.onnx"}else{"smart-turn/smart-turn-v3.2-cpu.onnx"};
-                    Some(listen::onnx::SmartTurn::load_backend(&reload_models.join(turn_path),&next.turn_backend)?)
+                    let (turn_path,_)=listen::turn_model(&reload_models)?;
+                    Some(listen::onnx::SmartTurn::load_backend(&turn_path,&next.turn_backend)?)
                 }else{None};
                 // Construct both requested candidates before replacing either model.
                 if let Some(asr)=asr{engine.replace_recognizer(asr);}
@@ -215,7 +236,7 @@ impl Pipeline {
                 }
                 match &event {
                     listen::WorkerEvent::Listen(ListenEvent::SpeechStart { source, .. })
-                        if source.starts_with("mic:") =>
+                        if holds_heimdall_early(source) =>
                     {
                         // Heard now; whether Heimdall stops is the barge-in decision (pipeline/barge_in.rs).
                         tools.voice(source, true);
@@ -509,8 +530,10 @@ impl Pipeline {
                 Ok(())
             }
             listen::WorkerEvent::SideTranscript { id, result, decode_ms, cpu_seconds } => {
-                if self.correction_transcript(id,result.clone(),decode_ms,cpu_seconds)? {Ok(())}
-                else {self.side_transcript(id,result,decode_ms)}
+                // Only speech_split asks for side transcripts; one it did not ask for is stale (barge-in no longer
+                // reads words, decision 31).
+                self.correction_transcript(id,result,decode_ms,cpu_seconds)?;
+                Ok(())
             },
             listen::WorkerEvent::SourceClosed { source } => {
                 if let Some(d) = self.discord.get_mut(&source) {
@@ -563,6 +586,7 @@ impl Pipeline {
             d.loading = true;
             d.speaking = true;
             d.segments.clear();
+            d.heard_until = 0;
             d.actor
                 .send(crate::speakers_runtime::Work::Audio(audio, true, now))?;
             d.fed_until = fed_until;
@@ -575,7 +599,6 @@ impl Pipeline {
                 NamingFlow::new(self.load_store()?).persist_to(self.data.join("speakers.json"), self.enrollment_lock.clone()),
                 self.speaker_cpu.clone(),
                 self.speaker_tx.clone(),
-                self.settings.speakers_backend.clone(),
             )?;
             actor.send(crate::speakers_runtime::Work::Audio(audio, true, now))?;
             self.discord.insert(
@@ -592,6 +615,7 @@ impl Pipeline {
                     closed: false,
                     segments: vec![],
                     unlabelled: vec![],
+                    heard_until: 0,
                 },
             );
         }
@@ -611,14 +635,21 @@ impl Pipeline {
         {
             return Ok(());
         }
+        // A live `Stable` horizon comes just before the `Snapshot` with its segments: judged on that one.
+        let judge = !matches!(event.update, Update::Stable { .. });
         match event.update {
             Update::Stable { origin, until, segments, finalized } => {
+                if !finalized {
+                    let d = self.discord.get_mut(&source).unwrap();
+                    if d.origin.abs_diff(origin) < 1_000_000 { d.heard_until = d.heard_until.max(until); }
+                }
                 self.stable_speech(&source,origin,until,segments,finalized)?;
             }
             Update::Started { origin } => {
                 let d = self.discord.get_mut(&source).unwrap();
                 d.origin = origin; d.session = origin; d.loading = false; d.active = true;
                 d.segments.clear();
+                d.heard_until = 0;
                 self.component_status(&format!("speakers:{source}"), None);
                 self.component_status("speakers", None);
                 crate::diagnostics::event_stream(&serde_json::json!({"event":"speaker_helper_ready","source":source}));
@@ -667,6 +698,8 @@ impl Pipeline {
                 if closed { self.close_source(&source); }
             }
         }
+        // Who is talking in the voice open on this source now (listening mode's cut-off, bridge/call_interrupt.rs).
+        if judge { self.judge_call_voice(&source); }
         Ok(())
     }
     pub fn speaker_update(&mut self, event: crate::speakers_runtime::Event) -> Result<()> {
@@ -746,16 +779,13 @@ impl Pipeline {
                 )?;
                 }
                 if !self.discord[source].closed {
-                    self.discord.get(source).unwrap().actor.send(
-                        crate::speakers_runtime::Work::Observe(
-                            track,
-                            end as f64 / 1e9,
-                            text.clone(),
-                            vec![],
-                        ),
-                    )?;
+                    self.discord.get(source).unwrap().actor.send(crate::speakers_runtime::Work::Observe(track, text.clone()))?;
                 }
                 if let Some(mut final_) = self.awaiting_speaker.remove(&id) {
+                    // A person he named: the call is a live conversation (night 1115, `SpeechPolicy::call_line`).
+                    if !name.starts_with("Speaker ") && name != "Unknown" && !final_.words.is_empty() {
+                        self.tools.speech_policy.call_line(final_.end, true);
+                    }
                     final_.observation.speaker = name.clone();
                     final_.turn.role = decide::Role::Other(name.clone());
                     self.give_to_agent(final_)?;
@@ -966,7 +996,9 @@ impl Pipeline {
             jarvis_wanted(self.settings.speak_replies, self.settings.dry_run, &self.settings.drama3_residency, self.tools.speech_voices.route());
         // The Speed slider's sample is spoken by Jarvis only: he stays resident for it whatever Speaking says
         // (the voice's health follows the usual residency).
-        self.tools.drama3.configure(drama_wanted || (!cfg!(test) && !self.replay && self.tools.sample_holds_jarvis()));
+        let sample = !cfg!(test) && !self.replay && self.tools.sample_holds_jarvis();
+        let why = jarvis_why(drama_wanted, sample, self.settings.speak_replies, self.settings.dry_run, &self.settings.drama3_residency);
+        self.tools.drama3.configure_for(drama_wanted || sample, why);
         for event in self.tools.drama3.events() {
             // A sentence Jarvis could not say after every retry is spoken by the lighter voice; that switch is
             // never silent ("it wasn't the proper Jarvis voice").
@@ -989,7 +1021,6 @@ impl Pipeline {
         };
         self.health_cue(cue);
         self.component_status("speech", speech);
-        self.component_status("agent-screen", self.tools.screenshot_status());
         self.component_status(
             "compaction",
             self._compactor.as_ref().and_then(|c| c.status()),
@@ -1116,6 +1147,18 @@ pub(crate) fn jarvis_wanted(speak_replies: bool, dry_run: bool, residency: &str,
         // Speaking ▸ the voice: Jarvis (29 GB) stays out of memory while another voice is chosen (night 1022 menu).
         route == crate::speech_voice::Route::Jarvis
 }
+/// Why Jarvis is wanted or not, for his residency line (bug note 2026-11-08T02-03-45: an unload by the Speaking switch
+/// logged only "settings: Speaking off", and was read as the memory line's give-way).
+pub(crate) fn jarvis_why(wanted: bool, sample: bool, speak_replies: bool, dry_run: bool, residency: &str) -> &'static str {
+    match (wanted, sample) {
+        (true, _) if residency == "always" => "kept resident (Drama 3 residency: always)",
+        (true, _) => "Speaking on",
+        (false, true) => "the Speed slider's sample",
+        (false, false) if residency != "always" && !speak_replies => "Speaking off",
+        (false, false) if residency != "always" && dry_run => "Agent off",
+        (false, false) => "another voice is chosen",
+    }
+}
 #[cfg(test)]
 mod jarvis_residency_tests {
     use super::jarvis_wanted;
@@ -1139,5 +1182,19 @@ mod jarvis_residency_tests {
         let tick = src.find("recv(settings_tick)").expect("the settings tick");
         let body = &src[tick..tick + 1500];
         assert!(body.contains("app.component_tick()"), "the settings tick runs the residency check");
+    }
+
+    /// Bug note 2026-11-08T02-03-45: every change of mind about Jarvis says which switch made it.
+    #[test]
+    fn his_residency_line_names_the_switch() {
+        use super::jarvis_why;
+        assert_eq!(jarvis_why(true, false, true, false, "speaking"), "Speaking on");
+        assert_eq!(jarvis_why(false, false, false, false, "speaking"), "Speaking off");
+        assert_eq!(jarvis_why(false, false, true, true, "speaking"), "Agent off");
+        assert_eq!(jarvis_why(false, false, true, false, "speaking"), "another voice is chosen");
+        assert_eq!(jarvis_why(false, true, false, false, "speaking"), "the Speed slider's sample");
+        assert_eq!(jarvis_why(true, false, false, false, "always"), "kept resident (Drama 3 residency: always)");
+        let src = include_str!("sources.rs");
+        assert!(src.contains("self.tools.drama3.configure_for(drama_wanted || sample, why)"), "the tick passes the reason");
     }
 }

@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use listen::{AudioChunk, ListenEngine, ListenEvent, Recognizer};
+use listen::{AudioChunk, ListenEngine, Recognizer};
 use std::{path::PathBuf, time::Instant};
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -48,7 +48,6 @@ fn main() -> Result<()> {
             for path in paths {
                 let audio = listen::file::read_wav(&path)?;
                 let start = Instant::now();
-                let mut first = false;
                 let source = format!("mic:{}", path.to_string_lossy());
                 for (i, chunk) in audio.chunks(320).enumerate() {
                     if realtime {
@@ -63,16 +62,6 @@ fn main() -> Result<()> {
                         host_time_ns: i as u64 * 20_000_000,
                         samples: chunk,
                     })? {
-                        if matches!(&event,ListenEvent::PartialTranscript{text,..} if !text.is_empty())
-                            && !first
-                        {
-                            eprintln!(
-                                "first_partial_seconds={:.6} audio_received_seconds={:.3}",
-                                start.elapsed().as_secs_f64(),
-                                (i + 1) as f64 * 0.020
-                            );
-                            first = true;
-                        }
                         println!("{}", serde_json::to_string(&event)?);
                     }
                 }

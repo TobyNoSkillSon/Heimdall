@@ -7,6 +7,7 @@
 //!
 //! Prints the socket path and the process's resident memory once the model is ready. With announcing on (the default)
 //! a running Vella hears `dev.heimdall.asr` ready for this socket and borrows it; `gone` is posted at exit.
+#[allow(dead_code)] // the app's file as it is: the app's own helpers go unused here
 #[path = "../vella_asr.rs"]
 mod vella_asr;
 use anyhow::{bail, ensure, Context, Result};

@@ -29,4 +29,23 @@ with tempfile.TemporaryDirectory() as t:
     note.write_text('/build/heimdall/crates/a.rs\n')
     problems, _ = cpb.check(app, builder_home='/Users/builder', source_root='/Users/builder/Projects/x')
     assert not problems, problems
-print('check_public_bundle: 5 cases ok')
+    # The public/private split: a bundled skill must declare `class: public`, and no private folder may be inside.
+    note.write_text('fine\n')
+    skill = app / 'Contents/Resources/skills/public/models'
+    skill.mkdir(parents=True)
+    (skill / 'SKILL.md').write_text('---\nname: models\ndescription: Pick one. Use when asked.\nmetadata:\n  class: public\n---\n')
+    problems, _ = cpb.check(app, builder_home='/Users/builder')
+    assert not problems, problems
+    (skill / 'SKILL.md').write_text('---\nname: models\ndescription: Pick one. Use when asked.\nmetadata:\n  class: private\n---\n')
+    problems, _ = cpb.check(app, builder_home='/Users/builder')
+    assert any('a private-class skill in a public place' in p for p in problems), problems
+    (skill / 'SKILL.md').write_text('---\nname: models\ndescription: Pick one. Use when asked.\n---\n')
+    problems, _ = cpb.check(app, builder_home='/Users/builder')
+    assert any('no class' in p for p in problems), problems
+    (skill / 'SKILL.md').write_text('---\nname: models\ndescription: Pick one. Use when asked.\nmetadata:\n  class: public\n---\n')
+    own = app / 'Contents/Resources/skills/heimdall/night'
+    own.mkdir(parents=True)
+    (own / 'SKILL.md').write_text('---\nname: night\ndescription: Mine. Use at night.\nmetadata:\n  class: public\n---\n')
+    problems, _ = cpb.check(app, builder_home='/Users/builder')
+    assert any('private path in the tree' in p and 'skills/heimdall' in p for p in problems), problems
+print('check_public_bundle: 9 cases ok')

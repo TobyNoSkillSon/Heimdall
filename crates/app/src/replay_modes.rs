@@ -12,13 +12,13 @@ pub(super) fn isolated_data(p: Option<PathBuf>, mode: &str) -> Result<PathBuf> {
     let real = real.canonicalize().unwrap_or(real);
     ensure!(
         !path.starts_with(&real),
-        "offline modes refuse User's real data directory"
+        "offline modes refuse the real data directory"
     );
     settings::private_dir(&path)?;
     let path = path.canonicalize()?;
     ensure!(
         !path.starts_with(&real),
-        "offline modes refuse User's real data directory"
+        "offline modes refuse the real data directory"
     );
     Ok(path)
 }
@@ -401,111 +401,6 @@ pub(super) fn cpu() -> f64 {
         + r.ru_utime.tv_usec as f64 / 1e6
         + r.ru_stime.tv_sec as f64
         + r.ru_stime.tv_usec as f64 / 1e6
-}
-/// Explicit, bounded lab only. Preflight refuses before any stream if the responsible
-/// process lacks grants. No provider query, settings/profile mutation or UI input.
-pub(super) fn hotswap_replay_smoke(data:PathBuf,models:PathBuf,wav:&Path)->Result<()> {
-    let audio=read_wav(wav)?;ensure!(!audio.is_empty(),"empty smoke clip");
-    let mut app=pipeline::Pipeline::new(data.clone(),models,Settings::default(),None,true)?;
-    let (tx,rx)=bounded(512);app.preload(tx,false)?;let mut raw=app.raw_archive()?;
-    let mut ids=vec![];let origin=capture::host_now_ns();
-    for source in ["mic","app"]{let info=fake_source(source,0,1);raw.add_source(&info,origin)?;ids.push(info.id.clone());app.source(info);}
-    let mut watch=settings::SettingsWatch::default();
-    let start=Instant::now();let begin_cpu=cpu();let mut changes=0;
-    // Same live worker, paced intake and archive paths; fake native capture and screen frames.
-    for tick in 0..1650u64 {
-        let at=Duration::from_millis(tick*20);if at>start.elapsed(){std::thread::sleep(at-start.elapsed());}
-        let ns=origin+tick*20_000_000;
-        if tick%50==0 {app.screen_buffer.lock().unwrap().push(screen::Frame::new(screen::DisplayInfo {id:1,x:0.,y:0.,width:2,height:1},ns,2,1,vec![0;6])?)?;}
-        if [100,300,500,700,900,1100].contains(&tick) {
-            let mut next=app.settings.clone();next.speak_replies=changes%2==0;
-            next.free_space_floor_bytes=(10+changes%2)*1024*1024*1024;
-            next.tts_backend=if changes%2==0 {"cpu"}else{"metal"}.into();
-            if changes<2 {next.parakeet_backend=if changes==0 {"coreml"}else{"metal"}.into();}
-            next.screen.fps=if changes%2==0 {2}else{1};
-            next.save(&data.join("settings.json"))?;
-            app.apply_settings(watch.read_changed(&data.join("settings.json"))?.context("missing settings revision")?)?;
-            app.screen_buffer.lock().unwrap().reconfigure(app.settings.screen.config(&[(2,1)]),ns)?;
-            changes+=1;
-        }
-        let chunk=if tick<1500 {(0..320).map(|i|audio[(tick as usize*320+i)%audio.len()]).collect::<Vec<_>>()}else{vec![0.;320]};
-        for id in &ids {
-            raw.append(id,ns,capture::NativeFormat {sample_rate:16000,channels:1},&chunk,false)?;
-            app.capture_event(capture::CaptureEvent::Audio(capture::AudioChunk {source_id:id.clone(),label:id.0.clone(),host_ns:ns,samples:chunk.clone(),discontinuity:false}))?;
-        }
-        while let Ok(Some(event))=rx.try_recv(){app.worker_event(event)?;}
-    }
-    app.stop_live_worker(&rx)?;raw.flush()?;
-    for id in &ids {app.finish_source(&id.0)?;}
-    let gaps=app.gaps;let errors=app.errors;let session=app.session.clone();app.finish()?;
-    let expected_utterances=app.index.evidence.records()?.iter().filter(|r|r.kind=="listen_event"&&r.payload["event"]=="final_utterance").count();
-    let indexed=app.index.utterances_between(0,u64::MAX/2)?;
-    let indexed_per_stream:Vec<_>=ids.iter().map(|id|indexed.iter().filter(|r|r["source_id"]==id.0).count()).collect();
-    let archive=capture::Archive::open_read_only(&session)?;
-    let counts:Vec<_>=ids.iter().map(|id|archive.read_blocks(id).map(|blocks|blocks.iter().map(|b|b.samples.len()).sum::<usize>())).collect::<Result<_>>()?;
-    let receipt=serde_json::json!({"native_capture":false,"native_screen":false,"busy_machine":true,"wall_seconds":start.elapsed().as_secs_f64(),"cpu_seconds":cpu()-begin_cpu,"streams":2,"changes":changes,"samples_per_stream":counts,"expected_samples_per_stream":1650*320,"utterances_indexed":indexed.len(),"utterances_expected":expected_utterances,"utterances_per_stream":indexed_per_stream,"gaps":gaps,"errors":errors,"pending_reload":app.pending_reload,"session":session});
-    settings::private_write(&data.join("hot-swap-smoke.json"),&serde_json::to_vec_pretty(&receipt)?)?;println!("{receipt}");
-    ensure!(counts==vec![1650*320;2]&&gaps==0&&errors==0&&app.pending_reload.is_empty(),"replay swap smoke reported loss or failed setting");
-    ensure!(expected_utterances>0&&indexed.len()==expected_utterances&&app.finals==expected_utterances&&indexed_per_stream.iter().all(|n|*n>0),"replay final transcript loss: {} indexed / {expected_utterances} expected",indexed.len());
-    Ok(())
-}
-pub(super) struct LabPlayback(pub(super) std::process::Child);
-impl Drop for LabPlayback { fn drop(&mut self) { let _=self.0.kill();let _=self.0.wait(); } }
-pub(super) fn hotswap_smoke(data: PathBuf, models: PathBuf) -> Result<()> {
-    let states=ui::permissions::status();
-    ensure!(states.contains(&(ui::Permission::Microphone,ui::PermissionState::Granted)), "lab microphone grant unavailable; no prompt requested");
-    ensure!(screen::screen_permission_granted(), "lab screen grant unavailable; no prompt requested");
-    let consented=Settings::load(&settings::default_data()?.join("settings.json"))?;
-    ensure!(consented.setup_requested,"existing System Audio grant has not been confirmed");
-    let s=Settings {setup_requested:true,recorded_apps:vec![settings::AppChoice {key:"/usr/bin/afplay".into(),name:"afplay".into(),path:"/usr/bin/afplay".into()}],..Default::default()};
-    let mut app=pipeline::Pipeline::new(data.clone(),models,s,None,false)?;
-    let (listen_tx,listen_rx)=bounded(512);app.preload(listen_tx,false)?;
-    let (tx,rx)=bounded(512);
-    let permissions=LivePermissions {mic:true,system:true,screen:true,..Default::default()};
-    let mut capture=Some(CaptureRun::start(&app,tx,permissions)?);
-    let mut screens=None;start_screen(&mut app,&mut screens)?;adopt_screen(&mut app,&mut screens,Duration::from_secs(30))?;ensure!(screens.is_some(),"lab screen did not start within 30 s");
-    let wav=agent::runtime::checkout_root().join("crates/listen/tests/fixtures/en-2.wav");
-    let start=Instant::now();let begin_cpu=cpu();let mut playback: Option<LabPlayback>=None;
-    let mut changes=0;let mut samples=std::collections::BTreeMap::<String,usize>::new();
-    let mut mic_samples=0;let mut app_samples=0;let mut screen_configs=0;
-    while start.elapsed()<Duration::from_secs(30) {
-        if playback.as_mut().map(|p|p.0.try_wait()).transpose()?.flatten().is_some()||playback.is_none(){
-            playback=Some(LabPlayback(std::process::Command::new("/usr/bin/afplay").args(["-v","0.1"]).arg(&wav).spawn()?));
-        }
-        if changes<6&&start.elapsed().as_secs()>=2+changes*4 {
-            let mut next=app.settings.clone();
-            next.speak_replies=changes%2==0;
-            next.free_space_floor_bytes=(10+changes%2)*1024*1024*1024;
-            next.tts_backend=if changes%2==0 {"cpu"}else{"metal"}.into();
-            if changes<2 {next.parakeet_backend=if changes==0 {"coreml"}else{"metal"}.into();}
-
-            next.screen.fps=if changes%2==0 {2}else{1};
-            next.screen.resolution=if changes%2==0 {settings::ScreenResolution::P720}else{settings::ScreenResolution::P540};
-            app.apply_settings(next)?;
-            screens.as_ref().unwrap().reconfigure(app.settings.screen.config(&ui::display_sizes()))?;
-            changes+=1;
-        }
-        while let Ok(Some(e))=listen_rx.try_recv(){app.worker_event(e)?;}
-        while let Ok(e)=screens.as_ref().unwrap().events.try_recv(){if let screen::ScreenEvent::Configured {error}=e {ensure!(error.is_none(),"screen swap failed: {error:?}");screen_configs+=1;}}
-        if let Ok(e)=rx.recv_timeout(Duration::from_millis(20)) {
-            if let capture::CaptureEvent::Audio(c)=&e {
-                *samples.entry(c.source_id.0.clone()).or_default()+=c.samples.len();
-                if c.source_id.0.starts_with("mic:"){mic_samples+=c.samples.len();}else{app_samples+=c.samples.len();}
-            }
-            app.capture_event(e)?;
-        }
-    }
-    drop(playback.take());
-    capture.take();while let Ok(e)=rx.try_recv(){app.capture_event(e)?;}
-    app.stop_live_worker(&listen_rx)?;
-    let frames=screens.as_ref().unwrap().buffer.lock().unwrap().frame_count();screens.take();
-    let gaps=app.gaps;let errors=app.errors;let session=app.session.clone();app.finish()?;
-    let receipt=serde_json::json!({"busy_machine":true,"wall_seconds":start.elapsed().as_secs_f64(),"cpu_seconds":cpu()-begin_cpu,"changes":changes,"screen_configs":screen_configs,"screen_frames":frames,"mic_samples":mic_samples,"app_samples":app_samples,"sources":samples,"gaps":gaps,"errors":errors,"session":session,"pending_reload":app.pending_reload});
-    settings::private_write(&data.join("hot-swap-smoke.json"),&serde_json::to_vec_pretty(&receipt)?)?;
-    println!("{receipt}");
-    ensure!(mic_samples>0&&app_samples>0&&frames>0&&screen_configs==6,"lab streams/configurations did not all deliver");
-    ensure!(gaps==0&&errors==0&&app.pending_reload.is_empty(),"hot-swap smoke reported loss or failed setting");
-    Ok(())
 }
 pub(super) fn idle(seconds: u64, p: Option<PathBuf>, models: PathBuf) -> Result<()> {
     ensure!(

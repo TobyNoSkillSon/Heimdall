@@ -406,8 +406,8 @@ impl Island {
     }
 
     /// Whether the open pull-down is the user's (⌃⌘H or a click), not an agent's note's.
-    pub fn owners_reply_open(&self) -> bool {
-        self.model.owners_reply_open()
+    pub fn user_reply_open(&self) -> bool {
+        self.model.user_reply_open()
     }
 
     /// Where a drop goes now: into the open pull-down's composer while he writes there, else to the agent

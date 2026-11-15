@@ -36,8 +36,12 @@ use std::sync::Arc;
 
 /// Codex's model when the shared one is not a Codex model.
 pub const CODEX_DEFAULT: &str = "gpt-6-luna";
-/// T3's Claude instances before T3 listed its own (`background_call::t3::publish_catalog`).
-pub const CLAUDE_ACCOUNTS: [&str; 2] = ["claudeAgent", "claudeAgent_claude_code_2"];
+/// T3's Claude instances before T3 listed its own (`background_call::t3::publish_catalog`): the personal edition's two
+/// accounts (its Islands default is the second, `ui::ISLANDS_DEFAULT`); the public edition knows only T3's default.
+#[cfg(not(feature = "public"))]
+pub const CLAUDE_ACCOUNTS: &[&str] = &["claudeAgent", "claudeAgent_2"];
+#[cfg(feature = "public")]
+pub const CLAUDE_ACCOUNTS: &[&str] = &["claudeAgent"];
 
 /// One backend a task may run on, and why it is in the chain.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -169,6 +173,7 @@ pub fn set_quota_board(b: Arc<accounts::Board>) { state::set_board(b) }
 /// The same reader for the relay's account choice (`emergency::T3Cover::quotas`): one script run serves both.
 pub fn quota_board() -> Option<Arc<accounts::Board>> { state::board() }
 /// The tasks off their pick and what each runs on now.
+#[cfg(test)]
 pub fn routes() -> Vec<(Task, String, String)> { state::routes(|r| listed(r)) }
 fn listed(r: &Routes) -> Vec<(Task, String, String)> { r.iter().map(|(t, (_, m))| (*t, m.provider.clone(), m.id.clone())).collect() }
 
@@ -295,6 +300,87 @@ pub fn route(task: Option<Task>, pick: BackgroundModel, tools: bool) -> Endpoint
         }
     }
 }
+
+// ---- one more try on the new route (bug note 2026-11-08T02-03-51) ----
+// 00:49:10 and 01:08:34 on 8 Nov: right after each restart the island agent's call was the first to reach the main
+// Claude account, spent since 6 Nov; the call failed on the weekly limit and its update was lost, while Goals, which
+// called a little later, already found the account marked and ran on Claude code 2. Every task's next call moves
+// (`route`); this lets the call that found the limit move too, once, instead of waiting for the task's next pass.
+
+/// Resolves a task's endpoint off the async runtime (`route` may refresh a ChatGPT token). Tests: on the calling thread,
+/// where their per-thread state (the published model, the gate's episodes) lives.
+pub async fn resolve_off_runtime(resolve: Arc<dyn Fn() -> Endpoint + Send + Sync>) -> anyhow::Result<Endpoint> {
+    #[cfg(test)]
+    return Ok(resolve());
+    #[cfg(not(test))]
+    Ok(tokio::task::spawn_blocking(move || resolve()).await?)
+}
+
+/// Whether a call on `first` that failed with `err` failed on its backend's own fault: the shared call path marked the
+/// backend in `background_gate` (a spent account or plan, a backend down). A job's own failure (a bad answer, a 400)
+/// or a pause is not one.
+fn backend_failed(first: &Endpoint, err: &anyhow::Error) -> bool {
+    !crate::background_gate::quiet(err) && crate::background_gate::episode(first.provider, agent::now_ms()).is_some()
+}
+/// Where the task routes now (`next`), when that is another backend with a credential.
+fn elsewhere(first: &Endpoint, next: Endpoint, err: &anyhow::Error) -> Option<Endpoint> {
+    if next.key.is_none() || (next.provider, &next.model) == (first.provider, &first.model) {
+        return None;
+    }
+    eprintln!("Background tasks: a call on {} failed ({err:#}); it goes once more on {}", first.provider, next.provider);
+    Some(next)
+}
+
+/// A task's call (`call`, on `first`, which `resolve` gave) that failed on its backend's own fault (`backend_failed`)
+/// goes once more, at once, to where `resolve` routes the task now, when that is another backend with a credential.
+/// Never more than once; any other failure is returned as it was. Returns the answer and the endpoint that gave it.
+/// The island agent's calls (bug note 2026-11-08T02-03-51); `once_more_blocking` is the same for a blocking job.
+pub async fn once_more<T, F, Fut>(first: Endpoint, resolve: Arc<dyn Fn() -> Endpoint + Send + Sync>, call: F) -> anyhow::Result<(T, Endpoint)>
+where
+    F: Fn(Endpoint) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
+{
+    let err = match call(first.clone()).await {
+        Ok(v) => return Ok((v, first)),
+        Err(e) => e,
+    };
+    if !backend_failed(&first, &err) {
+        return Err(err);
+    }
+    let Some(next) = elsewhere(&first, resolve_off_runtime(resolve).await?, &err) else { return Err(err) };
+    Ok((call(next.clone()).await?, next))
+}
+
+/// `once_more` for a job that calls from a blocking thread (the day timeline). Night 8 Nov log sweep, finding 7: on
+/// 6 Nov at 13:23, 13:37 and 14:08 the day timeline's naming failed on ChatGPT's "Subscription Sharing usage limit".
+/// The limit was marked at the first failure, but that call was not tried again, and the limit names no reset, so the
+/// gate's probes (10, then 20 minutes later) were the timeline's own passes, and failed too. Now each of those calls
+/// goes once more on the fallback.
+pub fn once_more_blocking<T>(first: Endpoint, resolve: &dyn Fn() -> Endpoint, call: impl Fn(&Endpoint) -> anyhow::Result<T>) -> anyhow::Result<T> {
+    let err = match call(&first) {
+        Ok(v) => return Ok(v),
+        Err(e) => e,
+    };
+    if !backend_failed(&first, &err) {
+        return Err(err);
+    }
+    let Some(next) = elsewhere(&first, resolve(), &err) else { return Err(err) };
+    call(&next)
+}
+// ---- end one more try ----
+
+// ---- limits the background calls met (bug note 2026-11-08T02-03-49) ----
+/// The accounts' reading with the limits the background calls met themselves (`background_gate`): a Claude account
+/// whose call just hit its limit counts as spent until then, though the reading (taken before) still shows quota. For
+/// the T3 tasks' account choice (`mcp_actions`' accounts hook: `delegate_task`'s default account and its failover).
+pub fn with_seen_limits(mut reading: Vec<AccountQuota>, now_ms: u64) -> Vec<AccountQuota> {
+    for a in reading.iter_mut().filter(|a| a.kind == accounts::Kind::Claude && accounts::usable(a, now_ms)) {
+        let Some(until) = crate::background_gate::spent_until(&format!("{}{}", ui::T3_PROVIDER_PREFIX, a.instance), now_ms) else { continue };
+        a.windows.push(accounts::Window { name: "limit seen".into(), used_percent: Some(100.0), resets_at_ms: Some(until) });
+    }
+    reading
+}
+// ---- end limits the background calls met ----
 
 #[cfg(test)]
 #[path = "background_fallback_tests.rs"]

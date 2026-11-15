@@ -9,13 +9,57 @@ The public edition also leaves out every model it downloads on first run (crates
 docs/models.md): Parakeet, the speaker models, the decider's checkpoints, EmbeddingGemma 2's weights and the MossFormer2
 separator. It keeps the small models (Silero VAD, stock Smart Turn, Phonon S) and the helpers' runtimes (the decider's
 MLX engine and metallib, the memory-search worker), which are code, not weights."""
-import argparse, hashlib, json, shutil
+import argparse, ctypes, errno, hashlib, json, os, shutil
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
+_LIBC = ctypes.CDLL(None, use_errno=True)
 
 def digest(p):
     with p.open('rb') as f:
         return hashlib.file_digest(f, 'sha256').hexdigest()
+
+def digests(paths):
+    """Hashes in parallel (hashlib releases the GIL): the 19.6 GB personal set is bound by the disk, not one core."""
+    with ThreadPoolExecutor(8) as pool:
+        return list(pool.map(digest, paths))
+
+def place(source, target):
+    """APFS clone (copy-on-write: nothing written, and later changes to the source never reach it); a plain copy where
+    the volume cannot clone. Follows symlinks and replaces an existing target, like shutil.copy2."""
+    if os.path.lexists(target):
+        os.unlink(target)
+    if _LIBC.clonefile(os.fsencode(source), os.fsencode(target), 0) != 0:
+        error = ctypes.get_errno()
+        if error not in (errno.ENOTSUP, errno.EXDEV):
+            raise OSError(error, os.strerror(error), str(target))
+        shutil.copy2(source, target)
+    return target
+
+def engine_sources(engine):
+    return [engine/'Cargo.toml', engine/'Cargo.lock', *(engine/'src').rglob('*'),
+            *(f for f in (engine/'vendor').rglob('*') if 'target' not in f.relative_to(engine).parts)]
+
+def engine_is_current(binary, engine):
+    """The Drama engine binary was built from the engine's current sources. The first time it is newer than every
+    source file, a stamp beside it records the sources' content and the binary's hash; after that a checkout, rebase
+    or merge that only touches mtimes still matches the stamp (cleanup 14 Nov, BLD-22). Never ship one older than its
+    source (review 1 Nov)."""
+    files = sorted(f for f in engine_sources(engine) if f.is_file())
+    tree = hashlib.sha256()
+    for f, sha in zip(files, digests(files)):
+        tree.update(f'{f.relative_to(engine).as_posix()}\0{sha}\n'.encode())
+    stamp_path = binary.with_name(binary.name + '.sources.json')
+    stamp = dict(sources=tree.hexdigest(), binary=digest(binary))
+    try:
+        if json.loads(stamp_path.read_text()) == stamp:
+            return True
+    except (OSError, ValueError):
+        pass
+    if binary.stat().st_mtime < max(f.stat().st_mtime for f in files):
+        return False
+    stamp_path.write_text(json.dumps(stamp) + '\n')
+    return True
 
 def stage(destination, edition='personal'):
     public = edition == 'public'
@@ -53,15 +97,18 @@ def stage(destination, edition='personal'):
         ('speakers/Nemotron-3-Diarization.q8_0.gguf', '08456d9e22cd9a323c0364d98375f3746d6e68507ebb705cd46438c534c7a3a1'),
         ('speakers/ReDimNet2B6.onnx', 'd960e9f713eaba712f44498e82221b6fc12fcd7eaacd367c9eac45d3a6ce59ec'),
     ])
+    # Memory search's reranker, Qwen3-Reranker-0.6B rev e61197ed (BF16, 1.19 GB; docs/models.md): the public edition
+    # downloads it at first run (model_downloads.lock.json); search keeps embedding order until it is in place.
     for row in json.loads((ROOT/'scripts/extra-models.lock.json').read_text()):
-        if not (public and row['path'] in downloaded):
+        if not (public and (row['path'] in downloaded or row.get('personal_only'))):
             entries.append((row['path'], row['sha256']))
     embedding=json.loads((ROOT/'crates/archive/embedding/assets.lock.json').read_text())
     runtime_tree=hashlib.sha256();runtime_rows=[]
-    for file in sorted((ROOT/'models'/embedding.get('runtime_directory','embeddinggemma2/runtime')).rglob('*')):
-        if file.is_file() and '__pycache__' not in file.parts and '.cache' not in file.parts:
-            relative=file.relative_to(ROOT/'models').as_posix();sha=digest(file)
-            runtime_tree.update((relative+'\0'+sha+'\n').encode());runtime_rows.append((relative,sha))
+    runtime_files=[file for file in sorted((ROOT/'models'/embedding.get('runtime_directory','embeddinggemma2/runtime')).rglob('*'))
+                   if file.is_file() and '__pycache__' not in file.parts and '.cache' not in file.parts]
+    for file, sha in zip(runtime_files, digests(runtime_files)):
+        relative=file.relative_to(ROOT/'models').as_posix()
+        runtime_tree.update((relative+'\0'+sha+'\n').encode());runtime_rows.append((relative,sha))
     if runtime_tree.hexdigest()!=embedding['runtime_tree_sha256'] or len(runtime_rows)!=embedding['runtime_files']:
         raise RuntimeError('Missing or changed embedding runtime')
     entries.extend(runtime_rows)
@@ -87,11 +134,10 @@ def stage(destination, edition='personal'):
     # Development-only interpreter and 23.8 GB weights never enter the app.
     manifest=[]
     if not public:
-        import os
         import drama3_prepare
         staged=drama3_prepare.ensure_prepared(ROOT/'lab/drama3',ROOT/'target/drama3-prepared',
             force=os.environ.get('HEIMDALL_DRAMA3_PREPARE')=='rebuild')
-        shutil.copytree(staged,destination/'drama3',ignore=shutil.ignore_patterns('preparation.json'))
+        shutil.copytree(staged,destination/'drama3',ignore=shutil.ignore_patterns('preparation.json'),copy_function=place)
         # The sidecar runs under Heimdall's name, so Activity Monitor lists Drama 3's memory as Heimdall's and not as
         # "python3" (crates/speak/src/drama3.rs `SIDECAR_PROCESS`): the same interpreter, linked beside it.
         python=destination/'drama3/runtime/bin/python3'
@@ -106,26 +152,26 @@ def stage(destination, edition='personal'):
             raise SystemExit(f'{rust} is missing: build it (cd crates/drama-engine && nice -n 19 cargo build --release), '
                              'or set HEIMDALL_DRAMA3_ENGINE=python to ship the Python worker alone')
         if rust.is_file():
-            # The default engine: never ship one older than its source (review 1 Nov).
-            engine=ROOT/'crates/drama-engine'
-            sources=[engine/'Cargo.toml',engine/'Cargo.lock',*(engine/'src').rglob('*'),
-                     *(f for f in (engine/'vendor').rglob('*') if 'target' not in f.relative_to(engine).parts)]
-            newest=max(f.stat().st_mtime for f in sources if f.is_file())
-            if rust.stat().st_mtime<newest:
+            if not engine_is_current(rust, ROOT/'crates/drama-engine'):
                 raise SystemExit(f'{rust} is older than crates/drama-engine: rebuild it (cargo build --release there)')
             (destination/'drama3/rust').mkdir()
-            shutil.copy2(rust,destination/'drama3/rust/Heimdall Drama 3')
-        manifest=[dict(path=p.relative_to(destination).as_posix(),bytes=p.stat().st_size,source_sha256=digest(p))
-                  for p in sorted((destination/'drama3').rglob('*')) if p.is_file()]
-    for relative, expected in entries:
+            place(rust,destination/'drama3/rust/Heimdall Drama 3')
+        files=[p for p in sorted((destination/'drama3').rglob('*')) if p.is_file()]
+        manifest=[dict(path=p.relative_to(destination).as_posix(),bytes=p.stat().st_size,source_sha256=sha)
+                  for p, sha in zip(files, digests(files))]
+    # Clone each asset, then hash the staged copy itself once: it is what ships, and a clone cannot change afterwards.
+    targets=[]
+    for relative, _ in entries:
         source=ROOT/'models'/relative
-        if not source.is_file() or digest(source)!=expected:
+        if not source.is_file():
             raise RuntimeError('Missing or changed runtime asset: '+relative)
         target=destination/relative
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source,target)
-        if digest(target)!=expected:
-            raise RuntimeError('Copy verification failed: '+relative)
+        targets.append(place(source,target))
+    for (relative, expected), target, sha in zip(entries, targets, digests(targets)):
+        if sha!=expected:
+            raise RuntimeError(('Missing or changed runtime asset: ' if digest(ROOT/'models'/relative)!=expected
+                                else 'Copy verification failed: ')+relative)
         manifest.append(dict(path=relative,bytes=target.stat().st_size,source_sha256=expected))
     (destination/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
     print(f'Bundled {len(manifest)} {edition} runtime assets; {sum(r["bytes"] for r in manifest)} bytes; no corpus/QA files')

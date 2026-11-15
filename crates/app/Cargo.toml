@@ -46,18 +46,20 @@ libc = "0.2"
 png = "0.18"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 hound = "3.5"
-rubato = "0.16"
 uuid = { version = "1", features = ["v4"] }
 # Plan refresher (plan_refresher.rs): the Anthropic Messages API, same client and features as the agent crate.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
-# ElevenLabs key in the login Keychain (speech_voice.rs), like the agent providers' keys.
-security-framework = "3"
+# ElevenLabs key and Own Engine endpoint in the login Keychain (speech_voice.rs, own_voice.rs), like the agent providers'
+# keys, through the one door (crates/keychain): never a prompt, never a wait on the caller.
+keychain = { path = "../keychain" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # Engine models (inference_engine/models.rs): the refs/splash pin folder name, as Splash computes it.
 sha2 = "0.10"
 
 # The harness check at each start (harness_autonomy.rs) and emergency mode's tests.
 heimdall-emergency = { path = "../emergency-cli" }
+# The agent's `computer` tool: acting in other apps through Accessibility (crates/computer; night1111 computer control).
+heimdall-computer = { path = "../computer" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
@@ -86,5 +88,6 @@ path = "src/bin/goals-lab.rs"
 test = false
 
 [lints.rust]
-# Friends (iroh) is not part of this source release; its cfg(feature = "friends") blocks compile out.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("friends"))'] }
+# Friends (iroh) and the phone are not part of this source release; their cfg(feature = "friends")
+# and cfg(feature = "phone") blocks compile out (src/phone_off.rs holds the phone's no-op names).
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("friends", "phone"))'] }

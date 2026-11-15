@@ -1,7 +1,6 @@
 cask "heimdall-alpha" do
-  version "0.1.0-alpha.1"
-  # Placeholder: scripts/package_release.sh prints the zip's sha256 ("Cask lines: ...") for each release.
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  version "0.1.0-alpha.2"
+  sha256 "d0a0d9020545afa791c22c691ab5e33c1af1c96ea53d9b4ce72fad313e6ae425"
 
   url "https://github.com/TobyNoSkillSon/Heimdall/releases/download/v#{version}/Heimdall-Alpha-#{version}-arm64.zip"
   name "Heimdall Alpha"

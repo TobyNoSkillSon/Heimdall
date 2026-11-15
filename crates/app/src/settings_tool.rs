@@ -38,7 +38,7 @@ pub struct View {
     pub relay_accounts: Vec<ui::RelayAccount>,
     pub data: std::path::PathBuf,
     /// The user's recent lines, spoken and typed, newest last: what `owner_asked` must quote.
-    pub recent_owner: Vec<String>,
+    pub recent_user: Vec<String>,
 }
 
 /// One row of the catalog: the key, its section in the menu, and what `set` takes.
@@ -55,7 +55,14 @@ const fn k(key: &'static str, section: &'static str, takes: &'static str, item: 
 }
 
 /// Every setting, in menu order. `agent::mcp_contract::SETTINGS_KEYS` lists the same keys (a test holds them equal).
-pub const KEYS: &[Key] = &[
+/// The public edition has no phone, so it stops before `reply_to`, the last key.
+pub const KEYS: &[Key] = match ALL_KEYS.split_last() {
+    Some((last, rest)) if crate::edition::PUBLIC && matches!(last.key.as_bytes(), b"reply_to") => rest,
+    _ => ALL_KEYS,
+};
+/// The speaking models `speaking_model` takes: Drama 3 and Supertonic are personal-edition voices.
+const SPEAKING_MODELS: &str = if crate::edition::PUBLIC { "phonon, own_engine, elevenlabs" } else { "drama3, supertonic, phonon, own_engine, elevenlabs" };
+const ALL_KEYS: &[Key] = &[
     k("listening", "Tiles", "true or false", false),
     k("seeing", "Tiles", "true or false", false),
     k("speaking", "Tiles", "true or false: your voice on or off", false),
@@ -69,24 +76,46 @@ pub const KEYS: &[Key] = &[
     k("islands_on_streams", "Seeing", "true or false", false),
     k("agent_model", "Agent", "local, an engine model, or an added model's name or id", false),
     k("agent_thinking", "Agent", "the selected model's thinking level", false),
-    k("agent_speed", "Agent", "standard or fast: fast asks the Codex subscription or the OpenAI API for the priority tier (an API key bills priority rates); other providers ignore it; only when User asks", false),
+    k("agent_speed", "Agent", "standard or fast: fast asks the Codex subscription or the OpenAI API for the priority tier (an API key bills priority rates); other providers ignore it; only when {user} asks", false),
     k("agent_context", "Agent", "the selected model's context in tokens (it snaps to the menu's nearest stop)", false),
     k("agent_relay", "Agent", "true or false: Claude Code subscription answers as you (Agent ▸ Model ▸ Claude Code subscription); false goes back to agent_model's row", false),
     k("agent_relay_model", "Agent", "a Claude model T3 lists (id or name); also turns Claude Code subscription on, as its row does", false),
     k("agent_relay_account", "Agent", "automatic, or a Claude account T3 lists (instance id or name); also turns Claude Code subscription on, as its row does", false),
+    // night1111 computer control
+    k("computer_control", "Agent", "true or false: Control Apps, your computer tool; true needs owner_asked with their words", false),
     k("name", "Personalisation", "your name, also your wake word", false),
     k("user_name", "Personalisation", "what you call the user", false),
     k("icon", "Personalisation", "helmet, an SF Symbol name, an absolute PNG/PDF/SVG path, or SVG source", false),
-    k("speaking_model", "Personalisation", "drama3, supertonic, phonon, own_engine, elevenlabs", false),
+    k("speaking_model", "Personalisation", SPEAKING_MODELS, false),
     k("voice", "Personalisation", "a voice of the speaking model", false),
     k("voice_speed", "Personalisation", "percent of natural speed, 80 to 160", false),
     k("wake_sound", "Personalisation", "true or false", false),
-    k("ack_delay", "Personalisation", "seconds of quiet after User stops talking before your short spoken acknowledgement and the notch's thinking animation, 0 to 10 (2 or 2.5)", false),
-    k("background_model", "Background Tasks", "provider/id, local/<engine model>, or t3:<instance>/<model> (a Claude Code instance in T3, no key: t3:claudeAgent_claude_code_2/claude-haiku-5-5); add @<level> for that model's thinking level (@default: each task's own); with item a task (islands, plan, voice_names, day_timeline, suggestions; suggestions never on t3): that task's own model, or shared for Background Tasks ▸ Model; with item paid_fallback true or false: whether a background task whose backend ran out may end on the Anthropic API key, which costs money (off by default; only when User asks)", false),
-    k("background_task", "Background Tasks", "item: islands, plan, voice_names, day_timeline or suggestions; value true or false", true),
+    k("ack_delay", "Personalisation", "seconds of quiet after {user} stops talking before your short spoken acknowledgement and the notch's thinking animation, 0 to 10 (2 or 2.5)", false),
+    k("background_model", "Background Tasks", "provider/id, local/<engine model>, or t3:<instance>/<model> (a coding-agent instance T3 lists, no key: t3:<instance id>/<model id> as get shows them); add @<level> for that model's thinking level (@default: each task's own); with item a task (islands, plan, goals, voice_names, day_timeline, suggestions; suggestions never on t3): that task's own model, or shared for Background Tasks ▸ Model; with item paid_fallback true or false: whether a background task whose backend ran out may end on the Anthropic API key, which costs money (off by default; only when {user} asks)", false),
+    k("background_task", "Background Tasks", "item: islands, plan, goals, voice_names, day_timeline or suggestions; value true or false", true),
     k("show_islands", "Windows", "true or false", false),
+    // islands display (night 1107, bug note 2026-11-07T02-02-35)
+    k("islands_display", "Windows", "follow (the islands follow the pointer), or a connected display's name, which locks the notch island and the floating islands there; a part of the name is fine", false),
     k("launch_at_login", "System", "true or false", false),
+    // night1113 reply route (bug note 2026-11-12T07-39-36)
 ];
+
+// ---- Review 1111 (switch confirmation): a settings change the agent made itself. ----
+/// When the agent's `settings` tool last sent a change to the menu (ms; 0 none). The menu applies it like the user's click,
+/// so the switch confirmation asks here whether the change it confirms was the agent's (`take_agent_set`).
+static AGENT_SET_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// How long after the tool's send its change counts as the agent's (the menu applies it within a second or two).
+const AGENT_SET_WINDOW_MS: u64 = 10_000;
+/// The agent's `settings` tool is sending a change to the menu now.
+pub fn mark_agent_set() {
+    AGENT_SET_MS.store(agent::now_ms(), std::sync::atomic::Ordering::Release);
+}
+/// Whether the change being applied is the agent's: one sent in the last `AGENT_SET_WINDOW_MS`, taken once.
+pub fn take_agent_set() -> bool {
+    let at = AGENT_SET_MS.swap(0, std::sync::atomic::Ordering::AcqRel);
+    at != 0 && agent::now_ms().saturating_sub(at) < AGENT_SET_WINDOW_MS
+}
+// ---- end review 1111 ----
 
 pub fn key(name: &str) -> Result<&'static Key> {
     KEYS.iter().find(|k| k.key == name).with_context(|| format!("NOT_CHANGED: no setting {name}; call settings with action list"))
@@ -172,6 +201,7 @@ impl View {
             "recording_resolution" => json!(resolution_name(s.screen.ui().resolution)),
             "recording_fps" => json!(s.screen.fps),
             "islands_on_streams" => on_off(s.islands_on_streams),
+            "computer_control" => on_off(s.computer_control), // night1111 computer control
             "agent_model" => json!(self.model_name()),
             "agent_thinking" => json!(self.thinking()),
             "agent_context" => self.context().map_or(json!("the whole window"), |t| json!(t)),
@@ -213,6 +243,7 @@ impl View {
                 None => json!(ui::BackgroundTask::ALL.iter().filter(|t| !s.background_off.iter().any(|k| k == t.key())).map(|t| t.key()).collect::<Vec<_>>()),
             },
             "show_islands" => on_off(!s.islands_hidden),
+            "islands_display" => json!(s.islands_display_lock().as_deref().unwrap_or(ui::islands_display::FOLLOW)),
             "launch_at_login" => on_off(s.launch_at_login),
             other => bail!("NOT_CHANGED: no setting {other}; call settings with action list"),
         })
@@ -244,6 +275,7 @@ impl View {
             },
             "speaking_model" | "voice" | "icon" => crate::identity::choices(&self.voices),
             "background_task" => ui::BackgroundTask::ALL.map(task_key).join(", "),
+            "islands_display" => std::iter::once(ui::islands_display::FOLLOW.to_string()).chain(ui::islands_display::connected()).collect::<Vec<_>>().join(", "),
             // The T3 instances and their levels as T3 last listed them (Background Tasks ▸ Model's T3 rows).
             "background_model" => crate::background_call::t3::instances().iter().flat_map(|i| i.models.iter().map(move |m| {
                 let levels = if m.efforts.is_empty() { String::new() } else { format!(" @{}", m.efforts.join("|")) };
@@ -391,13 +423,25 @@ fn text<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
 pub fn agent_off_check(owner_asked: Option<&str>, recent: &[String]) -> Result<String> {
     let words = owner_asked.map(str::trim).filter(|w| w.split_whitespace().filter(|x| x.chars().any(char::is_alphabetic)).count() >= 3);
     let words = words.context(
-        "NOT_CHANGED: you never switch yourself off unless User asked; pass owner_asked with his exact words if he did",
+        format!("NOT_CHANGED: you never switch yourself off unless {} asked; pass owner_asked with their exact words if they did", agent::identity::user()),
     )?;
     let quoted = fold(words);
     ensure!(
         recent.iter().any(|line| fold(line).contains(&quoted)),
-        "NOT_CHANGED: owner_asked must quote User's own recent words, as the transcript has them; these are not in his recent lines"
+        format!("NOT_CHANGED: owner_asked must quote {}'s own recent words, as the transcript has them; these are not in their recent lines", agent::identity::user())
     );
+    Ok(words.to_string())
+}
+
+/// The user's own words turning Control Apps on (`owner_asked`): at least three words, quoted from one of his recent lines,
+/// and that line asks for it in so many words, a verb and its object ("turn on computer control", "you can control my
+/// apps", "go ahead and click it for me"), with no "don't" or "if" just before (review C2, night 10-11 Nov:
+/// `heimdall_computer::asks`). A word that only appears ("my computer is slow", "remote control") is refused. `why`
+/// leads the refusal.
+pub fn owner_words_check(owner_asked: Option<&str>, recent: &[String], why: &str) -> Result<String> {
+    let words = owner_asked.map(str::trim).filter(|w| w.split_whitespace().filter(|x| x.chars().any(char::is_alphabetic)).count() >= 3);
+    let words = words.with_context(|| format!("NOT_CHANGED: {why}; pass owner_asked with their exact words if they did"))?;
+    heimdall_computer::asks::asks_for_control(words, recent).map_err(|e| anyhow::anyhow!("NOT_CHANGED: {why}; {}", agent::identity::tokens(e, &agent::identity::current())))?;
     Ok(words.to_string())
 }
 
@@ -418,7 +462,7 @@ impl Plan {
 /// The menu actions that set `key` to `value`: Err (prefixed NOT_CHANGED) when the menu would not offer it.
 pub fn plan(view: &View, key_name: &str, item: Option<&str>, value: &Value, owner_asked: Option<&str>) -> Result<Plan> {
     let k = key(key_name)?;
-    ensure!(!k.item || item.is_some(), "NOT_CHANGED: {key_name} needs item: {}", k.takes);
+    ensure!(!k.item || item.is_some(), "NOT_CHANGED: {key_name} needs item: {}", agent::identity::tokens(k.takes, &agent::identity::current()));
     let s = &view.settings;
     Ok(match key_name {
         "listening" => Plan::one(UiAction::SetListening(boolean(value, key_name)?)),
@@ -426,13 +470,13 @@ pub fn plan(view: &View, key_name: &str, item: Option<&str>, value: &Value, owne
         "speaking" => Plan::one(UiAction::SetSpeakReplies(boolean(value, key_name)?)),
         "agent" => {
             let on = boolean(value, key_name)?;
-            let by = if on { None } else { Some(agent_off_check(owner_asked, &view.recent_owner)?) };
+            let by = if on { None } else { Some(agent_off_check(owner_asked, &view.recent_user)?) };
             Plan { actions: vec![UiAction::SetDryRun(!on)], agent_off_by: by }
         }
         "engine" => {
             let on = boolean(value, key_name)?;
             // The engine off under a running local agent is the agent off.
-            let by = if !on && s.agent_model.is_local() && !view.agent_off { Some(agent_off_check(owner_asked, &view.recent_owner)?) } else { None };
+            let by = if !on && s.agent_model.is_local() && !view.agent_off { Some(agent_off_check(owner_asked, &view.recent_user)?) } else { None };
             Plan { actions: vec![UiAction::SetEngine(on)], agent_off_by: by }
         }
         "microphone" => Plan::one(UiAction::SelectMicrophone { id: find_microphone(&view.microphones, text(value, key_name)?)?.id.clone() }),
@@ -462,6 +506,15 @@ pub fn plan(view: &View, key_name: &str, item: Option<&str>, value: &Value, owne
             Plan::one(UiAction::SetScreenRecording(ui::ScreenRecording { resolution: s.screen.ui().resolution, fps: fps as u32 }))
         }
         "islands_on_streams" => Plan::one(UiAction::SetIslandsOnStreams(boolean(value, key_name)?)),
+        // Control Apps goes on only on the user's own words (bug note 2026-10-22T19-16-01: "gated by the user's permission");
+        // off is always allowed.
+        "computer_control" => {
+            let on = boolean(value, key_name)?;
+            if on {
+                owner_words_check(owner_asked, &view.recent_user, &format!("Control Apps turns on only when {} asks for it", agent::identity::user()))?;
+            }
+            Plan::one(UiAction::SetComputerControl(on))
+        }
         "agent_model" => Plan::one(agent_model(view, text(value, key_name)?)?),
         "agent_relay" => match boolean(value, key_name)? {
             true => Plan::one(UiAction::SelectAgentRelay),
@@ -582,7 +635,9 @@ pub fn plan(view: &View, key_name: &str, item: Option<&str>, value: &Value, owne
         }
         "background_task" => Plan::one(UiAction::SetBackgroundTask { task: find_task(item.unwrap())?, on: boolean(value, key_name)? }),
         "show_islands" => Plan::one(UiAction::SetIslandsShown(boolean(value, key_name)?)),
+        "islands_display" => Plan::one(UiAction::SetIslandsDisplay(islands_display(text(value, key_name)?, &ui::islands_display::connected())?)),
         "launch_at_login" => Plan::one(UiAction::SetLaunchAtLogin(boolean(value, key_name)?)),
+        // night1113 reply route: not a menu row; the tool sends it to the bridge itself (`McpActions::settings_call`).
         other => bail!("NOT_CHANGED: no setting {other}"),
     })
 }
@@ -606,6 +661,25 @@ pub fn personal_line(view: &View) -> String {
 fn engine_model_id(view: &View, name: &str) -> Result<String> {
     by_name(&view.engine_models, name, |(id, label)| if fold(id) == fold(name) { id.clone() } else { label.clone() }, "engine model").map(|(id, _)| id.clone())
 }
+
+// ---- islands display (night 1107, bug note 2026-11-07T02-02-35) ----
+/// `islands_display`'s value as the setting keeps it: `None` to follow the pointer, else the connected display's
+/// full name (`connected`, macOS's names; "MSI" finds "MSI MAG 271QPX"). Before the UI has listed the displays
+/// (empty) the name is kept as said, and the islands follow the pointer until a display of that name is connected.
+fn islands_display(v: &str, connected: &[String]) -> Result<Option<String>> {
+    if ui::islands_display::is_follow(v) {
+        return Ok(None);
+    }
+    if connected.is_empty() {
+        return Ok(Some(v.trim().to_string()));
+    }
+    let names: Vec<&str> = connected.iter().map(String::as_str).collect();
+    match ui::islands_display::find(&names, v) {
+        Some(i) => Ok(Some(connected[i].clone())),
+        None => bail!("NOT_CHANGED: no one connected display is named {v}; the displays: {}, or follow", connected.join(", ")),
+    }
+}
+// ---- end islands display ----
 
 /// `agent_relay_account`'s word for `None`: the menu's Automatic row.
 const AUTOMATIC: &str = "automatic";
@@ -639,7 +713,7 @@ fn agent_model(view: &View, v: &str) -> Result<UiAction> {
     match found {
         Ok(m) => {
             let p = m.provider_info();
-            ensure!(p.is_none_or(agent::provider::has_credential), "NOT_CHANGED: {} is not connected; User connects it in the menu", m.provider);
+            ensure!(p.is_none_or(agent::provider::has_credential), "NOT_CHANGED: {} is not connected; {} connects it in the menu", m.provider, agent::identity::user_start());
             Ok(UiAction::SelectApiModel { provider: m.provider.clone(), id: m.id.clone() })
         }
         Err(e) if scope.is_none() => engine_model_id(view, name).map(UiAction::SelectEngineModel).map_err(|_| e),
@@ -648,9 +722,16 @@ fn agent_model(view: &View, v: &str) -> Result<UiAction> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use ui::identity::IdentityAction;
+
+    /// Release 1114: the phone's reply route is not in this source release; the key is refused like any unknown one.
+    #[test]
+    fn the_public_tree_has_no_reply_route_setting() {
+        assert!(key("reply_to").err().is_some_and(|e| e.to_string().starts_with("NOT_CHANGED: no setting reply_to")));
+        assert!(KEYS.iter().all(|k| k.key != "reply_to") && !agent::mcp_contract::SETTINGS_KEYS.contains(&"reply_to"));
+    }
 
     fn mic(id: &str, name: &str, built_in: bool) -> ui::Microphone {
         ui::Microphone { id: id.into(), name: name.into(), connected: true, built_in }
@@ -676,9 +757,9 @@ mod tests {
             presets: vec![],
             engine_models: vec![("qwen3.8-27b".into(), "Qwen 3.8 27B".into())],
             relay_models: vec![ui::RelayModel { id: "claude-opus-5-5".into(), name: "Claude Opus 5.5".into() }, ui::RelayModel { id: "claude-sonnet-5-5".into(), name: "Claude Sonnet 5.5".into() }],
-            relay_accounts: vec![ui::RelayAccount { id: "claudeAgent".into(), name: "Claude".into() }, ui::RelayAccount { id: "claudeAgent_claude_code_2".into(), name: "Claude (work)".into() }],
+            relay_accounts: vec![ui::RelayAccount { id: "claudeAgent".into(), name: "Claude".into() }, ui::RelayAccount { id: "claudeAgent_2".into(), name: "Claude (work)".into() }],
             data: data.into(),
-            recent_owner: vec!["User: the build is green".into(), "Okay, turn the agent off for tonight.".into()],
+            recent_user: vec!["User: the build is green".into(), "Okay, turn the agent off for tonight.".into()],
         }
     }
 
@@ -760,8 +841,8 @@ mod tests {
         assert!(e.starts_with("NOT_CHANGED: you never switch yourself off"), "{e}");
         assert!(plan(&v, "agent", None, &json!("off"), Some("  ")).is_err());
         assert!(plan(&v, "agent", None, &json!(false), Some("yes")).is_err(), "too short to be his request");
-        let e = plan(&v, "agent", None, &json!(false), Some("User asked me to stop")).unwrap_err().to_string();
-        assert!(e.contains("not in his recent lines"), "words he never said are refused: {e}");
+        let e = plan(&v, "agent", None, &json!(false), Some("The user asked me to stop")).unwrap_err().to_string();
+        assert!(e.contains("not in their recent lines"), "words he never said are refused: {e}");
         let p = plan(&v, "agent", None, &json!(false), Some("turn the agent off for tonight")).unwrap();
         assert_eq!(p, Plan { actions: vec![UiAction::SetDryRun(true)], agent_off_by: Some("turn the agent off for tonight".into()) });
         // The engine under a local agent is the agent too; under an API model it is not.
@@ -771,6 +852,35 @@ mod tests {
         assert!(plan(&v, "engine", None, &json!(false), Some("stop the engine")).is_err());
         v.settings.agent_model = agent::provider::AgentModel::default();
         assert_eq!(plan(&v, "engine", None, &json!(false), None).unwrap().actions, [UiAction::SetEngine(false)]);
+    }
+
+    /// Control Apps (bug note 2026-10-22T19-16-01): off by default; on only with the user's own recent words; off any time.
+    #[test]
+    fn control_apps_goes_on_only_on_owners_words() {
+        let t = tempfile::tempdir().unwrap();
+        let mut v = view(t.path());
+        assert!(!v.settings.computer_control && !v.settings.computer_clicks, "both off by default");
+        let e = plan(&v, "computer_control", None, &json!(true), None).unwrap_err().to_string();
+        assert!(e.starts_with("NOT_CHANGED: Control Apps turns on only when the user asks for it"), "{e}");
+        assert!(plan(&v, "computer_control", None, &json!(true), Some("User wants app control")).is_err(), "words he never said");
+        v.recent_user.push("mute morgan in Discord".into());
+        let e = plan(&v, "computer_control", None, &json!(true), Some("mute morgan in")).unwrap_err().to_string();
+        assert!(e.contains("must be their words asking for it"), "his words, but not asking for this: {e}");
+        // Review C2 (night 10-11 Nov): a word that only appears is not an ask.
+        for line in ["my computer is slow", "My computer is slow, click on that link", "where is the remote control", "the controller is broken"] {
+            v.recent_user.push(line.into());
+            assert!(plan(&v, "computer_control", None, &json!(true), Some(line)).is_err(), "{line}");
+        }
+        v.recent_user.push("don't turn on computer control".into());
+        assert!(plan(&v, "computer_control", None, &json!(true), Some("turn on computer control")).is_err(), "negated");
+        v.recent_user.push("Turn on control apps so you can mute people".into());
+        assert_eq!(plan(&v, "computer_control", None, &json!(true), Some("turn on control apps")).unwrap().actions, [UiAction::SetComputerControl(true)]);
+        for line in ["you can control my apps", "go ahead and click it for me", "please turn on computer control"] {
+            v.recent_user.push(line.into());
+            assert!(plan(&v, "computer_control", None, &json!(true), Some(line)).is_ok(), "{line}");
+        }
+        assert_eq!(set(&v, "computer_control", None, json!(false)).unwrap(), [UiAction::SetComputerControl(false)]);
+        assert!(set(&v, "computer_control", None, json!("yes")).is_err());
     }
 
     /// Microphones by the names the menu shows, never by id: exact, folded, a unique part, "built-in".
@@ -861,14 +971,14 @@ mod tests {
         assert_eq!(set(&v, "agent_relay", None, json!(true)).unwrap(), [UiAction::SelectAgentRelay]);
         assert_eq!(set(&v, "agent_relay_model", None, json!("claude-sonnet-5-5")).unwrap(), [UiAction::SelectRelayModel("claude-sonnet-5-5".into())]);
         assert_eq!(set(&v, "agent_relay_model", None, json!("sonnet")).unwrap(), [UiAction::SelectRelayModel("claude-sonnet-5-5".into())], "by the menu's name");
-        assert_eq!(set(&v, "agent_relay_account", None, json!("claudeAgent_claude_code_2")).unwrap(), [UiAction::SelectRelayAccount(Some("claudeAgent_claude_code_2".into()))]);
-        assert_eq!(set(&v, "agent_relay_account", None, json!("Claude (work)")).unwrap(), [UiAction::SelectRelayAccount(Some("claudeAgent_claude_code_2".into()))]);
+        assert_eq!(set(&v, "agent_relay_account", None, json!("claudeAgent_2")).unwrap(), [UiAction::SelectRelayAccount(Some("claudeAgent_2".into()))]);
+        assert_eq!(set(&v, "agent_relay_account", None, json!("Claude (work)")).unwrap(), [UiAction::SelectRelayAccount(Some("claudeAgent_2".into()))]);
         assert_eq!(set(&v, "agent_relay_account", None, json!("Automatic")).unwrap(), [UiAction::SelectRelayAccount(None)]);
         let e = set(&v, "agent_relay_model", None, json!("claude-haiku-9")).unwrap_err().to_string();
         assert!(e.starts_with("NOT_CHANGED: no Claude model T3 lists named claude-haiku-9") && e.contains("Claude Opus 5.5"), "{e}");
         let e = set(&v, "agent_relay_account", None, json!("claudeAgent_3")).unwrap_err().to_string();
         assert!(e.starts_with("NOT_CHANGED: no Claude account T3 lists") && e.contains("Claude (work)"), "{e}");
-        assert!(v.choices("agent_relay_account").starts_with("automatic, claudeAgent (Claude), claudeAgent_claude_code_2"), "{}", v.choices("agent_relay_account"));
+        assert!(v.choices("agent_relay_account").starts_with("automatic, claudeAgent (Claude), claudeAgent_2"), "{}", v.choices("agent_relay_account"));
         assert!(v.choices("agent_relay_model").contains("claude-sonnet-5-5 (Claude Sonnet 5.5)"));
         assert!(set(&v, "agent_relay", None, json!(false)).unwrap().is_empty(), "off already: nothing sent");
         // Off: the row of the model it goes back to.
@@ -884,8 +994,8 @@ mod tests {
         assert!(set(&none, "agent_relay_model", None, json!("claude-opus-5-5")).unwrap_err().to_string().contains("has not listed"));
         assert!(set(&none, "agent_relay_account", None, json!("claudeAgent")).unwrap_err().to_string().contains("has not listed"));
         assert_eq!(set(&none, "agent_relay_account", None, json!("automatic")).unwrap(), [UiAction::SelectRelayAccount(None)]);
-        v.settings.agent_relay_account = Some("claudeAgent_claude_code_2".into());
-        assert_eq!(v.get("agent_relay_account", None).unwrap(), json!("claudeAgent_claude_code_2"));
+        v.settings.agent_relay_account = Some("claudeAgent_2".into());
+        assert_eq!(v.get("agent_relay_account", None).unwrap(), json!("claudeAgent_2"));
     }
 
     /// Personalisation: the name (the wake word), the user's name, the mark, the speaking model and voice, the speed
@@ -917,6 +1027,33 @@ mod tests {
         assert_eq!(v.get("voice", None).unwrap(), json!(format!("phonon · {}", v.voices.preset)));
     }
 
+    /// Bug note 2026-11-07T02-02-35: "lock the dynamic islands to the MSI display", and back to following, by voice.
+    #[test]
+    fn islands_display_locks_to_a_connected_display_and_follows_again() {
+        let t = tempfile::tempdir().unwrap();
+        let mut v = view(t.path());
+        assert_eq!(v.get("islands_display", None).unwrap(), json!("follow"), "following is the default");
+        let connected = vec!["Built-in Retina Display".to_string(), "MSI MAG 271QPX".to_string()];
+        assert_eq!(islands_display("MSI", &connected).unwrap(), Some("MSI MAG 271QPX".into()), "a part names it; the full name is kept");
+        assert_eq!(islands_display("built-in retina display", &connected).unwrap(), Some("Built-in Retina Display".into()));
+        for f in ["follow", "Follow Cursor", "cursor"] {
+            assert_eq!(islands_display(f, &connected).unwrap(), None, "{f}");
+        }
+        let e = islands_display("LG", &connected).unwrap_err().to_string();
+        assert!(e.starts_with("NOT_CHANGED") && e.contains("MSI MAG 271QPX"), "{e}");
+        assert_eq!(islands_display("MSI MAG 271QPX", &[]).unwrap(), Some("MSI MAG 271QPX".into()), "before the UI listed displays");
+        // Through the tool: no displays listed in tests, so the name is kept as said.
+        assert_eq!(set(&v, "islands_display", None, json!("follow")).unwrap(), [UiAction::SetIslandsDisplay(None)]);
+        assert!(set(&v, "islands_display", None, json!(true)).is_err(), "a name or follow");
+        v.settings.islands_display = Some("MSI MAG 271QPX".into());
+        assert_eq!(v.get("islands_display", None).unwrap(), json!("MSI MAG 271QPX"));
+        assert!(v.list().contains(" islands_display=MSI MAG 271QPX;"), "{}", v.list());
+        // "follow" written into settings.json by hand is Follow Cursor, not a display named "follow".
+        v.settings.islands_display = Some("follow".into());
+        assert_eq!(v.settings.islands_display_lock(), None);
+        assert_eq!(v.get("islands_display", None).unwrap(), json!("follow"));
+    }
+
     #[test]
     fn background_windows_and_login() {
         let t = tempfile::tempdir().unwrap();
@@ -939,10 +1076,10 @@ mod tests {
     fn background_model_on_t3_with_a_level() {
         let t = tempfile::tempdir().unwrap();
         let mut v = view(t.path());
-        let t3 = "t3:claudeAgent_claude_code_2";
-        assert_eq!(set(&v, "background_model", None, json!("t3:claudeAgent_claude_code_2/claude-haiku-5-5")).unwrap(),
+        let t3 = "t3:claudeAgent_2";
+        assert_eq!(set(&v, "background_model", None, json!("t3:claudeAgent_2/claude-haiku-5-5")).unwrap(),
             [UiAction::SetBackgroundModel { provider: t3.into(), id: "claude-haiku-5-5".into() }]);
-        assert_eq!(set(&v, "background_model", None, json!("t3:claudeAgent_claude_code_2/claude-haiku-5-5@low")).unwrap(), [
+        assert_eq!(set(&v, "background_model", None, json!("t3:claudeAgent_2/claude-haiku-5-5@low")).unwrap(), [
             UiAction::SetBackgroundModel { provider: t3.into(), id: "claude-haiku-5-5".into() },
             UiAction::SetBackgroundEffort { provider: t3.into(), id: "claude-haiku-5-5".into(), level: "low".into() }]);
         assert_eq!(set(&v, "background_model", None, json!("anthropic/claude-haiku-5-5@default")).unwrap()[1],
@@ -950,11 +1087,11 @@ mod tests {
         if !crate::edition::PUBLIC { assert!(set(&v, "background_model", None, json!("t3:codex/gpt-6.1-sol")).is_err(), "never Codex via T3"); }
         // With T3's list known, a level it does not list is refused, and the choices name the levels.
         crate::background_call::t3::publish_catalog(&serde_json::from_str(include_str!("background_t3_capabilities.json")).unwrap());
-        assert!(set(&v, "background_model", None, json!("t3:claudeAgent_claude_code_2/claude-haiku-5-5@ultracode")).is_err());
-        assert!(v.choices("background_model").contains("t3:claudeAgent_claude_code_2/claude-haiku-5-5 @low|medium|high|xhigh|max|ultrathink"));
+        assert!(set(&v, "background_model", None, json!("t3:claudeAgent_2/claude-haiku-5-5@ultracode")).is_err());
+        assert!(v.choices("background_model").contains("t3:claudeAgent_2/claude-haiku-5-5 @low|medium|high|xhigh|max|ultrathink"));
         v.settings.background_model = crate::background_model::BackgroundModel { provider: t3.into(), id: "claude-haiku-5-5".into() };
         v.settings.background_efforts = vec![crate::background_model::BackgroundEffort { provider: t3.into(), id: "claude-haiku-5-5".into(), level: "low".into() }];
-        assert_eq!(v.get("background_model", None).unwrap(), json!("t3:claudeAgent_claude_code_2/claude-haiku-5-5@low"));
+        assert_eq!(v.get("background_model", None).unwrap(), json!("t3:claudeAgent_2/claude-haiku-5-5@low"));
     }
 
     /// The fallback's paid step: off by default, set only as a yes or no.
@@ -974,19 +1111,19 @@ mod tests {
     fn a_tasks_own_model() {
         let t = tempfile::tempdir().unwrap();
         let mut v = view(t.path());
-        assert_eq!(set(&v, "background_model", Some("islands"), json!("t3:claudeAgent_claude_code_2/claude-haiku-5-5")).unwrap(),
-            [UiAction::SetTaskModel { task: ui::BackgroundTask::Islands, provider: "t3:claudeAgent_claude_code_2".into(), id: "claude-haiku-5-5".into() }]);
+        assert_eq!(set(&v, "background_model", Some("islands"), json!("t3:claudeAgent_2/claude-haiku-5-5")).unwrap(),
+            [UiAction::SetTaskModel { task: ui::BackgroundTask::Islands, provider: "t3:claudeAgent_2".into(), id: "claude-haiku-5-5".into() }]);
         assert_eq!(set(&v, "background_model", Some("Voice Names"), json!("anthropic/claude-sonnet-5-5")).unwrap(),
             [UiAction::SetTaskModel { task: ui::BackgroundTask::VoiceNames, provider: "anthropic".into(), id: "claude-sonnet-5-5".into() }]);
         assert_eq!(set(&v, "background_model", Some("islands"), json!("shared")).unwrap(),
             [UiAction::SetTaskModel { task: ui::BackgroundTask::Islands, provider: String::new(), id: String::new() }]);
         assert!(set(&v, "background_model", Some("mining"), json!("anthropic/x")).is_err() && set(&v, "background_model", Some("islands"), json!("nowhere/x")).is_err());
         // Suggestions searches with tools: never on T3.
-        assert!(set(&v, "background_model", Some("suggestions"), json!("t3:claudeAgent_claude_code_2/claude-haiku-5-5")).unwrap_err().to_string().contains("T3"));
+        assert!(set(&v, "background_model", Some("suggestions"), json!("t3:claudeAgent_2/claude-haiku-5-5")).unwrap_err().to_string().contains("T3"));
         assert_eq!(set(&v, "background_model", Some("suggestions"), json!("openai/gpt-6-luna")).unwrap(),
             [UiAction::SetTaskModel { task: ui::BackgroundTask::Suggestions, provider: "openai".into(), id: "gpt-6-luna".into() }]);
         v.settings.task_models = crate::background_model::default_task_models();
-        let islands = if crate::edition::PUBLIC { json!("shared") } else { json!("t3:claudeAgent_claude_code_2/claude-haiku-5-5") };
+        let islands = if crate::edition::PUBLIC { json!("shared") } else { json!("t3:claudeAgent_2/claude-haiku-5-5") };
         assert_eq!(v.get("background_model", Some("islands")).unwrap(), islands);
         assert_eq!(v.get("background_model", Some("plan")).unwrap(), json!("shared"));
     }

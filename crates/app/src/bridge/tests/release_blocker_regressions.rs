@@ -52,3 +52,36 @@
         }
         Ok(())
     }
+    /// 14 Nov: the release gate's night replay (`--night-replay-smoke`, a lab run) hung at its end on the T3 pairing's
+    /// Keychain read (relay catalog -> T3 client -> Keychain store) while the login Keychain was stuck. A replay
+    /// pipeline's agent builds no Keychain-backed pairing store and never reaches T3: its client is off before it reads
+    /// anything, its store is the empty lab one, and the relay catalog never connects. The live app keeps its store.
+    #[test]
+    fn a_replay_agent_never_reads_the_t3_pairing_or_reaches_t3() -> Result<()> {
+        let d=tempfile::tempdir()?;
+        let runtime_for=|tools:Arc<Tools>,data:PathBuf|->Result<AgentRuntime>{
+            test_harness(Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("../agent/tests/fixtures/mock-adapter.py")));
+            let result=AgentRuntime::start(Settings::default(),data.clone(),data.join("archive/session-t3"),tools,None);
+            test_harness(None);let runtime=result?;runtime.barrier()?;Ok(runtime)
+        };
+        let rt=tokio::runtime::Runtime::new()?;
+        // The replay: what `night_qa::replay` and `replay_modes::replay` build.
+        let lab=crate::pipeline::Pipeline::new(d.path().join("lab"),d.path().join("missing-models"),Settings::default(),None,true)?;
+        assert!(lab.tools.mcp_actions.lab());
+        let runtime=runtime_for(lab.tools.clone(),d.path().join("lab"))?;
+        let workers=lab.tools.mcp_actions.workers.lock().unwrap().clone().expect("the agent attached its T3 workers");
+        assert_eq!(workers.client.connection_notice_key(),"unconnected","the lab store holds no pairing (the app's test store would)");
+        let refused=rt.block_on(workers.client.call("orchestrator_capabilities",json!({}))).unwrap_err().to_string();
+        assert!(refused.starts_with("T3_UNAVAILABLE: connect T3 Code in Setup first"),"T3 is off before any read: {refused}");
+        assert!(!lab.tools.relay_catalog.connected(),"a replay never asks T3 for the relay catalog");
+        drop(runtime);
+        // The live app (`live_loop`: `Pipeline::new_with_tools(.., false, ..)`) is unchanged: its own store, the catalog connected.
+        let live=crate::pipeline::Pipeline::new(d.path().join("live"),d.path().join("missing-models"),Settings::default(),None,false)?;
+        assert!(!live.tools.mcp_actions.lab());
+        let runtime=runtime_for(live.tools.clone(),d.path().join("live"))?;
+        let workers=live.tools.mcp_actions.workers.lock().unwrap().clone().expect("the agent attached its T3 workers");
+        assert!(workers.client.connection_notice_key().starts_with("fake-app-test:"),"{}",workers.client.connection_notice_key());
+        assert!(live.tools.relay_catalog.connected());
+        drop(runtime);
+        Ok(())
+    }

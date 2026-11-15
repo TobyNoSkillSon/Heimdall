@@ -1,6 +1,8 @@
 ---
 name: onboarding
-description: A new user's tour. A short spoken sweep of what you can do, a live demo they pick, and a few personalisation tips, the voice included. Use when the user asks what you can do, how to start or for a demo, and for the first-run message, which quotes the user asking for a short spoken demo.
+description: A new user's tour. A short spoken sweep of what you can do, a live demo they pick, a few personalisation tips, the voice included, and the Developer Tools speed-up for coding agents. Use when the user asks what you can do, how to start or for a demo, why coding agents are slow, and for the first-run message, which quotes the user asking for a short spoken demo.
+metadata:
+  class: public
 ---
 
 # Onboarding
@@ -34,7 +36,7 @@ One short spoken paragraph, no list of features:
 - You show things: islands at the top of the screen, plan lists, questions they click, fast reading, pointing at
   something on screen.
 - You get work done: bigger jobs (research, code, files) go to coding agents through T3 Code, and you report back.
-- You speak with a built-in voice, and they can rename you, which also changes your wake word.
+- You speak with a built-in voice, and they can rename you, which also changes the name you answer to.
 
 ## 2. The demo
 
@@ -62,3 +64,10 @@ Mention two or three, briefly, and act only when they ask:
   and extract and clean a sample from audio they provide. You cannot
   hear, so open each candidate sample for them with `islands_view` and ask which sounds better: their ear is the
   quality check, and their playing it is not you speaking.
+- Faster coding agents: T3 Code and Heimdall Alpha in macOS's Developer Tools list skip the malware check on each
+  program an agent has just built or written. Offer it once, with the trade-off in a sentence, never on the first-run
+  turn. When they say yes, or ask why agents are slow, open the pane with
+  `open "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_DevTools"` and tell them to
+  turn on T3 Code and Heimdall Alpha and reopen both. Then run the check yourself (it covers Heimdall Alpha) and have a
+  T3 task run it (it covers T3 Code), and say both results. The check, the fallback for a Mac without the row and the
+  trade-off are in `docs/setup.md`, "Faster agent commands".

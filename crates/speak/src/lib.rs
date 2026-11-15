@@ -4,6 +4,7 @@ pub mod gpu_recovery;
 pub mod drama3;
 // Jarvis gives way to Phonon S when memory runs short (bug note 2026-11-03T22-38-44).
 pub mod memory_line;
+pub mod compute_flag;
 mod graph_patch;
 #[cfg(target_os = "macos")]
 mod metal;
@@ -113,10 +114,7 @@ impl Supertonic {
                 )?,
                 matches!(backend, TtsBackend::Metal),
             ),
-            style: onnx::load_voice_style(
-                &[voice_style_path(p, VOICE).to_string_lossy().into()],
-                false,
-            )?,
+            style: onnx::load_voice_style(&[voice_style_path(p, VOICE).to_string_lossy().into()])?,
         })
     }
     /// The style in use.
@@ -853,6 +851,47 @@ mod queue_tests {
         }
         let heard=Arc::new(AtomicBool::new(false));let q=SpeechQueue::new(Streaming(heard.clone()),Sink(heard.clone()));
         q.speak("[calm, slow] Okay.","en")?;settle(&q);assert!(heard.load(Ordering::Acquire));
+        assert!(matches!(q.events.try_recv()?,SpeechEvent::PlaybackEnded {..}));
+        assert!(matches!(q.events.try_recv()?,SpeechEvent::Complete {..}));Ok(())
+    }
+    /// night1112 (bug note 2026-11-11T20-07-49, the user: check the Mac does not wait for the whole reply either): a line
+    /// through `stream_packets`, the path every reply voice takes (`LazySynth`), plays its first sentence before the
+    /// second is synthesized, and each chunk carries its sentence's words to the speaker.
+    #[test]
+    fn a_lines_first_sentence_plays_before_the_next_is_synthesized() -> Result<()> {
+        use std::sync::atomic::AtomicBool;
+        struct Sentences(Arc<AtomicBool>);
+        impl Synthesizer for Sentences {
+            fn synthesize(&mut self,_:&str,_:&str,_:&dyn Fn()->bool)->Result<Audio> {anyhow::bail!("buffered path was used")}
+            fn stream_packets(&mut self,_:&str,_:&str,c:&dyn Fn()->bool,emit:&mut dyn FnMut(SpeechPacket)->Result<()>)->Result<Audio> {
+                let audio=|value|Audio {samples:vec![value;100],sample_rate:44_100,first_audio_ms:0.,synthesis_ms:0.};
+                emit(SpeechPacket::Sentence("One.".into()))?;
+                emit(SpeechPacket::Audio(audio(0.1)))?;
+                let deadline=Instant::now()+std::time::Duration::from_secs(2);
+                while !self.0.load(Ordering::Acquire) {ensure!(!c() && Instant::now()<deadline,"the first sentence waited for the rest of the line");thread::sleep(std::time::Duration::from_millis(1));}
+                emit(SpeechPacket::Sentence("Two.".into()))?;
+                emit(SpeechPacket::Audio(audio(0.2)))?;
+                Ok(audio(0.2))
+            }
+        }
+        struct Sink {heard:Arc<AtomicBool>,played:Arc<std::sync::Mutex<Vec<(f32,Option<String>)>>>}
+        impl AudioOutput for Sink {
+            fn output(&mut self,_:&Audio,_:&dyn Fn()->bool)->Result<()> {anyhow::bail!("unlabelled path was used")}
+            fn output_stream(&mut self,mut chunks:PlaybackStream,cancel:&dyn Fn()->bool,_:Cancellation)->Result<()> {
+                loop {
+                    if cancel() {return Ok(());}
+                    match chunks.recv(std::time::Duration::from_millis(2)) {
+                        Ok(chunk)=>{self.played.lock().unwrap().push((chunk.audio.samples[0],chunk.label.map(|l|l.to_string())));chunks.played.store(true,Ordering::Release);self.heard.store(true,Ordering::Release);}
+                        Err(mpsc::RecvTimeoutError::Timeout)=>{},
+                        Err(mpsc::RecvTimeoutError::Disconnected)=>return Ok(()),
+                    }
+                }
+            }
+        }
+        let heard=Arc::new(AtomicBool::new(false));let played=Arc::new(std::sync::Mutex::new(Vec::new()));
+        let q=SpeechQueue::new(Sentences(heard.clone()),Sink{heard,played:played.clone()});
+        q.speak("One. Two.","en")?;settle(&q);
+        assert_eq!(*played.lock().unwrap(),[(0.1,Some("One.".into())),(0.2,Some("Two.".into()))]);
         assert!(matches!(q.events.try_recv()?,SpeechEvent::PlaybackEnded {..}));
         assert!(matches!(q.events.try_recv()?,SpeechEvent::Complete {..}));Ok(())
     }

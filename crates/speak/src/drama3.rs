@@ -39,7 +39,9 @@ pub fn display_sentences(text: &str) -> Vec<String> {
 /// 12:19: "40%" was stripped to "40", Jarvis said "40 percent", and all three takes were rejected for the added word).
 /// English thousands separators are dropped, so "18,500" is one number, not "18 500" (24 Oct 03:17 and 03:37: Jarvis
 /// read "3 100 dollars" as "300, 100"). Text with Polish letters is voiced in Polish (`agent::reply::language`), so its
-/// symbols are Polish words and its commas stay decimal commas. `text.py` `spell_symbols` is the same.
+/// symbols are Polish words and its commas stay decimal commas. This copy is the one source: every request is spelled
+/// here first (`english_house_numbers(&spell_symbols(..))`), so the engines' copies (drama-engine `text.rs`, the
+/// Python worker's `text.py`) only see spelled text. New spoken-form rules go here only.
 pub fn spell_symbols(text: &str) -> String {
     use regex::{Captures, Regex};
     use std::sync::OnceLock;
@@ -145,6 +147,22 @@ pub fn spell_symbols(text: &str) -> String {
     static CHANNEL: OnceLock<Regex> = OnceLock::new();
     let channel = CHANNEL.get_or_init(|| Regex::new(r"\b(\d+)\s?(?:ch|CH|Ch)\b").unwrap());
     let text = if polish { text } else { std::borrow::Cow::Owned(channel.replace_all(&text, "$1 channel").into_owned()) };
+    // "13 GiB" is said "13 gigabytes", as Jarvis says it unasked (night 10–11 Nov sweep: all 15 takes of a "GiB" heard
+    // "gigabytes", and the lighter voice was given the bare "GiB"). The word check reads both alike (`coverage::unit`).
+    static BINARY: OnceLock<Regex> = OnceLock::new();
+    let binary = BINARY.get_or_init(|| Regex::new(r"\b(\d+(?:\.\d+)?)\s?([KMGT])iB\b").unwrap());
+    let text = if polish {
+        text
+    } else {
+        std::borrow::Cow::Owned(
+            binary
+                .replace_all(&text, |c: &Captures| {
+                    let unit = match &c[2] { "K" => "kilobyte", "M" => "megabyte", "G" => "gigabyte", _ => "terabyte" };
+                    format!("{} {}", &c[1], counted(&c[1], false, unit, ["", "", "", ""]))
+                })
+                .into_owned(),
+        )
+    };
     let and = if polish { " i " } else { " and " };
     text.replace('&', and).replace('+', " plus ").replace('@', if polish { " małpa " } else { " at " })
 }
@@ -206,6 +224,64 @@ fn shared_unit(text: &str) -> String {
     })
     .into_owned()
 }
+/// Night 11–12 Nov sweep: in an English sentence, a house number after a Polish street name is said in English words
+/// ("Hoża 6" is "Hoża six", "Zacisze 8" is "Zacisze eight"). Jarvis read the digit after the Polish name in Polish
+/// ("sześć", "osiem"), the English recognizer heard "Shiks", "Osh", "Ocean" and "Ote", and the word check rejected
+/// five takes on 11 Nov; at 11:32 the sentence went to the lighter voice. Written as words, the voice says them in
+/// English and the check expects the same words. A sentence is English when it has two or more English-only function
+/// words; a Polish sentence keeps its digits. Numbers of one to three digits only, never part of a decimal or range.
+pub fn english_house_numbers(text: &str) -> String {
+    use regex::{Captures, Regex};
+    use std::sync::OnceLock;
+    static RULES: OnceLock<[Regex; 2]> = OnceLock::new();
+    let [sentence, house] = RULES.get_or_init(|| {
+        [r"(?:[^.?!]|[.?!][^\s.?!])+[.?!]*\s*", r"\b(\p{Lu}\p{L}+) (\d{1,3})\b(?:$|[^.,\d\-–]|[.,](?:\s|$))"].map(|r| Regex::new(r).unwrap())
+    });
+    const ENGLISH: [&str; 18] =
+        ["the", "and", "of", "is", "at", "as", "from", "for", "with", "which", "that", "was", "are", "by", "its", "it's", "in", "give"];
+    let polish = |name: &str| {
+        let name = name.to_lowercase();
+        name.chars().any(|c| "ąćęłńóśźż".contains(c)) || ["sz", "cz", "rz"].iter().any(|d| name.contains(d))
+    };
+    sentence
+        .replace_all(text, |s: &Captures| {
+            let english = s[0]
+                .split(|c: char| !c.is_alphanumeric() && c != '\'')
+                .filter(|w| ENGLISH.contains(&w.to_lowercase().as_str()))
+                .count()
+                >= 2;
+            if !english {
+                return s[0].to_owned();
+            }
+            house
+                .replace_all(&s[0], |c: &Captures| {
+                    let n: u32 = c[2].parse().unwrap_or(0);
+                    if !polish(&c[1]) || n == 0 {
+                        return c[0].to_owned();
+                    }
+                    let tail = &c[0][c[1].len() + 1 + c[2].len()..];
+                    format!("{} {}{tail}", &c[1], english_number(n))
+                })
+                .into_owned()
+        })
+        .into_owned()
+}
+/// 1 to 999 in English words ("62" is "sixty two", "105" is "one hundred and five").
+fn english_number(n: u32) -> String {
+    const ONES: [&str; 20] = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve",
+        "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"];
+    const TENS: [&str; 10] = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"];
+    let below_hundred = |n: u32| match n {
+        0..=19 => ONES[n as usize].to_owned(),
+        _ if n % 10 == 0 => TENS[(n / 10) as usize].to_owned(),
+        _ => format!("{} {}", TENS[(n / 10) as usize], ONES[(n % 10) as usize]),
+    };
+    match n {
+        0..=99 => below_hundred(n),
+        _ if n % 100 == 0 => format!("{} hundred", ONES[(n / 100) as usize]),
+        _ => format!("{} hundred and {}", ONES[(n / 100) as usize], below_hundred(n % 100)),
+    }
+}
 /// Applied to both voices before synthesis. The Python worker repeats this at
 /// its boundary so direct/offline callers obey the same text contract.
 pub fn normalize(text: &str) -> String {
@@ -213,7 +289,7 @@ pub fn normalize(text: &str) -> String {
     let tags = TAGS.get_or_init(|| regex::Regex::new(r"\[[^\]]*\]|<[^>]*>").unwrap());
     let text = text.replace('’', "'");
     let stripped = tags.replace_all(&text, " ");
-    let stripped = spell_symbols(&stripped);
+    let stripped = english_house_numbers(&spell_symbols(&stripped));
     let mapped: String = stripped
         .chars()
         .map(|c| {
@@ -303,46 +379,6 @@ impl std::fmt::Display for SpeechFailure {
     }
 }
 impl std::error::Error for SpeechFailure {}
-/// Complete the fallback frontier: a failed live first sentence restarts in full;
-/// accepted later sentences remain excluded. Tests exercise this exact routing.
-pub fn finish_unplayed(
-    failure: SpeechFailure,
-    fallback: &mut dyn crate::Synthesizer,
-    language: &str,
-    cancel: &dyn Fn() -> bool,
-    emit: &mut dyn FnMut(&Audio) -> Result<()>,
-) -> Result<Audio> {
-    finish_unplayed_announced(failure, fallback, language, cancel, &mut |_| Ok(()), emit)
-}
-/// `finish_unplayed`, announcing each sentence before its audio (the island's spoken text).
-pub fn finish_unplayed_announced(
-    mut failure: SpeechFailure,
-    fallback: &mut dyn crate::Synthesizer,
-    language: &str,
-    cancel: &dyn Fn() -> bool,
-    announce: &mut dyn FnMut(&str) -> Result<()>,
-    emit: &mut dyn FnMut(&Audio) -> Result<()>,
-) -> Result<Audio> {
-    for sentence in sentences(&failure.remaining) {
-        ensure!(!cancel(), "speech interrupted");
-        let audio = fallback.synthesize(&sentence, language, cancel)?;
-        ensure!(!cancel(), "speech interrupted");
-        announce(&sentence)?;
-        emit(&audio)?;
-        if failure.played.samples.is_empty() {
-            failure.played.sample_rate = audio.sample_rate;
-            failure.played.first_audio_ms = audio.first_audio_ms;
-        }
-        ensure!(
-            failure.played.sample_rate == audio.sample_rate,
-            "fallback audio rate changed"
-        );
-        failure.played.samples.extend_from_slice(&audio.samples);
-        failure.played.synthesis_ms += audio.synthesis_ms;
-    }
-    Ok(failure.played)
-}
-
 /// Attempts per sentence before Jarvis says his best take or the lighter voice takes over (the worker's `ATTEMPTS`).
 pub const ATTEMPTS: u64 = 3;
 /// The island's notice for each way a line leaves Jarvis's voice (`voice_switch` events carry it as `notice`).
@@ -363,13 +399,13 @@ const LOAD_RETRY_PAUSE: Duration = Duration::from_millis(500);
 pub const LOAD_CANCELLED_MEMORY: &str = "load cancelled for memory";
 
 /// The cause class of a switch to the lighter voice, from its reason: the `cause=` the log's `voice: fallback` line
-/// carries, so the nightly pass can group every switch by cause (docs/nightly-build.md).
+/// carries, so the nightly pass can group every switch by cause (docs/personal/nightly-build.md).
 pub fn fallback_cause(reason: &str) -> &'static str {
     let r = reason.to_lowercase();
     let has = |words: &[&str]| words.iter().any(|w| r.contains(w));
     if has(&["too many open files", "os error 24"]) {
         "fd_exhausted"
-    } else if has(&["memory", "swap", "exit 73", "pressure"]) {
+    } else if memory_reason(reason) {
         "memory"
     } else if has(&["deadline", "timed out", "timeout", " stalled", "stall:"]) {
         "timeout"
@@ -438,6 +474,8 @@ pub fn speak_line(
         Ok(())
     }
     let _speaking = service.speaking();
+    // arsenal-yield (bug note 2026-11-09T12-43-19): red for Arsenal while Jarvis generates this line (`compute_flag`).
+    let _red = if service.resident() { crate::compute_flag::raise("Jarvis speech") } else { None };
     let mut all = Audio { samples: vec![], sample_rate: 44100, first_audio_ms: 0., synthesis_ms: 0. };
     let mut plain = sentences(&normalize(written));
     let mut shown = display_sentences(written);
@@ -533,15 +571,43 @@ impl Drop for Process {
         }
     }
 }
-/// Waits for the killed child `pid` on a thread of its own, so no zombie is left and the caller never waits.
+/// Waits for the killed child `pid` on a thread of its own, so no zombie is left and the caller never waits. Until it
+/// is gone it is listed in `REAPING`, so the next load waits for its memory (`wait_reaped`).
 fn reap_detached(pid: libc::pid_t) {
-    let reap = move || unsafe {
-        let mut status = 0;
-        while libc::waitpid(pid, &mut status, 0) == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {}
+    REAPING.0.lock().unwrap().push(pid);
+    let reap = move || {
+        unsafe {
+            let mut status = 0;
+            while libc::waitpid(pid, &mut status, 0) == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {}
+        }
+        REAPING.0.lock().unwrap().retain(|p| *p != pid);
+        REAPING.1.notify_all();
     };
     if std::thread::Builder::new().name("drama3-reaper".into()).spawn(reap).is_err() {
         reap();
     }
+}
+
+/// Killed workers not yet gone. A killed worker keeps its ~26 GB until it has exited, and the engine refuses to load
+/// below 55 GB available: 9 Nov 12:38, the reload after an interruption spawned while the killed worker still held its
+/// memory, was refused ("Need 55 GB available before loading Drama 3") and Jarvis was out for a minute's memory hold.
+static REAPING: (Mutex<Vec<libc::pid_t>>, std::sync::Condvar) = (Mutex::new(Vec::new()), std::sync::Condvar::new());
+/// The longest a load waits for killed workers to leave (a ~31 GB teardown took 2.2 s on 24 Oct).
+const REAP_WAIT: Duration = Duration::from_secs(10);
+
+/// Waits until every killed worker is gone, up to `limit`, while `go_on` holds (checked every 20 ms). True when none
+/// is left.
+fn wait_reaped(limit: Duration, go_on: &dyn Fn() -> bool) -> bool {
+    let until = Instant::now() + limit;
+    let mut left = REAPING.0.lock().unwrap();
+    while !left.is_empty() {
+        let now = Instant::now();
+        if now >= until || !go_on() {
+            return false;
+        }
+        left = REAPING.1.wait_timeout(left, (until - now).min(Duration::from_millis(20))).unwrap().0;
+    }
+    true
 }
 
 /// A line being spoken (`Service::speaking`): Jarvis returns from a memory hold only between lines.
@@ -700,6 +766,16 @@ impl Service {
         let returning = self.returning.load(Ordering::Acquire) && !self.ready.load(Ordering::Acquire);
         (self.giving_way.load(Ordering::Acquire) || returning).then(|| NOTE_MEMORY.to_owned())
     }
+    /// The memory line's hold (if any) and its last reading of memory in use, for a log line.
+    fn memory_reading(&self) -> (Option<String>, Option<u64>) {
+        let gate = self.memory_gate.lock().unwrap();
+        let gate = gate.as_ref();
+        (gate.and_then(|g| g.policy.held().map(str::to_owned)), gate.and_then(|g| g.last().map(|s| s.used)))
+    }
+    /// arsenal-yield: Jarvis's worker is loaded or loading (also while giving way, until it is gone).
+    pub fn resident(&self) -> bool {
+        self.ready.load(Ordering::Acquire) || self.starting.load(Ordering::Acquire)
+    }
     /// A line is being spoken while the guard lives (`speak_line`).
     pub fn speaking(&self) -> Speaking<'_> {
         self.speaking.fetch_add(1, Ordering::AcqRel);
@@ -712,7 +788,7 @@ impl Service {
         }
         Some(self.last_spoke.lock().unwrap().map_or(Duration::MAX, |at| at.elapsed()))
     }
-    /// The memory line's tick (bug note 2026-11-03T22-38-44): over the 95 GB line, or at WARN/CRITICAL, Jarvis gives
+    /// The memory line's tick (bug note 2026-11-03T22-38-44): over the 105 GB line, or at WARN/CRITICAL, Jarvis gives
     /// way and Phonon S speaks; once memory is back with a margin and has stayed back, he reloads between replies.
     fn memory_tick(&self) {
         let action = {
@@ -722,8 +798,18 @@ impl Service {
             // judged as not loaded, his rising use failed the room check partway and he looped load, give way, return).
             let resident = self.ready.load(Ordering::Acquire) || self.starting.load(Ordering::Acquire);
             let now = gate.now();
+            let was_held = gate.policy.held().is_some();
             let action = gate.tick(resident, self.quiet_for(), now);
             let sample = gate.last().cloned();
+            // A hold that began with no give-way (he was not loaded: Speaking just came on, or a load was refused) gets
+            // its own line, so every hold says why and for how long (bug note 2026-11-08T02-03-45).
+            if action == crate::memory_line::Action::Hold && !was_held {
+                if let Some(reason) = gate.policy.held() {
+                    let (used, need, why) = sample.as_ref().map_or((0, 0, vec![]), |s| (s.used, s.need, s.why.clone()));
+                    self.event(json!({"event":"memory_hold","reason":reason,"used_bytes":used,"need_bytes":need,"needed_by":why,
+                        "hold_s":gate.policy.hold_for().as_secs_f64(),"line_bytes":crate::memory_line::LINE}));
+                }
+            }
             (action, sample)
         };
         match action {
@@ -736,10 +822,11 @@ impl Service {
                 // sidecar refuses, or one that gives way again, is the same hold to the user.
                 self.return_pending.store(true, Ordering::Release);
                 let (used, available) = sample.as_ref().map_or((0, None), |s| (s.used, s.available));
-                let (jarvis, hold_s) = self.memory_gate.lock().unwrap().as_ref()
-                    .map_or((crate::memory_line::JARVIS_BYTES, 0.), |g| (g.policy.jarvis_bytes(), g.policy.hold_for().as_secs_f64()));
+                let (jarvis, hold_s, out) = self.memory_gate.lock().unwrap().as_ref()
+                    .map_or((crate::memory_line::JARVIS_BYTES, 0., None), |g| (g.policy.jarvis_bytes(), g.policy.hold_for().as_secs_f64(), g.policy.last_return()));
                 self.event(json!({"event":"memory_return","used_bytes":used,"available_bytes":available,
-                    "jarvis_bytes":jarvis,"hold_s":hold_s,"line_bytes":crate::memory_line::LINE}));
+                    "jarvis_bytes":jarvis,"hold_s":hold_s,"line_bytes":crate::memory_line::LINE,
+                    "out_s":out.map(|(d, _)| d.as_secs_f64()),"released":out.is_some_and(|(_, r)| r)}));
             }
             // Speaking off and on again clears the note; the hold it describes is still there.
             (crate::memory_line::Action::Hold, _) => {
@@ -952,11 +1039,27 @@ impl Service {
     }
     /// Called by the app's existing health tick. Loading never blocks it.
     pub fn configure(self: &Arc<Self>, wanted: bool) {
+        self.configure_for(wanted, "");
+    }
+    /// `configure`, with why he is wanted or not ("Speaking off", "Agent off"): a change of mind is one line in the log,
+    /// so an unload by a switch is never mistaken for the memory line's give-way, nor the memory line's for a switch
+    /// (bug note 2026-11-08T02-03-45: 01:38:01 and 01:46:20 showed only "settings: Speaking off").
+    pub fn configure_for(self: &Arc<Self>, wanted: bool, why: &str) {
+        let was = self.wanted.load(Ordering::Acquire);
         if !wanted {
-            if self.wanted.load(Ordering::Acquire) {
+            if was {
+                let resident = self.ready.load(Ordering::Acquire) || self.starting.load(Ordering::Acquire);
+                let (held, used) = self.memory_reading();
+                if !why.is_empty() {
+                    self.event(json!({"event":"unwanted","reason":why,"resident":resident,"held":held,"used_bytes":used}));
+                }
                 self.stop();
             }
             return;
+        }
+        if !was && !why.is_empty() {
+            let (held, used) = self.memory_reading();
+            self.event(json!({"event":"wanted","reason":why,"held":held,"used_bytes":used}));
         }
         self.wanted.store(true, Ordering::Release);
         self.memory_tick();
@@ -1107,6 +1210,17 @@ impl Service {
     fn start_with(&self, rust: Option<&std::path::Path>) -> Result<()> {
         let mut state = self.process.lock().unwrap();
         state.take();
+        // A worker killed a moment ago (an interruption's cancel deadline, a give-way, Speaking off and on) still
+        // holds its memory until it has exited: the new one would be refused for memory (9 Nov 12:38). Wait for it.
+        let waited = Instant::now();
+        if !wait_reaped(REAP_WAIT, &|| self.wanted.load(Ordering::Acquire) && !self.memory_blocked()) {
+            let left = REAPING.0.lock().unwrap().len();
+            if left > 0 && self.wanted.load(Ordering::Acquire) && !self.memory_blocked() {
+                self.event(json!({"event":"previous_worker_lingering","workers":left,"waited_ms":waited.elapsed().as_secs_f64()*1000.}));
+            }
+        } else if waited.elapsed() >= Duration::from_millis(50) {
+            self.event(json!({"event":"previous_worker_reaped","waited_ms":waited.elapsed().as_secs_f64()*1000.}));
+        }
         ensure!(self.wanted.load(Ordering::Acquire), "load cancelled");
         // Also the Python worker after a failed Rust engine, and the retry: a hold set meanwhile stops them.
         ensure!(!self.memory_blocked(), LOAD_CANCELLED_MEMORY);
@@ -1291,7 +1405,7 @@ impl Service {
             {
                 // Symbols already spelled (`spell_symbols`): the worker's normalizer is a port that may lag this one
                 // (ranges and times), and the word check below expects these words. Its own pass changes them no more.
-                let mut request = json!({"op":"speak","id":id,"text":spell_symbols(text),"buffered":buffered});
+                let mut request = json!({"op":"speak","id":id,"text":english_house_numbers(&spell_symbols(text)),"buffered":buffered});
                 if let Some(pace) = self.pace.lock().unwrap().as_ref() {
                     request["rate"] = json!(pace.load(Ordering::Acquire) as f64 / 100.);
                 }
@@ -1329,6 +1443,9 @@ impl Service {
         let mut playback_started = None;
         let mut requested_fallback = None;
         let mut output_error = None;
+        // The user chose another voice and Jarvis unloaded mid-line: the cut is that switch, not a crash (voice-drop sweep
+        // 14 Nov, 09:23:03: a menu switch to Phonon was logged `cause=sidecar_crash` with "Jarvis stopped").
+        let mut switched_away = false;
         // Committed audio waits here and reaches playback one chunk at a time, only while the worker has nothing
         // to say. Playback's bounded channel blocks for up to a chunk; the worker's verdict wait must never sit
         // behind several seconds of already-accepted speech (18 Oct: the short last sentence timed out its check
@@ -1524,7 +1641,7 @@ impl Service {
                             crate::coverage::accept_agreed_take(&mut evidence, &rejected.1);
                         }
                         if evidence["accepted"] != true {
-                            if let Some(errors) = crate::coverage::keepable(&evidence, &rejected.1) {
+                            if let Some(errors) = crate::coverage::keepable(&evidence) {
                                 if best.as_ref().is_none_or(|b| b.0 != sentence || errors <= b.2) {
                                     best = Some((sentence, attempt, errors, pending.clone()));
                                 }
@@ -1667,6 +1784,7 @@ impl Service {
                     result.as_ref().unwrap_err()
                 ));
             } else {
+                switched_away = !memory;
                 self.ready.store(false, Ordering::Release);
                 self.notify_residency(false);
                 self.event(json!({"event":"unloaded"}));
@@ -1696,7 +1814,8 @@ impl Service {
             // After every retry the lighter voice says only this sentence and Jarvis goes on; a stopped Jarvis leaves
             // it the rest of the line (`speak_line`). Each switch carries its reason. A kept take switches nothing.
             let after_retries = result.is_ok();
-            if remaining < parts.len() && !kept_take {
+            // A chosen switch logs no fallback and shows no notice: the new voice says the rest.
+            if remaining < parts.len() && !kept_take && !switched_away {
                 let (text, notice) = if after_retries {
                     (parts[remaining].clone(), NOTICE_MISSED)
                 } else {

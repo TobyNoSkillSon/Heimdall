@@ -126,7 +126,6 @@ impl UnicodeProcessor {
 }
 
 pub fn preprocess_text(text: &str, lang: &str) -> Result<String> {
-    // TODO: Need advanced normalizer for better performance
     let mut text: String = text.nfkd().collect();
 
     // Remove emojis (wide Unicode range)
@@ -866,7 +865,7 @@ impl TextToSpeech {
 // ============================================================================
 
 /// Load voice style from JSON files
-pub fn load_voice_style(voice_style_paths: &[String], verbose: bool) -> Result<Style> {
+pub fn load_voice_style(voice_style_paths: &[String]) -> Result<Style> {
     let bsz = voice_style_paths.len();
 
     // Read first file to get dimensions
@@ -922,10 +921,6 @@ pub fn load_voice_style(voice_style_paths: &[String], verbose: bool) -> Result<S
 
     let ttl_style = Array3::from_shape_vec((bsz, ttl_dim1, ttl_dim2), ttl_flat)?;
     let dp_style = Array3::from_shape_vec((bsz, dp_dim1, dp_dim2), dp_flat)?;
-
-    if verbose {
-        println!("Loaded {} voice styles\n", bsz);
-    }
 
     let source = voice_style_paths
         .iter()

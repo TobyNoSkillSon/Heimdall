@@ -6,10 +6,9 @@
 //! first speech-looking id from `GET <base>/models`, else `tts-1`.
 //!
 //! The endpoint and key live together in the login Keychain (installed app; service "Heimdall voice provider: Own
-//! Engine"), or in memory in lab builds, like ElevenLabs' key.
+//! Engine"), or the process's isolated store in tests and lab runs (`crates/keychain`), like ElevenLabs' key.
 use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
 
 /// OpenAI's built-in voice names, offered when the server does not list its own.
 pub const STANDARD_VOICES: [&str; 9] = ["alloy", "ash", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer"];
@@ -33,38 +32,16 @@ impl std::fmt::Debug for Endpoint {
     }
 }
 
-static LAB: Mutex<Option<Endpoint>> = Mutex::new(None);
-
+/// Through `keychain` (the installed app's Keychain without a prompt or a wait; a test's or lab run's isolated store;
+/// nothing for a bare build). A blocked Keychain reads as not connected: the lighter voice speaks meanwhile.
 pub fn saved() -> Option<Endpoint> {
-    if !agent::provider::is_installed_app() {
-        return LAB.lock().unwrap().clone();
-    }
-    use security_framework::item::{ItemClass, ItemSearchOptions, SearchResult};
-    let items = ItemSearchOptions::new().class(ItemClass::generic_password()).service(KEYCHAIN_SERVICE).account(ACCOUNT)
-        .load_data(true).skip_authenticated_items(true).search().ok()?;
-    items.into_iter().find_map(|i| match i { SearchResult::Data(b) => serde_json::from_slice(&b).ok(), _ => None })
+    keychain::read(KEYCHAIN_SERVICE, ACCOUNT).ok().flatten().and_then(|b| serde_json::from_slice(&b).ok())
 }
 pub fn save(e: &Endpoint) -> Result<()> {
-    if !agent::provider::is_installed_app() {
-        *LAB.lock().unwrap() = Some(e.clone());
-        return Ok(());
-    }
-    forget()?;
-    let mut options = security_framework::passwords::PasswordOptions::new_generic_password(KEYCHAIN_SERVICE, ACCOUNT);
-    options.set_label(KEYCHAIN_SERVICE);
-    security_framework::passwords::set_generic_password_options(&serde_json::to_vec(e)?, options).map_err(|_| anyhow::anyhow!("Could not save the endpoint in the Keychain"))
+    keychain::write(KEYCHAIN_SERVICE, ACCOUNT, KEYCHAIN_SERVICE, &serde_json::to_vec(e)?).map_err(|e| anyhow::anyhow!("Could not save the endpoint: {e}"))
 }
 pub fn forget() -> Result<()> {
-    if !agent::provider::is_installed_app() {
-        *LAB.lock().unwrap() = None;
-        return Ok(());
-    }
-    use security_framework::item::{ItemClass, ItemSearchOptions};
-    match ItemSearchOptions::new().class(ItemClass::generic_password()).service(KEYCHAIN_SERVICE).account(ACCOUNT).skip_authenticated_items(true).delete() {
-        Ok(()) => Ok(()),
-        Err(e) if e.code() == -25300 => Ok(()),
-        Err(_) => bail!("Could not remove the endpoint from the Keychain"),
-    }
+    keychain::delete(KEYCHAIN_SERVICE, ACCOUNT).map_err(|e| anyhow::anyhow!("Could not remove the endpoint: {e}"))
 }
 
 /// A local server: a sentence that takes longer than this is a hung server, and the lighter voice says it instead.

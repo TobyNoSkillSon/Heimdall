@@ -23,5 +23,3 @@ pub use verification::*;
 mod worker;
 pub use worker::*;
 
-#[cfg(target_os = "macos")]
-pub mod placement;

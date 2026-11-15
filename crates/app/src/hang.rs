@@ -21,7 +21,9 @@ use crate::watchdog::Beats;
 pub const HANG: Duration = Duration::from_secs(2);
 /// The live loop's settings tick (live_loop.rs): a hang is `HANG` past it.
 const LIVE_TICK: Duration = Duration::from_secs(2);
-const POLL: Duration = Duration::from_millis(250);
+/// One ping a second: a 2 s `HANG` is still seen within a second of passing it, and the main thread wakes once a second
+/// at rest instead of four times (cleanup night 14 Nov: 40 → 10 wakeups per 10 s of an idle process).
+const POLL: Duration = Duration::from_secs(1);
 /// One sample per thread per this, however often it stalls.
 const QUIET: Duration = Duration::from_secs(10 * 60);
 /// Sample files kept.
@@ -71,12 +73,29 @@ pub fn spawn(beats: Arc<Beats>, post: impl Fn(Box<dyn FnOnce() + Send>) + Send +
 enum Which {
     Ui,
     Live,
+    /// Quit past its limit (watchdog.rs): every thread once, the live loop's teardown in focus.
+    Quit,
+}
+
+/// Quit made no progress past its limit (bug note 2026-11-08T02-03-52): every thread's stack, once, before the
+/// watchdog ends the process. One sample, no repeats: the exit waits on it.
+pub fn record_quit(dir: &Path, line: &str) {
+    let threads = sample_all();
+    let mut text = format!("Heimdall hang: {line}\n\n");
+    for t in &threads {
+        text.push_str(&format!("Thread {} \"{}\"{}:\n{}\n", t.port, t.name, if t.main { " (main)" } else { "" }, symbolize(&t.frames)));
+    }
+    let focus = threads.iter().find(|t| t.name == "heimdall-app").map(|t| top(&t.frames)).unwrap_or_else(|| "the teardown thread not found".into());
+    match write(dir, Which::Quit, &text) {
+        Ok(path) => eprintln!("Hang: Quit stalled; the teardown at {focus}; stacks in {}", path.display()),
+        Err(e) => eprintln!("Hang: Quit stalled; the teardown at {focus}; stacks not saved: {e}"),
+    }
 }
 
 fn record(dir: &Path, which: Which, stalled: Duration) {
     let (label, name) = match which {
         Which::Ui => ("the menu (main thread)", None),
-        Which::Live => ("the live loop", Some("heimdall-app")),
+        Which::Live | Which::Quit => ("the live loop", Some("heimdall-app")),
     };
     let threads = sample_all();
     let focus = threads.iter().find(|t| match name { Some(n) => t.name == n, None => t.main });
@@ -112,7 +131,7 @@ fn write(dir: &Path, which: Which, text: &str) -> std::io::Result<PathBuf> {
     let dir = dir.join("hangs");
     std::fs::create_dir_all(&dir)?;
     let stamp = chrono::Local::now().format("%Y-%m-%d-%H%M%S");
-    let path = dir.join(format!("hang-{stamp}-{}.txt", if which == Which::Ui { "menu" } else { "live" }));
+    let path = dir.join(format!("hang-{stamp}-{}.txt", match which { Which::Ui => "menu", Which::Live => "live", Which::Quit => "quit" }));
     std::fs::write(&path, text)?;
     let mut old: Vec<_> = std::fs::read_dir(&dir)?.filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("hang-"))).collect();

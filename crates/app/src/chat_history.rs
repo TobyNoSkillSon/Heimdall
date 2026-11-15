@@ -1,7 +1,8 @@
 //! The conversation the pulled-down notch shows ("literally a chat conversation between you and
 //! me … not the actual context"), built from what Heimdall already stores, never a store of its own:
 //!
-//! - the user's words: the archive's `utterances` rows from his microphone (`source_id` `mic:…`, speaker the user) that the
+//! - The user's words: the archive's `utterances` rows from his microphones (`source_id` `mic:…`, and the phone's live
+//!   microphone `phone:…` since point 9; speaker the user) that the
 //!   decider sent (`decision.outcome` `send`; a `wait` just before one joins it), and his typed messages
 //!   (`[Heimdall typed message]` in the agent's session file). Other speakers, app audio and his talk with other
 //!   people never appear.
@@ -26,6 +27,18 @@
 //! The session file (`agent/active-session.json`) is one file across restarts, so "today" is read from it from local
 //! midnight; it is tailed by size afterwards. `start` runs the reader on its own thread and sends the conversation
 //! whole (`UiUpdate::Chat`) whenever it changes.
+//!
+//! One chat with the phone (point 9, "you should sync the control command H … with the chat in the
+//! application"): the same rows go to the phone (docs/personal/remote.md, "One chat with the Mac"). The user's lines on the phone's
+//! live microphone (`phone:` sources) are his words too. Each row has a stable id (`ChatRow`): `u<session>:<id>` for
+//! spoken words (the utterance the decider sent: a `wait` joined in front keeps it), `s<ms>.<hash>` for a session-file
+//! row (the entry's time and a hash of its kind and first 64 characters, so its place among other rows never changes
+//! it; `-2`, `-3` only for true duplicates; later marks never change it), `t<echo>` for a typed message, kept when the
+//! session file's copy takes its place. The user's rows' `via` is decided once per id and kept; the phone-typed marks are
+//! kept for the day in `<data>/chat-phone-typed.json`, so a restart keeps them. The reader diffs by id and publishes
+//! `chat {day, rows, older?}` (a new day, and the first look; at most `remote::CHAT_BYTES`), `chat_upsert {row}` and
+//! `chat_remove {id}` on the phone endpoint's hub; a row that only rolled out of the `MAX_ROWS` window is not
+//! removed.
 
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
@@ -88,6 +101,57 @@ pub struct History {
     relay_recorded: Vec<(String, u64)>,
     /// His typed messages shown the moment he sent them (`typed_pending`), until the session file has them.
     typed: Vec<(String, ChatEntry)>,
+    /// Each `voice` row's id and where it was said (`voice_rows_keyed`), in step with `voice`.
+    voice_ids: Vec<(String, &'static str)>,
+    /// Session rows that took the place of a typed row shown live, by their place in `pi`: that row's id (`t<echo>`),
+    /// which they keep (review finding 3).
+    carried: HashMap<usize, String>,
+    /// Each of the user's rows' `via`, decided the first time its id is seen and kept (review finding 4).
+    vias: std::cell::RefCell<HashMap<String, &'static str>>,
+    /// Session rows typed on the phone today, by their stable key (`stable_key`): the id they show under. Loaded and
+    /// saved by `Live` (`PHONE_MARKS`), so a restart keeps them; `marks_changed` when one was added.
+    phone_marks: std::cell::RefCell<HashMap<String, String>>,
+    marks_changed: std::cell::Cell<bool>,
+}
+
+/// A session row's stable key: `s<ms>.<hash>` of its kind and first 64 characters (a note's id), `-2`, `-3` for the
+/// second and third true duplicate (same time, kind and start) in file order (review finding 10).
+fn stable_key(e: &ChatEntry, seen: &mut HashMap<String, usize>) -> String {
+    let (tag, text): (&str, &str) = match &e.kind {
+        ChatKind::User(t) => ("owner", t),
+        ChatKind::Heimdall { text, .. } => ("heimdall", text),
+        ChatKind::Action { text, .. } => ("action", text),
+        ChatKind::Note { id, .. } => ("note", id),
+    };
+    // FNV-1a: the same on every build and every run.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in tag.bytes().chain([0]).chain(text.trim().chars().take(64).collect::<String>().into_bytes()) {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    let base = format!("s{}.{:08x}", e.at_ms, (h ^ (h >> 32)) as u32);
+    let n = seen.entry(base.clone()).or_insert(0);
+    *n += 1;
+    if *n == 1 { base } else { format!("{base}-{n}") }
+}
+
+/// One row of the conversation with its stable id and where the user's words came from (`via`: `mac_voice`, `mac_typed`,
+/// `phone_voice`, `phone_typed`; the user's rows only). The Mac panel draws `entry`; the phone gets `row_json`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChatRow {
+    pub id: String,
+    pub via: Option<&'static str>,
+    pub entry: ChatEntry,
+}
+
+/// One spoken utterance as the archive holds it: its identity (`<session>:<id>`), time, text, decision outcome and
+/// source (`mic:…` or the phone's `phone:…`).
+pub struct Utterance {
+    pub key: String,
+    pub at_ms: u64,
+    pub text: String,
+    pub outcome: String,
+    pub source: String,
 }
 
 /// Local midnight of the day holding `ms`, in Unix milliseconds.
@@ -194,7 +258,7 @@ impl History {
                 self.run_start = self.pi.len();
             }
             match typed {
-                Some(t) if !t.is_empty() => self.pi.push(ChatEntry { at_ms, kind: ChatKind::Owner(t.to_string()) }),
+                Some(t) if !t.is_empty() => self.pi.push(ChatEntry { at_ms, kind: ChatKind::User(t.to_string()) }),
                 Some(_) => {}
                 None if wake => self.held_wake = Some((self.last_ms, at_ms)),
                 None => self.notice(held, at_ms),
@@ -275,7 +339,7 @@ impl History {
                 self.run_start = self.pi.len();
                 if let Some(typed) = text.split_once("[Heimdall typed message]\n").map(|(_, t)| t.trim()) {
                     if !typed.is_empty() {
-                        self.pi.push(ChatEntry { at_ms, kind: ChatKind::Owner(typed.to_string()) });
+                        self.pi.push(ChatEntry { at_ms, kind: ChatKind::User(typed.to_string()) });
                     }
                     return;
                 }
@@ -395,7 +459,7 @@ impl History {
     /// Notes telling the agent what the user did not hear: the reply they quote is marked.
     fn marks(&mut self, text: &str) {
         // `bridge::tools::missed_lines` and `skipped_note`, as they are worded.
-        for (marker, heard) in [("he heard only the start of:", Heard::Cut), (" talked over you before he heard:", Heard::Cut), ("with his new words:", Heard::Never)] {
+        for (marker, heard) in [("he heard only the start of:", Heard::Cut), (" before he heard:", Heard::Cut), ("with his new words:", Heard::Never)] {
             if let Some(words) = quoted_after(text, marker) {
                 self.mark(words, heard, 0);
             }
@@ -457,18 +521,29 @@ impl History {
     /// The user's spoken words to Heimdall from `utterances` rows (time, text, decision outcome), oldest first: each sent
     /// row, with the `wait` rows just before it joined in front.
     /// `forced` is a send its model judged not for Heimdall (`utterances`).
+    #[cfg(test)]
     pub fn voice_rows(rows: &[(u64, String, String)]) -> Vec<ChatEntry> {
+        let rows: Vec<Utterance> = rows.iter().enumerate().map(|(k, (at, text, outcome))| Utterance { key: k.to_string(), at_ms: *at, text: text.clone(), outcome: outcome.clone(), source: "mic:".into() }).collect();
+        Self::voice_rows_keyed(&rows).into_iter().map(|(e, _, _)| e).collect()
+    }
+    /// `voice_rows` with each row's id (`u` and the sent utterance's key: a `wait` joined in front of it later keeps
+    /// it) and where it was said (`phone_voice` for the phone's live microphone, else `mac_voice`, by the sent line).
+    pub fn voice_rows_keyed(rows: &[Utterance]) -> Vec<(ChatEntry, String, &'static str)> {
         let mut out = vec![];
         let mut waiting: Vec<(u64, &str)> = vec![];
-        for (at, text, outcome) in rows {
-            match outcome.as_str() {
-                "wait" => waiting.push((*at, text)),
-                "send" | "forced" => {
+        for u in rows {
+            let at = &u.at_ms;
+            match u.outcome.as_str() {
+                "wait" => waiting.push((*at, &u.text)),
+                // His lines the old call gate held (`held_in_call`, before night 1115) are his words too: shown, so
+                // the panel never looks dead while he talks to Heimdall on a call (bug note 2026-11-14T11-58-47).
+                "send" | "forced" | "held_in_call" => {
                     waiting.retain(|(w, _)| at.saturating_sub(*w) <= WAIT_JOIN_MS);
                     let start = waiting.first().map_or(*at, |(w, _)| *w);
-                    let words: Vec<&str> = waiting.drain(..).map(|(_, t)| t).chain([text.as_str()]).map(str::trim).filter(|t| !t.is_empty()).collect();
+                    let words: Vec<&str> = waiting.drain(..).map(|(_, t)| t).chain([u.text.as_str()]).map(str::trim).filter(|t| !t.is_empty()).collect();
                     if !words.is_empty() {
-                        out.push(ChatEntry { at_ms: start, kind: ChatKind::Owner(words.join(" ")) });
+                        let via = if crate::phone_mic::is_phone_source(&u.source) { "phone_voice" } else { "mac_voice" };
+                        out.push((ChatEntry { at_ms: start, kind: ChatKind::User(words.join(" ")) }, format!("u{}", u.key), via));
                     }
                 }
                 _ => waiting.clear(),
@@ -479,28 +554,74 @@ impl History {
 
     /// Takes his typed messages sent since the last look and drops those the session file now holds (the same words,
     /// read at most `TYPED_SLACK_MS` before they were sent) or that waited `TYPED_WAIT_MS`.
+    /// The session row that takes a typed row's place keeps its id (`carried`); each session row takes one only.
     fn typed(&mut self, sent: Vec<(String, ChatEntry)>, failed: &[String], now_ms: u64) {
         self.typed.extend(sent);
         let pi = &self.pi;
+        let carried = &mut self.carried;
         self.typed.retain(|(id, e)| {
-            let ChatKind::Owner(words) = &e.kind else { return false };
-            let read = pi.iter().rev().take(64).any(|p| p.at_ms + TYPED_SLACK_MS >= e.at_ms && matches!(&p.kind, ChatKind::Owner(t) if t.trim() == words.trim()));
-            !read && !failed.contains(id) && now_ms < e.at_ms + TYPED_WAIT_MS
+            let ChatKind::User(words) = &e.kind else { return false };
+            let read = (pi.len().saturating_sub(64)..pi.len()).rev().find(|k| !carried.contains_key(k) && pi[*k].at_ms + TYPED_SLACK_MS >= e.at_ms
+                && matches!(&pi[*k].kind, ChatKind::User(t) if t.trim() == words.trim()));
+            if let Some(k) = read {
+                if !failed.contains(id) { carried.insert(k, format!("t{id}")); }
+                return false;
+            }
+            !failed.contains(id) && now_ms < e.at_ms + TYPED_WAIT_MS
         });
+    }
+    /// `via` of the row `id`: decided by `decide` the first time, then kept.
+    fn via_of(&self, id: &str, decide: impl FnOnce() -> &'static str) -> &'static str {
+        if let Some(v) = self.vias.borrow().get(id) { return v; }
+        let v = decide();
+        self.vias.borrow_mut().insert(id.to_owned(), v);
+        v
     }
 
     /// The conversation from `since_ms`, oldest first, at most `MAX_ROWS`.
+    #[cfg(test)]
     pub fn rows(&self, since_ms: u64) -> Vec<ChatEntry> {
+        self.rows_with_ids(since_ms).0.into_iter().map(|r| r.entry).collect()
+    }
+    /// `rows` with each row's id and `via`, and how many older rows of the day were left out (`MAX_ROWS`). The one
+    /// source of both the Mac panel and the phone's chat.
+    pub fn rows_with_ids(&self, since_ms: u64) -> (Vec<ChatRow>, usize) {
         // A forced wake the relay left unanswered: the spoken row holding it is not the user's turn.
         let skip: Vec<u64> = self.forced.iter().filter(|f| self.unanswered.iter().any(|(before, w)| before < *f && *f <= w))
             .filter_map(|f| self.voice.iter().rev().find(|e| e.at_ms <= *f).map(|e| e.at_ms)).collect();
-        let voice = self.voice.iter().filter(|e| !skip.contains(&e.at_ms));
-        let typed = self.typed.iter().map(|(_, e)| e);
-        let mut all: Vec<ChatEntry> = self.pi.iter().chain(voice).chain(typed).filter(|e| e.at_ms >= since_ms).cloned().collect();
-        all.sort_by_key(|e| e.at_ms);
+        let mut all: Vec<ChatRow> = vec![];
+        // Session rows: a stable key; the id of the typed row it took the place of (or one kept from before a
+        // restart), else the key.
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        for (k, e) in self.pi.iter().enumerate() {
+            let key = stable_key(e, &mut seen);
+            let marked = self.phone_marks.borrow().get(&key).cloned();
+            let id = self.carried.get(&k).cloned().or_else(|| marked.clone()).unwrap_or_else(|| key.clone());
+            let via = match &e.kind {
+                ChatKind::User(t) => Some(self.via_of(&id, || if marked.is_some() { "phone_typed" } else { typed_via(t, e.at_ms, id.strip_prefix('t')) })),
+                _ => None,
+            };
+            if via == Some("phone_typed") && marked.is_none() {
+                self.phone_marks.borrow_mut().insert(key, id.clone());
+                self.marks_changed.set(true);
+            }
+            all.push(ChatRow { id, via, entry: e.clone() });
+        }
+        for (k, e) in self.voice.iter().enumerate() {
+            if skip.contains(&e.at_ms) { continue; }
+            let (id, via) = self.voice_ids.get(k).map_or_else(|| (format!("v{}.{k}", e.at_ms), "mac_voice"), |(id, via)| (id.clone(), *via));
+            all.push(ChatRow { id, via: Some(via), entry: e.clone() });
+        }
+        for (echo, e) in &self.typed {
+            let id = format!("t{echo}");
+            let via = match &e.kind { ChatKind::User(t) => Some(self.via_of(&id, || typed_via(t, e.at_ms, Some(echo)))), _ => None };
+            all.push(ChatRow { id, via, entry: e.clone() });
+        }
+        all.retain(|r| r.entry.at_ms >= since_ms);
+        all.sort_by_key(|r| r.entry.at_ms);
         let cut = all.len().saturating_sub(MAX_ROWS);
         all.drain(..cut);
-        all
+        (all, cut)
     }
 
 }
@@ -593,13 +714,86 @@ pub fn typed_pending(id: &str, text: &str) {
     if text.is_empty() {
         return;
     }
-    with_typed(|t| t.0.push((id.to_string(), ChatEntry { at_ms: agent::now_ms(), kind: ChatKind::Owner(text.to_string()) })));
+    with_typed(|t| t.0.push((id.to_string(), ChatEntry { at_ms: agent::now_ms(), kind: ChatKind::User(text.to_string()) })));
     let _ = wake().0.try_send(());
 }
 /// The typed message `id` was not sent after all: its row goes.
 pub fn typed_failed(id: &str) {
     with_typed(|t| t.1.push(id.to_string()));
     let _ = wake().0.try_send(());
+}
+
+/// Typed messages that came from the phone (`remote::Live::text_turn`): their echo id, words and when, so their rows
+/// say `phone_typed`. Kept `TYPED_WAIT_MS`, at most 64; lost on a restart (the row then reads `mac_typed`).
+fn phone_typed() -> &'static Mutex<Vec<(String, String, u64)>> {
+    static P: OnceLock<Mutex<Vec<(String, String, u64)>>> = OnceLock::new();
+    P.get_or_init(|| Mutex::new(vec![]))
+}
+/// A typed turn from the phone, sent under `echo` (its words in the agent's session file as a typed message).
+#[cfg(feature = "phone")]
+pub fn from_phone(echo: &str, text: &str) {
+    from_phone_at(echo, text, agent::now_ms());
+}
+fn from_phone_at(echo: &str, text: &str, now: u64) {
+    let mut p = phone_typed().lock().unwrap_or_else(|e| e.into_inner());
+    p.retain(|(_, _, at)| now.saturating_sub(*at) < TYPED_WAIT_MS);
+    p.push((echo.to_string(), text.trim().to_string(), now));
+    let over = p.len().saturating_sub(64);
+    p.drain(..over);
+}
+/// Where a typed row of the user's came from: a push-to-talk transcript carries the phone's tag (`remote::phone_tag`);
+/// a typed turn from the phone is known by its echo or its words and time (`from_phone`); anything else was typed at
+/// the Mac.
+fn typed_via(text: &str, at_ms: u64, echo: Option<&str>) -> &'static str {
+    if crate::remote::said_on_phone(text.trim_start()).is_some() { return "phone_voice"; }
+    let p = phone_typed().lock().unwrap_or_else(|e| e.into_inner());
+    let phone = p.iter().any(|(e, t, at)| echo == Some(e.as_str()) || (t == text.trim() && at_ms.abs_diff(*at) <= TYPED_WAIT_MS));
+    if phone { "phone_typed" } else { "mac_typed" }
+}
+
+/// A row as the phone's chat takes it (PROTOCOL.md "One chat with the Mac"): `{id, at, kind, text, via?, heard?,
+/// action?, note?}`.
+pub fn row_json(r: &ChatRow) -> Value {
+    use serde_json::json;
+    let mut v = match &r.entry.kind {
+        ChatKind::User(t) => json!({"kind": "owner", "text": t}),
+        ChatKind::Heimdall { text, heard } => json!({"kind": "heimdall", "text": text,
+            "heard": match heard { Heard::Whole => "whole", Heard::Cut => "cut", Heard::Never => "never" }}),
+        ChatKind::Action { kind, text, answer } => {
+            let mut a = json!({"kind": match kind { ActionKind::Started => "started", ActionKind::Finished => "finished", ActionKind::Failed => "failed", ActionKind::Question => "question" }});
+            if let Some(answer) = answer { a["answer"] = answer.clone().into(); }
+            json!({"kind": "action", "text": text, "action": a})
+        }
+        ChatKind::Note { id, title, shape } => json!({"kind": "note", "text": title, "note": {"id": id, "title": title,
+            "shape": match shape { NoteShape::Text => "text", NoteShape::Table => "table", NoteShape::Svg => "svg", NoteShape::Image => "image" }}}),
+    };
+    v["id"] = r.id.clone().into();
+    v["at"] = r.entry.at_ms.into();
+    if let Some(via) = r.via { v["via"] = via.into(); }
+    v
+}
+/// The day as the phone names it: local `YYYY-MM-DD` of `day_ms`.
+pub fn day_name(day_ms: u64) -> String {
+    use chrono::TimeZone;
+    chrono::Local.timestamp_millis_opt(day_ms as i64).single().map_or_else(String::new, |t| t.format("%Y-%m-%d").to_string())
+}
+/// What the phone is told for the conversation going from (`old_day`, `old`) to (`day`, `new`, `older` rows left out):
+/// a `chat` snapshot for a new day (or the first look; at most `remote::CHAT_BYTES`, as a new client's), else one
+/// `chat_upsert` per new or changed row and one `chat_remove` per row gone, by id. A row that only rolled out of the
+/// window (`older` rows left out, and it is no newer than the oldest kept) is not removed: the phone's chat keeps it
+/// (review finding 9).
+pub fn chat_events(old_day: Option<u64>, old: &[ChatRow], day: u64, new: &[ChatRow], older: usize) -> Vec<(&'static str, Value)> {
+    use serde_json::json;
+    if old_day != Some(day) {
+        return vec![("chat", crate::remote::chat_capped(day_name(day).into(), new.iter().map(row_json).collect(), older as u64))];
+    }
+    let was: HashMap<&str, &ChatRow> = old.iter().map(|r| (r.id.as_str(), r)).collect();
+    let now: std::collections::HashSet<&str> = new.iter().map(|r| r.id.as_str()).collect();
+    let oldest_kept = new.first().map(|r| r.entry.at_ms);
+    let rolled_out = |r: &ChatRow| older > 0 && oldest_kept.is_some_and(|first| r.entry.at_ms <= first);
+    let mut out: Vec<(&'static str, Value)> = old.iter().filter(|r| !now.contains(r.id.as_str()) && !rolled_out(r)).map(|r| ("chat_remove", json!({"id": r.id}))).collect();
+    out.extend(new.iter().filter(|r| was.get(r.id.as_str()).is_none_or(|o| **o != **r)).map(|r| ("chat_upsert", json!({"row": row_json(r)}))));
+    out
 }
 
 /// Replies withdrawn live (their words and when), waiting for their record in the session file.
@@ -622,20 +816,25 @@ fn session_path(data: &Path) -> Option<PathBuf> {
     path.starts_with(data).then_some(path)
 }
 
-/// The user's addressed utterances from `after_ms` (exclusive), oldest first: (time, text, outcome, `forced` for a send
-/// its model judged not for Heimdall).
-fn utterances(archive: &Path, after_ms: u64) -> Vec<(u64, String, String)> {
-    let path = archive.join("heimdall.sqlite");
-    let Ok(db) = rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX) else { return vec![] };
+/// The user's addressed utterances from `after_ms` (exclusive), oldest first, on his Mac microphones and the phone's live
+/// microphone (point 9: the same conversation): outcome `forced` for a send its model judged not for Heimdall.
+fn utterances(archive: &Path, after_ms: u64) -> Vec<Utterance> {
+    if !archive.join(heimdall_archive::store::INDEX).exists() {
+        return vec![];
+    }
+    let Ok(db) = heimdall_archive::store::read_index(archive) else { return vec![] };
     let _ = db.busy_timeout(Duration::from_millis(500));
     let Ok(mut q) = db.prepare(
         "SELECT wall_ms, text, CASE WHEN json_extract(decision,'$.outcome')='send' AND json_extract(decision,'$.choice')='not_for_heimdall' \
-         THEN 'forced' ELSE coalesce(json_extract(decision,'$.outcome'),'') END FROM utterances \
-         WHERE wall_ms > ?1 AND speaker = 'User' AND source_id LIKE 'mic:%' ORDER BY wall_ms",
+         THEN 'forced' ELSE coalesce(json_extract(decision,'$.outcome'),'') END, session || ':' || id, source_id FROM utterances \
+         WHERE wall_ms > ?1 AND speaker = 'User' AND (source_id LIKE 'mic:%' OR source_id LIKE 'phone:%') ORDER BY wall_ms",
     ) else {
         return vec![];
     };
-    q.query_map([after_ms as i64], |r| Ok((r.get::<_, i64>(0)?.max(0) as u64, r.get::<_, Option<String>>(1)?.unwrap_or_default(), r.get::<_, String>(2)?)))
+    q.query_map([after_ms as i64], |r| Ok(Utterance {
+        at_ms: r.get::<_, i64>(0)?.max(0) as u64, text: r.get::<_, Option<String>>(1)?.unwrap_or_default(), outcome: r.get::<_, String>(2)?,
+        key: r.get::<_, String>(3)?, source: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+    }))
         .map(|rows| rows.flatten().collect())
         .unwrap_or_default()
 }
@@ -649,6 +848,7 @@ impl Live {
         // A new day, another session file, or one rewritten shorter (rotated past its size limit): read it again.
         if day != self.day || path != self.session || size < self.offset {
             self.history = History::default();
+            *self.history.phone_marks.borrow_mut() = load_marks(data, day);
             self.offset = 0;
             self.partial.clear();
             self.session = path.clone();
@@ -688,8 +888,10 @@ impl Live {
         self.history.typed(typed, &failed, now_ms);
         // His words: re-read the recent ones whole (a `wait` may be joined by the `send` that follows it).
         let rows = utterances(&data.join("archive"), self.day.saturating_sub(1));
-        self.history.voice = History::voice_rows(&rows);
-        self.history.forced = rows.iter().filter(|(_, _, o)| o == "forced").map(|(at, _, _)| *at).collect();
+        let keyed = History::voice_rows_keyed(&rows);
+        self.history.voice_ids = keyed.iter().map(|(_, id, via)| (id.clone(), *via)).collect();
+        self.history.voice = keyed.into_iter().map(|(e, _, _)| e).collect();
+        self.history.forced = rows.iter().filter(|u| u.outcome == "forced").map(|u| u.at_ms).collect();
         // Notices read, kept for pulling out; withdrawals whose reply is in now (or that waited too long), applied.
         for (id, (title, detail)) in self.history.notes.drain() {
             keep_note(&id, &title, &detail);
@@ -701,17 +903,57 @@ impl Live {
     }
 }
 
+/// The day's phone-typed marks (`History::phone_marks`), in the data folder: `{"day": <ms>, "marks": {key: id}}`.
+const PHONE_MARKS: &str = "chat-phone-typed.json";
+/// The marks kept for `day` (none for another day, a missing or unreadable file).
+fn load_marks(data: &Path, day: u64) -> HashMap<String, String> {
+    let Some(v) = std::fs::read(data.join(PHONE_MARKS)).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) else { return HashMap::new() };
+    if v["day"].as_u64() != Some(day) { return HashMap::new(); }
+    v["marks"].as_object().map(|m| m.iter().filter_map(|(k, id)| Some((k.clone(), id.as_str()?.to_owned()))).collect()).unwrap_or_default()
+}
+impl Live {
+    /// Saves the day's phone-typed marks when one was added (through a temporary file renamed over it).
+    fn save_marks(&self, data: &Path) {
+        if !self.history.marks_changed.replace(false) { return; }
+        let v = serde_json::json!({"day": self.day, "marks": *self.history.phone_marks.borrow()});
+        let (file, tmp) = (data.join(PHONE_MARKS), data.join(format!("{PHONE_MARKS}.{}.tmp", std::process::id())));
+        if let Err(e) = std::fs::write(&tmp, v.to_string()).and_then(|_| std::fs::rename(&tmp, &file)) {
+            eprintln!("chat: phone-typed marks not saved: {e}");
+        }
+    }
+}
+
 /// Starts the reader: today's conversation now, then whenever the session file grows, sent to the island whole. The
 /// reader's state is its thread's own.
 pub fn start(data: &Path, ui: ui::Ui) {
     let data = data.to_path_buf();
     let mut l = Live { history: History::default(), session: None, offset: 0, partial: vec![], day: 0, sent: vec![] };
+    // What the phone was given (point 9): the day and its rows, by id.
+    let mut published: (Option<u64>, Vec<ChatRow>) = (None, vec![]);
     let spawned = std::thread::Builder::new().name("heimdall-chat".into()).spawn(move || loop {
-        l.refresh(&data, agent::now_ms());
-        let rows = l.history.rows(l.day);
-        if rows != l.sent {
-            l.sent = rows.clone();
-            ui.send(ui::UiUpdate::Chat(rows));
+        let changed = l.refresh(&data, agent::now_ms());
+        l.save_marks(&data);
+        // Nothing new since the last look and this day already given out: the rows would come out the same.
+        if !changed && published.0 == Some(l.day) {
+            let _ = wake().1.recv_timeout(POLL);
+            continue;
+        }
+        let (rows, older) = l.history.rows_with_ids(l.day);
+        let entries: Vec<ChatEntry> = rows.iter().map(|r| r.entry.clone()).collect();
+        if entries != l.sent {
+            l.sent = entries.clone();
+            ui.send(ui::UiUpdate::Chat(entries));
+        }
+        if published.0 != Some(l.day) || published.1 != rows {
+            let events = chat_events(published.0, &published.1, l.day, &rows, older);
+            let (ups, gone) = (events.iter().filter(|(k, _)| *k == "chat_upsert").count(), events.iter().filter(|(k, _)| *k == "chat_remove").count());
+            if published.0 != Some(l.day) {
+                eprintln!("chat: {} {} rows{} to the phone's chat", day_name(l.day), rows.len(), if older > 0 { format!(" ({older} older left out)") } else { String::new() });
+            } else if ups + gone > 0 {
+                eprintln!("chat: {ups} upsert(s), {gone} removal(s); {} rows", rows.len());
+            }
+            for (kind, args) in events { crate::remote::publish(kind, args); }
+            published = (Some(l.day), rows);
         }
         let _ = wake().1.recv_timeout(POLL);
     });
@@ -726,6 +968,15 @@ fn read_once(data: &Path, now_ms: u64) -> Vec<ChatEntry> {
     let mut l = Live { history: History::default(), session: None, offset: 0, partial: vec![], day: 0, sent: vec![] };
     l.refresh(data, now_ms);
     l.history.rows(l.day)
+}
+/// `read_once` with ids, as the phone gets them.
+#[cfg(test)]
+fn read_once_rows(data: &Path, now_ms: u64) -> (u64, Vec<ChatRow>, usize) {
+    let mut l = Live { history: History::default(), session: None, offset: 0, partial: vec![], day: 0, sent: vec![] };
+    l.refresh(data, now_ms);
+    let (rows, older) = l.history.rows_with_ids(l.day);
+    l.save_marks(data);
+    (l.day, rows, older)
 }
 
 #[cfg(test)]

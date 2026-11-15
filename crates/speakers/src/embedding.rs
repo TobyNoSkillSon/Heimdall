@@ -56,8 +56,7 @@ pub trait VoiceEncoder {
     fn embed(&mut self, clean_pcm_16k: &[f32]) -> Result<Embedding>;
 }
 pub struct ReDimNet {
-    session: crate::gpu_recovery::Recovery<Session>,
-    path: std::path::PathBuf,
+    session: Session,
 }
 impl ReDimNet {
     /// Sliding-window experiment: repeat short speech to the pinned six-second input.
@@ -73,11 +72,9 @@ impl ReDimNet {
         self.infer(input)
     }
     fn infer(&mut self, input: Vec<f32>) -> Result<Embedding> {
-        self.session.run(|gpu| Self::session(&self.path, gpu), |session| {
-            let output = session.run(ort::inputs!["audio"=>Tensor::from_array(([1, WINDOW_SAMPLES], input.clone()))?])?;
-            let (_, values) = output["embedding"].try_extract_tensor::<f32>()?;
-            Embedding::new(values.to_vec())
-        })
+        let output = self.session.run(ort::inputs!["audio"=>Tensor::from_array(([1, WINDOW_SAMPLES], input))?])?;
+        let (_, values) = output["embedding"].try_extract_tensor::<f32>()?;
+        Embedding::new(values.to_vec())
     }
     pub fn load(path: &Path) -> Result<Self> {
         crate::artifacts::verify(
@@ -85,20 +82,9 @@ impl ReDimNet {
             51223453,
             "d960e9f713eaba712f44498e82221b6fc12fcd7eaacd367c9eac45d3a6ce59ec",
         )?;
-        #[cfg(target_os = "macos")]
-        let gpu = crate::metal::enabled("redim");
-        #[cfg(not(target_os = "macos"))]
-        let gpu = false;
-        Ok(Self {
-            session: crate::gpu_recovery::Recovery::new(Self::session(path, gpu)?, gpu),
-            path: path.into(),
-        })
+        Ok(Self { session: Self::session(path)? })
     }
-    fn session(path: &Path, gpu: bool) -> Result<Session> {
-        #[cfg(target_os = "macos")]
-        if gpu {
-            return crate::metal::session(path);
-        }
+    fn session(path: &Path) -> Result<Session> {
         Ok(Session::builder()?
             .with_intra_threads(1)
             .map_err(|e| anyhow::anyhow!(e.to_string()))?
@@ -154,33 +140,5 @@ mod tests {
         let a: Vec<_> = (0..WINDOW_SAMPLES + 10).map(|v| v as f32).collect();
         assert_eq!(model_window(&a).unwrap()[0], 5.);
         assert!(Embedding::new(vec![0.; DIMENSION]).is_err());
-    }
-}
-
-#[cfg(all(test, target_os = "macos"))]
-mod fault_model_tests {
-    use super::*;
-    #[test]
-    #[ignore = "requires pinned offline ReDimNet assets"]
-    fn gpu_fault_redim_recreates_falls_back_and_recovers() -> Result<()> {
-        let path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models/speakers/ReDimNet2B6.onnx");
-        let mut model = ReDimNet {
-            session: crate::gpu_recovery::Recovery::new(ReDimNet::session(&path, true)?, true),
-            path,
-        };
-        let audio: Vec<_> = (0..WINDOW_SAMPLES)
-            .map(|i| (i as f32 * 0.03).sin() * 0.1)
-            .collect();
-        let reference = model.infer(audio.clone())?;
-        for faults in [1, 2, 0] {
-            if faults == 0 {
-                model.session.retry_now();
-            }
-            crate::gpu_recovery::inject(faults);
-            assert!(model.infer(audio.clone())?.cosine(&reference) > 0.999);
-            assert_eq!(model.session.is_gpu(), faults != 2);
-        }
-        Ok(())
     }
 }

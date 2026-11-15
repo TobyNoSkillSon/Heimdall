@@ -45,7 +45,12 @@ impl CoverT3 for FakeT3 {
         c["providers"].as_array_mut().unwrap().extend(self.extra.lock().unwrap().iter().cloned());
         Ok(c)
     }
-    async fn launch(&self, _: &str, message: &str, h: &Harness) -> Result<(String, Option<String>)> {
+    async fn launch(&self, title: &str, message: &str, h: &Harness) -> Result<(String, Option<String>)> {
+        // Fresh review S3: the account check's throwaway thread, kept apart from the relay launches.
+        if title == ACCOUNT_CHECK_TITLE {
+            self.log.lock().unwrap().push(format!("check:{}", h.instance));
+            return Ok((format!("check-{}", h.instance), Some("run-check".into())));
+        }
         self.log.lock().unwrap().push(format!("launch:{}", h.instance));
         self.models.lock().unwrap().push(h.model.clone());
         let thread = format!("thread-{}", h.instance);
@@ -59,7 +64,7 @@ impl CoverT3 for FakeT3 {
     }
     async fn outcome(&self, thread: &str, _: Option<&str>, _: Duration) -> Result<Run> {
         while self.hold.load(Ordering::SeqCst) { tokio::time::sleep(Duration::from_millis(10)).await; }
-        Ok(if self.failing.lock().unwrap().iter().any(|i| thread == format!("thread-{i}")) {
+        Ok(if self.failing.lock().unwrap().iter().any(|i| thread == format!("thread-{i}") || thread == format!("check-{i}")) {
             Run::Failed(self.fail_text.lock().unwrap().clone().unwrap_or_else(|| "API Error: Claude usage limit reached".into()))
         } else if self.complete.load(Ordering::SeqCst) { Run::Completed(Some("Told User about the quota.".into())) } else { Run::Working })
     }
@@ -182,7 +187,7 @@ impl Lab {
         self.t3.complete.store(true, Ordering::SeqCst);
         self.until("the relay's runs end", |l| l.em.runs.load(Ordering::Acquire) == 0);
         if self.card(crate::emergency_recovery::RETURN_PREFIX).is_none() { self.em.set(|s| s.next_probe_ms = 0); self.poke(); }
-        self.until("User is asked to go back", |l| l.card(crate::emergency_recovery::RETURN_PREFIX).is_some());
+        self.until("The user is asked to go back", |l| l.card(crate::emergency_recovery::RETURN_PREFIX).is_some());
         self.pick(crate::emergency_recovery::RETURN_PREFIX, "Back to");
     }
 }
@@ -237,7 +242,7 @@ fn failover_skips_the_failed_subscription_relays_scopes_the_token_and_hands_back
     assert!(lab.side.working.lock().unwrap().first() == Some(&true), "a relay run works on the island");
     let sent = lab.t3.sent.lock().unwrap().clone();
     assert_eq!(sent[0].0, "thread-grok");
-    assert!(sent[0].1.starts_with("[For Heimdall, User said] [23:40 Mic · User] Are you there?"), "{}", sent[0].1);
+    assert!(sent[0].1.starts_with("[For Heimdall, the user said] [23:40 Mic · User] Are you there?"), "{}", sent[0].1);
     let image = sent[0].1.lines().find_map(|l| l.strip_prefix("Image: ")).unwrap().to_owned();
     assert_eq!(std::fs::read(&image).unwrap(), [1, 2, 3]);
     assert_eq!(std::fs::metadata(&image).unwrap().permissions().mode() & 0o777, 0o600);
@@ -251,7 +256,7 @@ fn failover_skips_the_failed_subscription_relays_scopes_the_token_and_hands_back
     for name in &names { assert!(list.lines().any(|l| l.starts_with(&format!("{name}:"))), "{name} listed"); }
     assert!(list.contains("emergency_status:"));
     assert_eq!(lab.call("speak", json!({"text": "Heimdall's agent is out of quota; I'm covering."})), (0, "Speech queued: 1.".into()));
-    // Bug notes: personal edition only; the public cover token refuses them (docs/bugs.md).
+    // Bug notes: personal edition only; the public cover token refuses them (docs/personal/bugs.md).
     let bug = lab.call("bug_note", json!({"text": "Agent quota ran out at 23:33"}));
     if cfg!(feature = "public") { assert_ne!(bug.0, 0, "{bug:?}") } else { assert_eq!(bug.0, 0) }
     let (code, out) = lab.cli(&["call", "no_such_tool", "{}"]);
@@ -262,7 +267,7 @@ fn failover_skips_the_failed_subscription_relays_scopes_the_token_and_hands_back
     let ran: &[&str] = if cfg!(feature = "public") { &["speak:Heimdall's agent is out of quota; I'm covering."] } else { &["speak:Heimdall's agent is out of quota; I'm covering.", "bug_note"] };
     assert_eq!(*lab.host.0.lock().unwrap(), ran);
     let records: Vec<String> = lab.side.records.lock().unwrap().iter().map(|(_, t)| t.clone()).collect();
-    assert!(records.iter().any(|t| t == "[Relay agent] said to User: \"Heimdall's agent is out of quota; I'm covering.\" → Speech queued: 1."), "{records:#?}");
+    assert!(records.iter().any(|t| t == "[Relay agent] said to the user: \"Heimdall's agent is out of quota; I'm covering.\" → Speech queued: 1."), "{records:#?}");
     assert_eq!(records.iter().any(|t| t.starts_with("[Relay agent] filed a bug note: Agent quota ran out")), !cfg!(feature = "public"));
 
     // Hand back: refused while the agent still fails, accepted once it answers; then the token is dead.
@@ -272,7 +277,7 @@ fn failover_skips_the_failed_subscription_relays_scopes_the_token_and_hands_back
     lab.probe.0.store(true, Ordering::SeqCst);
     // The user, 06:34: going back is his choice. The relay's `end` makes Heimdall ask him; he goes back.
     let (code, out) = lab.call("emergency_end", json!({"summary": "Told User and filed a bug note."}));
-    assert_eq!((code, out.as_str()), (0, "Heimdall's agent answers again. User will be asked whether to go back to it once your run ends; keep acting for him until you are told."));
+    assert_eq!((code, out.as_str()), (0, "Heimdall's agent answers again. The user will be asked whether to go back to it once your run ends; keep acting for him until you are told."));
     assert_eq!(lab.em.phase(), Phase::Covering, "nothing switched by itself");
     lab.go_back();
     assert!(lab.side.said.lock().unwrap().iter().any(|l| l.starts_with("Your built-in agent works again")), "asked by voice");
@@ -340,9 +345,9 @@ fn without_a_cover_input_waits_for_one_and_agent_off_stands_it_down() {
     lab.t3.failing.lock().unwrap().retain(|i| i != "grok");
     lab.until("a relaunch covers", |l| l.em.phase() == Phase::Covering);
     lab.until("the held words arrive", |l| l.t3.sent.lock().unwrap().iter().any(|(t, m)| t == "thread-grok" && m.contains("Hello?")));
-    lab.em.end("User switched Heimdall's agent off");
+    lab.em.end("The user switched Heimdall's agent off");
     lab.until("off", |l| l.em.phase() == Phase::Off);
-    assert!(lab.t3.sent.lock().unwrap().last().unwrap().1.starts_with("Stop acting now: User switched Heimdall's agent off"));
+    assert!(lab.t3.sent.lock().unwrap().last().unwrap().1.starts_with("Stop acting now: The user switched Heimdall's agent off"));
     // Only `end` for `END_GRACE_MS`, then nothing.
     lab.until("the token dies", |l| l.connection().is_none());
     assert_eq!(lab.side.said.lock().unwrap().len(), 1, "only the card's line: {:?}", lab.side.said.lock().unwrap());
@@ -402,9 +407,9 @@ fn after_an_update_the_relay_thread_is_told_once_which_tools_changed() {
     let sent = lab.t3.sent.lock().unwrap().clone();
     let first = sent.iter().find(|(_, m)| m.contains("schedule website work")).unwrap().1.clone();
     assert!(first.starts_with("[Heimdall was updated] These tools changed: plan_edit. ") && first.contains("select:mcp__heimdall__plan_edit)"), "{first}");
-    assert!(first.ends_with("[For Heimdall, User typed] schedule website work tomorrow"), "{first}");
+    assert!(first.ends_with("[For Heimdall, the user typed] schedule website work tomorrow"), "{first}");
     let second = sent.iter().find(|(_, m)| m.contains("thanks")).unwrap().1.clone();
-    assert!(second.starts_with("[For Heimdall, User typed] thanks"), "told once: {second}");
+    assert!(second.starts_with("[For Heimdall, the user typed] thanks"), "told once: {second}");
     // Heimdall's own message: the mirror leaves it out (the input is in Pi's session already).
     let item = Item { position: 9, kind: "user_message".into(), text: first.clone(), status: "completed".into() };
     assert_eq!(super::mirror_text(&item, "heimdall-emergency"), None, "{first}");
@@ -500,10 +505,10 @@ fn relay_mode_holds_a_notch_drop_alone_as_relayed_context_not_a_turn() -> Result
     assert!(tools.emergency.holding() && tools.emergency.reason() == Reason::Chosen, "relay mode holds from the start");
     let records = |kind: &str| -> Result<Vec<heimdall_archive::Record>> { Ok(heimdall_archive::Journal::open_read_only(&session)?.records()?.into_iter().filter(|r| r.kind == kind).collect()) };
     let sends = records("agent_send")?.len();
-    let text = "User dropped onto the notch:\n- link: https://huggingface.co/LiquidAI/d1-2B";
+    let text = "The user dropped onto the notch:\n- link: https://huggingface.co/LiquidAI/d1-2B";
     runtime.send(Command::Dropped { text: text.into(), images: vec![agent::protocol::Attachment { media_type: "image/png".into(), bytes: vec![1, 2, 3] }] })?;
     let pi = data.join("pi-session.jsonl");
-    let held = || std::fs::read_to_string(&pi).unwrap_or_default().lines().filter(|l| l.contains("heimdall_context") && l.contains("this reached the relay agent") && l.contains("User dropped onto the notch")).map(str::to_owned).collect::<Vec<_>>();
+    let held = || std::fs::read_to_string(&pi).unwrap_or_default().lines().filter(|l| l.contains("heimdall_context") && l.contains("this reached the relay agent") && l.contains("The user dropped onto the notch")).map(str::to_owned).collect::<Vec<_>>();
     let began = std::time::Instant::now();
     while held().is_empty() {
         anyhow::ensure!(began.elapsed() < Duration::from_secs(10), "the drop never reached Pi's session as held context");
@@ -514,7 +519,7 @@ fn relay_mode_holds_a_notch_drop_alone_as_relayed_context_not_a_turn() -> Result
     assert_eq!(held.len(), 1, "once: {held:#?}");
     assert!(held[0].contains("huggingface.co/LiquidAI/d1-2B") && held[0].contains("[1 image(s), shown to the cover agent]"), "{}", held[0]);
     assert_eq!(records("notch_drop")?.len(), 1);
-    assert!(!records("agent_send")?.iter().skip(sends).any(|r| r.payload.to_string().contains("User dropped onto the notch")), "a held drop starts no turn");
+    assert!(!records("agent_send")?.iter().skip(sends).any(|r| r.payload.to_string().contains("The user dropped onto the notch")), "a held drop starts no turn");
     drop(runtime);
     Ok(())
 }
@@ -612,7 +617,7 @@ fn standing_down_releases_the_hold_late_input_wakes_the_agent_and_a_failed_trial
     // Agent off as the supervisor sees it: the agent's gate closes, then emergency mode ends (review 27 Oct: the
     // grace server checked this gate, so every `end` got 503).
     lab.gate.intent(agent::delivery::StopReason::Agent, false);
-    lab.em.end("User switched Heimdall's agent off");
+    lab.em.end("The user switched Heimdall's agent off");
     lab.until("off, hold lifted", |l| l.em.phase() == Phase::Off && *l.side.quiet_releases.lock().unwrap() == 1);
     assert!(lab.side.released.lock().unwrap().is_empty(), "no hand-back turn");
     // Bug note 2026-10-27T02-16-00: the cover's last `end` was refused by a dead token. For `END_GRACE_MS` it is
@@ -752,7 +757,7 @@ fn relay_mode_is_the_same_path_by_choice() {
     assert_eq!(lab.side.indicators.lock().unwrap().last(), Some(&ui::RelayIndicator::Relay));
     let (code, out) = lab.call("emergency_status", json!({}));
     assert!(code == 0 && out.starts_with("Relay mode since"), "{out}");
-    assert!(lab.call("emergency_end", json!({"summary": "done"})).1.starts_with("Relay mode is User's choice"));
+    assert!(lab.call("emergency_end", json!({"summary": "done"})).1.starts_with("Relay mode is the user's choice"));
     // Replies: the run's final text goes the way Pi's does, once per run.
     lab.t3.complete.store(true, Ordering::SeqCst);
     (lab.em.relay())(Relayed { id: "w1".into(), kind: "wake".into(), text: "What's next?".into(), images: vec![] });
@@ -771,7 +776,7 @@ fn relay_mode_is_the_same_path_by_choice() {
     assert!(lab.side.released.lock().unwrap().is_empty());
     lab.em.choose(false);
     lab.until("off, quietly", |l| l.em.phase() == Phase::Off && *l.side.quiet_releases.lock().unwrap() == 1);
-    assert!(lab.t3.sent.lock().unwrap().iter().any(|(_, m)| m.starts_with("User switched Heimdall back to his built-in agent")));
+    assert!(lab.t3.sent.lock().unwrap().iter().any(|(_, m)| m.starts_with("The user switched Heimdall back to his built-in agent")));
     assert!(lab.connection().is_none() && lab.side.said.lock().unwrap().is_empty());
     let _ = lab.stop.send(true);
 }
@@ -791,8 +796,14 @@ fn the_relay_has_pi_s_whole_tool_surface_and_no_other_thread_can_drive_heimdall(
     let rpc = |method: &str, params: Value, caller: &str| mcp::handle(&json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}), &lab.data, Some(caller)).unwrap()["result"].clone();
 
     // Pi's tools are the main server's list (`mcp_contract::tools()`, registered by heimdall.ts as mcp__heimdall__<name>).
-    let pi = agent::mcp_contract::tools().as_array().unwrap().clone();
-    let listed = rpc("tools/list", json!({}), &relay)["tools"].as_array().unwrap().clone();
+    let mut pi = agent::mcp_contract::tools(); agent::identity::for_agent_json(&mut pi, &agent::identity::current()); let pi = pi.as_array().unwrap().clone();
+    let mut listed = rpc("tools/list", json!({}), &relay)["tools"].as_array().unwrap().clone();
+    // Lane S (proposal 4): the relay's most-used tools carry Claude Code's always-load marker; otherwise Pi's definition.
+    for t in listed.iter_mut() {
+        let eager = t["name"].as_str().is_some_and(|n| heimdall_emergency::mcp::ALWAYS_LOADED.contains(&n));
+        assert_eq!(t["_meta"]["anthropic/alwaysLoad"] == true, eager, "{}", t["name"]);
+        if eager { t.as_object_mut().unwrap().remove("_meta"); }
+    }
     assert_eq!(listed[..pi.len()], pi[..], "every Pi tool, the same definition, in Pi's order");
     let extra: Vec<&str> = listed[pi.len()..].iter().filter_map(|t| t["name"].as_str()).collect();
     assert_eq!(extra, ["emergency_status", "emergency_end"]);
@@ -805,7 +816,7 @@ fn the_relay_has_pi_s_whole_tool_surface_and_no_other_thread_can_drive_heimdall(
     // The relay calls one by Pi's name; it runs and enters Heimdall's record.
     let said = rpc("tools/call", json!({"name":"speak","arguments":{"text":"On it."}}), &relay);
     assert_eq!(said["content"][0]["text"], "Speech queued: 1.", "{said}");
-    assert!(lab.side.records.lock().unwrap().iter().any(|(_, t)| t == "[Relay agent] said to User: \"On it.\" → Speech queued: 1."));
+    assert!(lab.side.records.lock().unwrap().iter().any(|(_, t)| t == "[Relay agent] said to the user: \"On it.\" → Speech queued: 1."));
 
     // Another thread (a worker task, a sub-agent's own session) has the same server in its settings.
     assert_eq!(rpc("tools/list", json!({}), "thread-worker")["tools"], json!([]));
@@ -848,7 +859,7 @@ fn pi_to_relay_mid_conversation_carries_the_conversation_and_every_kind_of_input
     }
     lab.until("all relayed", |l| l.t3.sent.lock().unwrap().len() == 4);
     let sent: Vec<String> = lab.t3.sent.lock().unwrap().iter().map(|(_, m)| m.clone()).collect();
-    assert_eq!(sent, ["[For Heimdall, User clicked] q1: Opus", "[For Heimdall, a scheduled wake] Check the build", "[For Heimdall, a task finished] Fix the menu: done", "[For Heimdall, User typed] and the logs?"]);
+    assert_eq!(sent, ["[For Heimdall, the user clicked] q1: Opus", "[For Heimdall, a scheduled wake] Check the build", "[For Heimdall, a task finished] Fix the menu: done", "[For Heimdall, the user typed] and the logs?"]);
     assert!(lab.side.late.lock().unwrap().is_empty() && lab.side.released.lock().unwrap().is_empty(), "nothing woke Pi meanwhile");
     let _ = lab.stop.send(true);
 }
@@ -862,7 +873,7 @@ fn relay_to_pi_mid_conversation_hands_pi_what_the_relay_had_not_answered() {
     lab.em.choose(true);
     lab.until("the relay acts", |l| l.em.phase() == Phase::Covering);
     assert_eq!(lab.call("speak", json!({"text":"Looking."})).0, 0);
-    assert!(lab.side.records.lock().unwrap().iter().any(|(_, t)| t.starts_with("[Relay agent] said to User: \"Looking.\"")), "Pi's record has it as it happened");
+    assert!(lab.side.records.lock().unwrap().iter().any(|(_, t)| t.starts_with("[Relay agent] said to the user: \"Looking.\"")), "Pi's record has it as it happened");
     // One input the relay is still working on, one T3 has not taken yet.
     (lab.em.relay())(Relayed { id: "w1".into(), kind: "wake".into(), text: "Is the build green?".into(), images: vec![] });
     lab.until("the first is with the relay", |l| l.t3.sent.lock().unwrap().iter().any(|(_, m)| m.contains("Is the build green?")));
@@ -940,20 +951,42 @@ fn switching_back_and_forth_leaves_nothing_behind() {
 fn relay_mode_runs_the_chosen_t3_model_and_moves_when_it_changes() {
     let lab = Lab::new(&[]);
     assert!(crate::emergency::reports_provider_problems(&lab.em), "Pi's problems show while it is the agent");
-    let relay = |m: &str| Options { order: em::default_order(false), skip_relay: false, relay_model: Some(m.into()), relay_account: None };
+    let relay = |m: &str| Options { order: em::default_order(), skip_relay: false, relay_model: Some(m.into()), relay_account: None };
     lab.em.configure(relay("claude-b"));
     lab.em.choose(true);
     lab.until("the relay acts", |l| l.em.phase() == Phase::Covering);
     assert_eq!(lab.t3.models.lock().unwrap().as_slice(), ["claude-b"], "the chosen model, not T3's first");
     assert!(!crate::emergency::reports_provider_problems(&lab.em), "relay mode: Pi's provider problems are not the agent's");
+    // Bug note 2026-11-10T06-19-44: the first relay thread was a plain start (quiet); the move is a switch the user asked
+    // for, so the new thread's first message asks it to confirm, naming what it runs on.
+    assert!(lab.t3.first.lock().unwrap().last().is_some_and(|(_, m)| m.contains("Reply NO_REPLY to this message") && !m.contains("confirming it")));
     lab.em.configure(relay("claude-a"));
+    lab.em.switch_requested("claude-a (Claude via T3)".into(), true);
     lab.em.choose(true);
     lab.until("moved to claude-a", |l| l.t3.models.lock().unwrap().last().map(String::as_str) == Some("claude-a") && l.em.phase() == Phase::Covering);
-    assert!(lab.t3.sent.lock().unwrap().iter().any(|(_, m)| m.starts_with("User switched the relay to another model")));
+    assert!(lab.t3.sent.lock().unwrap().iter().any(|(_, m)| m.starts_with("The user switched the relay to another model")));
+    let first = lab.t3.first.lock().unwrap().last().unwrap().1.clone();
+    assert!(first.contains("The user asked for this switch and it just completed") && first.contains("(claude-a (Claude via T3))") && !first.contains("Reply NO_REPLY to this message"), "{first}");
     // The same choice again changes nothing.
     lab.em.choose(true);
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(lab.t3.models.lock().unwrap().len(), 2);
+    // Review 1111: a requested switch whose choice starts nothing is not confirmed by a later, unrelated start.
+    lab.em.switch_requested("stale".into(), true);
+    lab.em.choose(true);
+    std::thread::sleep(Duration::from_millis(100));
+    lab.em.configure(relay("claude-b"));
+    lab.em.choose(true);
+    lab.until("moved to claude-b", |l| l.t3.models.lock().unwrap().len() == 3 && l.em.phase() == Phase::Covering);
+    let first = lab.t3.first.lock().unwrap().last().unwrap().1.clone();
+    assert!(!first.contains("confirming it") && first.contains("Reply NO_REPLY to this message"), "{first}");
+    // A switch the agent made itself is confirmed without saying the user asked.
+    lab.em.configure(relay("claude-a"));
+    lab.em.switch_requested("claude-a (Claude via T3)".into(), false);
+    lab.em.choose(true);
+    lab.until("moved back to claude-a", |l| l.t3.models.lock().unwrap().len() == 4 && l.em.phase() == Phase::Covering);
+    let first = lab.t3.first.lock().unwrap().last().unwrap().1.clone();
+    assert!(first.contains("confirming it") && !first.contains("The user asked for this switch"), "{first}");
     lab.em.refresh_relay_models();
     lab.until("T3's Claude models reach the menu", |l| l.side.relay_models.lock().unwrap().last()
         .is_some_and(|m| m.iter().map(|m| (m.id.as_str(), m.name.as_str())).collect::<Vec<_>>() == [("claude-a", "Claude A"), ("claude-b", "Claude B")]));
@@ -968,7 +1001,7 @@ fn relay_mode_runs_the_chosen_t3_model_and_moves_when_it_changes() {
 #[test]
 fn without_a_relay_the_local_engine_stands_in_until_the_main_model_is_back() {
     let lab = Lab::new(&[]);
-    lab.em.configure(Options { order: em::default_order(false), skip_relay: true, relay_model: None, relay_account: None });
+    lab.em.configure(Options { order: em::default_order(), skip_relay: true, relay_model: None, relay_account: None });
     let reset = agent::now_ms() + 3_600_000;
     lab.em.enter(Cause::Quota { reset_ms: Some(reset), line: None }, Some(chatgpt()));
     lab.until("the offer", |l| !l.side.no_relay.lock().unwrap().is_empty());
@@ -1073,7 +1106,7 @@ fn the_relay_thread_is_mirrored_into_pi_s_session_whole_and_nothing_is_handed_of
         (t.clone(), item(3, "assistant_message", "ChatGPT ran out; I have it. I'm finishing the menu fix you asked for.")),
         (t.clone(), item(4, "command_execution", "$ heimdall-emergency --data-dir /x speak \"hi\"\nSpeech queued: 1.")),
         (t.clone(), item(5, "command_execution", "$ git -C /V/Projects/Heimdall log -1\nabc123 Fix")),
-        (t.clone(), item(6, "user_message", "[For Heimdall, User said] Are you there?")),
+        (t.clone(), item(6, "user_message", "[For Heimdall, the user said] Are you there?")),
         (t.clone(), item(7, "assistant_message", &long)),
         (t.clone(), item(8, "file_change", "crates/ui/src/mac/menu.rs")),
         (t.clone(), item(9, "checkpoint", "[]")),
@@ -1159,7 +1192,7 @@ fn relay_mode_chosen_during_a_trial_or_after_a_quick_off_and_on_acts_and_holds()
     lab.em.choose(true);
     lab.until("relay mode acts", |l| l.em.phase() == Phase::Covering && l.em.reason() == Reason::Chosen);
     assert!(lab.em.holding());
-    lab.em.end("User switched Heimdall's agent off");
+    lab.em.end("The user switched Heimdall's agent off");
     lab.em.choose(true);
     lab.until("on again after the stand-down", |l| l.em.phase() == Phase::Covering && l.em.reason() == Reason::Chosen);
     assert!(lab.em.holding());
@@ -1262,7 +1295,7 @@ fn relay_live_smoke() {
     (em.relay())(Relayed { id: "lab-w2".into(), kind: "wake".into(), text: "[lab] User said: run `python3 -c 'import time; time.sleep(90)'` in the foreground (not in the background; it is the drill's Stop test), then reply DONE.".into(), images: vec![] });
     std::thread::sleep(Duration::from_secs(20));
     let before_stop = rt.block_on(t3.outcome(&thread, None, Duration::from_millis(500))).map(|r| format!("{r:?}")).unwrap_or_else(|e| format!("{e:#}"));
-    (em.relay())(Relayed { id: format!("stop-{}", agent::now_ms()), kind: "stop".into(), text: "Stop speaking and stop what you are doing; wait for User.".into(), images: vec![] });
+    (em.relay())(Relayed { id: format!("stop-{}", agent::now_ms()), kind: "stop".into(), text: "Stop speaking and stop what you are doing; wait for the user.".into(), images: vec![] });
     let stop_line = || rt.block_on(t3.activity(&thread, 0)).unwrap_or_default().iter().any(|i| i.text.starts_with("[For Heimdall, User pressed Stop]"));
     step(&mut steps, "the Stop line reaches the thread at once, not after a 30 s retry", 15, &stop_line);
     std::thread::sleep(Duration::from_secs(5));
@@ -1299,7 +1332,7 @@ use crate::emergency_recovery::{PREFIX as RECOVERY, RETURN_PREFIX as RETURN};
 use agent::routing::{Quota, Window};
 
 const HOUR: u64 = 3_600_000;
-/// A second Claude account in T3, like the user's `claudeAgent_claude_code_2`.
+/// A second Claude account in T3, like the user's `claudeAgent_2`.
 fn second_claude(lab: &Lab) {
     lab.t3.extra.lock().unwrap().push(json!({"providerInstanceId":"claudeAgent_2","driverKind":"claudeAgent","displayName":"Claude 2","models":[{"id":"claude-a"},{"id":"claude-b"}],"constraints":[]}));
 }
@@ -1392,11 +1425,14 @@ fn waiting_for_the_original_account_resumes_on_it_when_it_works() {
     std::thread::sleep(Duration::from_millis(200));
     assert_eq!(launches(&lab), ["launch:claudeAgent"], "still spent: still waiting, nothing else tried");
     lab.t3.failing.lock().unwrap().clear();
+    lab.t3.complete.store(true, Ordering::SeqCst);
     set_quota(&lab, "claudeAgent", quota_of(2.0, 40.0, agent::now_ms() + 50 * HOUR));
     lab.em.set(|s| s.next_probe_ms = 0);
     lab.poke();
-    lab.until("back on it", |l| l.em.phase() == Phase::Covering && launches(l).len() == 2);
-    assert_eq!(launches(&lab)[1], "launch:claudeAgent");
+    // night1114 relay (bug note 2026-11-13T10-57-01): it carries on in the same thread, its conversation kept.
+    lab.until("back on it", |l| l.em.phase() == Phase::Covering);
+    assert_eq!(launches(&lab), ["launch:claudeAgent"], "the same thread, no new one");
+    lab.until("the held question follows", |l| l.t3.sent.lock().unwrap().iter().filter(|(t, m)| t == "thread-claudeAgent" && m.contains("Is the build green?")).count() == 2);
     let _ = lab.stop.send(true);
 }
 
@@ -1453,7 +1489,7 @@ fn going_back_moves_the_relay_to_the_original_account() {
     lab.go_back();
     lab.until("back on the original", |l| l.em.phase() == Phase::Covering && launches(l).len() == 3);
     assert_eq!(launches(&lab)[2], "launch:claudeAgent");
-    assert!(lab.t3.sent.lock().unwrap().iter().any(|(t, m)| t == "thread-claudeAgent_2" && m.starts_with("User went back to his original account")));
+    assert!(lab.t3.sent.lock().unwrap().iter().any(|(t, m)| t == "thread-claudeAgent_2" && m.starts_with("The user went back to his original account")));
     let _ = lab.stop.send(true);
 }
 
@@ -1481,7 +1517,7 @@ fn relay_mode_on_a_spent_account_offers_what_can_take_over() {
     let lab = Lab::new(&[]);
     second_claude(&lab);
     set_quota(&lab, "claudeAgent_2", quota_of(100.0, 30.0, agent::now_ms() + 30 * HOUR));
-    lab.em.configure(Options { order: em::default_order(false), skip_relay: false, relay_model: None, relay_account: Some("claudeAgent_2".into()) });
+    lab.em.configure(Options { order: em::default_order(), skip_relay: false, relay_model: None, relay_account: Some("claudeAgent_2".into()) });
     lab.em.choose(true);
     lab.until("the recovery card", |l| l.card(RECOVERY).is_some());
     assert!(launches(&lab).is_empty());
@@ -1692,4 +1728,174 @@ fn the_last_relay_thread_on_a_spent_account_is_not_reused() {
     s.spent.push(Spent { instance: "claudeAgent".into(), reset_ms: Some(now + HOUR), line: String::new(), at_ms: now, billing: false });
     assert!(s.last_route_spent(now), "its own account is spent");
     assert!(!s.last_route_spent(now + 2 * HOUR), "after its reset it may be reused");
+}
+
+/// Bug note 2026-11-08T02-03-47: one mirror pass carries the newest items up to its budget; the older ones are named
+/// by one pointer line, never put in whole.
+#[test]
+fn a_mirror_pass_carries_the_newest_items_up_to_its_budget() {
+    let t = |n: usize| Some("x".repeat(n));
+    assert_eq!(bounded_from(&[t(10), None, t(10)], 100), 0, "everything fits");
+    assert_eq!(bounded_from(&[t(60), t(30), None, t(50)], 100), 1, "the newest two fit, the oldest is left out");
+    assert_eq!(bounded_from(&[t(60), t(300)], 100), 1, "the newest always goes in, even past the budget");
+    assert_eq!(bounded_from(&[], 100), 0);
+}
+
+#[test]
+fn the_handover_cut_follows_only_a_relay_that_just_ended() {
+    // Review, 8 Nov: an emergency that never reached a relay keeps Pi's own compaction; only a relay thread set aside
+    // at this release gets the handover note (and so the cut).
+    let dir = tempfile::tempdir().unwrap();
+    let em = Emergency::new(&dir.path().join("data"), "cli".into(), "docs".into());
+    let now = agent::now_ms();
+    assert!(em.handover_note(now).is_none(), "no relay ran");
+    em.set(|s| s.last_thread = Some(("thread-old".into(), "claudeAgent".into(), now - 3_600_000)));
+    assert!(em.handover_note(now).is_none(), "a relay from an hour ago is not this release");
+    em.set(|s| s.last_thread = Some(("thread-relay".into(), "claudeAgent".into(), now - 2_000)));
+    let note = em.handover_note(now).expect("the relay just ended");
+    assert!(note.contains("thread-relay") && note.contains("took over from the relay"));
+}
+
+// The 13 Nov 10:47-10:53 sequence, replayed on fakes (bug notes 2026-11-13T10-54-06, 2026-11-13T10-57-01,
+// 2026-11-13T10-58-09)
+const CLOUDFLARE_403: &str = "Failed to authenticate. API Error: 403 Attention Required! | Cloudflare";
+/// Relay mode on Claude main; its sign-in fails behind Cloudflare under a run that three of the user's lines went into
+/// (10:50:09, :23, :25 steered into run 713); the user picks "Wait for Claude · A" on the card.
+fn relay_sign_in_fails_and_owner_waits(lab: &Lab) {
+    second_claude(lab);
+    set_quota(lab, "claudeAgent", quota_of(10.0, 40.0, agent::now_ms() + 50 * HOUR));
+    lab.em.choose(true);
+    lab.until("the relay acts", |l| l.em.phase() == Phase::Covering);
+    *lab.t3.fail_text.lock().unwrap() = Some(CLOUDFLARE_403.into());
+    lab.t3.failing.lock().unwrap().push("claudeAgent".into());
+    for (id, text) in [("w1", "Can you check the housing report?"), ("w2", "And show it to me."), ("w3", "On the left screen.")] {
+        (lab.em.relay())(Relayed { id: id.into(), kind: "wake".into(), text: text.into(), images: vec![] });
+    }
+    lab.until("the recovery card", |l| l.card(RECOVERY).is_some());
+}
+
+/// The relay's sign-in fails: the card and Heimdall's voice name it ("sign-in failed: 403 from Cloudflare"), one failed
+/// run is one failure, and waiting for the same model checks within seconds. Its quota reads fine all along, which
+/// proves nothing about a sign-in: only a run in the stopped thread does. When the sign-in works again the relay carries
+/// on in the SAME thread, and every held message (also one said while waiting, 10:52:26) reaches it in order, with
+/// nobody touching T3.
+#[test]
+fn a_sign_in_failure_waits_tests_with_a_run_and_continues_the_same_thread() {
+    let lab = Lab::new(&[]);
+    relay_sign_in_fails_and_owner_waits(&lab);
+    let n = lab.side.notices.lock().unwrap().iter().rev().find(|n| n.id.starts_with(RECOVERY)).cloned().unwrap();
+    assert!(n.text.starts_with("Claude · A: sign-in failed: 403 from Cloudflare."), "{}", n.text);
+    let said = lab.side.said.lock().unwrap().clone();
+    assert!(said.iter().any(|x| x.contains("sign-in failed: 403 from Cloudflare")), "{said:?}");
+    assert!(said.iter().chain(std::iter::once(&n.text)).all(|x| !x.contains("in a row")), "one failed run is not three: {said:?}");
+    assert_eq!(lab.side.notices.lock().unwrap().iter().filter(|n| n.id.starts_with(RECOVERY)).count(), 1, "one failure, one card");
+    let picked = std::time::Instant::now();
+    lab.pick(RECOVERY, "Wait for Claude");
+    lab.until("waiting, with why", |l| l.em.phase() == Phase::NoCover && l.side.notices.lock().unwrap().iter().any(|n| n.text == "Waiting for Claude · A · sign-in failed: 403 from Cloudflare"));
+    // The quota reads usable, the sign-in still fails: the stopped thread is tried within seconds, and that run's
+    // failure keeps the wait (no new thread, nothing else launched, held input still held).
+    lab.until("the stopped thread is tried", |l| l.t3.sent.lock().unwrap().iter().any(|(t, m)| t == "thread-claudeAgent" && m.starts_with("[Heimdall] Your last turn stopped")));
+    assert!(picked.elapsed() < Duration::from_secs(5), "within seconds of the pick, not a scheduled interval");
+    lab.until("tried again with a backoff, still waiting", |l| l.em.state.lock().unwrap().failed_probes >= 3 && l.em.phase() == Phase::NoCover);
+    // Fresh review S3: the retries test the account in a throwaway check thread (archived); the kept thread got one
+    // note, and none says the account works while it still fails.
+    let notes = |l: &Lab| l.t3.sent.lock().unwrap().iter().filter(|(t, m)| t == "thread-claudeAgent" && m.starts_with("[Heimdall] Your last turn stopped")).count();
+    assert_eq!(notes(&lab), 1, "one note per recovery, not one per retry");
+    assert!(lab.t3.sent.lock().unwrap().iter().all(|(_, m)| !m.contains("works again")), "never claims it works");
+    let log = lab.t3.log.lock().unwrap().clone();
+    assert!(log.iter().filter(|l| *l == "check:claudeAgent").count() >= 2 && log.iter().any(|l| l == "archive:check-claudeAgent"), "{log:?}");
+    assert_eq!(launches(&lab), ["launch:claudeAgent"], "the sign-in still fails: nothing new is started");
+    assert!(lab.em.state.lock().unwrap().waiting);
+    let held = |l: &Lab, text: &str| l.t3.sent.lock().unwrap().iter().filter(|(t, m)| t == "thread-claudeAgent" && m.ends_with(text)).count();
+    assert_eq!(held(&lab, "On the left screen."), 1, "held, not sent into a failing account again");
+    // 10:52:26: the user speaks while it waits.
+    (lab.em.relay())(Relayed { id: "w4".into(), kind: "wake".into(), text: "Okay, I think it worked.".into(), images: vec![] });
+    // The sign-in works again.
+    lab.t3.complete.store(true, Ordering::SeqCst);
+    lab.t3.failing.lock().unwrap().clear();
+    lab.until("the same thread covers again", |l| l.em.phase() == Phase::Covering);
+    assert_eq!(launches(&lab), ["launch:claudeAgent"], "the same thread, not a new one");
+    assert_eq!(lab.em.state.lock().unwrap().thread.as_deref(), Some("thread-claudeAgent"));
+    lab.until("every held message follows, in order", |l| held(l, "Okay, I think it worked.") == 1);
+    assert_eq!(notes(&lab), 2, "the second note only after the account check answered");
+    let sent = lab.t3.sent.lock().unwrap().clone();
+    let after: Vec<&String> = sent.iter().filter(|(t, _)| t == "thread-claudeAgent").map(|(_, m)| m).skip_while(|m| !m.starts_with("[Heimdall] Your last turn stopped")).collect();
+    let order: Vec<usize> = ["Can you check the housing report?", "And show it to me.", "On the left screen.", "Okay, I think it worked."].iter()
+        .map(|t| after.iter().rposition(|m| m.ends_with(t)).unwrap_or_else(|| panic!("{t} not forwarded: {after:?}"))).collect();
+    assert!(order.windows(2).all(|w| w[0] < w[1]), "in order: {order:?}");
+    lab.until("said plainly", |l| l.side.said.lock().unwrap().iter().any(|x| x == "A on Claude works again; carrying on in the same conversation."));
+    assert!(lab.side.dismissed.lock().unwrap().iter().any(|d| d.ends_with("waiting")), "the waiting line closes");
+    assert_eq!(lab.side.pauses.lock().unwrap().last(), Some(&None), "background work resumes");
+    assert!(lab.em.state.lock().unwrap().resume.is_none());
+    let _ = lab.stop.send(true);
+}
+
+/// Continuing is impossible (T3 keeps refusing messages to the stopped thread): only then a new thread, and Heimdall
+/// says why.
+#[test]
+fn a_stopped_thread_that_cannot_continue_gives_way_to_a_new_one_said_why() {
+    let lab = Lab::new(&[]);
+    relay_sign_in_fails_and_owner_waits(&lab);
+    lab.t3.send_fails.store(true, Ordering::SeqCst);
+    lab.pick(RECOVERY, "Wait for Claude");
+    lab.t3.failing.lock().unwrap().clear();
+    lab.t3.complete.store(true, Ordering::SeqCst);
+    lab.until("tries run out", |l| l.em.state.lock().unwrap().resume.is_none());
+    lab.t3.send_fails.store(false, Ordering::SeqCst);
+    lab.until("a new thread covers", |l| l.em.phase() == Phase::Covering && launches(l).len() == 2);
+    assert_eq!(launches(&lab)[1], "launch:claudeAgent", "the same account and model, in a new thread");
+    let said = lab.side.said.lock().unwrap().clone();
+    // Fresh review S2: one plain sentence; the thread id and T3's raw error never reach his ears.
+    assert!(said.iter().any(|x| x == "I couldn't continue the old relay conversation: T3 kept refusing it. Starting a new one."), "{said:?}");
+    assert!(said.iter().all(|x| !x.contains("thread-claudeAgent") && !x.contains("T3 is not answering")), "{said:?}");
+    let _ = lab.stop.send(true);
+}
+
+/// An agent restart while the user waits (the supervisor's `choose` on every start) keeps the wait for the stopped thread.
+#[test]
+fn a_restart_while_waiting_keeps_the_stopped_thread() {
+    let lab = Lab::new(&[]);
+    relay_sign_in_fails_and_owner_waits(&lab);
+    lab.pick(RECOVERY, "Wait for Claude");
+    lab.until("waiting", |l| l.em.phase() == Phase::NoCover);
+    lab.em.choose(true);
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(launches(&lab), ["launch:claudeAgent"], "no new thread from a restart");
+    assert!(lab.em.state.lock().unwrap().resume.as_ref().is_some_and(|r| r.thread == "thread-claudeAgent"));
+    let _ = lab.stop.send(true);
+}
+/// Heimdall itself restarts while the user waits (review): the wait and the stopped thread survive, and once the sign-in
+/// works the same thread carries on; nothing new is launched.
+#[test]
+fn a_heimdall_restart_while_waiting_continues_the_same_thread() {
+    let lab = Lab::new(&[]);
+    relay_sign_in_fails_and_owner_waits(&lab);
+    lab.pick(RECOVERY, "Wait for Claude");
+    lab.until("waiting", |l| l.em.phase() == Phase::NoCover && l.em.state.lock().unwrap().waiting);
+    let _ = lab.stop.send(true);
+    let Lab { _dir, rt, .. } = lab;
+    rt.shutdown_timeout(Duration::from_secs(2));
+    let lab = Lab::at(_dir, &[]);
+    second_claude(&lab);
+    lab.t3.complete.store(true, Ordering::SeqCst);
+    lab.until("the same thread covers after the restart", |l| l.em.phase() == Phase::Covering);
+    assert!(launches(&lab).is_empty(), "no new thread: {:?}", launches(&lab));
+    assert_eq!(lab.em.state.lock().unwrap().thread.as_deref(), Some("thread-claudeAgent"));
+    assert!(lab.t3.sent.lock().unwrap().iter().any(|(t, m)| t == "thread-claudeAgent" && m.starts_with("[Heimdall] Your last turn stopped")));
+    let _ = lab.stop.send(true);
+}
+
+/// DOC-21 (cleanup 14 Nov): what the relay thread is told goes out as the built-in agent's own text does: the user's words
+/// byte for byte; a renamed user by their name, never "the user".
+#[test]
+fn relay_messages_name_the_configured_user() {
+    let owner = agent::identity::Names { assistant: "Heimdall".into(), user: "User".into() };
+    let ada = agent::identity::Names { assistant: "Heimdall".into(), user: "Ada".into() };
+    for line in [SWITCHED_BACK, SWITCHED_MODEL, WENT_BACK, WRAP_UP] {
+        // The fixed lines are filled where they are sent (`agent::identity::tokens`), then worded like Pi's own text.
+        assert_eq!(relay_worded(&agent::identity::tokens(line, &owner), &owner), { let s = line.replace("{user}", "the user"); let mut c = s.chars(); c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default() });
+        let renamed = relay_worded(&agent::identity::tokens(line, &ada), &ada);
+        assert!(renamed.contains("Ada") && !renamed.contains("User"), "{renamed}");
+    }
+    assert_eq!(relay_worded(&agent::identity::tokens(SWITCHED_BACK, &ada), &ada), "Ada switched Heimdall back to his built-in agent. Stop acting for him now; his tools stop working for you.");
 }

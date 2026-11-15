@@ -135,7 +135,6 @@ struct Live {
     speech: Shared,
     retire: Shared,
     sent: Arc<AtomicU64>,
-    retired: Arc<Mutex<Vec<String>>>,
     writer: records::Writer,
 }
 impl Live {
@@ -205,7 +204,7 @@ impl Live {
                 }
             }));
         }
-        Self { stop, threads, listen, agent, speech, retire, sent, retired, writer }
+        Self { stop, threads, listen, agent, speech, retire, sent, writer }
     }
     /// Stops the writers, flushes listen evidence, and checks every limit (panics after printing them all).
     fn finish(self, label: &str) {
@@ -319,7 +318,7 @@ fn hold_in_child(root: &Path, hold: Duration) -> std::process::Child {
         .unwrap()
 }
 #[test]
-#[ignore]
+#[ignore = "subprocess helper of a_second_process_holding_the_lock_stalls_no_live_path"]
 fn child_holds_the_lock() {
     let Ok(root) = std::env::var("HARDENING_ROOT") else { return };
     let hold: u64 = std::env::var("HARDENING_HOLD_MS").unwrap().parse().unwrap();
@@ -467,7 +466,7 @@ fn a_crash_mid_step_loses_nothing_committed_and_the_work_resumes() {
 /// is back within its 64 MB limit. Writes the index to a temp folder and deletes it.
 /// `cargo test -p heimdall-archive --release --test hardening -- --ignored --nocapture realistic_size`
 #[test]
-#[ignore]
+#[ignore = "lab: 11.5 GB index for a minute, release build"]
 fn realistic_size_with_a_long_reader() {
     let _one = serial();
     support::throttle::install();

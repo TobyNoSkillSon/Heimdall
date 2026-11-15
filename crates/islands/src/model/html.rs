@@ -475,7 +475,9 @@ pub fn visible_text(html: &str) -> String {
 
 /// Heimdall's dark island style for model HTML: the system's neutrals and four accents as CSS variables (
 /// neutrals by default, the Goals green and Heimdall's blue as accents, orange and red only for a block or a failure;
-/// the retired hues are neutral aliases), SF at 13 pt, tabular figures, and a few helper classes the prompt names. Animations and transitions are off (the body is a still).
+/// the retired hues are neutral aliases), SF at 13 pt, tabular figures, and a few helper classes the prompt names:
+/// `rows` of `r` status rows (6 Nov: a row of 11-pt grey pills was the unreadable island) with a `dot` for the one
+/// in hand and `hollow` for one waiting. Animations and transitions are off (the body is a still).
 pub const BASE_CSS: &str = r#":root{color-scheme:dark;--ink:rgba(255,255,255,.92);--ink2:rgba(255,255,255,.58);--ink3:rgba(255,255,255,.34);--line:rgba(255,255,255,.12);--fill:rgba(255,255,255,.07);--blue:#0A84FF;--green:#30D158;--orange:#FF9F0A;--red:#FF453A;--grey:var(--ink2);--purple:var(--ink2);--pink:var(--ink2);--cyan:var(--ink2);--teal:var(--ink2);--indigo:var(--ink2);--yellow:var(--ink2);--mint:var(--ink2)}
 *{box-sizing:border-box;animation:none!important;transition:none!important}
 html,body{margin:0;padding:0;background:transparent;overflow:hidden}
@@ -494,6 +496,8 @@ ul,ol{margin:0;padding-left:18px}li{margin:1px 0}hr{border:0;border-top:.5px sol
 .bar{height:6px;border-radius:3px;background:var(--fill);overflow:hidden}.bar>i{display:block;height:100%;border-radius:3px;background:var(--ink)}
 .pill{display:inline-block;padding:1px 7px;border-radius:9px;background:var(--fill);font-size:11px;font-weight:500}
 .ok{color:var(--green)}.bad{color:var(--red)}.warn{color:var(--orange)}
+.rows{display:flex;flex-direction:column;gap:6px}.r{display:flex;align-items:center;gap:9px;font-size:14px;font-weight:500;color:var(--ink2);line-height:1.25;min-width:0}.r>.v{margin-left:auto;padding-left:10px;color:var(--ink3);font-size:12px;white-space:nowrap}.r.now{color:var(--ink)}.r.now>.v{color:var(--ink2)}.r.wait{color:var(--ink3)}.r>.ok,.r>.bad,.r>.warn{width:12px;text-align:center;font-weight:600}
+.dot{display:inline-block;flex:none;width:8px;height:8px;margin:0 2px;border-radius:4px;background:var(--blue);box-shadow:0 0 6px rgba(10,132,255,.8)}.hollow{display:inline-block;flex:none;width:8px;height:8px;margin:0 2px;border-radius:4px;border:1.5px solid var(--ink3)}
 "#;
 
 /// The whole document the renderer loads: the CSP, the base style, the fragment at `width` points.

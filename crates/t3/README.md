@@ -1,31 +1,53 @@
-# t3 — T3 Code orchestration
+# t3: T3 Code orchestration
 
-Heimdall controls T3 Code as an outside client: it pairs once, starts tasks and follows them for the agent under T3's
-own orchestrator v2 tool names (`delegate_task`, `task_status`, `task_cancel`, `t3_thread_list/read/send`), passes the
-rest of the orchestrator's catalog through (`t3_tools` / `t3_call`), and wakes the agent when a task is done (T3's
-`waiting_for_children` rule), when a run it sent a message into ends, or when any thread asks a question. It never
-borrows provider credentials or reads T3's database.
+Heimdall drives T3 Code as an outside client: it pairs once, starts and follows tasks under T3's own orchestrator v2
+tool names, passes the rest of T3's catalog through, and wakes the agent when followed work ends or asks something. It
+never borrows provider credentials or reads T3's database.
 
-**Owns:** `Client` (local server discovery, pairing, token renewal, revocation, T3's error text with secrets
-redacted; `CredentialStore`, `Keychain`), `Workers` (tasks and watched runs in `t3-workers.sqlite`: durable
-operations, open sub-agents and background commands, held turns, retired payloads; the default task prompt above
-every brief and the task-started hook that binds a job island), `threads` (the thread tools and
-the compact forms of T3 results), `observer` (thread status and wakes for questions and approvals), `orchestrator`
-(pass-through listing, approval checks), `text` (every line the agent reads: plain text, replies and questions in
-full).
+Read this when: you change how the agent starts, follows or answers T3 tasks, the T3 pairing, account failover or the
+T3 install step of Setup.
+Code: `crates/t3/src/`; the agent's tool descriptions are in `crates/agent/src/mcp_contract.rs`.
 
-**Interface:** `t3::{Client, CredentialStore, Keychain, Workers}`, `t3::client::Credential`,
-`t3::orchestrator::{approves, check, listing}`, `t3::threads::compact`. Uses `agent::delivery::{DeliveryGate,
-DeliveryPermit}` and `agent::actions::Actions` (shared runtime objects owned by the harness); everything else is local.
+## Modules
 
-**Used by:** `crates/app/src/mcp_actions.rs` and `bridge/` (the agent's T3 tools), `islands/` (thread-bound islands),
-`emergency.rs` (the cover thread) and `plan_refresher.rs`.
+| Module | Owns |
+|---|---|
+| `client` | `Client`: local server discovery, pairing, token renewal, revocation, T3 error text with secrets redacted; `CredentialStore`, `Keychain`, `client::Credential` |
+| `workers` | `Workers`: tasks and watched runs in `<data>/agent/t3-workers.sqlite` (durable operations, open sub-agents and background commands, held turns, retired payloads), the default task prompt above every brief, the task-started hook that binds a job island; `ApprovalWait` |
+| `threads` | `t3_thread_list` and `t3_thread_read`, and `threads::compact` for results that pass through `t3_call` |
+| `observer` | thread status and wakes for questions and approvals |
+| `orchestrator` | `t3_tools` listing and `t3_call` argument and approval checks (`orchestrator::{approves, check, listing}`) |
+| `text` | every line the agent reads from these tools: plain text, worker replies and questions in full |
+| `crew` | crewmates: the crew store `<data>/agent/crew.sqlite` (records, inbox, history, schedules), the `crew_*` tools, the crew pass, the `heimdall --crew` command ([docs/crew.md](../../docs/crew.md)) |
+| `failover` | moves a task whose turn hit a Claude usage limit to another Claude account in T3 that has quota |
+| `install` | finds T3 Code, checks it speaks orchestrator v2, installs the newest public release (Setup) |
+| `lib.rs` | `waits_on_approval`, and the pending-question calls on `t3_pending_request` (`question_ids`, `read_question`, `answer_question`) |
 
-**Testing:** `cargo nextest run -p t3`: 83 tests plus two ignored lab tests (counted from the test attributes, 27 Oct),
-with fake T3 servers (`tests/tasks.rs` has threads with runs and timelines like the real one; plus the plain-text
-formats). The ignored ones: `live_readonly_smoke_against_running_t3` reads a running T3 without mutating it;
-`live_store_copy_reloads_its_followed_work` shows what a copy of the live store reloads after a restart.
-A Claude Monitor counts as background work until its stop, a TaskStop or its timeout; a persistent one (no
-timeout) counts 30 minutes, after which its event turns wake Heimdall again as ordinary turns (accepted: such
-monitors are rare, and a forgotten one must not hold results for good).
-Reference: `docs/t3-orchestration.md`; live evidence fixtures in `tests/fixtures/`.
+The agent's tools by name: `delegate_task`, `task_status`, `task_cancel`, `t3_thread_list`, `t3_thread_read`,
+`t3_thread_send`, `t3_tools`, `t3_call`, and the crew's `crew_add`, `crew_tell`, `crew_status`, `crew_change`,
+`crew_schedule`, `crew_retire`.
+
+Uses `agent::delivery::{DeliveryGate, DeliveryPermit}` and `agent::actions::Actions` (shared objects the harness owns)
+and `heimdall-emergency` (recording approvals its permission hook answered). Feature `public`: the public edition's own Keychain name for the T3 pairing.
+
+Used by `crates/app/src/mcp_actions.rs`, `bridge/`, `islands/`, `emergency.rs`,
+`background_t3.rs`, `background_fallback.rs` and `setup_wizard.rs`.
+
+## Tests
+
+- `cargo test -p t3`. Every test runs against a local fake T3 server and never creates real threads:
+  `tests/tasks.rs` (threads with runs and timelines like the real server), `tests/orchestrator.rs` (pass-through,
+  pairing, wakes), `tests/t3.rs`, `tests/live_tools.rs` (every tool name, argument key and `action` Heimdall sends,
+  checked against T3 Code 0.1.6's recorded catalog in `tests/fixtures/t3-0.1.6-tools.json`).
+- Ignored lab checks:
+  - `live_readonly_smoke_against_running_t3` (`tests/orchestrator.rs`): `HEIMDALL_T3_LIVE=1 cargo test -p t3 --test
+    orchestrator live_readonly -- --ignored`. Issues a five-minute read-only session through T3's CLI and revokes it.
+  - `live_store_copy_reloads_its_followed_work` (`tests/tasks.rs`): `HEIMDALL_T3_DB_COPY=<copy of
+    t3-workers.sqlite> cargo test -p t3 --test tasks live_store_copy -- --ignored --nocapture`. Use a copy, never the
+    live file: opening migrates it.
+
+## See also
+
+- [t3-orchestration.md](../../docs/t3-orchestration.md): tool behaviour, wakes, held turns, monitors and approvals
+- [background-call.md](../../docs/background-call.md): background jobs that run as T3 tasks
+- [setup.md](../../docs/setup.md): the T3 Code step

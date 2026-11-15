@@ -210,10 +210,7 @@ fn extract(
                 content.push(json!({"type":"text","text":metadata.to_string()}));
                 content.push(json!({"type":"image","mimeType":if args["quality"]=="full"{"image/png"}else{"image/jpeg"},"data":encoded}));
             }
-            Err(_) => warnings.push(format!(
-                "Frame at {} could not be decoded; choose another time",
-                utc(wall)
-            )),
+            Err(e) => warnings.push(undecoded(&e, utc(wall), &permit, &cancellation)?),
         }
     }
     ensure!(
@@ -227,9 +224,32 @@ fn extract(
     Ok(json!({"content":content}))
 }
 
+/// The warning for a frame that failed: logged with its reason. A stop (the Agent turned off, the call dropped) fails
+/// the call as itself instead: it used to read "could not be decoded; choose another time".
+fn undecoded(error: &anyhow::Error, at: String, permit: &DeliveryPermit, cancellation: &crate::index::SearchCancellation) -> Result<String> {
+    permit.check()?;
+    ensure!(!cancellation.cancelled(), "archive search cancelled");
+    eprintln!("screen_frames: frame at {at} not decoded: {error:#}");
+    Ok(format!("Frame at {at} could not be decoded; choose another time"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// ARC-26: a frame failing because the call was stopped said "could not be decoded; choose another time".
+    #[test]
+    fn a_stopped_call_is_not_an_undecodable_frame() -> Result<()> {
+        let d = tempfile::tempdir()?;
+        let tools = crate::bridge::Tools::new(d.path(), d.path());
+        let p = tools.agent_enabled.permit()?;
+        let cancellation = Arc::new(crate::index::SearchCancellation::new());
+        let failed = anyhow::anyhow!("interrupted");
+        assert_eq!(undecoded(&failed, "12:00".into(), &p, &cancellation)?, "Frame at 12:00 could not be decoded; choose another time");
+        drop(crate::index::CancelSearch(cancellation.clone()));
+        let stopped = undecoded(&failed, "12:00".into(), &p, &cancellation).unwrap_err().to_string();
+        assert!(stopped.contains("cancelled") && !stopped.contains("decoded"), "{stopped}");
+        Ok(())
+    }
     #[tokio::test]
     async fn archived_fixture_metadata_preview_and_seeing_off() -> Result<()> {
         let d = tempfile::tempdir()?;

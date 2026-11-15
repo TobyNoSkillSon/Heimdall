@@ -6,7 +6,7 @@ exclude = ["crates/drama-engine"]
 
 [workspace.package]
 edition = "2021"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 license = "Apache-2.0"
 
 [workspace.dependencies]
@@ -27,6 +27,9 @@ codegen-units = 1
 # overflow checks stay on. Unoptimized model and DSP code made the model tests 5-10x slower.
 [profile.test]
 opt-level = 1
-# Line tables only: panics and backtraces keep file and line; no variable-level debug info, which no check reads.
-# Cold test build 1131 s -> 746 s at two jobs, test target 16 -> 12 GB (lab/build-speed, 1 Nov).
-debug = "line-tables-only"
+# No debug info (cleanup 14 Nov). Panic messages keep their file and line (compiled in); backtraces keep function
+# names but lose line numbers, which no test reads. With line tables, macOS kept every test binary's object files in
+# target/test/debug/deps (217,564 files on 13 Nov), and every test that first draws text had CoreText list that folder:
+# a menu-caption test took 1.5-3 s instead of 0.06 s. Before: line tables only, which had cut the cold test build from
+# 1131 s to 746 s at two jobs (lab/build-speed, 1 Nov).
+debug = false

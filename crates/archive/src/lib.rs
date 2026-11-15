@@ -15,6 +15,8 @@ pub mod diagnostics;
 pub mod event_timeline;
 pub mod snapshot;
 pub mod timeline;
+pub mod vector_index;
+pub mod rerank;
 pub mod store;
 pub mod video;
 pub use snapshot::View;

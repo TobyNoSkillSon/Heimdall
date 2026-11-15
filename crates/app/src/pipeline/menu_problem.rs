@@ -68,7 +68,6 @@ mod tests {
             ("screen", "Screen paused: display asleep"),
             ("screen", "Screen retry 2 in 4s"),
             ("command-decision", "Command not acted on: x"),
-            ("agent-screen", "Screenshot unavailable"),
             ("speech", "Speech replies off"),
             ("call-context", "Call context waiting on unavailable speaker labels; retained in archive"),
         ] {

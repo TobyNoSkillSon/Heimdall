@@ -13,24 +13,23 @@ fn main() {
     println!("cargo:rerun-if-changed=runtime/tool-guardian.c");
     println!("cargo:rustc-check-cfg=cfg(test_guardian_available)");
     let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
-    // The relay's system prompt (`relay_prompt`): the relay section, Heimdall's prompt and the skills index, per edition.
+    // The relay's system prompt (`relay_prompt`): the relay section, Heimdall's general prompt and the general skills'
+    // index. One text for every edition; the private layer is added at runtime from the user's data folder.
     let dir = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
     println!("cargo:rerun-if-changed=src/skill_index.rs");
-    for public in [false, true] {
-        let (relay, prompt, sets) = skill_index::sources(public);
-        for path in [relay, prompt, sets[0], sets[1]] {
-            println!("cargo:rerun-if-changed={path}");
-        }
-        // A directory only reruns on its own entries' change; each skill folder and SKILL.md too.
-        for set in sets {
-            for entry in std::fs::read_dir(dir.join(set)).into_iter().flatten().flatten() {
-                println!("cargo:rerun-if-changed={set}/{}", entry.file_name().to_string_lossy());
-                println!("cargo:rerun-if-changed={set}/{}/SKILL.md", entry.file_name().to_string_lossy());
-            }
-        }
-        let text = skill_index::compose_from(&dir, public).expect("relay prompt sources");
-        std::fs::write(out.join(if public { "relay-public.md" } else { "relay.md" }), text).expect("write relay prompt");
+    let (relay, prompt, sets) = skill_index::sources();
+    for path in [relay, prompt, sets[0], sets[1]] {
+        println!("cargo:rerun-if-changed={path}");
     }
+    // A directory only reruns on its own entries' change; each skill folder and SKILL.md too.
+    for set in sets {
+        for entry in std::fs::read_dir(dir.join(set)).into_iter().flatten().flatten() {
+            println!("cargo:rerun-if-changed={set}/{}", entry.file_name().to_string_lossy());
+            println!("cargo:rerun-if-changed={set}/{}/SKILL.md", entry.file_name().to_string_lossy());
+        }
+    }
+    let text = skill_index::compose_from(&dir).expect("relay prompt sources");
+    std::fs::write(out.join("relay.md"), text).expect("write relay prompt");
     let object = out.join("tool-guardian.o");
     let debug = std::env::var("PROFILE").unwrap() == "debug";
     compile(if debug { &["-c", "-DHEIMDALL_GUARDIAN_TEST_FAULTS"] } else { &["-c"] }, &object);

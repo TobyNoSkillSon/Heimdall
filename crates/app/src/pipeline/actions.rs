@@ -334,12 +334,6 @@ impl Pipeline {
                 self.apply_menu_settings(next)?;
                 if live { self.thinking_changed()?; }
             }
-            ui::UiAction::SetProviderCredit { provider, usd } => {
-                if provider != agent::provider::ANTHROPIC || !ui_credit_choice(usd) { return Ok(()); }
-                let mut next = self.settings.clone();
-                next.anthropic_credit_usd = usd;
-                self.apply_menu_settings(next)?;
-            }
             // A provider connected: its default model joins the list. The agent keeps a model it has: a connection is not
             // a pick (30 Oct 01:2x; until then it became the agent's model). An agent with nothing chosen (the public
             // edition's blank start: Setup's Codex or OpenCode Go tile, a first key) takes it. A catalog not loaded yet
@@ -405,7 +399,7 @@ impl Pipeline {
                 #[cfg(not(test))]
                 if matches!(action, ui::speech_voice::SpeechVoiceAction::SetLocal(_) | ui::speech_voice::SpeechVoiceAction::SetPreset(_)
                     | ui::speech_voice::SpeechVoiceAction::SetElevenLabsVoice { .. } | ui::speech_voice::SpeechVoiceAction::SetOwnVoice { .. }
-                    | ui::speech_voice::SpeechVoiceAction::SetApi(true)) && !self.replay {
+                    | ui::speech_voice::SpeechVoiceAction::SetApi(true)) && !self.replay && !crate::remote_settings::from_phone() {
                     self.tools.preview_voice();
                 }
                 self.tools.speech_voices.publish();
@@ -460,16 +454,6 @@ impl Pipeline {
             ui::UiAction::Health { control: ui::HealthControl::ShowArchive, .. } => {
                 std::process::Command::new("/usr/bin/open").arg(self.data.join("archive")).spawn()?;
             }
-            ui::UiAction::SetArchiveFormat(_) => {
-                self.settings.archive_format = settings::ArchiveFormat::NativeLossless;
-                self.settings.archive_choice_pending = false;
-            }
-            ui::UiAction::SetRetentionDays(_) => {
-                self.settings.retention_days = 0;
-            }
-            ui::UiAction::RestartSession => {
-                self.restart_agent()?;
-            }
             // speech-policy (night 3): Speaking ▸ Wake Sound.
             ui::UiAction::SetWakeSound(b) => {
                 let mut next = self.settings.clone(); next.wake_sound = b; self.apply_menu_settings(next)?;
@@ -481,9 +465,16 @@ impl Pipeline {
             ui::UiAction::SetIslandsShown(shown) => {
                 let mut next = self.settings.clone(); next.islands_hidden = !shown; self.apply_menu_settings(next)?;
             }
+            // Islands Display (night 1107, bug note 2026-11-07T02-02-35): follow the pointer or stay on one display.
+            ui::UiAction::SetIslandsDisplay(display) => {
+                let mut next = self.settings.clone(); next.islands_display = display; self.apply_menu_settings(next)?;
+            }
             // Show Islands on Streams: the UI has already applied it to its windows; this keeps it.
             ui::UiAction::SetIslandsOnStreams(b) => {
                 let mut next = self.settings.clone(); next.islands_on_streams = b; self.apply_menu_settings(next)?;
+            }
+            ui::UiAction::SetComputerControl(b) => {
+                let mut next = self.settings.clone(); next.computer_control = b; self.apply_menu_settings(next)?;
             }
             ui::UiAction::SetSpeakReplies(b) => {
                 let mut next = self.settings.clone(); next.speak_replies = b; self.apply_menu_settings(next)?;
@@ -494,7 +485,8 @@ impl Pipeline {
                 self.apply_menu_settings(next)?;
                 // "whenever I change the slider, the sample sound should be … shown like how fast
                 // do you actually speak".
-                if !self.replay {
+                // Not for a speed chosen on the phone (remote_settings.rs `from_phone`).
+                if !self.replay && !crate::remote_settings::from_phone() {
                     if let Err(e) = self.tools.play_voice_sample() {
                         crate::diagnostics::record(&self.evidence, "voice_sample", "heimdall:voice", serde_json::json!({"error":format!("{e:#}")}));
                     }

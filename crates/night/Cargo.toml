@@ -18,7 +18,6 @@ hound = "3.5"
 tempfile = "3"
 libc = "0.2"
 sha2 = "0.10"
-zstd = "0.13"
 
 [[bin]]
 name = "heimdall-night"

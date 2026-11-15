@@ -1672,6 +1672,13 @@ fn api_checks(mtm: MainThreadMarker) -> Vec<String> {
         && super::streams::sharing() == NSWindowSharingType::ReadOnly);
     super::with_state_now(|s| s.apply(UiUpdate::Settings(crate::Settings { islands_on_streams: false, ..s.settings_value.clone() })));
     check("the app's settings turn it off again", streams_on() == Some(false) && super::streams::sharing() == NSWindowSharingType::None);
+    // Agent ▸ Control Apps: off by default; a click tells the app; the app's settings turn it off again.
+    let control_on = || super::with_state_now(|s| s.computer_control_row.as_ref().map(|r| r.is_on())).flatten();
+    check("Control Apps starts off", control_on() == Some(false));
+    super::check_row_clicked(super::menu::COMPUTER_CONTROL_ROW);
+    check("a click on Control Apps turns it on and tells the app", control_on() == Some(true) && last() == Some(UiAction::SetComputerControl(true)));
+    super::with_state_now(|s| s.apply(UiUpdate::Settings(crate::Settings { computer_control: false, ..s.settings_value.clone() })));
+    check("the app's settings turn Control Apps off again", control_on() == Some(false));
     super::STATE.with(|s| *s.borrow_mut() = previous);
     failures
 }
@@ -1798,3 +1805,36 @@ fn api_switch_checks(mtm: MainThreadMarker) -> Vec<String> {
     super::STATE.with(|s| *s.borrow_mut() = previous);
     failures
 }
+
+// ---- islands display (night 1107, bug note 2026-11-07T02-02-35) ----
+/// Islands Display ▸ in each state, dark and light (`render_islands_display`).
+pub(crate) fn islands_display(dir: &Path) -> Vec<String> {
+    let mtm = MainThreadMarker::new().expect("renders run on the main thread");
+    NSApplication::sharedApplication(mtm).setActivationPolicy(NSApplicationActivationPolicy::Prohibited);
+    std::fs::create_dir_all(dir).ok();
+    let mut failures = vec![];
+    let both = ["Built-in Retina Display".to_string(), "MSI MAG 271QPX".to_string()];
+    let laptop = ["Built-in Retina Display".to_string()];
+    for (name, connected, locked) in [
+        ("follow", &both[..], None),
+        ("locked-msi", &both[..], Some("MSI MAG 271QPX")),
+        ("locked-msi-unplugged", &laptop[..], Some("MSI MAG 271QPX")),
+    ] {
+        let (rows, sub) = super::menu::islands_display_preview(connected, locked, mtm);
+        for (appearance, dark) in [("dark", true), ("light", false)] {
+            for (what, menu) in [("rows", &rows), ("submenu", &sub)] {
+                if what == "rows" && name != "follow" {
+                    continue;
+                }
+                let path = dir.join(format!("menu-islands-display-{what}-{name}-{appearance}.png"));
+                let ok = stack(&path, menu, dark, mtm);
+                eprintln!("render {} {}", path.display(), if ok { "ok" } else { "FAILED" });
+                if !ok {
+                    failures.push(path.display().to_string());
+                }
+            }
+        }
+    }
+    failures
+}
+// ---- end islands display ----

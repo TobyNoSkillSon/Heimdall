@@ -202,7 +202,7 @@ async fn a_connect_that_times_out_is_free_and_retried() {
 }
 
 // ---------------------------------------------------------------------------------------------------------
-// The tool loop (`run_tools`), scripted: no network. A response is what the Messages API would return.
+// The tool loop (`run_tools_on`, Anthropic's Messages format at Anthropic's prices), scripted: no network. A response is what the Messages API would return.
 
 fn tool_use(id: &str, name: &str, input: Value) -> Value {
     json!({"type": "tool_use", "id": id, "name": name, "input": input})
@@ -219,7 +219,7 @@ fn tools() -> Vec<Tool> {
     ]
 }
 
-/// Runs `run_tools` against scripted responses, recording every body sent and every tool call made.
+/// Runs `run_tools_on` against scripted responses, recording every body sent and every tool call made.
 fn scripted(c: &Call, script: Vec<Value>, limit: f64, rounds: usize) -> (Result<Answer>, Vec<Value>, Vec<String>) {
     let mut bodies: Vec<Value> = vec![];
     let mut calls: Vec<String> = vec![];
@@ -232,7 +232,8 @@ fn scripted(c: &Call, script: Vec<Value>, limit: f64, rounds: usize) -> (Result<
         calls.push(format!("{name} {}", input["words"].as_str().unwrap_or("")));
         format!("result for {name}")
     };
-    let answer = run_tools(c, &tools(), "submit", rounds, limit, &mut run, &mut send);
+    let l = Loop { wire: Wire::Anthropic, limit: Some(limit), max_output: None, reasoning: true, efforts: 0 };
+    let answer = run_tools_on(&l, c, &tools(), "submit", rounds, &mut run, &mut send);
     drop(send);
     (answer, bodies, calls)
 }
@@ -645,6 +646,10 @@ fn day_timeline_call() -> Call<'static> {
 /// Every format's request for the fixture, as fingerprints (Messages priced and unpriced, chat completions, Responses,
 /// the T3 message).
 fn fingerprints(c: &Call) -> [u64; 5] {
+    // As `ask` sends it: the system prompt's {user} filled (the user's profile here, byte for byte as before 14 Nov).
+    let names = agent::identity::current();
+    let system = agent::identity::for_agent(&agent::identity::tokens(c.system, &names), &names);
+    let c = &edition_worded(c, &system);
     let l = |wire| Loop { wire, limit: None, max_output: None, reasoning: true, efforts: 0 };
     [fnv(&prepare(c).unwrap().body.to_string()), fnv(&wire::answer_body(&l(Wire::Anthropic), c, 32_000).to_string()),
      fnv(&wire::answer_body(&l(Wire::ChatCompletions), c, 0).to_string()), fnv(&wire::answer_body(&l(Wire::Responses), c, 0).to_string()),
@@ -653,12 +658,12 @@ fn fingerprints(c: &Call) -> [u64; 5] {
 
 /// The fingerprints were taken from the code before rolling sessions existed (31 Oct): a job without history or session
 /// sends the very same bytes on every format. (The day timeline's own prompt changing moves its row: re-take it then;
-/// re-taken 4 Nov for the public edition's rewritten prompt.)
+/// re-taken 4 Nov for the public edition's rewritten prompt, and 14 Nov for its owner-name wording.)
 #[test]
 fn a_job_without_history_sends_the_same_bytes_as_before_rolling_sessions() {
     let dt = day_timeline_call();
     assert!(dt.history.is_empty() && dt.session.is_none());
-    assert_eq!(fingerprints(&dt), [0x90c65402e578a6a9, 0x663eb387fcd7860b, 0x70c50e60f85040ab, 0x7012364b4c4d2b55, 0x0e350c1749348af3]);
+    assert_eq!(fingerprints(&dt), [0x4134a43d4a20052e, 0xf0f731ca984e3648, 0xa0021f74bbdb8e0c, 0x1bb617f37d759d99, 0xb7add19e4357813c]);
     assert_eq!(fingerprints(&call("claude-haiku-5-5", two_stretches("10:00"))), [0x0db81918bb49497e, 0x23545aa84a70536c, 0x6d035a50b5c5a2fa, 0x85c808c3e7e16307, 0x02a29b28fea48cf1]);
 }
 
@@ -775,4 +780,25 @@ fn a_live_job_never_runs_above_its_own_effort() {
     assert_eq!(capped_effort(crate::suggester::JOB, "low", own), "low");
     assert_eq!(capped_effort("plan refresher", "max", "high"), "max");
     assert_eq!(capped_effort("island agent", "minimal", "medium"), "minimal");
+}
+
+/// Bug note 2026-11-08T02-03-41: a request too large for the model (here a fake API's 400 "prompt is too long") is
+/// settled, so the job never resends it unchanged; a 500 stays a plain failure, retried later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_too_large_is_settled_and_a_server_error_is_retried() {
+    use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
+    async fn messages(State(code): State<u16>) -> (StatusCode, Json<Value>) {
+        let message = if code == 400 { "prompt is too long: 250000 tokens > 200000 maximum" } else { "internal error" };
+        (StatusCode::from_u16(code).unwrap(), Json(json!({"type": "error", "error": {"type": "invalid_request_error", "message": message}})))
+    }
+    for (code, settles) in [(400u16, true), (413, true), (500, false)] {
+        let app = Router::new().route("/v1/messages", post(messages)).with_state(code);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let e = Endpoint { base, key: Some("sk-test".into()), workspace: None, timeout: Duration::from_secs(10), model: None, ..Default::default() };
+        let err = ask(&e, &call("claude-haiku-5-5", "x".into())).await.unwrap_err();
+        assert_eq!(settled(&err), settles, "HTTP {code}: {err:#}");
+    }
+    assert!(!too_large(400, "model not found") && !too_large(500, "prompt is too long") && too_large(422, "context_length_exceeded"));
 }

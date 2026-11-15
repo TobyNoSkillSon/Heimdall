@@ -305,28 +305,31 @@ fn cold_evidence_vectors_are_exact_and_new_image_reuse_restores_hot_bytes() {
 }
 #[test]
 fn native_48k_fractional_callback_boundaries_export_every_cold_sample() {
-    let t = tempfile::tempdir().unwrap();
-    let root = t.path().join("archive");
-    let (db, seg) = segment(&root);
-    let pcm: Vec<_> = (0..48000).map(|i| (i as f32 * 0.053).sin() * 0.2).collect();
-    let mut ids = vec![];
-    for (n, samples) in pcm.chunks(512).enumerate() {
-        ids.push(block_at(&db, seg, "mic", n as u64 * 512 * 1_000_000_000 / 48000, 48000, samples));
+    // An app goes cold at 16 kHz; the mic, a voice source, at its 48 kHz capture rate (13 Nov).
+    for (source, cold_rate) in [("process", 16_000usize), ("mic", 48_000)] {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("archive");
+        let (db, seg) = segment(&root);
+        let pcm: Vec<_> = (0..48000).map(|i| (i as f32 * 0.053).sin() * 0.2).collect();
+        let mut ids = vec![];
+        for (n, samples) in pcm.chunks(512).enumerate() {
+            ids.push(block_at(&db, seg, source, n as u64 * 512 * 1_000_000_000 / 48000, 48000, samples));
+        }
+        compact::compact_audio(&root, DAY_NS + 10_000_000_000, 32000, 10).unwrap();
+        let mut decoded = vec![];
+        for id in &ids {
+            decoded.extend(audio::read_block(&db, *id).unwrap().samples);
+        }
+        assert_eq!(decoded.len(), cold_rate, "{source}");
+        let expected = if cold_rate == 48_000 { pcm.clone() } else { audio::mono_16k(&pcm, 48000, 1).unwrap() };
+        assert!(decoded.iter().zip(&expected).all(|(a, b)| (a - b).abs() <= 1. / 32768.), "{source}");
+        drop(db);
+        let out = t.path().join("training");
+        export::export(&root, &out).unwrap();
+        assert_eq!(std::fs::read_dir(out.join("audio")).unwrap().count(), 1);
+        let timeline: Vec<serde_json::Value> = std::fs::read_to_string(out.join("audio.jsonl")).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(timeline.iter().map(|r| r["data"]["samples"].as_u64().unwrap()).sum::<u64>(), cold_rate as u64, "{source}");
     }
-    compact::compact_audio(&root, DAY_NS + 10_000_000_000, 32000, 10).unwrap();
-    let mut decoded = vec![];
-    for id in &ids {
-        decoded.extend(audio::read_block(&db, *id).unwrap().samples);
-    }
-    assert_eq!(decoded.len(), 16000);
-    let expected = audio::mono_16k(&pcm, 48000, 1).unwrap();
-    assert!(decoded.iter().zip(&expected).all(|(a, b)| (a - b).abs() <= 1. / 32768.));
-    drop(db);
-    let out = t.path().join("training");
-    export::export(&root, &out).unwrap();
-    assert_eq!(std::fs::read_dir(out.join("audio")).unwrap().count(), 1);
-    let timeline: Vec<serde_json::Value> = std::fs::read_to_string(out.join("audio.jsonl")).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
-    assert_eq!(timeline.iter().map(|r| r["data"]["samples"].as_u64().unwrap()).sum::<u64>(), 16000);
 }
 #[test]
 fn exceptional_native_floats_remain_bit_exact_and_do_not_block_other_sources() {
@@ -458,8 +461,115 @@ fn non_speech_opus_keeps_missed_audio_and_missing_vad_defaults_to_flac() {
     assert_eq!(read.samples.len(), signal.len());
     assert!(read.samples.iter().any(|x| x.abs() > 0.01));
     let codec = |id: i64| db.query_row("SELECT o.codec FROM blocks b JOIN audio_objects o ON o.id=b.object_id WHERE b.id=?1", [id], |r| r.get::<_, String>(0)).unwrap();
-    assert_eq!(codec(a), "opus-har1");
+    // The mic is a voice source: its non-speech is fullband Opus at its own rate (13 Nov); the app keeps FLAC 16 kHz.
+    assert_eq!(codec(a), audio::OPUS_NATIVE);
     assert_eq!(codec(b), "flac16");
+}
+/// Bug note 2026-11-12T13-49-07: the user cut clips of his own voice from the archive and heard 16 kHz audio ("I never said
+/// to store low quality audio"). A voice source's speech goes cold as FLAC at its capture rate (a mono microphone
+/// presented as two equal channels is stored mono), its non-speech as Opus at the capture rate; an app keeps 16 kHz
+/// mono; old 16 kHz objects stay readable beside the new ones.
+#[test]
+fn voice_sources_go_cold_at_their_capture_rate_and_old_16k_objects_stay_readable() {
+    let t = tempfile::tempdir().unwrap();
+    let (db, seg) = segment(t.path());
+    // An old cold 16 kHz FLAC object, as compaction stored speech before 13 Nov.
+    let old_signal = speech();
+    let old = block(&db, seg, "process", 0, &old_signal);
+    compact::compact_audio(t.path(), DAY_NS + 3_000_000_000, 32000, 10).unwrap();
+    // Two seconds of 48 kHz speech with energy above 8 kHz (lost at 16 kHz), as two equal channels, on the mic.
+    let mono48: Vec<f32> = (0..96_000).map(|i| (i as f32 * 0.079).sin() * 0.25 + (i as f32 * 1.4).sin() * 0.1).collect();
+    let stereo: Vec<f32> = mono48.iter().flat_map(|x| [*x, *x]).collect();
+    let mic = {
+        let id = audio::put_hot(&db, 48_000, 2, &stereo).unwrap();
+        db.execute(
+            "INSERT INTO blocks(segment,source_id,host_ns,rate,channels,frames,codec,discontinuity,object_id,offset_frames,wall_ns) VALUES(?1,'mic',?2,48000,2,96000,'f32-zstd',0,?3,0,?4)",
+            params![seg, 10_000_000_000i64, id, 11_000_000_000i64],
+        ).unwrap();
+        db.last_insert_rowid()
+    };
+    let other: Vec<f32> = (0..96_000).flat_map(|i| { let x = (i as f32 * 0.05).sin() * 0.2; [x, -x] }).collect();
+    let hot = |source: &str, pcm: &[f32]| {
+        let id = audio::put_hot(&db, 48_000, 2, pcm).unwrap();
+        db.execute(
+            "INSERT INTO blocks(segment,source_id,host_ns,rate,channels,frames,codec,discontinuity,object_id,offset_frames,wall_ns) VALUES(?1,?2,?3,48000,2,96000,'f32-zstd',0,?4,0,?5)",
+            params![seg, source, 10_000_000_000i64, id, 11_000_000_000i64],
+        ).unwrap();
+        db.last_insert_rowid()
+    };
+    let app = hot("process", &other);
+    // An app that played the mic's exact signal at the same time (a monitor): it shares the mic's 48 kHz object
+    // rather than replacing it with a 16 kHz copy.
+    let echo = hot("process-monitor", &stereo);
+    compact::compact_audio(t.path(), DAY_NS + 20_000_000_000, 32000, 10).unwrap();
+    let object = |id: i64| db.query_row("SELECT o.codec,o.rate,o.channels FROM blocks b JOIN audio_objects o ON o.id=b.object_id WHERE b.id=?1", [id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?, r.get::<_, u16>(2)?))).unwrap();
+    assert_eq!(object(mic), ("flac16".into(), 48_000, 1), "voice speech: FLAC at the capture rate, equal channels stored once");
+    assert_eq!(object(app), ("flac16".into(), 16_000, 1), "apps keep the 11 Oct policy");
+    assert_eq!(object(echo), object(mic), "an equal app copy never downgrades the voice object");
+    assert_eq!(object(old), ("flac16".into(), 16_000, 1));
+    let read = audio::read_block(&db, mic).unwrap();
+    assert_eq!((read.rate, read.channels, read.samples.len()), (48_000, 1, 96_000));
+    let worst = read.samples.iter().zip(&mono48).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+    assert!(worst <= 1.0 / 32768.0 + 1e-7, "16-bit FLAC at 48 kHz is the capture to one quantization step: {worst}");
+    assert_eq!(audio::read_block(&db, old).unwrap().samples.len(), old_signal.len(), "old 16 kHz objects stay readable");
+}
+/// Audio past ±1 is never clipped: an app's goes cold as 16 kHz mono float, a voice source's as float at its capture
+/// rate (13 Nov, found on a real day: an app group with a sample at 1.02 failed its verification every pass).
+#[test]
+fn samples_outside_unity_stay_float_in_the_policy_geometry() {
+    let t = tempfile::tempdir().unwrap();
+    let (db, seg) = segment(t.path());
+    let loud: Vec<f32> = (0..48_000).map(|i| (i as f32 * 0.03).sin() * 1.2).collect();
+    let app = block_at(&db, seg, "process", 0, 48_000, &loud);
+    let mic = block_at(&db, seg, "mic", 0, 48_000, &loud.iter().map(|x| x * 0.9).collect::<Vec<_>>());
+    let receipt = compact::compact_audio(t.path(), DAY_NS + 10_000_000_000, 32000, 10).unwrap();
+    assert!(receipt.errors.is_empty(), "{:?}", receipt.errors);
+    let object = |id: i64| db.query_row("SELECT o.codec,o.rate FROM blocks b JOIN audio_objects o ON o.id=b.object_id WHERE b.id=?1", [id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?))).unwrap();
+    assert_eq!(object(app), ("f32-zstd".into(), 16_000));
+    assert_eq!(object(mic), ("f32-zstd".into(), 48_000));
+    let read = audio::read_block(&db, app).unwrap();
+    assert!(read.samples.iter().any(|x| *x > 1.0), "not clipped");
+    assert_eq!(audio::read_block(&db, mic).unwrap().samples.len(), 48_000);
+}
+/// A resampled cold object holds the rounded-up length, so the last callback of a group fits when a reader rounds its
+/// end up (clips of 10 Nov lost up to 0.3 s per 5 minutes to "callback exceeds its audio object").
+#[test]
+fn resampled_cold_objects_cover_the_rounded_up_end() {
+    for (rate, voice, low, out) in [(48_000u32, false, false, 16_000u64), (48_000, false, true, 16_000), (44_100, true, true, 48_000)] {
+        let frames = 48_001u64;
+        let pcm: Vec<f32> = (0..frames).map(|i| (i as f32 * 0.01).sin() * 0.3).collect();
+        let mono = audio::mono_16k(&pcm, rate, 1).unwrap();
+        let cold = compact::encode_cold(&pcm, rate, 1, &mono, voice, low).unwrap();
+        assert_eq!(cold.samples as u64, (frames * out).div_ceil(rate as u64), "{rate} voice={voice} low={low}");
+        let back = audio::decode_object(cold.rate, cold.channels, cold.samples, cold.codec, &cold.bytes).unwrap();
+        assert_eq!(back.samples.len(), cold.samples);
+    }
+    // Stereo native audio going cold as mono keeps its real length (review B1, 13 Nov: the frame count used the cold
+    // channel count, so apps and voice non-speech went cold at twice their length).
+    for (rate, voice, low, out) in [(48_000u32, false, false, 16_000u64), (48_000, false, true, 16_000), (44_100, true, true, 48_000), (48_000, true, true, 48_000)] {
+        let frames = 96_001u64;
+        let pcm: Vec<f32> = (0..frames).flat_map(|i| [(i as f32 * 0.01).sin() * 0.3, (i as f32 * 0.013).cos() * 0.2]).collect();
+        let mono = audio::mono_16k(&pcm, rate, 2).unwrap();
+        let cold = compact::encode_cold(&pcm, rate, 2, &mono, voice, low).unwrap();
+        assert_eq!(cold.channels, 1);
+        let want = (frames * out).div_ceil(rate as u64);
+        assert!(cold.samples as u64 >= want - 1 && cold.samples as u64 <= want, "stereo {rate} voice={voice} low={low}: {} frames, want {want}", cold.samples);
+    }
+}
+/// Non-speech of a voice source: mono Opus at the capture rate keeps the band above 8 kHz that 16 kHz Opus dropped.
+#[test]
+fn voice_non_speech_opus_runs_at_the_capture_rate() {
+    let pcm: Vec<f32> = (0..48_000).map(|i| (i as f32 * 2.0 * std::f32::consts::PI * 10_000.0 / 48_000.0).sin() * 0.2).collect();
+    let mono = audio::mono_16k(&pcm, 48_000, 1).unwrap();
+    let cold = compact::encode_cold(&pcm, 48_000, 1, &mono, true, true).unwrap();
+    assert_eq!((cold.codec, cold.rate, cold.channels), (audio::OPUS_NATIVE, 48_000, 1));
+    let back = audio::decode_object(cold.rate, cold.channels, cold.samples, cold.codec, &cold.bytes).unwrap();
+    let energy = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>() / v.len() as f32;
+    assert!(energy(&back.samples) > energy(&pcm) * 0.5, "a 10 kHz tone survives at 48 kHz");
+    let old = compact::encode_cold(&pcm, 48_000, 1, &mono, false, true).unwrap();
+    let old_back = audio::decode_object(old.rate, old.channels, old.samples, old.codec, &old.bytes).unwrap();
+    assert!(energy(&old_back.samples) < energy(&pcm) * 0.05, "16 kHz loses it");
+    assert!(audio::decode_opus_native(&cold.bytes, 24_000).is_err(), "rate is checked against the catalogue");
 }
 #[test]
 fn real_sigkill_metadata_publication_preserves_audio_and_outputs() {

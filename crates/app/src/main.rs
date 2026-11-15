@@ -1,10 +1,15 @@
-mod audio;
+// Night 1111 [input]: the composer's secret field.
+mod secrets;
+// Which secret store a run gets, and the island pill when the Keychain stops answering (crates/keychain).
+mod keychain_notice;
+mod launch_permissions; // the grants Setup got, checked at every launch: asked again or a pill (an update can drop them)
 mod api_providers;
 mod drama3_verify;
 mod edition;
 mod friends;
 mod archive;
 mod embeddings;
+mod arsenal_yield; // arsenal-yield: Heimdall lets Arsenal have Jarvis's and the indexer's memory (docs/personal/arsenal-yield.md)
 mod bridge;
 mod bugs;
 mod context_policy;
@@ -67,6 +72,35 @@ mod resource_watch; // swap past 2 GB tells the agent once; GPU time per part of
 mod home_change; // the home folder: fixed at start, changed by the setup wizard (docs/home.md)
 mod updates; // in-app updates, public edition only (docs/updates.md)
 mod model_store; // first-run model downloads into <data>/models, public edition (docs/models.md)
+#[cfg(feature = "phone")]
+mod remote; // the phone endpoint: one loopback listener for the phone's bridge
+#[cfg(feature = "phone")]
+mod remote_jobs; // the phone's job islands and thread questions, tapped from the islands host (docs/remote.md)
+#[cfg(feature = "phone")]
+mod remote_presence; // point 10: arriving home or leaving wakes the agent with one short notice
+#[cfg(feature = "phone")]
+mod remote_listen; // 13 Nov: a press, an audio turn or the live mic with Listening off turns it on and waits for its models
+#[cfg(feature = "phone")]
+mod remote_settings; // the phone's copy of the menu's switches, both ways (docs/remote.md, "Settings")
+#[cfg(feature = "phone")]
+mod phone_mic; // the phone's live microphone: one more microphone in the listening pipeline (docs/remote.md)
+#[cfg(feature = "phone")]
+mod presence; // night1114: where the user is on every delivery, and one notice per change
+#[cfg(feature = "phone")]
+mod phone_listen; // night1113: Heimdall opens a listening window on the phone after an unprompted reply; "not now" closes it
+#[cfg(feature = "phone")]
+mod bridge_supervisor; // the phone bridge as Heimdall's child, restarted when it exits (docs/remote.md)
+#[cfg(feature = "phone")]
+mod remote_lab; // `--remote-lab`: that endpoint on a lab profile with a scripted agent (docs/remote.md)
+#[cfg(feature = "phone")]
+mod remote_reports; // `phone_show`: a Mac report or image on the phone, over the bridge (docs/remote.md, `report`)
+#[cfg(feature = "phone")]
+mod remote_reports_md; // lane T (night 1111): `phone_show` renders a Markdown file to a page
+// The phone is not in this source release (phone_off.rs): the shared code's calls land on no-ops with the same names.
+#[cfg(not(feature = "phone"))]
+mod phone_off;
+#[cfg(not(feature = "phone"))]
+use phone_off::{phone_listen, phone_mic, remote, remote_jobs, remote_listen, remote_presence, remote_settings};
 mod setup_cli; // `Heimdall setup`: a coding agent sets Heimdall up through the window's actions (docs/setup.md)
 #[cfg(test)]
 mod serde_order_tests {
@@ -106,16 +140,16 @@ struct Args {
     source: String,
     settings_only: bool,
     set_dry: Option<bool>,
-    format: Option<settings::ArchiveFormat>,
-    retention: Option<u32>,
     floor: Option<u64>,
     realtime: bool,
     streams: usize,
     macmon: Option<PathBuf>,
-    hotswap_smoke: bool,
     night_replay_smoke: bool,
     night_lab_worker: bool,
     lab_scenario: Option<PathBuf>,
+    remote_lab: bool,
+    #[cfg(feature = "phone")]
+    remote_port: Option<u16>,
 }
 fn args() -> Result<Args> {
     let mut a = Args {
@@ -128,13 +162,16 @@ fn args() -> Result<Args> {
         match v.as_str() {
             "--night-replay-smoke" => a.night_replay_smoke = true,
             "--night-lab-worker" => a.night_lab_worker = true,
-            "--hotswap-smoke" => a.hotswap_smoke = true,
             "--replay" => {
                 a.replay = Some(it.next().context("--replay needs WAV or directory")?.into())
             }
             "--lab-scenario" => {
                 a.lab_scenario = Some(it.next().context("--lab-scenario needs a scenario file")?.into())
             }
+            #[cfg(feature = "phone")]
+            "--remote-lab" => a.remote_lab = true,
+            #[cfg(feature = "phone")]
+            "--remote-port" => a.remote_port = Some(it.next().context("--remote-port needs a port")?.parse()?),
             "--ui" => a.ui = true,
             "--models" => a.models = Some(it.next().context("--models needs directory")?.into()),
             "--data-dir" => a.data = Some(it.next().context("--data-dir needs directory")?.into()),
@@ -158,21 +195,6 @@ fn args() -> Result<Args> {
                 a.set_dry = Some(it.next().context("dry-run needs true/false")?.parse()?);
                 a.settings_only = true;
             }
-            "--archive-format" => {
-                a.format = Some(
-                    match it.next().context("archive format missing")?.as_str() {
-                        "native_lossless" => settings::ArchiveFormat::NativeLossless,
-                        "flac24" => settings::ArchiveFormat::Flac24,
-                        "flac16k_mono" => settings::ArchiveFormat::Flac16kMono,
-                        _ => bail!("unknown archive format"),
-                    },
-                );
-                a.settings_only = true;
-            }
-            "--retention-days" => {
-                a.retention = Some(it.next().context("retention missing")?.parse()?);
-                a.settings_only = true;
-            }
             "--free-space-floor-gib" => {
                 a.floor = Some(
                     it.next()
@@ -184,7 +206,7 @@ fn args() -> Result<Args> {
                 a.settings_only = true;
             }
             "--help" => {
-                println!("Heimdall: menu-bar app (dry-run by default).\n  --replay WAV_OR_DIR [--source mic|discord|app|mixed] [--ui] [--realtime] [--streams 1..8] [--macmon PATH] [--data-dir DIR]\n  --idle-seconds 10..60 [--data-dir DIR] (no capture or permissions)\n  --models DIR\n  --set-dry-run true|false | --archive-format native_lossless|flac24|flac16k_mono\n  --retention-days DAYS (0=keep) | --free-space-floor-gib N (minimum 1)\nReplay always forces dry-run and an isolated data directory.");
+                println!("Heimdall: menu-bar app (dry-run by default).\n  --replay WAV_OR_DIR [--source mic|discord|app|mixed] [--ui] [--realtime] [--streams 1..8] [--macmon PATH] [--data-dir DIR]\n  --idle-seconds 10..60 [--data-dir DIR] (no capture or permissions)\n  --models DIR\n  --set-dry-run true|false | --free-space-floor-gib N (minimum 1)\nReplay always forces dry-run and an isolated data directory.");
                 std::process::exit(0);
             }
             _ => bail!("unknown argument: {v}"),
@@ -227,10 +249,28 @@ fn main() -> Result<()> {
             Err(e) => { eprintln!("{e:#}"); std::process::exit(2); }
         }
     }
+    // Crewmates' way in for local processes (t3::crew::cli, docs/crew.md): queues one message for an existing
+    // crewmate in the data dir's crew store, prints one line and exits; the running app delivers it on its next pass.
+    if std::env::args().nth(1).as_deref() == Some("--crew") {
+        let rest: Vec<String> = std::env::args().skip(2).collect();
+        match t3::crew::cli(&rest, settings::default_data, &mut std::io::stdin()) {
+            Ok(line) => { println!("{line}"); return Ok(()); }
+            Err(e) => { eprintln!("{e:#}"); std::process::exit(2); }
+        }
+    }
     // The taste ledger from the command line (agent::taste): reviews of a date range, adding entries, search.
     if std::env::args().nth(1).as_deref() == Some("--taste") {
         let rest: Vec<String> = std::env::args().skip(2).collect();
         match agent::taste::cli(&rest, settings::default_data, &mut std::io::stdin()) {
+            Ok(text) => { println!("{text}"); return Ok(()); }
+            Err(e) => { eprintln!("{e:#}"); std::process::exit(2); }
+        }
+    }
+    // The private layer of the agent's prompt (agent::environment): show it as the agent gets it, check it (the
+    // weekly audit), or rewrite its generated block now. Reads settings.json and the Mac; never the Keychain.
+    if std::env::args().nth(1).as_deref() == Some("--environment") {
+        let rest: Vec<String> = std::env::args().skip(2).collect();
+        match settings::default_data().and_then(|data| agent::environment::cli(&rest, &data)) {
             Ok(text) => { println!("{text}"); return Ok(()); }
             Err(e) => { eprintln!("{e:#}"); std::process::exit(2); }
         }
@@ -269,8 +309,10 @@ fn main() -> Result<()> {
     let a = args()?;
     // The app on a profile: a home move asked for last run happens now, before anything opens the data folder, and
     // the folders go to every child. Offline modes keep their isolated folders and never move anything.
-    let live_app = a.replay.is_none() && a.idle.is_none() && !a.settings_only && !a.hotswap_smoke && !a.night_replay_smoke
-        && !a.night_lab_worker && a.lab_scenario.is_none();
+    let live_app = a.replay.is_none() && a.idle.is_none() && !a.settings_only && !a.night_replay_smoke
+        && !a.night_lab_worker && a.lab_scenario.is_none() && !a.remote_lab;
+    // Secrets (crates/keychain, 14 Nov): an offline mode or an explicit --data-dir never reads the login Keychain.
+    keychain_notice::isolate(live_app, a.data.as_deref());
     let home_moved = if live_app { home_change::start(a.data.as_deref()) } else { None };
     // The post-install check's lab instance (lab/postinstall/): the real UI driven by a scenario on an isolated
     // profile; nothing else starts.
@@ -278,6 +320,15 @@ fn main() -> Result<()> {
         ensure!(a.data.is_some(), "--lab-scenario needs an explicit isolated --data-dir");
         let data = isolated_data(a.data, "lab")?;
         return lab_run::run(&file, data);
+    }
+    // The phone endpoint's lab instance (remote_lab.rs): the real endpoint on an isolated profile, a scripted agent,
+    // no UI, capture, hotkeys, Keychain or T3; never the user's profile, and never the live app's port.
+    #[cfg(feature = "phone")]
+    if a.remote_lab {
+        ensure!(a.data.is_some(), "--remote-lab needs an explicit isolated --data-dir");
+        let data = isolated_data(a.data, "remote-lab")?;
+        let model_root = a.models.clone().map(Ok).unwrap_or_else(models)?;
+        return remote_lab::run(&data, &model_root, remote::port(Some(a.remote_port.unwrap_or(remote_lab::PORT))));
     }
     diagnostics::startup_record(&a)?;
     if live_app {
@@ -292,11 +343,6 @@ fn main() -> Result<()> {
         let wav=a.replay.context("night diagnostic needs --replay WAV")?;
         return if a.night_lab_worker {night_qa::worker(&data,&model_root,&wav)} else {night_qa::replay(data,model_root,&wav)};
     }
-    if a.hotswap_smoke {
-        ensure!(a.data.is_some(), "hot-swap smoke needs an isolated --data-dir");
-        let data=isolated_data(a.data,"hotswap")?;
-        return match a.replay { Some(wav)=>hotswap_replay_smoke(data,model_root,&wav), None=>hotswap_smoke(data,model_root) };
-    }
     if a.settings_only {
         ensure!(
             a.replay.is_none() && a.idle.is_none(),
@@ -308,20 +354,12 @@ fn main() -> Result<()> {
         if let Some(b) = a.set_dry {
             s.dry_run = b;
         }
-        if let Some(f) = a.format {
-            s.archive_format = f;
-            s.archive_choice_pending = false;
-        }
-        if let Some(d) = a.retention {
-            s.retention_days = d;
-        }
         if let Some(n) = a.floor {
             ensure!(n >= 1073741824, "floor must be at least 1 GiB");
             s.free_space_floor_bytes = n;
         }
-        s.normalize_archive();
         s.save(&path)?;
-        println!("Settings saved; the running app applies valid edits live. dry_run={} archive={:?} choice_pending={} retention_days={} floor_bytes={}",s.dry_run,s.archive_format,s.archive_choice_pending,s.retention_days,s.free_space_floor_bytes);
+        println!("Settings saved; the running app applies valid edits live. dry_run={} floor_bytes={}",s.dry_run,s.free_space_floor_bytes);
         return Ok(());
     }
     if let Some(secs) = a.idle {
@@ -376,6 +414,22 @@ fn main() -> Result<()> {
         Ok(_) => {}
         Err(e) => eprintln!("Could not remove the downloaded agent runtime: {e:#}"),
     }
+    // ---- Review fix S3 (night 1111): secrets from the composer's lock older than 24 hours go at launch (secrets.rs).
+    match secrets::sweep(&heimdall_home::data_dir(), std::time::SystemTime::now()) {
+        0 => {}
+        n => eprintln!("Deleted {n} secret file(s) older than 24 hours"),
+    }
+    // Night 1111 second review S4: Heimdall runs for days, so the 24-hour promise needs an hourly sweep too.
+    std::thread::Builder::new()
+        .name("secret-sweep".into())
+        .spawn(|| loop {
+            std::thread::sleep(std::time::Duration::from_secs(3600));
+            let n = secrets::sweep(&heimdall_home::data_dir(), std::time::SystemTime::now());
+            if n > 0 {
+                eprintln!("Deleted {n} secret file(s) older than 24 hours");
+            }
+        })
+        .ok();
     let u = ui::Ui::handle();
     // The public edition loads its models from `<data>/models`: the bundled small ones linked from the app, the big
     // ones downloaded there on first run (model_store.rs, docs/models.md). `--models` keeps a given folder.
@@ -402,11 +456,17 @@ fn main() -> Result<()> {
     // Share the exact tools before starting the pipeline: Off cannot wait for it.
     let tools = Arc::new(bridge::Tools::new(&model_root, &data));
     tools.initialize_delivery(&settings);
+    // A blocked or refused Keychain item: one island pill per feature until it answers (keychain_notice.rs).
+    keychain_notice::report(u, tools.clone());
     // In-app updates (public edition only): an interrupted update repaired, the menu row, the launch check.
     updates::launch(u, &tools);
     // Floating islands (night 1022): the watcher, the agent's island tools and the bundled helper's supervisor.
     // Show Islands on Streams, known before the host writes the helper's streams.json and launches it.
     islands::streams::set(settings.islands_on_streams);
+    // Control Apps (night1111 computer control): the computer tool's switches, known before the agent starts.
+    heimdall_computer::gate::set_enabled(settings.computer_control);
+    heimdall_computer::gate::set_clicks(settings.computer_clicks);
+    islands::display::set(settings.islands_display_lock()); // Islands Display (night 1107)
     islands::live::start(&data, settings.floating_islands_off, settings.islands_hidden, &tools);
     // A first provider connection selects its default model through the same queue as the user's clicks.
     tools.api.set_actions(tx.clone());
@@ -453,7 +513,22 @@ fn main() -> Result<()> {
     // rest of Heimdall's data (measured on a build's first launch).
     drawing::install_grabber(tools.clone());
     // The agent's `settings` tool changes a setting through the menu's own callback, as a click (settings_tool.rs).
-    *tools.mcp_actions.menu.lock().unwrap() = Some(Arc::new(ui_action_callback(tools.clone(), tx.clone(), u)));
+    let menu: mcp_actions::MenuCallback = Arc::new(ui_action_callback(tools.clone(), tx.clone(), u));
+    // ---- every event (bug note 2026-11-13T13-55-33): each action's line names its source ----
+    let labelled = |source: &'static str, menu: mcp_actions::MenuCallback| -> mcp_actions::MenuCallback {
+        Arc::new(move |action| { diagnostics::action_line(source, &action); menu(action) })
+    };
+    *tools.mcp_actions.menu.lock().unwrap() = Some(labelled("agent tool", menu.clone()));
+    // The phone endpoint (remote.rs, personal edition): turns from the phone's bridge, island events back.
+    #[cfg(feature = "phone")]
+    remote::start_live(&callback_data, tools.clone(), labelled("phone", menu));
+    #[cfg(not(feature = "phone"))]
+    let _ = (&labelled, menu);
+    // ---- end every event ----
+    #[cfg(feature = "phone")]
+    bridge_supervisor::start_live(&callback_data);
+    #[cfg(feature = "phone")]
+    presence::start_live(); // night1114: the bridge's presence on every delivery (changes: remote_presence.rs)
     let options = ui::Options { system_profile: Some(callback_data.join("system.json")), friends: friends::ENABLED, ..ui::Options::default() };
     ui::run(options, live_action_callback(tools, tx, u, beats, callback_data));
 }
@@ -498,6 +573,7 @@ fn live_action_callback(
     let recovery_tools = tools.clone();
     let inner = ui_action_callback(tools, tx, u);
     move |action| {
+        diagnostics::action_line("menu", &action);
         // The user clicked "restart" on the red pill: relaunch whatever the automatic bound says, through a normal
         // Quit (the archive and deliveries drain), which the watchdog bounds even if the live loop is stuck.
         let action = match action {
@@ -522,6 +598,8 @@ fn live_action_callback(
             beats.quitting();
             // A compaction step in flight holds the archive locks every teardown write waits for: it stops now.
             heimdall_archive::compact::preempt_all();
+            #[cfg(feature = "phone")]
+            bridge_supervisor::stop_live();
         }
         inner(action)
     }
@@ -598,6 +676,21 @@ fn ui_action_callback(
                         (false, _) => O::QuestionUnavailable,
                     };
                     bridge::notice_outcomes(u, ids, outcome);
+                }
+                return;
+            },
+            // ---- Night 1111 [input]: a secret from the composer's lock (bug note 2026-11-10T16-30-03): kept in a
+            // 0600 file, and the agent gets only its path, as the user's typed message (`secrets.rs`). Never logged.
+            ui::UiAction::Secret(secret) => {
+                match secrets::keep(&heimdall_home::data_dir(), &secret, &secrets::now_stamp()) {
+                    Ok(path) => {
+                        let text = secrets::reference(&path);
+                        if let Err(e) = tools.window_action(ui::AgentWindowAction::Send { text, steer: false }) {
+                            eprintln!("Secret kept at {}; the agent was not told: {e:#}", path.display());
+                            bridge::window_problem(u, refusal(&e).into());
+                        }
+                    }
+                    Err(e) => eprintln!("Secret not kept: {e:#}"),
                 }
                 return;
             },

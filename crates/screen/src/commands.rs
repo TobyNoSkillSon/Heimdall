@@ -1,4 +1,4 @@
-use crate::{HostTimeNs, ScreenBuffer};
+use crate::HostTimeNs;
 use anyhow::{bail, ensure, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -363,12 +363,6 @@ fn polish(phrase: &str) -> bool {
         .next()
         .is_some_and(|w| matches!(normalize(w).as_str(), "zobacz" | "spojrz" | "zrob" | "popatrz" | "zerknij"))
 }
-/// Whether a phrase whose words match at `start` may fire there: not negated, and (English) in command position.
-fn fires_at(phrase: &str, words: &[TimedWord], normalized: &[String], start: usize) -> bool {
-    !negated(words, normalized, start)
-        && (!positioned(phrase) || commanded(words, normalized, start))
-        && !(SCREEN_PHRASES.contains(&phrase) && reported(words, normalized, start))
-}
 impl PhraseMatcher {
     /// A matcher over another fixed table (for example the app's cancel/stop phrases).
     pub fn new(phrases: &'static [&'static str]) -> Self {
@@ -513,126 +507,6 @@ impl PhraseMatcher {
         self.fired.remove(source);
     }
 }
-/// A phrase that almost fired, for bug triage. Never triggers anything.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct NearMiss {
-    pub phrase: String,
-    /// The words actually heard over the span.
-    pub heard: String,
-    pub start_ns: HostTimeNs,
-    pub end_ns: HostTimeNs,
-    /// `negated`: the whole phrase was heard inside a negation. `partial`: the
-    /// opening words matched and the rest did not (at least two words, or one
-    /// word of five or more letters). `loose`: every word is within two edits,
-    /// or a Polish imperative is one edit off, so the strict rules rejected it.
-    /// `embedded`: the whole English phrase was heard inside a statement, not
-    /// in command position ("I wouldn't even look at this").
-    pub reason: String,
-}
-fn edit_distance(a: &str, b: &str) -> usize {
-    let b: Vec<char> = b.chars().collect();
-    let mut row: Vec<usize> = (0..=b.len()).collect();
-    for (i, ca) in a.chars().enumerate() {
-        let mut prev = row[0];
-        row[0] = i + 1;
-        for (j, cb) in b.iter().enumerate() {
-            let cur = row[j + 1];
-            row[j + 1] = (prev + usize::from(ca != *cb)).min(row[j] + 1).min(cur + 1);
-            prev = cur;
-        }
-    }
-    row[b.len()]
-}
-/// Offline scan of a finished utterance for phrases from `phrases` that did not
-/// fire. Matches the strict matcher's tokenization; one entry per span.
-pub fn near_misses(phrases: &[&str], words: &[TimedWord]) -> Vec<NearMiss> {
-    let normalized: Vec<_> = words.iter().map(|w| normalize(&w.text)).collect();
-    let mut found: Vec<NearMiss> = vec![];
-    // Spans where a phrase did fire are not near-misses of a longer alias.
-    let mut covered: Vec<(usize, usize)> = vec![];
-    for start in 0..words.len() {
-        for phrase in phrases {
-            if !fires_at(phrase, words, &normalized, start) {
-                continue;
-            }
-            let tokens: Vec<_> = phrase.split_whitespace().map(normalize).collect();
-            if start + tokens.len() <= words.len()
-                && tokens
-                    .iter()
-                    .enumerate()
-                    .all(|(i, t)| token_matches(&normalized[start + i], t))
-            {
-                covered.push((start, start + tokens.len() - 1));
-            }
-        }
-    }
-    for start in 0..words.len() {
-        // (rank, span length, distance of the first unmatched word, phrase, reason)
-        let mut best: Option<(u8, usize, usize, &str, &str)> = None;
-        for phrase in phrases {
-            let tokens: Vec<_> = phrase.split_whitespace().map(normalize).collect();
-            let mut strict = 0;
-            while strict < tokens.len()
-                && start + strict < words.len()
-                && token_matches(&normalized[start + strict], &tokens[strict])
-            {
-                strict += 1;
-            }
-            let loose = start + tokens.len() <= words.len()
-                && tokens.iter().enumerate().all(|(i, t)| {
-                    let a = &normalized[start + i];
-                    token_matches(a, t) || (t.chars().count() >= 4 && edit_distance(a, t) <= 2)
-                });
-            let candidate = if strict == tokens.len() {
-                if negated(words, &normalized, start) {
-                    (3, strict, 0, "negated")
-                } else if !fires_at(phrase, words, &normalized, start) {
-                    // Inside a statement, not in command position (D4).
-                    (3, strict, 0, "embedded")
-                } else {
-                    continue;
-                }
-            } else if loose {
-                (2, tokens.len(), 0, "loose")
-            } else if strict > 0
-                && tokens.len() > 1
-                && (strict >= 2 || tokens[0].chars().count() >= 5)
-            {
-                let next = normalized
-                    .get(start + strict)
-                    .map_or(usize::MAX, |w| edit_distance(w, &tokens[strict]));
-                (1, strict, next, "partial")
-            } else {
-                continue;
-            };
-            let key = |c: &(u8, usize, usize, &str, &str)| (c.0, c.1, std::cmp::Reverse(c.2));
-            let c = (candidate.0, candidate.1, candidate.2, *phrase, candidate.3);
-            if best.as_ref().is_none_or(|b| key(&c) > key(b)) {
-                best = Some(c);
-            }
-        }
-        let Some((_, len, _, phrase, reason)) = best else {
-            continue;
-        };
-        let end = start + len - 1;
-        if covered.iter().any(|(s, e)| *s <= end && *e >= start) {
-            continue;
-        }
-        covered.push((start, end));
-        found.push(NearMiss {
-            phrase: phrase.into(),
-            heard: words[start..=end]
-                .iter()
-                .map(|w| w.text.as_str())
-                .collect::<Vec<_>>()
-                .join(" "),
-            start_ns: words[start].start_ns,
-            end_ns: words[end].end_ns,
-            reason: reason.into(),
-        });
-    }
-    found
-}
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShotKind {
@@ -685,17 +559,8 @@ pub(crate) fn wall_label(trigger: u64, host_now: u64) -> String {
         format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
     }
 }
-/// Only this command path persists pixels. Missing displays fail explicitly,
+/// Write the phrase-time ring frames, live or held, as the command's attachment. Missing displays fail explicitly,
 /// never claim a complete attachment when one stream is stale or not ready.
-pub fn attach_screenshot(
-    buffer: &mut ScreenBuffer,
-    matched: &PhraseMatch,
-    now_ns: u64,
-    dir: &Path,
-) -> Result<Action> {
-    write_ring_action(buffer.select(matched.start_ns, now_ns), matched, now_ns, dir)
-}
-/// Write the phrase-time ring frames, live or held, as the command's attachment.
 pub(crate) fn write_ring_action(
     selected: crate::FrameSet,
     matched: &PhraseMatch,
@@ -802,6 +667,7 @@ pub(crate) fn write_shot(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ScreenBuffer;
     fn words(s: &str, start: u64) -> Vec<TimedWord> {
         s.split_whitespace()
             .enumerate()
@@ -983,25 +849,7 @@ mod tests {
         // Bug notes are Heimdall's `bug_note` tool now: no table matches the old phrases.
         for text in ["bug note", "Bug note.", "bugnote", "bug notes", "But note, it failed", "Heimdall bug", "zgłoś błąd"] {
             assert!(PhraseMatcher::default().observe_utterance("mic", "x", &words(text, 0), true).is_empty(), "{text}");
-            assert!(near_misses(SCREEN_PHRASES, &words(text, 0)).is_empty(), "{text}");
         }
-    }
-    #[test]
-    fn near_misses_explain_what_almost_fired() {
-        let reasons = |text: &str, phrases: &[&str]| -> Vec<(String, String, String)> {
-            near_misses(phrases, &words(text, 0))
-                .into_iter()
-                .map(|n| (n.phrase, n.heard, n.reason))
-                .collect()
-        };
-        let r = |p: &str, h: &str, why: &str| (p.to_string(), h.to_string(), why.to_string());
-        assert_eq!(reasons("take a screen shot", SCREEN_PHRASES), vec![r("take a screenshot", "take a", "partial")]);
-        assert_eq!(reasons("don't take a screenshot", SCREEN_PHRASES), vec![r("take a screenshot", "take a screenshot", "negated")]);
-        assert_eq!(reasons("look at thiss", SCREEN_PHRASES), vec![r("look at this", "look at thiss", "loose")]);
-        assert_eq!(reasons("zrobi zrzut ekranu", SCREEN_PHRASES), vec![r("zrób zrzut ekranu", "zrobi zrzut ekranu", "loose")]);
-        assert!(reasons("look at this", SCREEN_PHRASES).is_empty());
-        assert!(reasons("what a nice day", SCREEN_PHRASES).is_empty());
-        assert_eq!(reasons("when I take a screenshot for him", SCREEN_PHRASES), vec![r("take a screenshot", "take a screenshot", "embedded")]);
     }
     /// Night review D4: the user's own microphone lines from the archive (12–20 Oct). A quick command fires in command
     /// position; the same words inside a statement do not. Each line is verbatim from the transcript, except the two "my screen" variants.
@@ -1090,8 +938,6 @@ mod tests {
             let w = words(text, 1_000_000_000);
             let matched = PhraseMatcher::default().observe_utterance("mic", "a", &w, true);
             assert!(matched.is_empty(), "{text}: {matched:?}");
-            // Near-miss triage still sees the phrase, as embedded.
-            assert!(near_misses(SCREEN_PHRASES, &w).iter().any(|m| m.reason == "embedded"), "{text}");
         }
         let fires: &[(&str, &str)] = &[
             ("Okay, look at this.", "look at this"),
@@ -1174,16 +1020,10 @@ mod tests {
             let matched = PhraseMatcher::default().observe_utterance("mic", "a", &words(text, 1_000_000_000), true);
             assert!(matched.is_empty(), "{text}: {matched:?}");
         }
-        // The near-miss report agrees: a joined command is not "embedded"; a statement's join is.
-        let reasons = |text: &str| -> Vec<(String, String, String)> {
-            near_misses(SCREEN_PHRASES, &words(text, 0)).into_iter().map(|n| (n.phrase, n.heard, n.reason)).collect()
-        };
-        let r = |p: &str, h: &str, why: &str| (p.to_string(), h.to_string(), why.to_string());
-        assert!(reasons("open Safari and take a screenshot").is_empty());
-        assert_eq!(
-            reasons("we should open Safari and take a screenshot"),
-            vec![r("take a screenshot", "take a screenshot", "embedded")]
-        );
+        // A joined command fires; the same join inside a statement does not.
+        let fired = |text: &str| PhraseMatcher::default().observe_utterance("mic", "a", &words(text, 0), true);
+        assert_eq!(fired("open Safari and take a screenshot").first().map(|m| m.phrase.as_str()), Some("take a screenshot"));
+        assert!(fired("we should open Safari and take a screenshot").is_empty());
     }
     #[test]
     fn timestamp_revisions_and_final_redecode_keep_occurrence_identity() {
@@ -1309,7 +1149,7 @@ mod tests {
             start_ns: 1_000_000_000,
             trigger_ns: 1_500_000_000,
         };
-        let action = attach_screenshot(&mut b, &matched, 2_000_000_000, &dest).unwrap();
+        let action = write_ring_action(b.select(matched.start_ns, 2_000_000_000), &matched, 2_000_000_000, &dest).unwrap();
         assert_eq!(action.shots.len(), 2);
         assert!(action.note.starts_with("[screenshot "));
         let decoder = png::Decoder::new(std::io::BufReader::new(
@@ -1319,7 +1159,7 @@ mod tests {
         let mut rgb = vec![0; reader.output_buffer_size().unwrap()];
         reader.next_frame(&mut rgb).unwrap();
         assert_eq!(rgb, [1; 6]);
-        assert!(attach_screenshot(&mut b, &matched, 22_000_000_000, &dest).is_ok(), "recorded history does not expire");
+        assert!(write_ring_action(b.select(matched.start_ns, 22_000_000_000), &matched, 22_000_000_000, &dest).is_ok(), "recorded history does not expire");
         assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 4);
     }
     #[test]
@@ -1329,12 +1169,11 @@ mod tests {
         for second in 0..=18 {
             buffer.push(crate::Frame::new(crate::DisplayInfo {id:1,x:0.,y:0.,width:2,height:1},second*1_000_000_000,2,1,vec![second as u8;6]).unwrap()).unwrap();
         }
-        let mut commands=ScreenCommands::new(temp.path().join("shots"));
+        let (mut matcher, shots) = (PhraseMatcher::default(), temp.path().join("shots"));
         let words:Vec<_>=["look","at","this"].into_iter().enumerate().map(|(i,text)|TimedWord {text:text.into(),start_ns:1_000_000_000+i as u64*200_000_000,end_ns:1_200_000_000+i as u64*200_000_000}).collect();
-        let events=commands.process_utterance("mic","long-window",&words,true,&mut buffer,18_000_000_000);
-        let ScreenActionEvent::Action(action)=&events[0]else{panic!("{events:?}");};
-        assert_eq!(action.shots[0].frame_ns,1_000_000_000);
-        assert!(commands.process_utterance("mic","long-window",&words,true,&mut buffer,18_000_000_000).is_empty());
+        let events=super::handler_tests::shoot(&mut matcher,&mut buffer,"long-window",&words,true,18_000_000_000,&shots);
+        assert_eq!(events[0].as_ref().unwrap().shots[0].frame_ns,1_000_000_000);
+        assert!(super::handler_tests::shoot(&mut matcher,&mut buffer,"long-window",&words,true,18_000_000_000,&shots).is_empty());
     }
 }
 
@@ -1348,91 +1187,6 @@ pub enum ScreenActionEvent {
         error: String,
     },
 }
-/// App-facing fixed-command handler. Feed every eligible live partial directly;
-/// returned notes are additive transcript entries, never replacement text.
-pub struct ScreenCommands {
-    matcher: PhraseMatcher,
-    shots_dir: PathBuf,
-    #[cfg(feature = "listen-adapter")]
-    utterances: HashMap<String, ListenUtterance>,
-}
-impl ScreenCommands {
-    pub fn new(shots_dir: PathBuf) -> Self {
-        Self {
-            matcher: PhraseMatcher::default(),
-            shots_dir,
-            #[cfg(feature = "listen-adapter")]
-            utterances: HashMap::new(),
-        }
-    }
-    pub fn process_partial(
-        &mut self,
-        source: &str,
-        words: &[TimedWord],
-        buffer: &mut ScreenBuffer,
-        now_ns: u64,
-    ) -> Vec<ScreenActionEvent> {
-        self.process_utterance(source, "cumulative", words, false, buffer, now_ns)
-    }
-    /// Explicit identity path for callers that do not use ListenEvent.
-    #[allow(clippy::too_many_arguments)]
-    pub fn process_utterance(
-        &mut self,
-        source: &str,
-        utterance_id: &str,
-        words: &[TimedWord],
-        is_final: bool,
-        buffer: &mut ScreenBuffer,
-        now_ns: u64,
-    ) -> Vec<ScreenActionEvent> {
-        self.matcher
-            .observe_utterance(source, utterance_id, words, is_final)
-            .into_iter()
-            .map(
-                |m| match attach_screenshot(buffer, &m, now_ns, &self.shots_dir) {
-                    Ok(action) => ScreenActionEvent::Action(action),
-                    Err(e) => ScreenActionEvent::Failed {
-                        source: m.source,
-                        trigger_ns: m.trigger_ns,
-                        error: e.to_string(),
-                    },
-                },
-            )
-            .collect()
-    }
-    /// Live commands release the ring mutex before any native one-shot request.
-    #[allow(clippy::too_many_arguments)]
-    pub fn process_utterance_live(
-        &mut self,
-        source: &str,
-        utterance_id: &str,
-        words: &[TimedWord],
-        is_final: bool,
-        buffer: &std::sync::Arc<std::sync::Mutex<ScreenBuffer>>,
-        now_ns: u64,
-    ) -> Vec<ScreenActionEvent> {
-        self.matcher
-            .observe_utterance(source, utterance_id, words, is_final)
-            .into_iter()
-            .map(
-                |m| match crate::attach_command_screenshot(buffer, &m, now_ns, &self.shots_dir) {
-                    Ok(action) => ScreenActionEvent::Action(action),
-                    Err(e) => ScreenActionEvent::Failed {
-                        source: m.source,
-                        trigger_ns: m.trigger_ns,
-                        error: e.to_string(),
-                    },
-                },
-            )
-            .collect()
-    }
-    pub fn reset_source(&mut self, source: &str) {
-        self.matcher.reset_source(source);
-        #[cfg(feature = "listen-adapter")]
-        self.utterances.remove(source);
-    }
-}
-
 #[cfg(feature = "listen-adapter")]
 impl From<&listen::Word> for TimedWord {
     fn from(w: &listen::Word) -> Self {
@@ -1443,71 +1197,26 @@ impl From<&listen::Word> for TimedWord {
         }
     }
 }
-#[cfg(feature = "listen-adapter")]
-#[derive(Default)]
-struct ListenUtterance {
-    id: String,
-    finalized: bool,
-    completed: HashMap<u64, String>,
-}
-#[cfg(feature = "listen-adapter")]
-impl ScreenCommands {
-    /// Feed SpeechStart too: its host time supplies the stable utterance ID.
-    /// A resumed SpeechStart after an internal pause is still the same utterance.
-    /// Routing decides whether this source belongs to the user before this adapter.
-    pub fn process_listen_event(
-        &mut self,
-        event: &listen::ListenEvent,
-        buffer: &mut ScreenBuffer,
-        now_ns: u64,
-    ) -> Vec<ScreenActionEvent> {
-        match event {
-            listen::ListenEvent::SpeechStart {
-                source,
-                host_time_ns,
-            } => {
-                let u = self.utterances.entry(source.clone()).or_default();
-                if u.id.is_empty() || u.finalized {
-                    u.id = host_time_ns.to_string();
-                    u.finalized = false;
-                }
-                vec![]
-            }
-            listen::ListenEvent::PartialTranscript { source, words, .. }
-            | listen::ListenEvent::FinalUtterance { source, words, .. } => {
-                let u = self.utterances.entry(source.clone()).or_default();
-                // Legacy callers omitting lifecycle events get one cumulative
-                // scope; do not guess identity from mutable ASR timestamps.
-                if u.id.is_empty() {
-                    u.id = "cumulative".into();
-                }
-                let is_final = matches!(event, listen::ListenEvent::FinalUtterance { .. });
-                let id = if let listen::ListenEvent::FinalUtterance { start_ns, .. } = event {
-                    if let Some(id) = u.completed.get(start_ns) {
-                        id.clone()
-                    } else {
-                        u.finalized = true;
-                        u.completed.insert(*start_ns, u.id.clone());
-                        u.id.clone()
-                    }
-                } else {
-                    u.id.clone()
-                };
-                let words: Vec<_> = words.iter().map(TimedWord::from).collect();
-                self.process_utterance(source, &id, &words, is_final, buffer, now_ns)
-            }
-            listen::ListenEvent::Discontinuity { source, .. } => {
-                self.reset_source(source);
-                vec![]
-            }
-            _ => vec![],
-        }
-    }
-}
-
 #[cfg(test)]
 mod handler_tests {
     use super::*;
+    use crate::ScreenBuffer;
+    /// The app's path (pipeline/commands.rs): the matcher fires, and the ring frames at the phrase start are written.
+    pub(super) fn shoot(
+        matcher: &mut PhraseMatcher,
+        buffer: &mut ScreenBuffer,
+        id: &str,
+        words: &[TimedWord],
+        is_final: bool,
+        now_ns: u64,
+        dir: &Path,
+    ) -> Vec<Result<Action>> {
+        matcher
+            .observe_utterance("mic", id, words, is_final)
+            .iter()
+            .map(|m| write_ring_action(buffer.select(m.start_ns, now_ns), m, now_ns, dir))
+            .collect()
+    }
     #[test]
     fn frame_is_selected_at_phrase_start_not_completion() {
         let dir = tempfile::tempdir().unwrap();
@@ -1532,7 +1241,7 @@ mod handler_tests {
                 )
                 .unwrap();
         }
-        let mut handler = ScreenCommands::new(dir.path().join("shots"));
+        let mut matcher = PhraseMatcher::default();
         let words = ["spójrz", "na", "to"]
             .iter()
             .enumerate()
@@ -1542,11 +1251,9 @@ mod handler_tests {
                 end_ns: 1_150_000_000 + i as u64 * 200_000_000,
             })
             .collect::<Vec<_>>();
-        let events =
-            handler.process_utterance("mic", "u1", &words, false, &mut buffer, 1_600_000_000);
-        let ScreenActionEvent::Action(action) = &events[0] else {
-            panic!("{events:?}")
-        };
+        let shots = dir.path().join("shots");
+        let events = shoot(&mut matcher, &mut buffer, "u1", &words, false, 1_600_000_000, &shots);
+        let action = events[0].as_ref().unwrap();
         assert_eq!(action.trigger_ns, 1_400_000_000);
         assert_eq!(action.shots[0].frame_ns, 1_000_000_000);
         let decoder = png::Decoder::new(std::io::BufReader::new(
@@ -1557,101 +1264,11 @@ mod handler_tests {
         reader.next_frame(&mut rgb).unwrap();
         assert_eq!(rgb, [17; 3]);
     }
-    #[cfg(feature = "listen-adapter")]
-    #[test]
-    fn listen_lifecycle_keeps_partials_finals_and_resumed_speech_in_one_scope() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut h = ScreenCommands::new(dir.path().join("shots"));
-        let mut buffer = ScreenBuffer::new(crate::ScreenConfig {fps:1,..Default::default()}).unwrap();
-        let make_words = |time| {
-            ["look", "at", "this"]
-                .iter()
-                .enumerate()
-                .map(|(i, w)| listen::Word {
-                    text: (*w).into(),
-                    start_ns: time + i as u64 * 200_000_000,
-                    end_ns: time + i as u64 * 200_000_000 + 150_000_000,
-                    confidence: 1.0,
-                })
-                .collect::<Vec<_>>()
-        };
-        let start = |time| listen::ListenEvent::SpeechStart {
-            source: "mic".into(),
-            host_time_ns: time,
-        };
-        let partial = |time| listen::ListenEvent::PartialTranscript {
-            source: "mic".into(),
-            text: "look at this".into(),
-            words: make_words(time),
-            stable_words: 0,
-        };
-        let final_ = |time, start_ns| listen::ListenEvent::FinalUtterance {
-            source: "mic".into(),
-            text: "look at this".into(),
-            words: make_words(time),
-            start_ns,
-            end_ns: time + 550_000_000,
-            end_of_turn_probability: 1.,
-            forced: false,
-        };
-        h.process_listen_event(&start(1_000_000_000), &mut buffer, 2_000_000_000);
-        assert_eq!(
-            h.process_listen_event(&partial(1_000_000_000), &mut buffer, 2_000_000_000)
-                .len(),
-            1
-        );
-        h.process_listen_event(
-            &listen::ListenEvent::SpeechEnd {
-                source: "mic".into(),
-                host_time_ns: 2_000_000_000,
-            },
-            &mut buffer,
-            2_000_000_000,
-        );
-        h.process_listen_event(&start(3_000_000_000), &mut buffer, 4_000_000_000);
-        assert!(h
-            .process_listen_event(&partial(3_000_000_000), &mut buffer, 4_000_000_000)
-            .is_empty());
-        let f = final_(3_000_000_000, 1_000_000_000);
-        assert!(h
-            .process_listen_event(&f, &mut buffer, 4_000_000_000)
-            .is_empty());
-        h.process_listen_event(&start(80_000_000_000), &mut buffer, 81_000_000_000);
-        // Replay of an older final still resolves to its completed utterance.
-        assert!(h
-            .process_listen_event(&f, &mut buffer, 81_000_000_000)
-            .is_empty());
-        assert_eq!(
-            h.process_listen_event(&partial(80_000_000_000), &mut buffer, 81_000_000_000)
-                .len(),
-            1
-        );
-        assert!(h
-            .process_listen_event(
-                &final_(82_000_000_000, 80_000_000_000),
-                &mut buffer,
-                83_000_000_000
-            )
-            .is_empty());
-        h.process_listen_event(
-            &listen::ListenEvent::Discontinuity {
-                source: "mic".into(),
-                host_time_ns: 84_000_000_000,
-            },
-            &mut buffer,
-            84_000_000_000,
-        );
-        h.process_listen_event(&start(1_000_000_000), &mut buffer, 85_000_000_000);
-        assert_eq!(
-            h.process_listen_event(&partial(1_000_000_000), &mut buffer, 85_000_000_000)
-                .len(),
-            1
-        );
-    }
     #[test]
     fn live_partial_emits_once_and_failed_capture_is_explicit() {
         let dir = tempfile::tempdir().unwrap();
-        let mut handler = ScreenCommands::new(dir.path().join("shots"));
+        let mut matcher = PhraseMatcher::default();
+        let shots = dir.path().join("shots");
         let words: Vec<_> = ["look", "at", "this"]
             .iter()
             .enumerate()
@@ -1663,11 +1280,8 @@ mod handler_tests {
             .collect();
         let original = words.iter().map(|w| w.text.clone()).collect::<Vec<_>>();
         let mut buffer = ScreenBuffer::new(crate::ScreenConfig {fps:1,..Default::default()}).unwrap();
-        assert!(matches!(
-            &handler.process_partial("mic", &words, &mut buffer, 2_000_000_000)[0],
-            ScreenActionEvent::Failed { .. }
-        ));
-        handler.reset_source("mic");
+        assert!(shoot(&mut matcher, &mut buffer, "cumulative", &words, false, 2_000_000_000, &shots)[0].is_err());
+        matcher.reset_source("mic");
         buffer
             .push(
                 crate::Frame::new(
@@ -1686,13 +1300,8 @@ mod handler_tests {
                 .unwrap(),
             )
             .unwrap();
-        assert!(matches!(
-            &handler.process_partial("mic", &words, &mut buffer, 2_000_000_000)[0],
-            ScreenActionEvent::Action(_)
-        ));
-        assert!(handler
-            .process_partial("mic", &words, &mut buffer, 2_000_000_000)
-            .is_empty());
+        assert!(shoot(&mut matcher, &mut buffer, "cumulative", &words, false, 2_000_000_000, &shots)[0].is_ok());
+        assert!(shoot(&mut matcher, &mut buffer, "cumulative", &words, false, 2_000_000_000, &shots).is_empty());
         assert_eq!(
             words.iter().map(|w| w.text.clone()).collect::<Vec<_>>(),
             original

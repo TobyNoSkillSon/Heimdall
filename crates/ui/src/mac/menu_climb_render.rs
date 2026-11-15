@@ -63,7 +63,7 @@ fn states() -> Vec<(&'static str, Setup)> {
         ("06-fallback", Box::new(|s: &mut super::State| {
             owner(s);
             only(s, MenuSection::Background);
-            s.background_routes = vec![(BackgroundTask::Islands, "t3:claudeAgent".into(), "claude-haiku-5-5".into()), (BackgroundTask::Plan, "t3:claudeAgent_claude_code_2".into(), "claude-haiku-5-5".into())];
+            s.background_routes = vec![(BackgroundTask::Islands, "t3:claudeAgent".into(), "claude-haiku-5-5".into()), (BackgroundTask::Plan, "t3:claudeAgent_2".into(), "claude-haiku-5-5".into())];
         })),
         ("07-emergency", Box::new(|s: &mut super::State| {
             owner(s);
@@ -95,7 +95,7 @@ fn states() -> Vec<(&'static str, Setup)> {
         ("16-fallback-folded", Box::new(|s: &mut super::State| {
             owner(s);
             s.settings_value.collapsed = MenuSection::ALL.to_vec();
-            s.background_routes = vec![(BackgroundTask::Islands, "t3:claudeAgent".into(), "claude-haiku-5-5".into()), (BackgroundTask::Plan, "t3:claudeAgent_claude_code_2".into(), "claude-haiku-5-5".into())];
+            s.background_routes = vec![(BackgroundTask::Islands, "t3:claudeAgent".into(), "claude-haiku-5-5".into()), (BackgroundTask::Plan, "t3:claudeAgent_2".into(), "claude-haiku-5-5".into())];
         })),
     ]
 }

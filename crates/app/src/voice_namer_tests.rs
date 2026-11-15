@@ -26,7 +26,7 @@ fn store(codes: &[&str]) -> EnrollmentStore {
     for c in codes {
         s.voices.insert((*c).into(), speakers::identity::CodedVoice {
             embeddings: vec![Embedding::new(vec![1.; speakers::embedding::DIMENSION]).unwrap()],
-            heard_in: "Discord".into(), quote: String::new(), first_ms: 0, last_ms: 0, calls: 1, days: Default::default(), irrelevant: false,
+            heard_in: "Discord".into(), quote: String::new(), first_ms: 0, last_ms: 0, calls: 1, days: Default::default(), irrelevant: false, widened: vec![],
         });
     }
     s
@@ -256,11 +256,11 @@ fn a_proposal_is_remembered_so_the_card_is_not_shown_again_soon() {
 fn the_request_is_haiku_with_its_own_system_prompt_and_a_strict_schema() {
     let body = request_body("x");
     assert_eq!(body["model"], "claude-haiku-5-5");
-    assert_eq!(body["system"][0]["text"], SYSTEM);
+    assert_eq!(body["system"][0]["text"], system());
     assert_eq!(body["thinking"]["type"], "adaptive");
     assert_eq!(body["output_config"]["format"]["schema"]["additionalProperties"], false);
     assert!(body.get("temperature").is_none());
-    assert!(SYSTEM.contains("answers next") && SYSTEM.contains("Never answer User"));
+    assert!(SYSTEM.contains("answers next") && SYSTEM.contains("Never answer {user}"));
 }
 
 /// Lab run on a real archive, read-only: every call speaker label treated as if it were a coded voice. Prints who
@@ -302,5 +302,23 @@ fn real_archive_eligibility() {
                 }
             }
         }
+    }
+}
+
+/// Review 14 Nov should-fix 3: for the user and Heimdall both naming prompts are the text main sent, byte for byte (no
+/// backticks around the user). Since the names became `{user}` / `{user_label}` (14 Nov), a renamed user gets their name in
+/// the prose and as the label, the label the background call's wording gives the transcript lines (`for_agent`).
+#[test]
+fn naming_prompts_are_unchanged_for_owner_and_keep_the_label_for_a_renamed_user() {
+    let owner = agent::identity::Names { assistant: "Heimdall".into(), user: "User".into() };
+    let ada = agent::identity::Names { assistant: "Heimdall".into(), user: "Ada".into() };
+    for system in [SYSTEM, crate::voice_suggest::SYSTEM] {
+        assert!(system.contains("Other lines carry their speaker: {user_label}, a known person's name") && !system.contains('`'), "{system}");
+        let filled = personal_for(system, &owner);
+        assert_eq!(filled, system.replace("{user_label}", "User").replace(": {user}", ": The user").replace("{user}", "the user"));
+        assert!(filled.contains("Other lines carry their speaker: User, a known person's name"), "{filled}");
+        let renamed = personal_for(system, &ada);
+        assert!(renamed.contains("Other lines carry their speaker: Ada, a known person's name"), "{renamed}");
+        assert!(!renamed.contains("User") && !renamed.contains("{user"), "{renamed}");
     }
 }

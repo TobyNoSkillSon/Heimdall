@@ -1,6 +1,5 @@
 use crate::{audio, hash, private_dir, store, View};
 use anyhow::{ensure, Context, Result};
-use rusqlite::{Connection, OpenFlags};
 use serde_json::{json, Value};
 use std::{io::Write, path::Path};
 
@@ -346,44 +345,4 @@ fn audio_gaps(segments: &[Value], start: u64, end: u64) -> Vec<Value> {
         gaps.push(json!({"start_ns":cursor,"end_ns":end}));
     }
     gaps
-}
-
-/// An isolated, consistent copy of the whole store for offline export: the index and every
-/// pack through SQLite's online backup (committed WAL included), under the shared lifetime lock so
-/// no blob is collected meanwhile. The caller owns and deletes the copy.
-pub fn snapshot_archive(source: &Path, destination: &Path) -> Result<()> {
-    ensure!(!destination.exists(), "snapshot destination exists");
-    ensure!(store::exists(source), "no archive store at {}", source.display());
-    let parent = destination.parent().context("snapshot parent")?;
-    private_dir(parent)?;
-    ensure!(
-        !parent.canonicalize()?.starts_with(source.canonicalize()?),
-        "snapshot must be outside archive"
-    );
-    let _reader = crate::compact::reader_lock(source)?;
-    let staging = tempfile::tempdir_in(parent)?;
-    private_dir(&staging.path().join(store::PACKS))?;
-    let copy = |from: &Path, to: &Path| -> Result<()> {
-        let src = Connection::open_with_flags(from, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        src.busy_timeout(std::time::Duration::from_secs(10))?;
-        let mut dst = Connection::open(to)?;
-        rusqlite::backup::Backup::new(&src, &mut dst)?.run_to_completion(1024, std::time::Duration::ZERO, None)?;
-        ensure!(
-            dst.query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0))? == "ok",
-            "snapshot integrity"
-        );
-        Ok(())
-    };
-    copy(&source.join(store::INDEX), &staging.path().join(store::INDEX))?;
-    for pack in store::packs(source)? {
-        copy(&store::pack_path(source, &pack)?, &store::pack_path(staging.path(), &pack)?)?;
-    }
-    crate::atomic_write(
-        &staging.path().join("NIGHT_SNAPSHOT"),
-        &serde_json::to_vec(
-            &json!({"schema":2,"scope":"archive store","consistency":"SQLite online backup per file, committed WAL included, under the shared lifetime lock"}),
-        )?,
-    )?;
-    std::fs::rename(staging.keep(), destination)?;
-    Ok(())
 }

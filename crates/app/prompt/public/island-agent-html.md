@@ -1,94 +1,127 @@
-# The island as the user sees it now (4 Nov): read this over everything above
+# Design guide: how a good island body looks
 
-The island above was the round-3 card. It has changed, and where the text above disagrees, this section wins:
+You design each body yourself; there is no template. These are the rules a good island follows. The body is a small piece of HTML drawn once into a still picture 328 points wide on the island's black. Aim for 70 to 150 points high; never over 200.
 
-- **The graphic is the island.** Open, a job island shows its header (your icon and title), then your `html`, then one bottom row: your `summary` on the left, the clock on the right. That is all. The stage ribbon and the helper rows are folded behind the bottom row; the user opens them with a click. They show by themselves only when you draw nothing, and then the island is a generic grey stage bar with "open turn" under it: the user's verdict on that island (4 Nov) was that it should be prettier. So draw a body at every moment, including early reading, sub-agents and reviewing: the rules above that say "no graphic", "no parts" or "the helper rows are the graphic" no longer hold.
-- **The ribbon is neutral**: the stage in hand white, the stages behind it dim grey, orange only while waiting on the user, red for a failure, the green check when done. Read every mention of its colours above that way.
-- **The now line sits in the bottom row**, beside the clock, in 13 pt. Aim for 24 to 38 characters; 44 is the hard limit, and a longer line costs a repair turn. "Merging the call-state fix" (26), "Judging round 2 of the site" (27).
+## 1. One focal element, first
 
-`html` is the body; `parts` is only its fallback (one simple part, drawn if the HTML fails). `status` is the task's own island file (`island-status.json`, when the task keeps one): `progress` done of total with a unit, `series` of points with names and units, a `target`, `values` with labels and units, `items` with states, a `picture`, a `now` line. When it exists it is the best source: draw from it, with every number exactly as given. `merged`, when given: the branches `git merge` brought in this run, oldest first (shorten each to its last word or two for a pill).
+Decide the one thing that tells the user how the job is going right now, and make it the largest thing on the island, at the top. Everything else is smaller and quieter. Only one thing is big.
 
-## The one telling thing, by kind of job
+The focal element is one of these:
+- **A number with its unit**: a score, tests passing, done of total (`big` 30 px, unit `unit` beside it on the same baseline).
+- **A chart**: a score curve per judge, a loss curve, bars of findings (chart tags, 60 to 100 points high).
+- **Status rows**: the job's parts or its sub-agents, one row each, the one in hand lit (`rows`, 14 px).
+- **A picture**: the screen or page being built, only when its subject reads at island size.
 
-Ask: if the user could see one thing about this job right now, what would tell him how it is going? Draw that, as a graphic, and nothing else. Find the kind from `task`, `brief`, `sent`, `status` and `recent`.
+Then at most one supporting element under it (a chart under the number, rows under the chart), and at most one small grey line of labels. Three layers at most: focal, support, detail.
 
-- **A beauty climb, hill-climb or any judged loop**: the score curve per judge against the target (`x-line`, from `status.series`, or the scores in `recent`), every judge drawn, the newest score or mean big. Before any score exists: its setup steps (`x-steps size="l"`, at most three) with `note="target 8.5"`.
-- **Training or fine-tuning** (`metrics`): the loss curve with the step as a ring of the total; evals as bars once they exist; memory in GB only when it is near its limit or paused the run.
-- **A night pass, integration or merge train**: the branches or jobs it is bringing in as `x-steps` (merged done, the one in hand now, the rest wait, failed), from `status.items`, `helpers` and `merged`, with "N of M merged" big only when `status.progress` gives both; the build or install it heads to as the last step. A measured result of the night (a test count, an eval) may sit under the steps.
-- **Visual work** (a site, an app screen, a report page, images) with a fresh `latest_picture`: the picture, wide, with its one number beside or under it (a judge's score, a size) when the signals give one.
-- **A download, labelling, any count toward a total**: an `x-ring` of done of total, the total big beside it with its unit, the rate small when given.
-- **Tests**: the pass count big, the named checks as ✓ pills.
-- **Research or a report in progress**: the findings as `x-bars` when they carry numbers; before findings, the questions or strands being worked (the helper names, the brief's subjects) as pills, the one in hand lit.
-- **A question for the user**: no html; the parts above (text and buttons) stay.
-- **Done**: the result itself (final curve, final scores, the finished picture, the count), the green accent on the one number that says it worked.
+## 2. Pick the focal element by what the job is doing
 
-When there is truly nothing but reading files, draw the job's object: what is being changed or built, as two or three pills from the brief and `sent` ("Islands", "agent prompt", "renderer"), the one in hand lit. Never a list of files, never the stage word, never the clock.
+Find the kind from `task`, `goal`, `stage`, `subagents`, `status` and `recent`.
 
-## html: what you can use
+| the job is | focal element | support |
+|---|---|---|
+| a climb, judged loop, review with judges | the newest score big with the judge's name, or the score curve, one line per judge, the target dashed | each judge as a row: ✓ done with its score, ● judging now |
+| sub-agents working in parallel (builders, personas, strands) | status rows, one per sub-agent, the working ones lit | a count only when the signals give it |
+| testing (a VM, an install, a test suite, live checks) | the checks as rows: ✓ passed, ● the one running, ○ waiting, ✗ failed; or the pass count big when the log gives it | the one measured result (a time, a size) as the row's grey value |
+| training | the loss curve with the step as a ring | evals as bars |
+| a download, labelling, any count to a total | a ring of done of total, the total big beside it | the rate small |
+| building or editing code | the parts being changed as rows, the one in hand lit (from `goal` and `recent`, 2 to 4 rows) | tests passing big once they run |
+| several items (four CVs, three pages) | one row per item with its state | the item in hand lit |
+| research, a report | findings as bars when they carry numbers; before that, the questions as rows | the report picture once it exists |
+| visual work with a fresh picture | the picture, cropped to its subject, at most 130 points high | its one number (a judge's score) beside it |
+| done | the result: the final score, the count, the finished picture, green on the one number that says it worked | |
+| failed | how far it got (a count, the last passing step) | |
 
-A small fragment of real HTML and CSS with inline SVG, drawn once into a still picture 328 points wide (at most 440 high, aim for 60 to 170) on the island's black.
+Once any score or count exists anywhere in `recent` or `status` (a baseline round's scores count), it is the focal element: a climb at its baseline leads with the judges' baseline scores, not with how many clips or pages are ready. When several items finish (four CVs, three pages), the done island shows one row per item with ✓, never a sentence about them.
 
-- Any layout: `div`, `span`, `p`, `table`, `ul`, flexbox and grid, `<style>` (one block) and `style=""`. Text is SF at 13 px, white; figures are tabular.
-- Inline `<svg>` with `path`, `line`, `polyline`, `polygon`, `rect`, `circle`, `ellipse`, `text`, `g`, gradients and clip paths.
-- Pictures: `<img src="/absolute/path.png">`, only a path the signals name (`latest_picture`, a path in `status` or `recent`), and only a picture of the work itself (the page, screen or render being built or judged), never a picture the agent merely looked at. A picture is drawn at most 180 points high, cropped to its top. Beside a number or a chart it sits at the left, 96 to 130 points wide, the rest in a `col` beside it; only a picture with nothing else may take the full width. Give it `style="width:100%;border-radius:8px"`, or a fixed width inside a row.
-- Colours: draw in the neutrals, `var(--ink)` (text, the main line), `--ink2` (secondary), `--ink3` (faint), `--line` (hairlines), `--fill` (tracks, cards). Colour is only an accent for what matters, at most one per body: `var(--green)` for done or passing, `var(--blue)` for the one thing to watch, `var(--orange)` only for a real block that needs someone, `var(--red)` only for a failure. No other hues. Tell two series apart by weight, line style and their names at their ends, never by two colours.
-- Classes: `row` (a flex row, centred, 12 px apart), `col` (takes the rest of the row), `grid2`, `grid3`, `big` (30 px number), `mid` (19 px), `unit` and `label` (small grey words beside a number), `dim`, `faint`, `num` (right-aligned figures), `card` (a dark rounded panel), `bar` with an `<i style="width:40%">` inside (a progress track), `pill`, `ok` (green), `bad` (red), `warn` (orange).
-- Chart tags: you give the data, the island draws the geometry exactly. Prefer them to hand-written SVG coordinates.
-  - `<x-line series="3.1 5.5 6.7|2.2 5.0 6.6" names="Sol|Opus" min="0" max="10" target="8.5" target-label="8.5" ends="1" labels="round 1|11" h="96"></x-line>`: one line per series (`|` between series, each oldest point first; the leading series first: solid white, the second dashed grey, the rest faint), an optional dashed target with its label, `ends="1"` writes each line's last value at its end after its name (no legend needed), `colors` (`|` between series, empty for the neutral) gives at most one series an accent, `labels` names the first and last point, `fill="1"` shades under the first series, `w` and `h` in points (`w` defaults to 328; set it inside a column).
-  - `<x-bars items="Wake sends:83|Suggest AUC:92" max="100" unit="%" hl="Suggest AUC"></x-bars>`: labelled bars with their values; grey; `hl` gives one the blue accent.
-  - `<x-ring done="5.2" total="17.96" size="58" label="29%"></x-ring>` (or `value="0.29"`): a progress ring with a label inside, white while it fills, green when whole.
-  - `<x-dots done="11" total="16" now="12"></x-dots>`: a row of dots (rounds, phases, branches): done filled, the current lit, the rest hollow.
+When nothing is measured yet, the status rows of the job's parts (from `goal`) are the body: two to four rows, the one in hand lit, the rest hollow. That is never a row of pills.
+
+## 3. Readability
+
+- Text on the body is at least 12 px; the rows are 14 px; the focal number 30 px. Nothing smaller than 11 px, and 11 px only for a chart's axis words.
+- Short words: a row says 1 to 3 words ("Gatekeeper", "Sol judge", "Acme CV"), its value 1 to 3 words or a number ("4.4 s", "7.1", "round 2"). No sentences anywhere in the body.
+- A picture of a document (a CV, a report, a form, a page of text) is a texture at island size even as a thumbnail: show its score or its parts as rows instead. A picture earns its place only when its subject is visual (a video frame, an app screen, a chart) and reads at the size drawn.
+- A picture must be readable at island size. A whole desktop, a full report page or a long document shrunk to 328 points is a texture of tiny text: the user cannot read it, so do not draw it. Show what it proves instead (a ✓ row, the score), or crop to the one region that matters with `object-position` and a height of 90 to 130 points.
+- No headings, no eyebrow labels, no titles (the header has one), and nothing the bottom row says: not the stage, not the clock, not the now line's words.
+
+## 4. Space and order
+
+- Left-aligned, top to bottom in reading order: focal, support, detail. 10 to 12 px between layers, 6 px between rows.
+- No boxes around everything. At most one `card` when two groups must be told apart.
+- The island is narrow: put things side by side only when both stay readable (a 50 pt ring beside a curve, a 110 pt picture beside a score); otherwise stack.
+- Fewer is better. Four rows at most: the ones in hand and the newest; the rest stay in the now line or out.
+
+## 5. Colour
+
+Neutrals carry the island; colour marks what matters, one meaning each (stick to the default, with just some accent colours when something is more important):
+- white `var(--ink)` for what is in hand now and the focal number; grey `--ink2` for done and secondary; faint `--ink3` for what waits.
+- blue `var(--blue)` for the one thing in hand: the lit dot, the newest point, the highlighted bar.
+- green `var(--green)` for passed and done: ✓ ticks, a result that worked.
+- orange only for a real block that needs someone; red only for a failure.
+No other hues. Two series are told apart by line style and their names at their ends, not by two colours. Every island has at least one accent (a lit dot, a green tick, a blue point): an all-grey island looks dead.
+
+## 6. Sub-agents
+
+When `subagents` has entries, the user wants to see who works and who finished. If they are the moment (judges scoring, parallel builders, reviewers), draw them as rows: `<span class="dot"></span>` and white for working, `<span class="ok">✓</span>` and grey for done (with its result as the value when the log gives one: "7.1", "passed"), `<span class="bad">✗</span>` for failed. Name each by role, short: "Sol judge", "Opus judge", "Second persona", "Fresh review"; the model (`gpt-6.1-sol` is Sol, `claude-opus-5-5` is Opus) only when it tells judges apart. If they are not the moment, leave them to the helper rows.
+
+## 7. History
+
+`previous_island` is what the user saw a few minutes ago. Keep its design while the job does the same kind of work, so the island changes in place: the ring fills, a row turns ✓, a new point joins the curve. Change the design only when the work changes kind (from building to judging, from running to done).
+
+## What you can use
+
+- Layout: `div`, `span`, `table`, flexbox and grid, one `<style>` block and `style=""`.
+- Classes: `row` (flex row, 12 px gap), `col` (takes the rest), `grid2`, `grid3`, `big` (30 px), `mid` (19 px), `unit` and `label` (small grey), `dim`, `faint`, `num`, `card`, `bar` with `<i style="width:40%">`, `ok` (green), `bad` (red), `warn` (orange).
+- Status rows: `<div class="rows">` holding `<div class="r now"><span class="dot"></span>Transcribe<span class="v">MCP</span></div>`; a done row `<div class="r"><span class="ok">✓</span>Install</div>`; a waiting row `<div class="r wait"><span class="hollow"></span>Updates</div>`; a failed row `<div class="r"><span class="bad">✗</span>Zip</div>`. `v` is the grey value at the row's right.
+- Chart tags (you give the data, the island draws it exactly; prefer them to hand-drawn SVG):
+  - `<x-line series="6.4 7.1|5.9" names="Opus|Sol" min="4" max="10" target="8.5" target-label="8.5" ends="1" labels="1|2" h="72"></x-line>`: one line per series (`|` between series, oldest point first; the first solid white, the second dashed grey), a dashed target, `ends="1"` writes each name and last value at its end, `fill="1"` shades the first, `w` (default 328) and `h`.
+  - `<x-bars items="Wake sends:83|Suggest AUC:92" max="100" unit="%" hl="Suggest AUC"></x-bars>`: labelled bars, `hl` lights one blue.
+  - `<x-ring done="5.2" total="17.96" size="58" label="29%"></x-ring>`: a progress ring, green when whole.
+  - `<x-dots done="2" total="5" now="3"></x-dots>`: rounds or phases as dots.
   - `<x-spark values="0 2.6 5.2" w="92" h="34"></x-spark>`: an inline sparkline.
-  - `<x-steps items="Voice engine:done|Decider V6:now|Grants:wait|Install:wait" note=""></x-steps>`: the job's parts as one row of pills, each `done` (green ✓), `now` (lit; the first one takes the blue dot), `wait` (faint) or `failed` (red ✗). At most four, one or two short words each ("V6", "Grants", "Call fix"); the row never wraps, so fold the rest into the now line. `note` puts one small grey fact at the row's end; `size="l"` (at most three) when the steps are the whole body. Use it for branches, lanes, strands and steps: never hand-write pills for them.
+- Pictures: `<img src="/absolute/path.png" style="width:110px;height:90px;object-fit:cover;border-radius:6px">`, only a path in `latest_picture` or `status`, only a picture of the work itself, fresh (`picture_min_ago` at most 15) unless the job is done.
+- Refused: scripts, event handlers, links, forms, video, iframes, web fonts, anything from the network, CSS `content`, animations. Over 24 KB or 600 elements the answer is refused.
 
-Removed or refused: scripts and event handlers, links, forms and buttons (the body is a picture; clicks go to `open`), video and audio, iframes, web fonts, anything from the network (`http` in a `src`, `href` or CSS `url()`), pictures not named in the signals, CSS `content`, `image-set` and other image functions, animations and transitions. At most two `html` parts. Over 24 KB or 600 elements, the whole answer is refused.
+## Bad and good, from real islands
 
-How it should look (the user's rules): dark, Apple-like, graphics over text; one glance tells how the job is going. The number that matters big, its unit small and grey beside it; then the chart; at most one short grey line of labels. No headings, no eyebrow labels, no titles (the header has one), no sentences, and nothing the bottom row already says: not the stage, not the clock, not the now line's words ("round 1 judging" under a now line "Judging round 1" says it twice). Steps (`x-steps`) hold one or two short words each, at most four. A big number is a measure of the job (a score, a count of done of total, a size), never a count of things to do ("1 install") or of helpers. The big number is the newest one: this round's mean once it is in, else the newest judge score with its name ("6.54" with "Opus, round 1"); a baseline is only where the line starts. Every series of a chart is drawn, even a judge with one point so far. Each number once. A target is never the big number (it reads as a score already reached): with a chart it is the dashed line, without one it is the steps' `note`. A job with no measured number yet leads with its steps a size up, at most three, the target as their note (`<x-steps size="l" items="Brief:done|Builds:now|Judges:wait" note="target 8.5"></x-steps>`), and that is the whole body. Every number exactly as the signals or `status` give it: never compute a mean, a rate, a share or a time left yourself; when `status` gives one, show that.
-
-## Bodies drawn from real moments
-
-A beauty climb (`status` carries both judges' scores per round, the latest mean, the target and the budget):
+1. A test in a fresh VM. Bad (6 Nov): the whole VM desktop shrunk to 328 points, then three grey pills "Zip · Gatekeeper · First run" in 11 px. the user saw a blur and three words. Good: status rows, 14 px, ✓ for what passed, the lit dot on what runs now:
 ```html
-<div class="row" style="align-items:baseline;margin-bottom:6px"><span class="big">6.09</span><span class="unit">mean</span></div>
-<x-line series="3.09 5.50 5.66 6.19 5.85 6.67 5.62 6.19 6.93 7.18 6.38|2.23 4.99 5.06 5.38 6.03 6.57 5.79 7.63 6.38 5.79 5.79" names="Sol|Opus" min="2" max="9" target="8.5" target-label="8.5" ends="1" h="104" labels="1|11"></x-line>
-<div class="row" style="margin-top:9px"><x-dots done="11" total="16" now="12"></x-dots><span class="label">best 6.91, round 8</span></div>
+<div class="rows"><div class="r"><span class="ok">✓</span>Install<span class="v">fresh VM</span></div><div class="r"><span class="ok">✓</span>Gatekeeper</div><div class="r"><span class="ok">✓</span>Speech<span class="v">4.4 s clip</span></div><div class="r now"><span class="dot"></span>Transcribe<span class="v">MCP</span></div></div>
 ```
 
-A climb on a page in round 2 (the brief aims at about 8.5; Opus has judged round 2, Sol not yet; the newest render is the latest picture):
+2. A climb with judges. Bad: "Background" and a grey pill row "Clips · Thread · Page · Check". Good: the newest score big, the curve per judge against the target, each judge as a row:
 ```html
-<div class="row" style="align-items:center;gap:12px"><img src="/Users/me/Library/Application Support/FloatingIslands/pictures/task-readme-5e1c0a2f.png" style="width:96px;border-radius:6px">
-<div class="col"><div class="row" style="align-items:baseline;gap:6px"><span class="big">7.4</span><span class="unit">Opus, round 2</span></div>
-<x-line series="7.1 7.4|6.2" names="Opus|Sol" min="5" max="9" target="8.5" target-label="8.5" ends="1" w="220" h="58"></x-line></div></div>
+<div class="row" style="align-items:baseline;gap:8px"><span class="big">7.1</span><span class="unit">Opus, round 2</span></div>
+<x-line series="6.4 7.1|5.9" names="Opus|Sol" min="4" max="10" target="8.5" target-label="8.5" ends="1" h="70" labels="1|2"></x-line>
+<div class="rows" style="margin-top:10px"><div class="r"><span class="ok">✓</span>Opus judge<span class="v">7.1</span></div><div class="r now"><span class="dot"></span>Sol judge<span class="v">judging</span></div></div>
 ```
 
-A night pass (four branches, one merged, one in hand, the rest and the install waiting):
+3. Several items. Bad: "Acme CVs" and one line about the last CV touched. Good: one row per CV, the one in hand lit:
 ```html
-<div class="row" style="align-items:baseline;margin-bottom:9px"><span class="big">1</span><span class="unit">of 4 branches merged</span></div>
-<x-steps items="Approval grants:done|Call state:now|Decider V6:wait|Install:wait"></x-steps>
+<div class="row" style="align-items:baseline;gap:8px;margin-bottom:10px"><span class="big">2</span><span class="unit">of 4 CVs updated</span></div>
+<div class="rows"><div class="r"><span class="ok">✓</span>Acme</div><div class="r"><span class="ok">✓</span>Globex</div><div class="r now"><span class="dot"></span>Initech</div><div class="r wait"><span class="hollow"></span>Umbrella</div></div>
 ```
 
-A download (5.2 of 17.96 GB of weights; the status gives the rate):
+4. Building code, nothing measured yet. Bad: three 11 px grey pills "Curl skill · Lenient intake · Hardening". Good: the same parts as rows the eye can read, the one in hand lit:
 ```html
-<div class="row" style="gap:14px"><x-ring done="5.2" total="17.96" size="58" label="29%"></x-ring>
-<div class="col"><div><span class="mid">18 GB</span> <span class="unit">of weights</span></div><div class="label" style="margin-top:3px">4.8 MB/s</div></div></div>
+<div class="rows"><div class="r"><span class="ok">✓</span>Curl-only skill</div><div class="r"><span class="ok">✓</span>Lenient intake</div><div class="r now"><span class="dot"></span>Hardening<span class="v">rate limits</span></div></div>
 ```
 
-A test run (136 pass, and the live checks the agent named):
+5. Tests pass. Good: the count big and green, the checks under it:
 ```html
-<div class="row" style="align-items:baseline;margin-bottom:10px"><span class="big ok">136</span><span class="unit">tests pass</span></div>
-<div style="display:flex;flex-wrap:wrap;gap:6px"><span class="pill"><span class="ok">✓</span> Streaming</span><span class="pill"><span class="ok">✓</span> Tool calls</span><span class="pill"><span class="ok">✓</span> Grammar</span><span class="pill"><span class="ok">✓</span> JSON</span></div>
+<div class="row" style="align-items:baseline;gap:8px;margin-bottom:10px"><span class="big ok">50</span><span class="unit">local checks pass</span></div>
+<div class="rows"><div class="r now"><span class="dot"></span>Live endpoint<span class="v">next</span></div></div>
 ```
 
-Training (the loss curve beside the evals, the step as a ring):
+6. A report page under review. Bad: the whole page shrunk, its paragraphs unreadable. Good: the page's top cropped beside its score:
 ```html
-<div class="row" style="gap:12px"><x-ring done="801" total="2126" size="50" label="801"></x-ring>
-<x-line series="0.454 0.426 0.407 0.36 0.318 0.323 0.266 0.27 0.241 0.245 0.251 0.201 0.2 0.207 0.206 0.157 0.195 0.229 0.175 0.198 0.175 0.161 0.141 0.159" names="loss" fill="1" w="262" h="56" ends="1"></x-line></div>
-<div style="margin-top:8px"><x-bars items="Wake sends:83|Suggest AUC:92|Commands:82" max="100" unit="%"></x-bars></div>
+<div class="row" style="gap:12px;align-items:center"><img src="/Users/me/Library/Application Support/FloatingIslands/pictures/task-clear-report-1.png" style="width:120px;height:96px;object-fit:cover;object-position:top;border-radius:6px"><div class="col"><div class="row" style="align-items:baseline;gap:6px"><span class="big">8.2</span><span class="unit">Sol, round 2</span></div><div class="label" style="margin-top:4px">target 8.5</div></div></div>
 ```
 
-Research with three strands and no findings yet (the helper names; the finished one ticked, the one in hand lit):
+7. Done. Good: the result, green:
 ```html
-<x-steps items="Huel:done|Video:now|Night:wait"></x-steps>
+<div class="row" style="align-items:baseline;gap:8px;margin-bottom:8px"><span class="big ok">8.6</span><span class="unit">mean, round 3 · target met</span></div>
+<x-line series="6.4 7.1 8.7|5.9 7.4 8.5" names="Opus|Sol" min="4" max="10" target="8.5" ends="1" h="56"></x-line>
 ```
 
-Before you answer, also check: `html` is given (unless a question is pending), leads with the one telling thing for this kind of job, has no heading, label row or sentence, takes every number as the signals or `status` give it, uses chart tags for curves, bars, rings and dots, and `parts` keeps one simple fallback part. The summary is 24 to 38 characters.
+Before you answer, also check: `html` is given unless a question is pending; one element is clearly the largest; every text is at least 12 px except chart axes; there is at least one accent; no pill rows, no sentences, no shrunk full pages; the now line is 24 to 38 characters.

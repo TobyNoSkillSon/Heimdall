@@ -154,45 +154,21 @@ const ELEVENLABS_RATE: u32 = 24_000;
 pub(crate) const KEYCHAIN_SERVICE: &str = if crate::edition::PUBLIC { "Heimdall Alpha API provider: ElevenLabs" } else { "Heimdall API provider: ElevenLabs" };
 const KEY_ENV: &str = "HEIMDALL_ELEVENLABS_KEY";
 
-/// Lab builds' key, for the process lifetime only.
-static LAB_KEY: Mutex<Option<String>> = Mutex::new(None);
-
-/// The saved key: the environment's (lab), else the Keychain's (installed app) or memory's (lab).
+/// The saved key: the environment's (lab), else the one in `keychain` (the installed app's Keychain without a prompt or
+/// a wait; a test's or lab run's isolated store; nothing for a bare build). A blocked Keychain reads as no key.
 pub fn saved_key() -> Option<String> {
     if let Some(key) = std::env::var(KEY_ENV).ok().and_then(|k| agent::provider::normalize_key(&k).ok()) {
         return Some(key);
     }
-    if !agent::provider::is_installed_app() {
-        return LAB_KEY.lock().unwrap().clone();
-    }
-    use security_framework::item::{ItemClass, ItemSearchOptions, SearchResult};
-    let items = ItemSearchOptions::new().class(ItemClass::generic_password()).service(KEYCHAIN_SERVICE).account(ui::speech_voice::ELEVENLABS)
-        .load_data(true).skip_authenticated_items(true).search().ok()?;
-    items.into_iter().find_map(|i| match i { SearchResult::Data(b) => String::from_utf8(b).ok(), _ => None })
+    keychain::read(KEYCHAIN_SERVICE, ui::speech_voice::ELEVENLABS).ok().flatten()
+        .and_then(|b| String::from_utf8(b).ok())
         .and_then(|k| agent::provider::normalize_key(&k).ok())
 }
 fn save_key(key: &str) -> Result<()> {
-    if !agent::provider::is_installed_app() {
-        *LAB_KEY.lock().unwrap() = Some(key.into());
-        return Ok(());
-    }
-    delete_key()?;
-    let mut options = security_framework::passwords::PasswordOptions::new_generic_password(KEYCHAIN_SERVICE, ui::speech_voice::ELEVENLABS);
-    options.set_label(KEYCHAIN_SERVICE);
-    security_framework::passwords::set_generic_password_options(key.as_bytes(), options).map_err(|_| anyhow::anyhow!("Could not save the key in the Keychain"))
+    keychain::write(KEYCHAIN_SERVICE, ui::speech_voice::ELEVENLABS, KEYCHAIN_SERVICE, key.as_bytes()).map_err(|e| anyhow::anyhow!("Could not save the key: {e}"))
 }
 fn delete_key() -> Result<()> {
-    if !agent::provider::is_installed_app() {
-        *LAB_KEY.lock().unwrap() = None;
-        return Ok(());
-    }
-    use security_framework::item::{ItemClass, ItemSearchOptions};
-    match ItemSearchOptions::new().class(ItemClass::generic_password()).service(KEYCHAIN_SERVICE).account(ui::speech_voice::ELEVENLABS)
-        .skip_authenticated_items(true).delete() {
-        Ok(()) => Ok(()),
-        Err(e) if e.code() == -25300 => Ok(()),
-        Err(_) => bail!("Could not remove the key from the Keychain"),
-    }
+    keychain::delete(KEYCHAIN_SERVICE, ui::speech_voice::ELEVENLABS).map_err(|e| anyhow::anyhow!("Could not remove the key: {e}"))
 }
 
 /// ElevenLabs over HTTPS (blocking: speech runs on its own threads). `base` is the API root (a fake server in tests).
@@ -281,7 +257,6 @@ fn refusal(response: reqwest::blocking::Response) -> Result<reqwest::blocking::R
 /// One ElevenLabs voice as a streaming voice.
 struct ElevenLabsVoice<'a> { client: &'a ElevenLabs, key: String, voice: String }
 impl speak::voice::StreamingVoice for ElevenLabsVoice<'_> {
-    fn label(&self) -> &str { "ElevenLabs" }
     fn stream_sentence(&mut self, text: &str, cancel: &dyn Fn() -> bool, emit: &mut dyn FnMut(&[f32], u32) -> Result<()>) -> Result<()> {
         self.client.stream(&self.key, &self.voice, text, cancel, emit)
     }
@@ -290,7 +265,6 @@ impl speak::voice::StreamingVoice for ElevenLabsVoice<'_> {
 /// [voices] One Own Engine voice as a streaming voice (a sentence per request).
 struct OwnVoice { endpoint: crate::own_voice::Endpoint, voice: String }
 impl speak::voice::StreamingVoice for OwnVoice {
-    fn label(&self) -> &str { "Own Engine" }
     fn stream_sentence(&mut self, text: &str, cancel: &dyn Fn() -> bool, emit: &mut dyn FnMut(&[f32], u32) -> Result<()>) -> Result<()> {
         let (samples, rate) = crate::own_voice::speak(&self.endpoint, &self.voice, text, cancel)?;
         emit(&samples, rate)
@@ -419,13 +393,17 @@ impl Voices {
     /// nothing else may load it before the user's first reply). Nothing while it is loaded or not the voice.
     pub fn load_phonon(&self) -> Result<()> {
         if !matches!(self.route(), Route::Phonon(_)) { return Ok(()) }
+        self.phonon_slot(" (Setup learns the voice)").map(drop)
+    }
+    /// The Phonon S slot, loaded first when empty; `why` ends the log line.
+    fn phonon_slot(&self, why: &str) -> Result<std::sync::MutexGuard<'_, Option<Box<dyn PresetVoice>>>> {
         let mut slot = self.phonon.lock().unwrap();
         if slot.is_none() {
             let started = std::time::Instant::now();
             *slot = Some((self.load_phonon)(&self.phonon_dir).context("Phonon S not loaded")?);
-            eprintln!("voice: Phonon S loaded in {:.1} s (Setup learns the voice)", started.elapsed().as_secs_f64());
+            eprintln!("voice: Phonon S loaded in {:.1} s{why}", started.elapsed().as_secs_f64());
         }
-        Ok(())
+        Ok(slot)
     }
     /// Bank lines are Jarvis's recordings: they play only while Jarvis is the voice.
     pub fn bank_matches(&self) -> bool {
@@ -436,12 +414,7 @@ impl Voices {
         emit: &mut dyn FnMut(speak::SpeechPacket) -> Result<()>) -> Result<speak::Audio> {
         match route {
             Route::Phonon(preset) => {
-                let mut slot = self.phonon.lock().unwrap();
-                if slot.is_none() {
-                    let started = std::time::Instant::now();
-                    *slot = Some((self.load_phonon)(&self.phonon_dir).context("Phonon S not loaded")?);
-                    eprintln!("voice: Phonon S loaded in {:.1} s", started.elapsed().as_secs_f64());
-                }
+                let mut slot = self.phonon_slot("")?;
                 let voice = slot.as_mut().unwrap();
                 voice.set_preset(preset)?;
                 speak::voice::stream_sentence(voice.as_mut(), written, plain, rate, cancel, emit)

@@ -79,6 +79,23 @@ pub fn build(island: &Island, root: &CALayer, y0: f64, width: f64, scale: f64, o
     y
 }
 
+/// What a "done?" card (a proposal of kind `complete`) says under its goal.
+pub const COMPLETE_LINE: &str = "Done? Close it";
+
+/// The looping icon an ongoing goal shows in place of its ring ("no completion ring and a looping icon").
+pub const ONGOING_SYMBOL: &str = "arrow.triangle.2.circlepath";
+
+/// An ongoing goal's disc: the same dark disc and inner face as the ring, no progress arcs and no glow, the loop in it.
+fn loop_disc(scale: f64) -> Retained<CALayer> {
+    let r = boxed(RING_X, RING_Y, RING, RING, &track_fill(), RING / 2.0);
+    let inner = boxed(7.0, 7.0, RING - 14.0, RING - 14.0, &rgb(0x141416, 1.0), (RING - 14.0) / 2.0);
+    r.addSublayer(&inner);
+    let s = symbol_layer(ONGOING_SYMBOL, 15.0, &[run_blue()], Weight::Semibold, scale);
+    s.setPosition(pt(RING / 2.0, RING / 2.0));
+    r.addSublayer(&s);
+    r
+}
+
 /// The ring: the shares done and running round the goal's symbol on a dark disc, a soft green glow under it.
 fn ring(symbol: &str, done: f64, run: f64, scale: f64) -> Retained<CALayer> {
     let r = boxed(RING_X, RING_Y, RING, RING, &track_fill(), RING / 2.0);
@@ -154,31 +171,51 @@ fn bar(segs: &[Seg], x0: f64, y: f64, w: f64, into: &CALayer) {
     }
 }
 
-/// A proposal's ghost row at (x, y), `w` wide: open dot, title at 75 % white, Yes, "+N"; its `why` under it once its
-/// title was clicked. Keyed `key` so a yes fills it in where it sits. Returns its bottom.
+/// The gap between a ghost's Yes and No chips (night1111 goals no).
+const CHIP_GAP: f64 = 6.0;
+
+/// A proposal's ghost row at (x, y), `w` wide: open dot, title at 75 % white, Yes, No, "+N"; its `why` under it once
+/// its title was clicked. Keyed `key` so a yes fills it in where it sits. Answered, only the chosen chip stays, with a
+/// check. Returns its bottom.
 #[allow(clippy::too_many_arguments)]
 fn ghost_row(p: &Proposal, plus_n: usize, key: &str, root: &CALayer, x: f64, y: f64, w: f64, scale: f64, open_items: &HashSet<String>, body: &mut Body) -> (Retained<CALayer>, f64) {
     let answered = open_items.contains(&format!("yes:{}", p.id));
+    let declined = !answered && open_items.contains(&format!("no:{}", p.id));
     let why_open = p.why.is_some() && open_items.contains(&format!("why:{}", p.id));
     let row = keyed(y, x + w, 0.0);
     // Clear: a ghost goal's ring shows beside it.
     set_bg(&row, &clear());
     let (yes, yw) = yes_chip(answered, scale);
+    // No beside Yes, CHIP_GAP after it; an answer leaves only the chosen chip.
+    let (no, nw) = no_chip(declined, scale);
+    let (show_yes, show_no) = (!declined, !answered);
+    let yes_w = if show_yes { yw } else { 0.0 };
+    let no_w = if show_no { nw + if show_yes { CHIP_GAP } else { 0.0 } } else { 0.0 };
+    let chips_w = yes_w + no_w;
     let pl = plus(plus_n, scale);
     let pw = pl.as_ref().map(|l| l.bounds().size.width + 9.0).unwrap_or(0.0);
     let right = x + w - 6.0;
     let tx = x + 8.0 + 7.0 + 9.0;
-    let tw = right - pw - yw - 9.0 - tx;
-    let (t, off, th) = boxed_lines(&p.title, &line_font(), &white(0.75), tw, 2, 20.0, scale);
+    let tw = right - pw - chips_w - 9.0 - tx;
+    // A "done?" card sits under its goal: its title would repeat the goal's name.
+    let title = if p.kind.as_deref() == Some("complete") { COMPLETE_LINE } else { p.title.as_str() };
+    let (t, off, th) = boxed_lines(title, &line_font(), &white(0.75), tw, 2, 20.0, scale);
     let inner = th.max(YES_H);
     let h = inner + 8.0;
     row.addSublayer(&ghost_box(x, 0.0, w, h));
     row.addSublayer(&open_dot(x + 8.0 + 3.5, h / 2.0, 7.0, &white(0.6)));
     t.setPosition(pt(tx, 4.0 + (inner - th) / 2.0 + off));
     row.addSublayer(&t);
-    let yx = right - pw - yw;
-    yes.setPosition(pt(yx, (h - YES_H) / 2.0));
-    row.addSublayer(&yes);
+    let yx = right - pw - chips_w;
+    let nx = right - pw - nw;
+    if show_yes {
+        yes.setPosition(pt(yx, (h - YES_H) / 2.0));
+        row.addSublayer(&yes);
+    }
+    if show_no {
+        no.setPosition(pt(nx, (h - YES_H) / 2.0));
+        row.addSublayer(&no);
+    }
     if let Some(l) = &pl {
         l.setPosition(pt(right - l.bounds().size.width - 2.0, (h - l.bounds().size.height) / 2.0));
         row.addSublayer(l);
@@ -192,13 +229,14 @@ fn ghost_row(p: &Proposal, plus_n: usize, key: &str, root: &CALayer, x: f64, y: 
     }
     row.setBounds(cgr(Rect::new(0.0, 0.0, x + w, total)));
     root.addSublayer(&row);
-    if !answered {
+    if !answered && !declined {
         body.regions.push(HitRegion { rect: Rect::new(yx - 2.0, y, yw + 4.0, h), control: Control::Yes { list: "goals".into(), id: p.id.clone() } });
+        body.regions.push(HitRegion { rect: Rect::new(nx - 2.0, y, nw + 4.0, h), control: Control::No { list: "goals".into(), id: p.id.clone() } });
     }
     if p.why.is_some() {
         body.regions.push(HitRegion { rect: Rect::new(x, y, (yx - x - 4.0).max(10.0), h), control: Control::Disclose { key: format!("why:{}", p.id) } });
     }
-    let sig = [p.title.clone(), plus_n.to_string(), answered.to_string(), why_open.to_string(), format!("{w:.0}")].join("\u{1}");
+    let sig = [p.title.clone(), plus_n.to_string(), answered.to_string(), why_open.to_string(), format!("{w:.0}"), declined.to_string()].join("\u{1}");
     body.rows.insert(key.to_owned(), (row.clone(), sig));
     (row, y + total)
 }
@@ -206,18 +244,25 @@ fn ghost_row(p: &Proposal, plus_n: usize, key: &str, root: &CALayer, x: f64, y: 
 /// One active goal: its head (ring, title, bar, latest move, running line), its queued lines and its ghost step.
 #[allow(clippy::too_many_arguments)]
 fn goal_block(g: &Goal, running: usize, step: Option<&(Proposal, usize)>, root: &CALayer, y0: f64, width: f64, scale: f64, open_items: &HashSet<String>, body: &mut Body) -> f64 {
-    let v = onesys::goal_view(g, running, step.is_some());
+    // A "done?" card is no piece of work: no proposed segment for it.
+    let v = onesys::goal_view(g, running, step.is_some_and(|(p, _)| p.kind.as_deref() != Some("complete")));
     let tw = width - GOAL_TEXT_X;
     let top = y0 + PAD_TOP;
     let row = keyed(top, width, 0.0);
     let symbol = Some(g.symbol()).filter(|s| symbol_exists(s)).unwrap_or_else(|| "flag".into());
-    row.addSublayer(&ring(&symbol, v.done_share, v.run_share, scale));
+    // Ongoing: the loop, and no bar (nothing to complete).
+    let disc = if g.ongoing { loop_disc(scale) } else { ring(&symbol, v.done_share, v.run_share, scale) };
+    row.addSublayer(&disc);
     let (t, off, th) = boxed_lines(&g.title, &title_font(), &ink(), tw, 2, 22.0, scale);
     t.setPosition(pt(GOAL_TEXT_X, off));
     row.addSublayer(&t);
     let mut h = th + 7.0;
-    bar(&v.segs, GOAL_TEXT_X, h, tw, &row);
-    h += BAR_H + 8.0;
+    if g.ongoing {
+        h += 1.0;
+    } else {
+        bar(&v.segs, GOAL_TEXT_X, h, tw, &row);
+        h += BAR_H + 8.0;
+    }
     if let Some(n) = &g.now {
         let (l, off, lh) = boxed_lines(n, &now_font(), &white(0.62), tw, 2, 18.0, scale);
         l.setPosition(pt(GOAL_TEXT_X, h + off));
@@ -241,7 +286,7 @@ fn goal_block(g: &Goal, running: usize, step: Option<&(Proposal, usize)>, root: 
     let head_h = h.max(RING + RING_Y);
     row.setBounds(cgr(Rect::new(0.0, 0.0, width, head_h)));
     root.addSublayer(&row);
-    let sig = [g.title.clone(), format!("{:?}", v.segs), format!("{:.3}/{:.3}", v.done_share, v.run_share), g.now.clone().unwrap_or_default(), v.running.to_string(), symbol, format!("{width:.0}")].join("\u{1}");
+    let sig = [g.title.clone(), g.ongoing.to_string(), format!("{:?}", v.segs), format!("{:.3}/{:.3}", v.done_share, v.run_share), g.now.clone().unwrap_or_default(), v.running.to_string(), symbol, format!("{width:.0}")].join("\u{1}");
     body.rows.insert(format!("goal:{}", g.key), (row, sig));
     let mut y = top + head_h;
     // The queued tasks, a grey dot each (their keys are the tasks', so a yes on a step fills its ghost in place).
@@ -281,7 +326,7 @@ fn goal_block(g: &Goal, running: usize, step: Option<&(Proposal, usize)>, root: 
     y + PAD_BOTTOM
 }
 
-/// A goal proposal after the goals: a dashed ring with its symbol, then the ghost box (title, Yes, +N). Keyed as the
+/// A goal proposal after the goals: a dashed ring with its symbol, then the ghost box (title, Yes, No, +N). Keyed as the
 /// goal it becomes.
 fn ghost_goal(f: &(Proposal, usize), root: &CALayer, y0: f64, width: f64, scale: f64, open_items: &HashSet<String>, body: &mut Body) -> f64 {
     let (p, n) = f;
@@ -300,12 +345,13 @@ fn ghost_goal(f: &(Proposal, usize), root: &CALayer, y0: f64, width: f64, scale:
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::jobj;
+    use crate::model::Responses;
 
-    #[test]
-    fn goals_draw_the_active_goals_their_queue_and_one_ghost() {
+    /// Run by `mac::tests::appkit_renders`, in one process with the other AppKit renders (TST-11).
+    pub(crate) fn goals_draw_the_active_goals_their_queue_and_one_ghost() {
         let now = time::now();
         let island = Island::new("goals", jobj! {"preset": "todo", "list": "goals", "goals": [
             {"id": "g-ship", "title": "Ship Heimdall publicly", "now": "Designing the lists", "tasks": [
@@ -330,8 +376,63 @@ mod tests {
         assert!(body.rows["row:p1"].1.contains("\u{1}true\u{1}"));
     }
 
-    #[test]
-    fn a_goal_proposal_is_a_ghost_goal_and_nothing_at_all_is_the_empty_sign() {
+    /// Bug note 2026-11-06T11-42-43: an ongoing goal has no completion ring or bar (a loop in their place), and a
+    /// "done?" card under a goal is a ghost row with Yes but no proposed segment.
+    /// Run by `mac::tests::appkit_renders`, in one process with the other AppKit renders (TST-11).
+    pub(crate) fn an_ongoing_goal_draws_a_loop_and_a_done_card_adds_no_segment() {
+        let now = time::now();
+        let island = Island::new("goals", jobj! {"preset": "todo", "list": "goals", "goals": [
+            {"id": "g-better", "title": "Improve Heimdall and Arsenal", "ongoing": true, "now": "Menu lag cut", "tasks": [{"id": "t1", "title": "Done", "state": "done"}]},
+            {"id": "g-ship", "title": "Ship Arsenal", "now": "Menu lag cut", "tasks": [{"id": "t2", "title": "Published", "state": "done"}]}],
+            "proposals": [{"id": "c1", "title": "Ship Arsenal looks done: close it?", "kind": "complete", "goal": "g-ship", "shown": now - 60.0}]});
+        let parsed = Goals::parse(&island.raw);
+        assert!(parsed[0].ongoing && !parsed[1].ongoing);
+        assert_eq!(parsed[0].share(), None, "no completion share");
+        let mut body = Body::empty();
+        build(&island, &layer(), 0.0, 328.0, 2.0, &HashSet::new(), &mut body);
+        let sig = |k: &str| body.rows[k].1.split('\u{1}').map(str::to_owned).collect::<Vec<_>>();
+        assert_eq!(sig("goal:g-better")[1], "true");
+        assert_eq!(sig("goal:g-ship")[1], "false");
+        assert_eq!(sig("goal:g-ship")[2], "[Done]", "the card is no piece of work");
+        assert!(body.regions.iter().any(|r| matches!(&r.control, Control::Yes { id, .. } if id == "c1")));
+        // The ongoing head is shorter: no bar under its title.
+        let h = |k: &str| body.rows[k].0.bounds().size.height;
+        assert!(h("goal:g-better") < h("goal:g-ship"), "{} vs {}", h("goal:g-better"), h("goal:g-ship"));
+    }
+
+    /// "we need some yes and no for the proposed goals". A ghost goal and a ghost step each carry
+    /// Yes and No, side by side; a No click writes the same `approval` response the phone's No becomes (action "no",
+    /// the app declines it); answered, only the chosen chip stays and neither answers again.
+    /// Run by `mac::tests::appkit_renders`, in one process with the other AppKit renders (TST-11).
+    pub(crate) fn a_proposal_ghost_has_yes_and_no_and_a_no_answers_it_once() {
+        let island = Island::new("goals", jobj! {"preset": "todo", "list": "goals", "goals": [{"id": "g-ship", "title": "Ship Heimdall publicly", "tasks": []}],
+            "proposals": [{"id": "p1", "title": "Prepare CV drafts", "kind": "step", "goal": "g-ship"}, {"id": "g-job", "title": "Get a job", "kind": "goal", "icon": "briefcase"}]});
+        let region = |b: &Body, f: &dyn Fn(&Control) -> bool| b.regions.iter().find(|r| f(&r.control)).map(|r| r.rect);
+        let mut body = Body::empty();
+        build(&island, &layer(), 0.0, 328.0, 2.0, &HashSet::new(), &mut body);
+        let yes = region(&body, &|c| matches!(c, Control::Yes { list, id } if list == "goals" && id == "p1")).expect("Yes on the step");
+        let no = region(&body, &|c| matches!(c, Control::No { list, id } if list == "goals" && id == "p1")).expect("No on the step");
+        assert!(yes.max_x() <= no.min_x() && (yes.min_y() - no.min_y()).abs() < 0.5, "No sits right of Yes on the same row: {yes:?} {no:?}");
+        assert!(region(&body, &|c| matches!(c, Control::Yes { id, .. } if id == "g-job")).is_none(), "one front proposal: the step");
+        // The response a No click writes is the one the app declines (crates/app/src/islands/responses.rs, `approval`).
+        let r = Responses::approval("goals", "p1", "no");
+        assert_eq!(serde_json::to_value(&r).unwrap(), serde_json::json!({"island": "goals", "kind": "approval", "action": "no", "value": "p1"}));
+        // Declined: only a checked No, no live chips, the row's sig changes so it redraws.
+        let before = body.rows["row:p1"].1.clone();
+        let mut body = Body::empty();
+        build(&island, &layer(), 0.0, 328.0, 2.0, &["no:p1".to_owned()].into(), &mut body);
+        assert!(region(&body, &|c| matches!(c, Control::Yes { .. } | Control::No { .. })).is_none());
+        assert!(body.rows["row:p1"].1.ends_with("\u{1}true") && body.rows["row:p1"].1 != before);
+        // A goal proposal alone is a ghost goal with both chips too.
+        let goal = Island::new("goals", jobj! {"preset": "todo", "list": "goals", "goals": [], "proposals": [{"id": "g-job", "title": "Get a job", "kind": "goal", "icon": "briefcase"}]});
+        let mut body = Body::empty();
+        build(&goal, &layer(), 0.0, 328.0, 2.0, &HashSet::new(), &mut body);
+        assert!(region(&body, &|c| matches!(c, Control::Yes { id, .. } if id == "g-job")).is_some());
+        assert!(region(&body, &|c| matches!(c, Control::No { id, .. } if id == "g-job")).is_some());
+    }
+
+    /// Run by `mac::tests::appkit_renders`, in one process with the other AppKit renders (TST-11).
+    pub(crate) fn a_goal_proposal_is_a_ghost_goal_and_nothing_at_all_is_the_empty_sign() {
         let island = Island::new("goals", jobj! {"preset": "todo", "list": "goals", "goals": [], "proposals": [{"id": "g-job", "title": "Get a job", "kind": "goal", "icon": "briefcase"}, {"id": "x", "title": "x"}]});
         let mut body = Body::empty();
         build(&island, &layer(), 0.0, 328.0, 2.0, &HashSet::new(), &mut body);

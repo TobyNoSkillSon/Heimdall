@@ -62,9 +62,9 @@ pub const CARD_PREFIX: &str = "voice-name:";
 pub const YES: &str = "Yes";
 pub const FORGET: &str = "Forget";
 
-pub const SYSTEM: &str = "You identify one unnamed voice in User's recorded calls (mostly Discord). Heimdall, his \
+pub const SYSTEM: &str = "You identify one unnamed voice in {user}'s recorded calls (mostly Discord). Heimdall, his \
 assistant, labelled it with a code such as \"Speaker Fri 23 Oct 21h #3\"; in the transcript below its lines are \
-marked VOICE. Other lines carry their speaker: User, a known person's name, or another code. You get the voice's \
+marked VOICE. Other lines carry their speaker: {user_label}, a known person's name, or another code. You get the voice's \
 lines from several calls and, around each, the lines just before and after it.
 
 Decide whether the transcript shows this voice's name. Good evidence, strongest first:
@@ -74,11 +74,25 @@ then VOICE: \"yeah\");
 - others talk to or about the voice by name in a way only it fits.
 Not evidence: a name the VOICE itself says to someone else (that is another person); a name followed by a \
 different speaker's answer; a name in a story, a game, a stream or a song; one moment repeated. ASR may misspell \
-names; use the spelling the transcript uses most. Never answer User or Heimdall.
+names; use the spelling the transcript uses most. Never answer {user} or Heimdall.
 
 Answer a name only when several independent moments point at it and nothing points elsewhere. hints lists the \
 line numbers that name the person, each a separate piece of evidence; quote_line is the clearest one, to show \
-User. When unsure, answer name \"\" with confidence low and no hints: a wrong guess costs User more than none.";
+{user}. When unsure, answer name \"\" with confidence low and no hints: a wrong guess costs {user} more than none.";
+
+/// `SYSTEM` with the configured names (`personal`).
+pub fn system() -> String {
+    personal(SYSTEM)
+}
+/// A background prompt with the configured user's and assistant's names in its prose (`agent::identity::names_only`):
+/// `{user}` is the name, `{user_label}` the label the transcript shows the model for the user's own lines (the send
+/// words the stored `the user` label per edition, `agent::identity::for_agent`).
+pub(crate) fn personal(text: &str) -> String {
+    personal_for(text, &agent::identity::current())
+}
+pub(crate) fn personal_for(text: &str, names: &agent::identity::Names) -> String {
+    agent::identity::template(text, names)
+}
 
 /// Archived lines of one voice: how much of them there is.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -185,7 +199,7 @@ pub fn prompt(code: &str, lines: &[Line], known: &[String], declined: &[String])
         p.push_str(&format!("Names Heimdall already knows (other voices): {}.\n", known.join(", ")));
     }
     if !declined.is_empty() {
-        p.push_str(&format!("User already said it is not: {}.\n", declined.join(", ")));
+        p.push_str(&personal(&format!("{{user}} already said it is not: {}.\n", declined.join(", "))));
     }
     p.push_str("\n<transcript note=\"[n] local time, speaker: words; a blank line between calls\">\n");
     let mut last: Option<(i64, i64)> = None;
@@ -233,8 +247,8 @@ pub fn schema() -> Value {
 /// The run on the background model (`background_call`: adaptive thinking with `output_config.effort`, structured
 /// output, the one-hour cache on the system prompt, the $0.50 limit). The user message is one voice's transcript,
 /// different every run, so only the system prompt is marked for the cache.
-pub fn call(model: &str, prompt: &str) -> crate::background_call::Call<'static> {
-    crate::background_call::Call { job: JOB, model: model.to_owned(), system: SYSTEM, schema: schema(), effort: EFFORT, prompt: prompt.into(), history: Vec::new(), session: None }
+pub fn call<'a>(model: &str, system: &'a str, prompt: &str) -> crate::background_call::Call<'a> {
+    crate::background_call::Call { job: JOB, model: model.to_owned(), system, schema: schema(), effort: EFFORT, prompt: prompt.into(), history: Vec::new(), session: None }
 }
 
 #[cfg(test)]
@@ -243,8 +257,9 @@ pub fn request_body(prompt: &str) -> Value {
 }
 
 /// The Messages API body naming `model` (the endpoint's snapshot).
+#[cfg(test)]
 pub fn request_body_for(model: &str, prompt: &str) -> Value {
-    crate::background_call::prepare(&call(model, prompt)).map(|p| p.body).unwrap_or(Value::Null)
+    crate::background_call::prepare(&call(model, &system(), prompt)).map(|p| p.body).unwrap_or(Value::Null)
 }
 
 /// What the card asks.
@@ -302,26 +317,15 @@ pub fn verify(code: &str, answer: &str, lines: &[Line], known: &[String], declin
     if name.is_empty() || v["confidence"] != "high" {
         return Ok(None);
     }
-    let lower = name.to_lowercase();
-    if name.chars().count() > 40
-        || name.split_whitespace().count() > 3
-        || !name.chars().all(|c| c.is_alphabetic() || c == ' ' || c == '-' || c == '\'')
-        || ["owner", "heimdall", "voice", "speaker", "unknown"].contains(&lower.as_str())
-        || declined.iter().any(|d| same_names(d, &name))
-        // Someone Heimdall already knows is another voice: Yes would mix this voice into their samples.
-        || known.iter().any(|k| same_names(k, &name))
-    {
+    // Someone Heimdall already knows is another voice: Yes would mix this voice into their samples.
+    if !plausible(&name, declined) || known.iter().any(|k| same_names(k, &name)) {
         return Ok(None);
     }
     let by_n: BTreeMap<usize, &Line> = lines.iter().map(|l| (l.n, l)).collect();
     let mut hints: Vec<&Line> = vec![];
     for n in v["hints"].as_array().into_iter().flatten().filter_map(Value::as_u64) {
         let Some(l) = by_n.get(&(n as usize)) else { continue };
-        // The voice saying its own name, or someone saying it with the voice answering next ("hey John" belongs to
-        // whoever answers): the next line of that call is the voice's own.
-        let answered = || lines.iter().find(|x| x.n > l.n && x.session == l.session).is_some_and(|x| x.own && x.wall_ms - l.wall_ms <= AFTER_MS);
-        let counts = if l.own { introduces(&l.text, &name) } else { answered() };
-        if counts && says(&l.text, &name) && !hints.iter().any(|h| h.n == l.n) {
+        if hint_counts(l, lines, &name) && !hints.iter().any(|h| h.n == l.n) {
             hints.push(l);
         }
     }
@@ -343,6 +347,28 @@ pub fn verify(code: &str, answer: &str, lines: &[Line], known: &[String], declin
     let q = by_n[&quote_n];
     let who = if q.own { "They said" } else if q.speaker.is_empty() { "Someone" } else { q.speaker.as_str() };
     Ok(Some(Proposal { code: code.into(), name, quote: format!("{who}: {}", q.text), hints: hints.iter().map(|h| h.n).collect() }))
+}
+
+/// A name a card may offer or a proposal may carry: a plausible person's name, not the user's or Heimdall's (by
+/// configured name or by label), not a card answer, not one the user turned down for this voice.
+pub(crate) fn plausible(name: &str, declined: &[String]) -> bool {
+    let lower = name.to_lowercase();
+    let names = agent::identity::current();
+    !name.is_empty()
+        && name.chars().count() <= 40
+        && name.split_whitespace().count() <= 3
+        && name.chars().all(|c| c.is_alphabetic() || c == ' ' || c == '-' || c == '\'')
+        && lower != agent::identity::DEFAULT_USER.to_lowercase()
+        && !["heimdall", "voice", "speaker", "unknown", "yes", "not important", "forget"].contains(&lower.as_str())
+        && ![&names.user, &names.assistant].iter().any(|n| same_names(n, name))
+        && !declined.iter().any(|d| same_names(d, name))
+}
+/// Whether line `l` is evidence that `name` is the voice's: the voice saying it as its own, or someone saying it with
+/// the voice answering next ("hey John" belongs to whoever answers): the next line of that call is the voice's own,
+/// within `AFTER_MS`.
+pub(crate) fn hint_counts(l: &Line, lines: &[Line], name: &str) -> bool {
+    let answered = || lines.iter().find(|x| x.n > l.n && x.session == l.session).is_some_and(|x| x.own && x.wall_ms - l.wall_ms <= AFTER_MS);
+    says(&l.text, name) && if l.own { introduces(&l.text, name) } else { answered() }
 }
 
 /// "I'm Dave", "it's Dave", "Dave here": the voice saying its own name.
@@ -452,7 +478,7 @@ pub fn pass(db: &Connection, store: &EnrollmentStore, state: &mut State, now_ms:
 /// Anthropic, the provider's stored key). Errors never carry the key.
 pub fn ask_model(e: &crate::plan_refresher::Endpoint, prompt: &str) -> Result<String> {
     let model = e.model.clone().unwrap_or_else(crate::background_model::anthropic_model);
-    Ok(crate::background_call::ask_blocking(e, &call(&model, prompt))?.text)
+    Ok(crate::background_call::ask_blocking(e, &call(&model, &system(), prompt))?.text)
 }
 
 /// The card's words: "Is this John?" and the quote, cut to the island's one line (`voice_suggest::fitted`).

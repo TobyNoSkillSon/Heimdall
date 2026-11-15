@@ -4,8 +4,7 @@
 
 pub const PUBLIC: bool = cfg!(feature = "public");
 pub const NAME: &str = if PUBLIC { "public" } else { "personal" };
-/// The app's name and ID, as `scripts/bundle.sh` writes them into Info.plist.
-pub const APP_NAME: &str = if PUBLIC { "Heimdall Alpha" } else { "Heimdall" };
+/// The app's ID, as `scripts/bundle.sh` writes it into Info.plist.
 pub const BUNDLE_ID: &str = if PUBLIC { heimdall_home::PUBLIC_ID } else { heimdall_home::PERSONAL_ID };
 /// One version for both editions: the workspace's.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

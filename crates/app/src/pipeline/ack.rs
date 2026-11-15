@@ -1,9 +1,8 @@
 //! Instant acknowledgement: when the user's words go to the agent as a spoken wake (d1's send, his name,
-//! "send it" or the follow-up window), Heimdall says a short recorded line in Jarvis's voice ("On it.", "Sprawdzam.")
-//! once he has been quiet `Settings::ack_delay_ms` since his last voiced audio (2.5 s, "1.5 is way
-//! too short"; A setting, live from settings.json; 21:44: 2 s, and the island's send arrow and
-//! thinking dots wait for the same moment, `hold_island`; 22:25: no added wait, 0 by default, so both come as the wake
-//! goes). The wake normally reaches this point about 1.6 s after his last word (the speech detector's 1.5 s pause),
+//! "send it" or the follow-up window), Heimdall says a short recorded line in Jarvis's voice ("On it.", "Will do.")
+//! once he has been quiet `Settings::ack_delay_ms` since his last voiced audio (a setting, live from settings.json;
+//! 0 by default since 22:25, so the ack comes as the wake goes; the island's send arrow and thinking dots wait for the
+//! same moment, `hold_island`). The wake normally reaches this point 0.4–1.6 s after his last word (Smart Turn's end of his turn, 11 Nov),
 //! so a longer delay waits out the rest on its own thread (`voice_bank::play_ack_after`) while the wake goes to the
 //! agent at once: the agent is never held back for it.
 //! - Before the reply: the agent's first sentence comes seconds after the wake and waits out the same pause, so the
@@ -12,6 +11,7 @@
 //!   unless the user talks first]`.
 //!
 //! - The line: `voicebank::acks` picks by the turn's language and words, varying lines; takes are Jarvis bank clips.
+//!   A decider's line plays only in the turn's language, and an id the catalogue does not know plays nothing.
 //! - Precise ("too aggressive and not very precise"): decider v3's line passes
 //!   `voicebank::ack_gate`, so "Stopping now." needs a stop order and "On it." a request; a line that claims too much
 //!   becomes "Got it.", a remark or greeting gets nothing. Fewer: when the recent replies' first speech came within
@@ -194,6 +194,9 @@ impl Pipeline {
         // neutral line or nothing (`voicebank::ack_gate`).
         let mut gated_from = None;
         let plan = match plan {
+            // An id the catalogue does not know (a retired Polish line), or a line in another language than the turn's,
+            // plays nothing (below): the gate's neutral line would answer a Polish turn in English.
+            AckPlan::Line(id) if voicebank::acks::resolve(&id).is_none_or(|a| a.lang != voicebank::acks::language(text)) => AckPlan::Line(id),
             AckPlan::Line(id) => match voicebank::ack_gate::gate(&id, text) {
                 voicebank::ack_gate::Gated::Keep => AckPlan::Line(id),
                 voicebank::ack_gate::Gated::Neutral(neutral) => {
@@ -227,7 +230,12 @@ impl Pipeline {
             AckPlan::Later => Err(if self.settings.dry_run { "agent_off" } else { "awaiting_decider" }),
             AckPlan::Line(id) => {
                 record["decider_line"] = json!(id);
-                if line.is_some() { self.try_ack(source, through, utterance, lang, pool, now, named, &mut record, line, late) } else { Err("unknown_line") }
+                match line {
+                    None => Err("unknown_line"),
+                    // Never answer Polish in English: the line must be in the turn's language.
+                    Some(a) if a.lang != voicebank::acks::language(text) => Err("other_language"),
+                    Some(_) => self.try_ack(source, through, utterance, lang, pool, now, named, &mut record, line, late),
+                }
             }
             AckPlan::Rule => self.try_ack(source, through, utterance, lang, pool, now, named, &mut record, None, late),
         };
@@ -250,7 +258,9 @@ impl Pipeline {
         if self.settings.paused || !self.settings.speak_replies || !tools.enabled.load(Ordering::Acquire) {
             return Err("speaking_off");
         }
-        if !self.primary_mic(source) {
+        // The primary Mac microphone, or the phone's live microphone (13 Nov: the phone is a full microphone; its ack
+        // goes to the phone, voice_bank.rs `play_line`).
+        if !self.talk_mic(source) {
             return Err("not_primary_microphone");
         }
         if !named && tools.speech_policy.call_heard_within(now, ACK_CALL_NS) {
@@ -294,7 +304,7 @@ impl Pipeline {
         let line = if wait == 0 {
             format!("[Heimdall already said: \"{}\" at {at}]", ack.text)
         } else {
-            format!("[Heimdall is saying: \"{}\" at {at}, unless User talks first]", ack.text)
+            format!("[Heimdall is saying: \"{}\" at {at}, unless {} talks first]", ack.text, crate::remote_presence::user_name())
         };
         if !late {
             *tools.ack_said.lock().unwrap() = Some((through, line));
@@ -303,7 +313,7 @@ impl Pipeline {
         let spoken = ack.text.clone();
         let withdraw = move |outcome: Result<(), &'static str>| {
             let reason = match outcome {
-                Ok(()) if late => return said.context_note(LATE_NOTE, said_note(&spoken)),
+                Ok(()) if late => { let _ = said.context_note(LATE_NOTE, said_note(&spoken)); return; }
                 Ok(()) => return,
                 Err(reason) => reason,
             };
@@ -322,7 +332,7 @@ impl Pipeline {
         match voice_bank::play_ack_after(&tools, clip, utterance, speakers, std::time::Duration::from_nanos(wait), withdraw) {
             Ok(true) => {
                 if late && wait == 0 {
-                    tools.context_note(LATE_NOTE, said_note(&ack.text));
+                    let _ = tools.context_note(LATE_NOTE, said_note(&ack.text));
                 }
             }
             started => {
@@ -369,12 +379,12 @@ impl Pipeline {
             _ if from_ns != 0 => (from_ns, to_ns),
             _ => return false,
         };
-        self.owner(source) && (self.tools.speech_policy.cue_covers(from, to) || self.echo_verdict(source, words).is_some_and(|v| v.own()))
+        self.user_source(source) && (self.tools.speech_policy.cue_covers(from, to) || self.echo_verdict(source, words).is_some_and(|v| v.own()))
     }
     /// Words with Heimdall's own sound left out (each lying wholly inside it), for command matching: an echo of
     /// "Let me take a look." merged with the user's next words never becomes a screenshot.
     pub(super) fn without_own_sound(&self, source: &str, words: &[super::Word]) -> Vec<super::Word> {
-        if !self.owner(source) {
+        if !self.user_source(source) {
             return words.to_vec();
         }
         let words = self.echo_verdict(source, words).map_or_else(|| words.to_vec(), |v| v.kept(words));
@@ -392,8 +402,7 @@ impl Pipeline {
         let moment = u64::from(self.settings.ack_delay_ms).max(quiet_ms);
         expected.is_some_and(|ms| ms < moment + REPLY_SOON_MS)
     }
-    /// The user's quiet before the ack and the island's arrow and dots (2.5 s; 1.5 s before, "way too
-    /// short"; 26 Oct: a setting; 2 s; 22:25: 0 by default).
+    /// The user's quiet before the ack and the island's arrow and dots (`Settings::ack_delay_ms`, 0 by default).
     fn ack_quiet_ns(&self) -> u64 {
         u64::from(self.settings.ack_delay_ms) * 1_000_000
     }
@@ -490,6 +499,40 @@ mod tests {
     fn quiet(a: &mut Pipeline, mic: &str, end: u64, now: u64) {
         a.quiet_since.insert(mic.into(), end);
         a.hooks.ack_now = Some(now);
+    }
+
+    /// 13 Nov (the phone is a full microphone): the user's line on the phone's live microphone gets its ack too, and it is
+    /// said on the phone (its wake made it a phone turn), not on the Mac.
+    #[cfg(feature = "phone")]
+    #[test]
+    fn a_phone_mic_line_gets_its_ack_on_the_phone() {
+        let (_t, mut a, _mic) = rig();
+        jarvis(&a, "on_it", "On it.", "en", 900);
+        jarvis(&a, "will_do", "Will do.", "en", 900);
+        let phone = capture::SourceInfo::new(
+            capture::SourceKind::Phone { kind: "airpods".into(), name: "AirPods".into(), capture: "headset".into(), voice_processing: true },
+            capture::NativeFormat { sample_rate: 16_000, channels: 1 }, 2);
+        let id = phone.id.0.clone();
+        a.source(phone);
+        a.settings.ack_delay_ms = 0;
+        let log = probe(&a.tools, Duration::from_millis(1));
+        let _g = crate::remote::tests::ROUTE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (sub, rx) = crate::remote::HUB.subscribe(64);
+        let turn = crate::remote::phone_mic_wake(Some("ack-obs"));
+        quiet(&mut a, &id, 10_000_000_000, 12_600_000_000);
+        assert!(a.instant_ack(&id, 3, "s:1", "Open Safari and start the timer."), "{:#?}", acks(&a));
+        let began = Instant::now();
+        let mut speak = None;
+        while speak.is_none() && began.elapsed() < Duration::from_secs(3) {
+            speak = rx.try_iter().find(|f| f.starts_with("event: speak\n")).map(|f| f.to_string());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let speak = speak.expect("the ack went to the phone");
+        assert!(speak.contains(&format!("\"turn\":\"{turn}\"")) && speak.contains("\"audio\":"), "{speak}");
+        wait_idle(&a.tools);
+        assert!(log.lock().unwrap().is_empty(), "nothing on the Mac");
+        crate::remote::phone_turn_failed();
+        crate::remote::HUB.unsubscribe(sub);
     }
 
     #[test]

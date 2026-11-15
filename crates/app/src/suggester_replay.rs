@@ -45,8 +45,8 @@ pub fn parse_line(json: &str) -> Option<sg::Line> {
         return None;
     }
     let at_ms = v["wall_ns"].as_u64()? / 1_000_000;
-    let owner = speaker == "User";
-    Some(sg::Line { at_ms, speaker, text, owner })
+    let user = speaker == agent::identity::DEFAULT_USER;
+    Some(sg::Line { at_ms, speaker, text, user })
 }
 
 /// The talk of one timeline file, in time order.
@@ -91,7 +91,7 @@ pub fn run(lines: &[sg::Line], mut ask: Option<&mut dyn FnMut(Prompt) -> (Result
         }
         window.push(line.clone());
         let now = line.at_ms;
-        if !(line.owner && sg::stub_suggest_now(&window)) {
+        if !(line.user && sg::stub_suggest_now(&window)) {
             continue;
         }
         let decision = |outcome: &str, reason: String, card: Option<sg::Suggestion>, called: bool, usd: f64| Decision {

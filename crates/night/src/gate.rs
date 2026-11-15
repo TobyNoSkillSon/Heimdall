@@ -15,11 +15,6 @@ impl State {
         self.on_ac && self.idle_seconds.is_finite() && self.idle_seconds >= IDLE_SECONDS
     }
 }
-pub fn parse_power(text: &str) -> bool {
-    text.lines()
-        .next()
-        .is_some_and(|line| line.contains("'AC Power'"))
-}
 pub fn bounded_output(command: &mut Command) -> Result<String> {
     let mut child = command
         .stdout(Stdio::piped())
@@ -100,13 +95,6 @@ mod tests {
     use super::*;
     #[test]
     fn power_and_idle_fail_closed() {
-        assert!(parse_power(
-            "Now drawing from 'AC Power'\n -InternalBattery 85%; charging"
-        ));
-        assert!(!parse_power(
-            "Now drawing from 'Battery Power'\n -InternalBattery 100%; charged"
-        ));
-        assert!(!parse_power("unknown AC Power"));
         for s in [
             State {
                 on_ac: false,
@@ -157,4 +145,65 @@ pub fn background() -> Result<()> {
         "background nice unavailable"
     );
     Ok(())
+}
+/// Bug note 2026-11-08T11-30-09: the speech-split helper ran at 127% CPU during a Discord call and the call's audio
+/// glitched. Only its main thread was background; ONNX Runtime's worker thread is the library's own. This puts the
+/// whole process in Darwin background (what `taskpolicy -b` sets): every thread, also ones a library starts later,
+/// runs on efficiency cores with throttled I/O, below coreaudiod and the call app. Only a dedicated helper process
+/// calls it; never Heimdall itself.
+#[cfg(target_os = "macos")]
+pub fn background_process() -> Result<()> {
+    background()?;
+    ensure!(
+        unsafe { libc::setpriority(libc::PRIO_DARWIN_PROCESS, 0, libc::PRIO_DARWIN_BG) } == 0,
+        "Darwin background unavailable"
+    );
+    Ok(())
+}
+#[cfg(not(target_os = "macos"))]
+pub fn background_process() -> Result<()> {
+    background()
+}
+/// What `background_process` set, read back: (process in Darwin background, this thread's QoS class).
+#[cfg(target_os = "macos")]
+pub fn background_state() -> (bool, u32) {
+    unsafe extern "C" {
+        fn qos_class_self() -> u32;
+    }
+    // Reads back 1, not PRIO_DARWIN_BG, once set (measured 9 Nov).
+    let darwin_bg = unsafe { libc::getpriority(libc::PRIO_DARWIN_PROCESS, 0) } > 0;
+    (darwin_bg, unsafe { qos_class_self() })
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod background_process_tests {
+    const CHILD: &str = "HEIMDALL_BACKGROUND_PROCESS_CHILD";
+    const QOS_CLASS_BACKGROUND: u32 = 0x09;
+    /// Runs in a re-executed copy of the test binary, so the test runner itself is never demoted.
+    #[test]
+    fn background_process_child() {
+        if std::env::var_os(CHILD).is_none() {
+            return;
+        }
+        assert_eq!(super::background_state().0, false, "a fresh process starts outside Darwin background");
+        super::background_process().unwrap();
+        assert_eq!(super::background_state(), (true, QOS_CLASS_BACKGROUND));
+        assert!(unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) } >= 10);
+        // A thread started afterwards (as ONNX Runtime's pool is) does not inherit the QoS class (measured 9 Nov: it
+        // starts at default, 0x15), which is how the helper's second thread ran at full priority. The process-wide
+        // Darwin background covers it: a spinning later thread measured scheduler priority 4, against 31 without.
+        let later = std::thread::spawn(super::background_state).join().unwrap();
+        assert!(later.0, "later thread outside Darwin background: {later:?}");
+        println!("background-process-child-ok");
+    }
+    #[test]
+    fn helper_process_runs_at_background_qos_with_its_later_threads() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "gate::background_process_tests::background_process_child", "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success() && text.contains("background-process-child-ok"), "{text}");
+    }
 }

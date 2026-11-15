@@ -8,3 +8,7 @@ CMAKE_TOOLCHAIN_FILE = { value = "build/offline.cmake", relative = true }
 CMAKE_BUILD_PARALLEL_LEVEL = "2"
 # mlx.metallib goes inside the engine's target dir, not ~/.mlx.
 MLX_RS_METAL_PATH = { value = "target/mlx-metal", relative = true }
+# The deployment target of the dylib and of MLX's kernels (CMake reads it into CMAKE_OSX_DEPLOYMENT_TARGET, and MLX passes
+# -mmacosx-version-min to the metal compile and link): the app's stated minimum. Unset, MLX builds for the build Mac's
+# macOS, and a metallib built on macOS 27 (Metal 4.1) fails to load on macOS 14-26 (release-1114 VM finding, 14 Nov).
+MACOSX_DEPLOYMENT_TARGET = "14.4"

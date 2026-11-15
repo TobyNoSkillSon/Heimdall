@@ -540,7 +540,18 @@ impl Pipeline {
         }
         self.speech_split.job_calls.remove(key);
     }
+    /// Bug note 2026-11-08T11-30-09: the helper ran at 127% CPU during the user's Discord call and the call's audio
+    /// glitched. While any call is live (its speaker tracking has not gone quiet or closed), no separation starts and
+    /// no separated track goes to side ASR; a job already running finishes at background priority. Pending regions
+    /// keep their metadata and run on the 2-second ticks once the call ends. Separator words never publish, so
+    /// nothing on screen waits for it.
+    pub(super) fn correction_yields_to_call(&self) -> bool {
+        !self.speech_split.active.is_empty()
+    }
     fn correction_admit(&mut self) -> Result<()> {
+        if self.correction_yields_to_call() {
+            return Ok(());
+        }
         // Reserve input + both maximum-sized outputs, including work inside the
         // event channel, before asking the CPU helper for anything.
         while self.speech_split.reservations.len() < MAX_RETAINED_JOBS
@@ -579,7 +590,7 @@ impl Pipeline {
                 input,
                 Instant::now(),
             );
-            self.index.evidence.event("speech_split_admission",&pending.source,&[],pending.start,serde_json::json!({"job":identity,"admitted":result.is_ok(),"policy":"call_or_draining; battery/input/speech allowed","reason":result.as_ref().err().map(|e|e.to_string())}))?;
+            self.index.evidence.event("speech_split_admission",&pending.source,&[],pending.start,serde_json::json!({"job":identity,"admitted":result.is_ok(),"policy":"after_call; battery/input/speech allowed","reason":result.as_ref().err().map(|e|e.to_string())}))?;
             if result.is_err() {
                 break;
             } // remains pending; next tick retries even after expiry
@@ -734,7 +745,8 @@ impl Pipeline {
     }
     pub(super) fn correction_tick(&mut self) -> Result<()> {
         self.correction_admit()?;
-        if let Some(worker) = self.live_worker.as_ref() {
+        let yields = self.correction_yields_to_call();
+        if let Some(worker) = self.live_worker.as_ref().filter(|_| !yields) {
             for (key, job) in &self.speech_split.decoded {
                 for slot in 0..2 {
                     if job.words[slot].is_some()
@@ -761,11 +773,12 @@ impl Pipeline {
                 }
             }
         }
+        // A live call leaves the helper nothing to do until it ends: unload it rather than hold its memory.
         if self.speech_split.outstanding == 0
-            && self.speech_split.active.is_empty()
-            && self.speech_split.pending.is_empty()
-            && self.speech_split.decoded.is_empty()
-            && self.speech_split.inflight.is_empty()
+            && (yields
+                || (self.speech_split.pending.is_empty()
+                    && self.speech_split.decoded.is_empty()
+                    && self.speech_split.inflight.is_empty()))
         {
             if let Some(runtime) = &self.speech_split.runtime {
                 runtime.unload();
@@ -927,7 +940,11 @@ impl Pipeline {
                 self.session.file_name().unwrap().to_string_lossy()
             );
             let revision = final_.revision + 1;
-            if !self.index.revise_transcript(
+            // Night 8 Nov log sweep, finding 4: a final revised before was found archived then, so its next revision
+            // (a rename re-projects every final of every call) never waits on the live loop for its commit.
+            let revise = if final_.revision > 0 { crate::index::Index::revise_projected_transcript } else { crate::index::Index::revise_transcript };
+            if !revise(
+                &self.index,
                 &observation_id,
                 source,
                 revision,

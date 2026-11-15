@@ -45,3 +45,30 @@ fn one_utterance_on_two_microphones_reaches_the_decider_and_the_agent_once() {
     a.agent.as_ref().unwrap().barrier().unwrap();
     assert_eq!(records(&a).iter().filter(|r| r.kind == "send_decision").count(), 4);
 }
+
+/// night1110 phone-core, bug note 2026-11-09T07-09-44 (9 Nov 07:05:57: the Mac microphone heard the words the user typed
+/// and said into the phone, d1 woke on them 1.7 s later and took the turn from the phone): while the phone has pressed
+/// to talk (or its turn is in flight), the Mac microphone's line is archived only, never decided on or given to the
+/// agent; once the press ends the same line wakes as before.
+#[cfg(feature = "phone")]
+#[test]
+fn the_mac_microphone_wakes_nothing_while_the_phone_holds_the_turn() {
+    let _g = crate::remote::tests::ROUTE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (sub, _rx) = crate::remote::HUB.subscribe(64);
+    let (_t, mut a, shure) = rig(false);
+    crate::remote::phone_press("gate-press");
+    assert!(crate::remote::phone_holds_mic());
+    turn(&mut a, &shure, 10 * S, "Heimdall, what's on today?", Detect::Final, 0, Some(0.), 2 * S, |_| {});
+    assert!(a.agent.is_none(), "nothing reached the agent: its runtime was never even started");
+    let r = records(&a);
+    assert_eq!(r.iter().filter(|r| r.kind == "send_decision").count(), 0, "the decider never saw it");
+    assert_eq!(r.iter().filter(|r| r.kind == "agent_context_routing" && r.payload["given_to_agent"] == true).count(), 0);
+    let rows = a.index.utterances_between(0, 100 * S).unwrap();
+    assert_eq!(rows.len(), 1, "the archive still records it: {rows:#?}");
+    assert_eq!(rows[0]["decision"]["reason"], "phone_turn");
+    crate::remote::phone_press_end("gate-press");
+    turn(&mut a, &shure, 30 * S, "Heimdall, what's on today?", Detect::Final, 0, Some(0.), 2 * S, |_| {});
+    a.agent.as_ref().unwrap().barrier().unwrap();
+    crate::remote::HUB.unsubscribe(sub);
+    assert_eq!(records(&a).iter().filter(|r| r.kind == "send_decision").count(), 1, "the press over: the Mac hears again");
+}

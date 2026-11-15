@@ -45,7 +45,7 @@ pub fn check(
     cancel: &dyn Fn() -> bool,
 ) -> Result<serde_json::Value> {
     let started = Instant::now();
-    let samples = crate::audio::mono_16k(&audio.samples, audio.sample_rate, 1)?;
+    let samples = heimdall_archive::audio::mono_16k(&audio.samples, audio.sample_rate, 1)?;
     let mut evidence = hear(text, &samples, |window| {
         client.transcribe(window, Duration::from_millis(750), cancel).map(|t| (t.transcript.text, t.queue_ms, t.decode_ms))
     })?;

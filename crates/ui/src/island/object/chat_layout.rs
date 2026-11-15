@@ -36,7 +36,7 @@ pub struct Block {
     /// Each notice card (its id) and where it is, from the block's top-left.
     pub cards: Vec<(String, Rect)>,
     /// The top of each of the user's bubbles.
-    pub owners: Vec<f64>,
+    pub user_rows: Vec<f64>,
     /// Each message's words as written and its band (the column's width, the row's height, from the block's top-left):
     /// what a Copy on it puts on the clipboard (bug note 2026-10-30T22-16-36).
     pub texts: Vec<(Rect, String)>,
@@ -109,14 +109,14 @@ pub fn lay_cached(m: &dyn Measure, rows: &[ChatKind], w: f64) -> std::rc::Rc<Blo
 
 #[derive(Clone, Copy, PartialEq)]
 enum Side {
-    Owner,
+    User,
     Heimdall,
     Middle,
 }
 
 fn side(k: &ChatKind) -> Side {
     match k {
-        ChatKind::Owner(_) => Side::Owner,
+        ChatKind::User(_) => Side::User,
         ChatKind::Heimdall { .. } | ChatKind::Note { .. } => Side::Heimdall,
         ChatKind::Action { .. } => Side::Middle,
     }
@@ -141,7 +141,7 @@ struct Row {
     marks: Vec<Mark>,
     h: f64,
     card: Option<(String, Rect)>,
-    owner: bool,
+    user: bool,
     /// The message's words, when it is one of the user's or Heimdall's (`Block::texts`).
     copy: Option<String>,
 }
@@ -220,8 +220,8 @@ pub fn lay(m: &dyn Measure, rows: &[ChatKind], w: f64) -> Block {
                 r
             }
         };
-        if r.owner {
-            b.owners.push(y);
+        if r.user {
+            b.user_rows.push(y);
         }
         b.marks.extend(r.marks.iter().map(|mk| shifted(mk, y)));
         if let Some((id, rect)) = &r.card {
@@ -243,7 +243,7 @@ fn lay_row(m: &dyn Measure, row: &ChatKind, w: f64) -> Row {
     let y = 0.0;
     let mut r = Row::default();
     match row {
-        ChatKind::Owner(text) => {
+        ChatKind::User(text) => {
             let max = (w * BUBBLE_SHARE - 2.0 * BUBBLE_X).max(40.0);
             let (lines, tw) = wrap(m, text, Font::Spoken, max, BUBBLE_LINES);
             if lines.is_empty() {
@@ -252,7 +252,7 @@ fn lay_row(m: &dyn Measure, row: &ChatKind, w: f64) -> Row {
             let tw = fin(tw).clamp(1.0, max);
             let (bw, bh) = (tw + 2.0 * BUBBLE_X, LINE * lines.len() as f64 + 2.0 * BUBBLE_Y);
             let x = w - bw;
-            r.owner = true;
+            r.user = true;
             r.copy = Some(text.trim().to_string());
             r.marks.push(Mark::Fill { x, y, w: bw, h: bh, r: (bh / 2.0).min(17.0), color: BUBBLE });
             for (k, line) in lines.into_iter().enumerate() {
@@ -342,12 +342,12 @@ mod tests {
 
     fn rows() -> Vec<ChatKind> {
         vec![
-            ChatKind::Owner("How much RAM is free?".into()),
+            ChatKind::User("How much RAM is free?".into()),
             ChatKind::Heimdall { text: "About 60 GB.\n\nNo swap in use.".into(), heard: Heard::Whole },
             ChatKind::Action { kind: ActionKind::Question, text: "Clear the model cache?".into(), answer: Some("Yes".into()) },
             ChatKind::Note { id: "ram".into(), title: "Memory by app".into(), shape: NoteShape::Table },
             ChatKind::Heimdall { text: "I'll stop there.".into(), heard: Heard::Cut },
-            ChatKind::Owner("Thanks".into()),
+            ChatKind::User("Thanks".into()),
         ]
     }
 
@@ -355,7 +355,7 @@ mod tests {
     fn owner_is_on_the_right_heimdall_on_the_left_and_rows_never_overlap_or_leave_the_column() {
         let w = 420.0;
         let b = lay(&Approx, &rows(), w);
-        assert_eq!(b.owners.len(), 2);
+        assert_eq!(b.user_rows.len(), 2);
         let fills: Vec<_> = b.marks.iter().filter_map(|m| match m { Mark::Fill { x, y, w, h, color, .. } => Some((*x, *y, *w, *h, *color)), _ => None }).collect();
         let bubbles: Vec<_> = fills.iter().filter(|f| f.4 == BUBBLE).collect();
         assert_eq!(bubbles.len(), 2);
@@ -369,7 +369,7 @@ mod tests {
             }
         }
         // Rows go down: each row's top is below the last row's bottom.
-        let mut tops: Vec<f64> = b.owners.clone();
+        let mut tops: Vec<f64> = b.user_rows.clone();
         tops.sort_by(f64::total_cmp);
         assert!(tops[0] == 0.0 && tops[1] > 100.0);
         assert!(b.marks.iter().all(|m| m.bottom() <= b.h + 1.0));

@@ -483,7 +483,7 @@ async fn event_wait_resolves_without_polling_and_watcher_deduplicates_terminal()
     // The finished notice carries the reply whole (tool-output, 19 Oct): no t3_worker_read needed to see it.
     let outbox = rusqlite::Connection::open(l.dir.path().join("actions.db")).unwrap();
     let notice: String = outbox.query_row("SELECT text FROM outbox WHERE id LIKE 'terminal:%'", [], |r| r.get(0)).unwrap();
-    assert_eq!(notice, format!("Task 'Test' (owned-thread) completed. Final reply:\n\n{}\n\n{}", l.s.text, t3::text::SILENCE_RULE));
+    assert_eq!(notice, format!("Task 'Test' (owned-thread) completed. Final reply:\n\n{}\n\n{}", l.s.text, &t3::text::silence_rule()));
     let question: String = outbox.query_row("SELECT text FROM outbox WHERE id LIKE 'question:%'", [], |r| r.get(0)).unwrap();
     assert_eq!(question, "Task 'Test' (owned-thread) asks [request q-1]:\nWhat should I do? [question q]");
     let questions: i64 = db

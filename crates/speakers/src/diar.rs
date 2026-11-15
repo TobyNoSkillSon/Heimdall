@@ -61,11 +61,7 @@ unsafe extern "C" {
 fn native_pool<T>(f: impl FnOnce() -> T) -> T {
     #[cfg(target_os = "macos")]
     {
-        objc2::rc::autoreleasepool(|_| {
-            let result = f();
-            crate::metal::drain_native_scratch();
-            result
-        })
+        objc2::rc::autoreleasepool(|_| f())
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -84,8 +80,6 @@ fn check(code: i32) -> Result<()> {
 }
 struct Model {
     raw: NonNull<c_void>,
-    #[cfg(target_os = "macos")]
-    _metal: Option<crate::metal::NemotronGpu>,
 }
 impl Drop for Model {
     fn drop(&mut self) {
@@ -132,19 +126,11 @@ impl Diarizer {
             update_period_frames: 222,
         };
         let mut raw = std::ptr::null_mut();
-        #[cfg(target_os = "macos")]
-        let metal = if gpu >= 0 && crate::metal::enabled("nemotron") {
-            Some(crate::metal::NemotronGpu::new()?)
-        } else {
-            None
-        };
         check(native_pool(|| unsafe {
             nemo_speech_diar_create(&config, &mut raw)
         }))?;
         let model = Rc::new(Model {
             raw: NonNull::new(raw).ok_or_else(|| anyhow::anyhow!("null NeMo model"))?,
-            #[cfg(target_os = "macos")]
-            _metal: metal,
         });
         let speakers = unsafe { nemo_speech_diar_num_speakers(raw) } as usize;
         let seconds_per_frame = unsafe { nemo_speech_diar_seconds_per_frame(raw) };

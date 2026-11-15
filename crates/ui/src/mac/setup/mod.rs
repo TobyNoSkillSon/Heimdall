@@ -13,6 +13,7 @@ mod microphone;
 pub(crate) mod phrase;
 mod kit;
 mod pages;
+#[cfg(feature = "lab")]
 mod render;
 
 use objc2::rc::Retained;
@@ -31,6 +32,7 @@ use crate::speech_voice::SpeechVoiceState;
 use kit::{Dots, Pad};
 use pages::*;
 
+#[cfg(feature = "lab")]
 pub(crate) use render::{demo_decider, render};
 
 /// `#win`: 800 × 680, resizable down to 640 × 520.
@@ -637,8 +639,12 @@ impl SetupWindow {
         // The name the user gave on Customise, as Start would have said it, else the saved one.
         let typed = self.custom.field.stringValue().to_string();
         let name = if typed.trim().is_empty() { self.identity.name.clone() } else { typed.trim().to_string() };
+        // Arriving, or moved by rows above it changing (not on every level change: the user may have scrolled).
+        let arriving = self.phrase_card.state.is_none() || (self.phrase_card.band.frame().origin.y - y).abs() > 0.5;
         self.phrase_card.sync(y, &phrase::phrase(&name), &state);
         self.downloads_page.frame.set_height(y + phrase::PhraseCard::height());
+        // The card is what the page asks for next: when it arrives it is on screen, whole, even in a short window.
+        if arriving { self.downloads_page.frame.reveal(y + phrase::PhraseCard::height()); }
     }
 
     /// The card's state follows the clock too (the hint after `phrase::HINT_AFTER` of silence): the prompt watch's tick.
@@ -1064,6 +1070,15 @@ impl SetupWindow {
     }
 
     /// The fix of Getting ready's row at `index` (a model's Retry, or the readiness row's own).
+    /// The phrase card wholly on screen, as the page is scrolled now (render checks).
+    #[cfg(feature = "lab")]
+    pub(crate) fn phrase_card_in_view(&self) -> bool {
+        let card = self.phrase_card.band.frame();
+        let seen = self.downloads_page.frame.visible();
+        !self.phrase_card.band.isHidden() && card.origin.y >= seen.origin.y - 0.5
+            && card.origin.y + card.size.height <= seen.origin.y + seen.size.height + 0.5
+    }
+
     pub(crate) fn fix_at(&self, index: usize) -> Option<ReadyFix> {
         fix_at(&self.downloads, &self.readiness, index)
     }
@@ -1557,7 +1572,7 @@ mod tests {
     #[test]
     fn wizard_provider_status_reads_sign_in_relay_and_engine() {
         let row = |id: &str, auth: ProviderAuth| ApiProviderRow {
-            id: id.into(), name: id.into(), icon: String::new(), console_url: String::new(), auth, notice: None, sign_in: true, credit: None, spend: None,
+            id: id.into(), name: id.into(), icon: String::new(), console_url: String::new(), auth, notice: None, sign_in: true,
             custom_url: false, key_required: false, endpoint: None, group: ProviderGroup::default(), key_fallback: false,
         };
         let api = ApiProviders { providers: vec![row("openai", ProviderAuth::Connected), row("opencode-go", ProviderAuth::Missing)], unchosen: true, relay_added: true, ..Default::default() };

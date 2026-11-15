@@ -4,8 +4,13 @@
 use super::*;
 use serde_json::json;
 
-fn line(at_ms: u64, speaker: &str, text: &str, owner: bool) -> Line {
-    Line { at_ms, speaker: speaker.into(), text: text.into(), owner }
+thread_local! {
+    /// The user's name this test thread's suggester strings use (`super::user`); None reads Personalise.
+    pub(super) static USER: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+fn line(at_ms: u64, speaker: &str, text: &str, user: bool) -> Line {
+    Line { at_ms, speaker: speaker.into(), text: text.into(), user }
 }
 
 fn window(lines: &[Line]) -> Window {
@@ -91,8 +96,6 @@ fn two_dismissals_in_a_row_pause_for_fifteen_minutes_and_a_pick_resets_the_count
     assert!(p.paused(NOW + 5) && p.paused(NOW + PAUSE_MS + 3));
     assert!(!p.may_call(NOW + 5) && !p.may_show(NOW + 5, "anything"));
     assert!(!p.paused(NOW + 4 + PAUSE_MS));
-    p.resolved(NOW + 6, Outcome::Ignored);
-    assert!(!p.paused(NOW + 6 + PAUSE_MS), "an ignored card neither counts nor resets");
 }
 
 #[test]
@@ -179,14 +182,14 @@ fn the_handoff_carries_the_suggestion_the_pick_and_the_talk() {
     let Verdict::Card(s) = verify(&card_answer(json!({"found": []})), &[]).unwrap() else { panic!() };
     let pick = vec![ui::agent_notice::QuestionAnswer { question_id: "q1".into(), labels: vec!["Find the file".into()], other: None }];
     let text = handoff(&s, &pick, NOW, false, "[10:02 Sam] the CAD file from the laptop");
-    assert!(text.starts_with("[Heimdall suggestion, picked by User]"));
+    assert!(text.starts_with("[Heimdall suggestion, picked by the user]"));
     assert!(text.contains("This was a suggestion from the island"));
-    assert!(text.contains("Question \"Should I look for it?\": User picked Find the file."), "{text}");
+    assert!(text.contains("Question \"Should I look for it?\": the user picked Find the file."), "{text}");
     assert!(text.contains("Notes: User half-remembers"));
     assert!(text.contains("[10:02 Sam] the CAD file"));
     assert!(!text.contains("do not speak"), "no call, no call line");
     let during = handoff(&s, &pick, NOW, true, "");
-    assert!(during.contains("User is on a call: answer on screen only, and do not speak."));
+    assert!(during.contains("The user is on a call: answer as usual; speech waits for a pause in the others' talk unless it matters now."));
     let typed = vec![ui::agent_notice::QuestionAnswer { question_id: "q1".into(), labels: vec![], other: Some("the Dropbox one".into()) }];
     assert!(handoff(&s, &typed, NOW, false, "").contains("(typed: the Dropbox one)"));
 }
@@ -336,8 +339,53 @@ fn a_card_offers_to_look_things_up_and_never_to_act() {
     assert!(acts_outward("Delete the old drafts"));
     assert!(acts_outward("Buy the drawings?"));
     assert!(!acts_outward("Find the drawings"));
+    assert!(acts_outward("Want me to delete the old drafts?"));
+    assert!(acts_outward("Shall I install it?"));
+    assert!(acts_outward("Find the build and post it"));
+}
+
+/// Bug note 2026-11-05T02-32-17 item 2 (night 1111): from 6 to 10 Nov the outward-action net dropped four cards, three
+/// of them look-ups about a payment, a sale or someone's worth (8 Nov 12:36:44, the user: "Can you check how much did we pay
+/// for Abrams tanks"). A look-up whose subject is a purchase is a card; the dropped wording is in the reason.
+#[test]
+fn a_look_up_about_a_purchase_is_a_card_and_a_dropped_card_says_why() {
+    for wording in ["Look up how much Poland paid for its Abrams tanks?", "Check the Abrams tank purchase", "Check what Poland did pay for the tanks",
+        "Look up Jensen Huang's Nvidia share", "Did the chip transfer reach China?", "Find the order of the releases"] {
+        assert!(!acts_outward(wording), "{wording}");
+    }
+    let answer = card_answer(json!({"questions": [{"text": "Look up what Poland pay for the Abrams?", "options": ["Look it up", "Not now"], "multi_select": false}]}));
+    assert!(matches!(verify(&answer, &[]).unwrap(), Verdict::Card(_)));
+    let answer = card_answer(json!({"questions": [{"text": "Want me to order the tanks?", "options": ["Order them", "Not now"], "multi_select": false}]}));
+    assert_eq!(verify(&answer, &[]).unwrap(), Verdict::Silent("asks for an action outside a look-up: Want me to order the tanks?".into()));
     let answer = card_answer(json!({"questions": [{"text": "Trash the old backups?", "options": ["Yes", "Not now"], "multi_select": false}]}));
     assert!(matches!(verify(&answer, &[]).unwrap(), Verdict::Silent(r) if r.contains("outside a look-up")));
+}
+
+/// Review fix Blocker 1 (night 1111 fresh review): lane U's rule counted an outward word only at the start or after 18
+/// listed words, so these wordings reached the user as cards whose click tells the agent "Do it". The look-ups lane U kept
+/// (what someone paid, a purchase, someone's share) stay cards.
+#[test]
+fn an_outward_offer_is_dropped_however_it_is_worded_and_money_look_ups_stay_cards() {
+    for wording in ["Yes, delete them", "Okay, delete the old drafts", "Should we buy the drawings?", "Want me to quickly delete it?",
+        "Go ahead: post it", "Okay, post it", "Ok post the build", "Heimdall, share the page", "First uninstall the old build",
+        "Find the drafts and delete them", "Check the drafts, then trash them", "Look up which files to delete", "See what we can remove",
+        // Night 1111 second review B1 and S2: nouns outside a look-up, inflected forms, "how about" and "what if".
+        "Want me to place the order?", "Shall we make the purchase?", "Go ahead with the order", "Complete the purchase",
+        "Shall I go ahead with deleting the drafts?", "Want me to try posting it?", "How about we delete the old drafts?",
+        "What if we removed the old builds?"] {
+        assert!(acts_outward(wording), "{wording}");
+    }
+    for wording in ["Can you check how much did we pay for Abrams tanks", "Look up how much Poland paid for its Abrams tanks?",
+        "Check the Abrams tank purchase", "Check what Poland did pay for the tanks", "Look up Jensen Huang's Nvidia share",
+        "Did the chip transfer reach China?", "Find the order of the releases", "How much did they sell the company for?"] {
+        assert!(!acts_outward(wording), "{wording}");
+    }
+    for (text, option) in [("Clean up the old drafts?", "Yes, delete them"), ("Should we buy the drawings?", "Look them up first"), ("The build is ready", "Okay, post it")] {
+        let answer = card_answer(json!({"questions": [{"text": text, "options": [option, "Not now"], "multi_select": false}]}));
+        assert!(matches!(verify(&answer, &[]).unwrap(), Verdict::Silent(r) if r.contains("outside a look-up")), "{text} / {option}");
+    }
+    assert!(held_card("Yes, delete them").is_none());
+    assert!(held_card("Can you check how much did we pay for Abrams tanks").is_some());
 }
 
 #[test]
@@ -368,4 +416,106 @@ fn a_long_line_is_cut_before_it_reaches_the_prompt() {
 #[test]
 fn without_a_home_folder_there_is_no_file_search_at_all() {
     assert!(search_files("cad", Path::new(""), Path::new("/Users/owner/Library/Application Support/Heimdall")).is_err());
+}
+
+/// Night 1112 lane G: on 11 Nov the call gate held two lines of the user's that asked for nothing, their passes rightly
+/// answered quiet, and `held_card` showed them anyway as "Do it" cards ("Okay, hi Doll, I'm back." 14:28:02, ignored;
+/// "But the scrolling is very smooth. I like the scrolling." 18:19:44, dismissed in 6 s). A held line gets its own card
+/// only when it asks for something; the requests that needed one (8 Nov, 4 Nov) still get it, and the safety words still
+/// keep a contact or an outward action off it.
+#[test]
+fn a_held_line_gets_its_own_card_only_when_it_asks_for_something() {
+    for line in ["Okay, hi Doll, I'm back.", "But the scrolling is very smooth. I like the scrolling.", "Yeah, I mean it's not great, but",
+        "I'm gonna go to a shop. I need to buy something.", "All right. So yeah, good luck."] {
+        assert!(!asks_for_something(line) && held_card(line).is_none(), "{line}");
+    }
+    for line in ["Okay, bro, sorry, run it in four-bit. Just run it once and give me the transcript.",
+        "Look at some other well-made profiles on LinkedIn and update it",
+        "Because that's it's not me who manages it, it's Heimdall. Heimdall, how many tokens did that website have? The agent take?",
+        "It would be cool to research that", "Sprawdź, czy OpenCode generuje obrazy", "Możesz znaleźć ten plik",
+        "how many tokens did that website have", "Yes do it", "Go ahead and rerun the benchmark", "Okej, odpal to jeszcze raz",
+        "Chcę, żebyś to sprawdził", "Okay - retry it in four-bit"] {
+        assert!(asks_for_something(line) && held_card(line).is_some(), "{line}");
+    }
+    // A request that would contact someone or act outward still gets no card of its own.
+    for line in ["Can you message Angel the transcript?", "Yes, delete them", "Okay, post it", "Please buy the drawings"] {
+        assert!(held_card(line).is_none(), "{line}");
+    }
+}
+
+/// Night 1112 lane G: the schema told the model "false … This is the usual answer" after b036cf31 took that bias out of
+/// the prompt, and the prompt had no rule for a factual question raised on a call; on 11 Nov all 7 passes in calls
+/// answered false, one of them over "I didn't know that they have image generation on OpenCode. Can you double check
+/// that?" (18:13:01, pass 18:14:18 "quiet: OpenCode image generation").
+#[test]
+fn the_suggester_is_told_an_open_question_on_a_call_is_a_card() {
+    let schema = submit_schema().to_string();
+    assert!(!schema.contains("usual answer"), "{schema}");
+    for text in [SYSTEM, include_str!("../prompt/public/suggester.md")] {
+        assert!(text.contains("Can you double check that?") && text.contains("\"Look it up\""));
+    }
+}
+
+/// Night 1112 lane G review: a handoff that says where the talk was ("On a call the user wondered whether…") is not a call
+/// to the user; a reaching word right after "a", "the", "this" is a noun. The verbs still count, before a name or a pronoun.
+#[test]
+fn a_reaching_word_used_as_a_noun_before_a_name_is_not_contact() {
+    for wording in ["On a call User wondered whether OpenCode has image generation.", "During the call User asked to double check it",
+        "Find the text Priya sent", "Look up this message Sam wrote"] {
+        assert!(!proposes_contact(wording), "{wording}");
+    }
+    for wording in ["Call Priya", "Can you call User", "Please message Sam the file", "Text them", "Then call Priya about it"] {
+        assert!(proposes_contact(wording), "{wording}");
+    }
+}
+
+/// Night 1112 fresh review blocker: the noun rule skipped any reaching word after "a"/"the", so answering someone's
+/// message passed as a look-up. Answering verbs count like send; a noun is only placed or looked up.
+#[test]
+fn answering_someones_message_is_contact_even_through_a_noun() {
+    for wording in ["Reply to the email Anna sent?", "Answer the message Priya left?", "Return the call Mom made", "Respond to the text Sam sent",
+        "Open the email Anna sent and reply", "Write back to the message Priya left"] {
+        // "Write back to the message Priya left": "message" after "the" with no place or look-up word before it.
+        assert!(proposes_contact(wording), "{wording}");
+    }
+    for wording in ["On a call User wondered what the answer Priya gave meant.", "Look up the return policy Priya mentioned"] {
+        assert!(!proposes_contact(wording), "{wording}");
+    }
+}
+
+/// Cleanup 14 Nov (DEC-9): the strings that reach the model and the agent name the user Personalise sets, not "the user";
+/// the transcript's `the user` label stays a label. With no name set the personal edition still reads "the user".
+#[test]
+fn the_configured_user_name_reaches_the_prompt_the_tools_and_the_handoffs() {
+    let w = window(&[line(NOW - 60_000, "Sam", "remember the CAD file", false), line(NOW, "User", "yes, that one", true)]);
+    let notes = json!({"handoff": "A CAD file from the old laptop; search it by name."});
+    let Verdict::Card(s) = verify(&card_answer(notes), &[]).unwrap() else { panic!() };
+    let pick = vec![ui::agent_notice::QuestionAnswer { question_id: "q1".into(), labels: vec!["Find the file".into()], other: None }];
+    let texts = || {
+        let tools = tools().iter().map(|t| format!("{} {}", t.description, t.schema)).collect::<Vec<_>>().join("\n");
+        let held = held_card("Run it in four-bit, please").expect("a request").handoff;
+        (prompt(&w, NOW, &[]).text(), handoff(&s, &pick, NOW, true, ""), held, tools)
+    };
+    let (prompt_text, picked, held, tools) = texts();
+    if crate::remote_presence::user_name() == "User" {
+        assert!(prompt_text.contains("User is the one labelled User.") && prompt_text.contains("worth showing User now"), "{prompt_text}");
+        assert!(picked.starts_with("[Heimdall suggestion, picked by the user]") && picked.contains("User is on a call"), "{picked}");
+        assert!(held.starts_with("In the call User just said"), "{held}");
+        assert!(tools.contains("Search User's Mac") && tools.contains("act on User's pick"), "{tools}");
+    }
+    for (name, start) in [("Ivy", "Ivy"), ("the user", "The user")] {
+        USER.with(|u| *u.borrow_mut() = Some(name.into()));
+        let (prompt_text, picked, held, tools) = texts();
+        assert!(prompt_text.contains(&format!("{start} is the one labelled User.")), "the label stays: {prompt_text}");
+        assert!(prompt_text.contains(&format!("worth showing {name} now")), "{prompt_text}");
+        assert!(picked.starts_with(&format!("[Heimdall suggestion, picked by {name}]")), "{picked}");
+        assert!(picked.contains(&format!("{start} picked this;")) && picked.contains(&format!(": {name} picked Find the file.")), "{picked}");
+        assert!(picked.contains(&format!("{start} is on a call: answer as usual")), "{picked}");
+        assert!(held.starts_with(&format!("In the call {name} just said")), "{held}");
+        assert!(tools.contains(&format!("Search {name}'s Mac")) && tools.contains(&format!("archive of what was said, {name}'s")), "{tools}");
+        assert!(tools.contains(&format!("One question {name} can answer")) && tools.contains(&format!("act on {name}'s pick")), "{tools}");
+        let rest = [&prompt_text.replace("labelled User", "").replace(" User] yes", ""), &picked, &held, &tools].map(|t| t.contains("User"));
+        assert_eq!(rest, [false; 4], "no User left beside the label");
+    }
+    USER.with(|u| *u.borrow_mut() = None);
 }

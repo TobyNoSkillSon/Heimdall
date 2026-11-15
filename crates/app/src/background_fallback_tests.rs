@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 const ACCT1: &str = "t3:claudeAgent";
-const ACCT2: &str = "t3:claudeAgent_claude_code_2";
+const ACCT2: &str = "t3:claudeAgent_2";
 const HAIKU: &str = "claude-haiku-5-5";
 
 fn m(p: &str, id: &str) -> BackgroundModel { BackgroundModel { provider: p.into(), id: id.into() } }
@@ -29,6 +29,7 @@ fn pick_of(steps: &[Step], w: &World, missing: &'static [&'static str], spent: &
 
 /// The user's order (30 Oct 07:37): the other Claude Code account, Codex, OpenCode Go, the local engine, API keys last.
 #[test]
+#[cfg_attr(feature = "public", ignore = "the table is the personal edition's: two Claude accounts, the second the default; the public edition has one")]
 fn the_fallback_order_table() {
     let w = world();
     let steps = chain(&m(ACCT2, HAIKU), false, &w);
@@ -201,7 +202,7 @@ fn a_call_never_switches_backend_midway() {
     assert_eq!(e.provider, ACCT2);
     let c = crate::background_call::Call { job: "island agent", model: HAIKU.into(), system: "s", schema: json!({"type": "object"}), effort: "low", prompt: "x".into(), history: Vec::new(), session: None };
     assert!(crate::background_call::ask_blocking(&e, &c).is_err(), "the call fails on account 2");
-    assert_eq!(*LAUNCHES.lock().unwrap(), ["claudeAgent_claude_code_2"], "nothing launched elsewhere during the call");
+    assert_eq!(*LAUNCHES.lock().unwrap(), ["claudeAgent_2"], "nothing launched elsewhere during the call");
     assert_eq!(crate::background_model::task_endpoint(Task::Islands).provider, ACCT1, "the next call moves");
 }
 
@@ -268,4 +269,66 @@ fn a_down_pick_is_retried_when_nothing_else_is_usable() {
     // Spent with nowhere else: no call.
     crate::background_gate::quota_spent(ACCT2, Some(now + 3_600_000), now);
     assert!(crate::background_model::task_endpoint(Task::Islands).key.is_none());
+}
+
+/// Bug note 2026-11-08T02-03-49: a limit a background call met counts for the T3 tasks' account choice before the next
+/// reading shows it; an account the reading already shows spent, or one with no limit seen, is left as it is.
+#[test]
+fn a_limit_a_background_call_met_marks_the_account_in_the_reading() {
+    let now = agent::now_ms();
+    let reading = vec![acct("claudeAgent", 40.0, now + 86_400_000), acct("claudeAgent_2", 3.0, now + 86_400_000)];
+    assert_eq!(with_seen_limits(reading.clone(), now), reading, "nothing seen: the reading as it was");
+    crate::background_gate::quota_spent(ACCT1, Some(now + 3_600_000), now);
+    let seen = with_seen_limits(reading.clone(), now);
+    assert_eq!(accounts::spent_until(&seen[0], now), Some(now + 3_600_000));
+    assert!(accounts::usable(&seen[1], now));
+    assert_eq!(t3::failover::default_account(&["claudeAgent", "claudeAgent_2"], &seen, &[], now).as_deref(), Some("claudeAgent_2"));
+}
+
+/// Night 8 Nov log sweep, finding 7 (6 Nov 13:23, 13:37, 14:08): a blocking job's call that meets a usage limit, in
+/// ChatGPT's wording that names no reset, is marked spent by the shared fault rule and goes once more, at once, on the
+/// fallback; the job's next call starts there. A job's own failure is not tried again.
+#[test]
+fn a_blocking_call_that_meets_a_usage_limit_runs_once_more_on_the_fallback() {
+    const SHARING: &str = "The ChatGPT user has reached their Subscription Sharing usage limit. Ask the user to try again after their usage limit resets or use an API key instead.";
+    assert_eq!(crate::background_gate::fault(None, SHARING), Some(crate::background_gate::Fault::Spent));
+    app_state(Arc::new(Quiet));
+    let resolve = || crate::background_model::task_endpoint(Task::Islands);
+    let asked = Mutex::new(Vec::<String>::new());
+    let call = |e: &Endpoint| -> anyhow::Result<&'static str> {
+        asked.lock().unwrap().push(e.provider.to_owned());
+        if e.provider == ACCT2 {
+            let now = agent::now_ms();
+            crate::background_gate::mark_fault(e.provider, crate::background_gate::fault(None, SHARING), None, SHARING, now);
+            anyhow::bail!("the model failed: {SHARING}");
+        }
+        Ok("named")
+    };
+    assert_eq!(once_more_blocking(resolve(), &resolve, call).unwrap(), "named");
+    assert_eq!(*asked.lock().unwrap(), [ACCT2, ACCT1], "the pick once, then the fallback at once");
+    assert_eq!(resolve().provider, ACCT1, "the next call starts on the fallback");
+    let bad = once_more_blocking(resolve(), &resolve, |_| -> anyhow::Result<()> { anyhow::bail!("not JSON") });
+    assert!(bad.is_err(), "a job's own failure is returned as it was");
+}
+
+/// Cleanup 14 Nov (DEC-25): before T3 lists its instances the public edition falls back only to T3's default Claude
+/// instance, never to the name of the user's second account; the personal edition keeps both.
+#[test]
+fn the_public_edition_knows_only_the_default_claude_account_before_t3_lists_its_own() {
+    if cfg!(feature = "public") {
+        assert_eq!(CLAUDE_ACCOUNTS, ["claudeAgent"]);
+    } else {
+        assert_eq!(CLAUDE_ACCOUNTS, ["claudeAgent", "claudeAgent_2"]);
+    }
+}
+
+/// Release 1114: a stranger's T3 has its standard Claude instance, `claudeAgent`, and no second account. The public
+/// edition's bare "t3:" choice and the Islands default name that instance.
+#[cfg(feature = "public")]
+#[test]
+fn the_public_default_t3_instance_is_t3s_standard_claude() {
+    assert_eq!(ui::T3_DEFAULT_INSTANCE, "claudeAgent");
+    assert_eq!(ui::t3_instance(ui::T3_PROVIDER_PREFIX), Some("claudeAgent"));
+    assert_eq!(ui::ISLANDS_DEFAULT.0, "t3:claudeAgent");
+    assert_eq!(CLAUDE_ACCOUNTS, ["claudeAgent"]);
 }

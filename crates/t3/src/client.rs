@@ -40,25 +40,21 @@ pub struct Keychain;
 /// The Keychain service of the T3 pairing credential. The public edition has its own, so it can never read the
 /// personal app's pairing on the same Mac; the personal name never changes.
 pub const KEYCHAIN_SERVICE: &str = if cfg!(feature = "public") { "com.tobynoskillson.heimdall.t3" } else { "dev.heimdall.t3" };
+/// The pairing goes through `keychain` (the installed app's Keychain without a prompt or a wait; a test's or lab run's
+/// isolated store; nothing for a bare build). Any failure there is `T3_UNAVAILABLE`, which every caller already handles
+/// quietly, and never a reason to pair again (`needs_pairing`): 13 Nov, a bare binary's read of this item raised the
+/// login-password dialog that stalled the installed app for nine hours.
 impl CredentialStore for Keychain {
     fn load(&self) -> Result<Option<Credential>> {
-        match security_framework::passwords::get_generic_password(KEYCHAIN_SERVICE, "oauth") {
-            Ok(bytes) => Ok(Some(
-                serde_json::from_slice(&bytes).context("T3 credential is invalid; reconnect T3")?,
-            )),
-            Err(e) if e.code() == -25300 => Ok(None),
-            Err(_) => {
-                anyhow::bail!("Keychain unavailable; unlock the login Keychain and reconnect T3")
-            }
+        match keychain::read(KEYCHAIN_SERVICE, "oauth") {
+            Ok(Some(bytes)) => Ok(Some(serde_json::from_slice(&bytes).context("T3 credential is invalid; reconnect T3")?)),
+            Ok(None) => Ok(None),
+            Err(e) => anyhow::bail!("T3_UNAVAILABLE: {e}"),
         }
     }
     fn save(&self, c: &Credential) -> Result<()> {
-        security_framework::passwords::set_generic_password(
-            KEYCHAIN_SERVICE,
-            "oauth",
-            &serde_json::to_vec(c)?,
-        )
-        .map_err(|_| anyhow::anyhow!("Keychain write failed; reconnect T3"))
+        keychain::write(KEYCHAIN_SERVICE, "oauth", KEYCHAIN_SERVICE, &serde_json::to_vec(c)?)
+            .map_err(|e| anyhow::anyhow!("T3 pairing not saved: {e}; reconnect T3"))
     }
 }
 #[derive(Clone)]
@@ -207,8 +203,11 @@ impl Client {
         self.credentials.load().ok().flatten().is_some_and(|c| c.revoked)
     }
     /// True when the stored credential cannot be used as is: missing, expiring, or for another T3 environment.
+    /// A store that cannot answer (a blocked Keychain) is not a missing credential: pairing again would only add
+    /// another connection in T3 and fail to save it.
     fn needs_pairing(&self, environment: Option<&str>) -> bool {
-        self.credentials.load().ok().flatten().is_none_or(|c| {
+        let Ok(stored) = self.credentials.load() else { return false };
+        stored.is_none_or(|c| {
                 c.expires_ms <= crate::now_ms() + RENEW_MS
                     || environment.is_some_and(|e| e != c.environment)
             })
@@ -459,9 +458,22 @@ impl Client {
     /// A `t3_thread_launch` (Heimdall's tasks, the relay thread, a launch through `t3_call`) records its first message
     /// before the call: the thread's first permission prompt can come within seconds of it (see `launches`).
     fn record_launch(&self, name: &str, args: &Value) {
+        self.record_go_install(name, args);
         if let (Some(data), "t3_thread_launch", Some(message)) = (&self.launches, name, args["message"].as_str()) {
             if let Err(e) = heimdall_emergency::approvals::record(data, message) {
                 eprintln!("T3 launch not recorded for the approval hook: {e}");
+            }
+        }
+    }
+    /// Review 1110 item 3: Heimdall's `GO INSTALL` to a task writes, before the send, the one quit grant its install
+    /// needs (`heimdall_emergency::grants::write_quit`, 15 minutes, once): the approval hook lets the click on Heimdall's
+    /// own Quit item through only with it and a staged build. Nothing else writes one, and agents cannot reach the folder.
+    fn record_go_install(&self, name: &str, args: &Value) {
+        if let (Some(data), "t3_thread_send", Some(message), Some(thread)) = (&self.launches, name, args["message"].as_str(), args["threadId"].as_str()) {
+            if heimdall_emergency::grants::go_install(crate::workers::unmarked(message)) {
+                if let Err(e) = heimdall_emergency::grants::write_quit(data, thread, agent::now_ms()) {
+                    eprintln!("GO INSTALL quit grant not written for the approval hook: {e}");
+                }
             }
         }
     }
@@ -774,14 +786,7 @@ async fn bounded(response: reqwest::Response) -> Result<Vec<u8>> {
     }
     Ok(out)
 }
-/// At most `max` characters, cut on a character boundary, marked when cut.
-pub(crate) fn bounded_text(text: &str, max: usize) -> String {
-    let text = text.trim();
-    if text.chars().count() <= max {
-        return text.into();
-    }
-    format!("{}…", text.chars().take(max).collect::<String>())
-}
+pub(crate) use agent::emergency::bounded as bounded_text;
 /// T3's own reason for a rejected call, one line, with anything secret-looking removed (day review T2: a generic
 /// "request rejected" line sent the agent guessing; the user wants the real reason, 18-52-36).
 fn safe_tool_error(v: &Value) -> String {

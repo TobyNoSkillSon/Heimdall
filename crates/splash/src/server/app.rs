@@ -156,7 +156,7 @@ impl App {
     }
 
     pub fn input_modalities(&self) -> Vec<&'static str> {
-        // PDF input is not ported (docs/splash-native.md); images are.
+        // PDF input is not ported (docs/inference-engine.md); images are.
         if self.ready.vision { vec!["text", "image"] } else { vec!["text"] }
     }
 
